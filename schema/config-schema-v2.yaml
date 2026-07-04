@@ -1,0 +1,598 @@
+# =============================================================================
+# 通用毕业论文 LaTeX → DOCX 配置模型
+# =============================================================================
+# 本文件定义了一套跨高校的论文排版规范描述语言。
+# 每个字段注释中的示例值来自天津财经大学规范，仅供参考。
+# LLM 从任意学校的规范文档中提取规则后，按此结构输出 YAML。
+# =============================================================================
+# ⚠️ 安全要求：下游加载器必须使用 yaml.safe_load() 或等效安全模式。
+#    禁止 yaml.load() 以避免任意代码执行。
+# =============================================================================
+
+# ---- 学校基本信息 -----------------------------------------------------------
+school:
+  # 学校全称（中文）
+  name: ""                          # 例："天津财经大学"
+  # 学校英文名
+  name_en: ""                       # 例："Tianjin University of Finance and Economics"
+  # 规范文档版本/年份
+  spec_version: ""                  # 例："2026.03"
+
+# ---- 学位层次 ---------------------------------------------------------------
+# 不同学位层次可能有不同的字数/篇幅要求
+metadata:
+  # 作者姓名
+  author: ""
+  author_en: ""
+  # 导师姓名
+  advisor: ""
+  advisor_en: ""
+  # 副导师 / 合作导师（可选）
+  co_advisor: ""
+  co_advisor_en: ""
+  # 学院 / 培养单位
+  school: ""                        # 例："金融学院"
+  school_en: ""
+  # 专业名称
+  major: ""                         # 例："金融学"
+  major_en: ""
+  # 研究方向
+  research_direction: ""
+  research_direction_en: ""
+  # 学号
+  student_id: ""
+  # 分类号（中图分类号）
+  classification_number: ""         # 例："F830.91"
+  # UDC（国际十进分类号）
+  udc: ""
+  # 密级
+  confidentiality_level: ""         # 例："公开" / "内部" / "秘密" / "机密"
+  confidentiality_level_en: ""
+  # 论文提交日期
+  submit_date: ""                   # 例："2026年6月"
+  submit_date_en: ""
+  # 答辩日期
+  defense_date: ""                  # 例："2026年6月"
+  defense_date_en: ""
+  # 学位授予日期
+  degree_conferral_date: ""
+  degree_conferral_date_en: ""
+  # 论文题目（中文）
+  title: ""
+  # 论文英文题目
+  title_en: ""
+  # 中文副标题
+  subtitle: ""
+  # 英文副标题
+  subtitle_en: ""
+  # 学位类型外显文字（如"哲学博士"/"经济学硕士"，用于扉页）
+  degree_display: ""
+  degree_display_en: ""
+
+# ---- 学位层次 ---------------------------------------------------------------
+# 不同学位层次可能有不同的字数/篇幅要求
+degree_levels:
+  doctor:
+    label: "博士"                   # 例："博士" / "Doctor"
+    cn_abstract_min_chars: 2000     # 中文摘要最少字数
+    cn_abstract_max_chars: 3500     # 中文摘要最多字数（0=不限）
+    en_abstract_min_words: 250      # 英文摘要最少词数
+    body_min_chars: 100000          # 正文最少字数（0=不限）
+  master:
+    label: "硕士"
+    cn_abstract_min_chars: 800
+    cn_abstract_max_chars: 1800
+    en_abstract_min_words: 120
+    body_min_chars: 30000
+  professional_master:
+    label: "专业硕士"
+    cn_abstract_min_chars: 800
+    cn_abstract_max_chars: 1800
+    en_abstract_min_words: 120
+    body_min_chars: 30000
+
+# ---- 页面设置 ---------------------------------------------------------------
+page:
+  # 纸张尺寸（仅支持 A4）
+  size: "A4"
+  # 页边距，单位：twips（1/20 pt，1 pt ≈ 20 twips，1 inch = 1440 twips）
+  margins:
+    top: 1134                       # 2.0cm
+    bottom: 850                     # 1.5cm
+    left: 1134                      # 2.0cm
+    right: 1134                     # 2.0cm
+    header_distance: 850            # 1.5cm，页眉距页边上缘
+    footer_distance: 992            # 1.7cm，页脚距页边下缘
+    gutter: 0                       # 例：0.5cm ≈ 284 twips，装订线宽度
+    gutter_position: "left"         # "left"=左侧装订, "top"=顶部装订
+
+# ---- 封面 (Cover Page) ------------------------------------------------------
+cover:
+  # 是否生成封面
+  enabled: true
+  # 封面顶部文字行（可多行）
+  top_lines:                        # 例：["天津财经大学", "博士毕业（学位）论文"]
+    - ""
+  # 论文标题样式名
+  title_style: "Title"              # 取值来源：Word 内置样式名或自定义样式名
+  # 副标题样式名
+  subtitle_style: "Subtitle"        # 取值来源：Word 内置样式名或自定义样式名
+  # 副标题前缀符（空字符串表示无前缀）
+  subtitle_prefix: "——"
+  # 标题上方空行数
+  blank_above_title: 1
+  # 标题下方空行数
+  blank_below_title: 2
+  # 信息表字段（按顺序）
+  info_fields:
+    - label: ""                    # 例："专业名称"
+      value: ""                    # 占位，实际值从 metadata 取
+    # 可继续添加...
+  # 信息表后空行数
+  blank_after_info_table: 4
+  # 提交日期位置（底部）
+  date_style: "CoverDate"          # 取值来源：Word 内置样式名或自定义样式名
+  # 封面后是否分页
+  pagebreak_after: true
+
+# ---- 扉页 (Title Page) -----------------------------------------------------
+title_page:
+  # 是否生成扉页
+  enabled: true
+  # 分类号/密级（可选）
+  classification: false
+  # 学位类型文字（顶部）
+  degree_line: ""                   # 例："博士毕业（学位）论文"
+  degree_line_style: "TitlePageDegree"  # 取值来源：Word 内置样式名或自定义样式名
+  # 标题上方空行
+  blank_above_title: 1
+  # 英文标题样式
+  en_title_style: "EnglishTitle"    # 取值来源：Word 内置样式名或自定义样式名
+  en_subtitle_style: "EnglishSubtitle"  # 取值来源：Word 内置样式名或自定义样式名
+  # 英文标题上方空行
+  blank_above_en_title: 3
+  # 信息表下方空行
+  blank_above_info_table: 5
+  # 信息表字段（两列布局，每行 4 个单元格：标签-值-标签-值）
+  info_fields:
+    - label: ""
+      value: ""
+    # ...
+  # 是否压缩姓名空格（如"张 三"→"张三"）
+  compact_names: true
+  # 哪些标签的值需要紧凑姓名
+  compact_name_labels: []           # 例：["作者", "导师姓名"]
+  # 日期类字段的值是否转换为中文数字（如"2026年6月"→"二○二六年六月"）
+  cn_date_fields: []                # 例：["答辩日期", "提交日期"]
+  # 扉页后是否分页
+  pagebreak_after: true
+
+# ---- 声明/授权页（可选）------------------------------------------------------
+declarations:
+  # 是否生成声明页
+  enabled: false
+  # 全局样式（可在单个声明中覆盖）
+  heading_style: "StatementHeading"
+  body_style: "StatementBody"
+  signature_line_style: "SignatureLine"
+  # 声明页前是否分页
+  pagebreak_before: true
+  # 声明页后是否分页
+  pagebreak_after: true
+  # 声明条目列表
+  items:
+    - heading: "独创性声明"
+      heading_en: "Original Statement"
+      body: ""
+      body_en: ""
+      signature_fields:
+        - label: "作者签名："
+          label_en: "Author Signature:"
+          value: ""
+        - label: "日期："
+          label_en: "Date:"
+          value: ""
+    - heading: "学位论文版权使用授权书"
+      heading_en: "Dissertation Copyright License"
+      body: ""
+      body_en: ""
+      signature_fields:
+        - label: "作者签名："
+          label_en: "Author Signature:"
+          value: ""
+        - label: "导师签名："
+          label_en: "Supervisor Signature:"
+          value: ""
+        - label: "日期："
+          label_en: "Date:"
+          value: ""
+    # 可继续添加更多声明...
+
+# ---- 中文摘要 ---------------------------------------------------------------
+cn_abstract:
+  heading: "摘要"
+  heading_style: "AbstractTitleCN"  # 取值来源：Word 内置样式名或自定义样式名
+  body_style: "AbstractBodyCN"      # 取值来源：Word 内置样式名或自定义样式名
+  # 摘要前是否强制分页
+  pagebreak_before: true
+
+# ---- 中文关键词 -------------------------------------------------------------
+cn_keywords:
+  # 标签文字
+  label: "关键词："
+  label_style: "KeywordLabelCN"     # 取值来源：Word 内置样式名或自定义样式名
+  line_style: "KeywordsLineCN"      # 取值来源：Word 内置样式名或自定义样式名
+  # 分隔符
+  delimiter: "，"                    # 例："，" / "；" / "; "
+  # 最少关键词数
+  min_count: 3                      # 约束: min ≤ max
+  # 最多关键词数
+  max_count: 5                      # 约束: min ≤ max
+  # 关键词前空行数
+  blank_before: 1
+  # 是否禁止半角标点
+  forbid_halfwidth_punct: true
+
+# ---- 英文摘要 ---------------------------------------------------------------
+en_abstract:
+  heading: "Abstract"
+  heading_style: "AbstractTitleEN"  # 取值来源：Word 内置样式名或自定义样式名
+  body_style: "AbstractBodyEN"      # 取值来源：Word 内置样式名或自定义样式名
+  pagebreak_before: true
+  # 正文是否自动做标点归一化（中文标点→英文标点）
+  auto_normalize_punct: true
+
+# ---- 英文关键词 -------------------------------------------------------------
+en_keywords:
+  label: "Key Words:"
+  label_style: "KeywordLabelEN"     # 取值来源：Word 内置样式名或自定义样式名
+  line_style: "KeywordsLineEN"      # 取值来源：Word 内置样式名或自定义样式名
+  delimiter: "; "                     # 例："; " / ", "
+  min_count: 3                      # 约束: min ≤ max
+  max_count: 5                      # 约束: min ≤ max
+  blank_before: 1
+  # 是否禁止中文标点
+  forbid_cjk_punct: true
+  # 是否要求每个分号后跟空格
+  require_space_after_delimiter: true
+
+# ---- 目录 ------------------------------------------------------------------
+toc:
+  enabled: true
+  heading: "目录"
+  heading_style: "TOCHeading"       # 取值来源：Word 内置样式名或自定义样式名
+  # 目录深度
+  depth: 3                          # 约束: 1..3, 且 ≤ sections.numbering_depth
+  pagebreak_before: true
+  pagebreak_after: true
+
+# ---- 章节编号规则 -----------------------------------------------------------
+
+# ---- 插图目录 -------------------------------------------------------------
+list_of_figures:
+    enabled: true
+    heading: "插图目录"
+    heading_en: "List of Figures"
+    heading_style: "TOCHeading"
+    pagebreak_before: false
+    pagebreak_after: false
+
+# ---- 附表目录 -------------------------------------------------------------
+list_of_tables:
+    enabled: true
+    heading: "附表目录"
+    heading_en: "List of Tables"
+    heading_style: "TOCHeading"
+    pagebreak_before: false
+    pagebreak_after: false
+
+# ---- 缩略语表 ---------------------------------------------------------------
+sections:
+  # 正文一级标题格式
+  # 可用占位符：{chapter} = 章序号，{title} = 章标题
+  heading1_format: "第{chapter}章  {title}"  # 注意：'章'后有两个空格
+  # 一级标题序号样式
+  # 合法值：decimal(1/2/3), chinese(一/二/三), alpha(a/b/c), alphaUpper(A/B/C)
+  chapter_numbering: "decimal"
+  # 二级标题格式
+  heading2_format: "{chapter}.{section}  {title}"
+  # 三级标题格式
+  heading3_format: "{chapter}.{section}.{subsection}  {title}"
+  # 标题编号深度（最深到几级）
+  numbering_depth: 3
+  # 一级标题前是否分页
+  heading1_pagebreak: true
+
+# ---- 附录 ------------------------------------------------------------------
+appendix:
+  # 附录标签方式
+  # 合法值：alpha(A/B/C), number(1/2/3), chinese(一/二/三)
+  label_style: "alpha"
+  # 附录标题格式
+  heading_format: "附录{label}  {title}"
+  # 附录内子标题编号格式
+  sub_heading_format: "{label}.{section}  {title}"
+  # 附录前是否强制分页
+  pagebreak_before: true
+
+# ---- 参考文献 ---------------------------------------------------------------
+bibliography:
+  heading: "参考文献"
+  heading_style: "ReferencesHeading"  # 取值来源：Word 内置样式名或自定义样式名
+  body_style: "Bibliography"          # 取值来源：Word 内置样式名或自定义样式名
+  # 引用格式：由 entry_prefix / entry_suffix 自动推断 CSL 样式
+  # numeric → 编号制 [1][2]（如 GB/T 7714 numeric），author_date → 著者-出版年 (Heston, 1993)
+  citation_format: "numeric"            # 合法值: numeric | author_date
+  # CSL 文件路径：相对于管线根目录，numeric 默认 china-national-standard-gb-t-7714-2015-numeric.csl
+  csl_file: "csl/china-national-standard-gb-t-7714-2015-numeric.csl"
+  pagebreak_before: true
+  # 引用编号包裹符：prefix + 数字 + suffix 组成引用标记
+  # 例：entry_prefix="[" + entry_suffix="]" → "[1]"；entry_prefix="" + entry_suffix="①"（序号字符）→ "①"
+  entry_prefix: "["
+  entry_suffix: "]"
+  # 引用序号是否每章重置
+  per_chapter: false
+  # 脚注编号样式
+  # 合法值：decimal(1/2/3), decimalEnclosedCircleChinese(①②③), chinese(一/二/三),
+  #         chineseEnclosedCircle(①/②/③), roman(i/ii/iii), romanUpper(I/II/III)
+  footnote_number_format: "decimalEnclosedCircleChinese"
+  # 最低文献数量（按学位层次，可在 degree_levels 中覆盖）
+  min_entries_by_level:             # 约束: 各值 ≥ 0, 建议 ≤ 500
+    doctor: 100
+    master: 40
+    professional_master: 30
+  # 近5年文献最低比例
+  recent_year_ratio: 0.25           # 约束: [0, 1]
+  # 外文文献最低比例
+  foreign_ratio: 0.20               # 约束: [0, 1]
+  # 参考文献 URL probe 检查（是否检查 URL 可达性）
+  url_probe: false
+
+# ---- 在学期间研究成果（博士需要）----------------------------------------------
+research_outputs:
+  enabled: false                     # 博士为 true
+  heading: "在学期间发表的学术论文与研究成果"
+  heading_style: "ResearchOutputsHeading"  # 取值来源：Word 内置样式名或自定义样式名
+  body_style: "Bibliography"               # 取值来源：Word 内置样式名或自定义样式名
+  pagebreak_before: true
+
+# ---- 后记/致谢 --------------------------------------------------------------
+glossary:
+  enabled: false
+  heading: "缩略语表"
+  heading_en: "Glossary"
+  heading_style: "GlossaryHeading"
+  body_style: "GlossaryBody"
+  # 列表格式：definition_list=定义列表(术语-解释), table=两列表格
+  layout: "definition_list"
+  # 排序方式：as_appears=按出现顺序, alphabetical=按字母序
+  sort: "as_appears"
+  pagebreak_before: true
+  pagebreak_after: false
+
+# ---- 章节编号规则 -----------------------------------------------------------
+acknowledgements:
+  heading: "后记"                     # 或 "致谢"
+  heading_style: "AcknowledgementsHeading"  # 取值来源：Word 内置样式名或自定义样式名
+  body_style: "AcknowledgementsBody"        # 取值来源：Word 内置样式名或自定义样式名
+  pagebreak_before: true
+  # 是否在末尾添加签名行
+  signature:
+    enabled: true
+    style: "SignatureLine"            # 取值来源：Word 内置样式名或自定义样式名
+    # 签名字段：从 metadata 取 author / ack_signature_name
+    # 日期字段：从 metadata 取 submit_date_cn / ack_signature_date
+
+# ---- 排版字体 ---------------------------------------------------------------
+typography:
+  # 中文字体
+  body_font_cn: "SimSun"             # 宋体
+  heading_font_cn: "SimHei"          # 黑体
+  # 英文字体
+  body_font_en: "Times New Roman"
+  heading_font_en: "Times New Roman"
+  # 正文行距：value=数值, unit=单位(pt)
+  body_line_spacing:
+    value: 20
+    unit: pt                          # 20pt，原 400 twips
+  # 行距规则：exact=严格使用 value+unit 中指定值；atLeast=至少使用指定值；auto=自动计算
+  body_line_rule: "exact"
+  # 标题行距
+  heading_line_spacing:
+    value: 20
+    unit: pt                          # 20pt，原 400 twips
+  # 行距规则：exact/atLeast/auto（含义同上）
+  heading_line_rule: "atLeast"
+  # 脚注行距
+  footnote_line_spacing:
+    value: 15
+    unit: pt                          # 15pt，原 300 twips
+  # 行距规则：exact/atLeast/auto（含义同上）
+  footnote_line_rule: "exact"
+
+# ---- 正文字体大小（单位：pt）-------------------------------------------------
+font_sizes:
+  body: 12                            # 正文 12pt = 小四
+  heading1: 16                        # 一级标题 16pt = 三号
+  heading2: 14                        # 二级标题 14pt = 四号
+  heading3: 12                        # 三级标题 12pt = 小四
+  abstract_body: 12                   # 摘要正文 12pt
+  abstract_title: 16                  # 摘要标题 16pt = 三号
+  keywords: 12                        # 关键词 12pt
+  caption: 10.5                       # 图表标题 10.5pt = 五号
+  table_content: 10.5                 # 表格内容 10.5pt
+  source_note: 9                      # 资料来源 9pt
+  header_footer: 9                    # 页眉页脚 9pt
+  footnote: 9                         # 脚注 9pt
+  cover_title: 22                     # 封面标题 22pt = 二号
+  cover_info: 14                      # 封面信息 14pt = 四号
+  cover_date: 14                      # 封面日期 14pt
+
+# ---- 图表标题规则 -----------------------------------------------------------
+figures_tables:
+  # 图
+  figure:
+    prefix: "图"                       # 例："图" / "Figure"
+    # 编号方式，合法值：chapter_seq(按章编号，如图1-1), global(全文连续，如图1), none(无编号)
+    numbering: "chapter-seq"
+    caption_style: "ImageCaption"      # 取值来源：Word 内置样式名或自定义样式名
+    caption_position: "below"          # below=图下, above=图上
+    # 图序与图题之间的分隔
+    caption_separator: "    "          # 例："    " (4空格)
+    blank_before_cluster: true         # 图表块前是否空一行
+    blank_after_cluster: true
+  # 表
+  table:
+    prefix: "表"
+    # 编号方式，合法值：chapter_seq(按章编号，如表1-1), global(全文连续，如表1), none(无编号)
+    numbering: "chapter-seq"
+    caption_style: "TableCaption"      # 取值来源：Word 内置样式名或自定义样式名
+    caption_position: "above"          # above=表上, below=表下
+    caption_separator: "    "
+    blank_before_cluster: true
+    blank_after_cluster: true
+    # 表格样式
+    border_style: "three_line"         # three_line=三线表, all_borders=全框线
+    header_bold: true                  # 表头加粗
+    content_align: "center"            # 单元格文字居中
+    # 表头信息行（表序号/名称 + 可能有的额外信息行）
+    meta_line_style: "TableMetaLine"   # 取值来源：Word 内置样式名或自定义样式名
+    # 资料来源
+    source_style: "SourceNote"         # 取值来源：Word 内置样式名或自定义样式名
+    source_prefixes:                   # 资料来源识别前缀
+      - "资料来源："
+      - "数据来源："
+      - "来源："
+  # 续表的识别与处理
+  continued:
+    figure_prefix: "续图"
+    table_prefix: "表"
+    renumber: false                    # 续图表是否重新编号（false=延续原编号）
+
+# ---- 公式 ------------------------------------------------------------------
+equations:
+  numbering: "chapter-seq"             # 按章编号：(1-1) / (1.1)
+  # 编号显示格式
+  label_format: "（{chapter}-{seq}）"  # 例："（1-1）" / "(1.1)"
+  # 等式块样式
+  block_style: "EquationBlock"         # 取值来源：Word 内置样式名或自定义样式名
+  # 编号字体
+  label_font_size: 12                  # 12pt
+  label_font_cn: "SimSun"
+  label_font_en: "Times New Roman"
+  # 等式块上下间距（twips）
+  spacing_before: 120                  # 约束: ≥ 0
+  spacing_after: 120                   # 约束: ≥ 0
+
+# ---- 正文段落 ---------------------------------------------------------------
+body_text:
+  # 首段样式
+  first_paragraph_style: "FirstParagraph"  # 取值来源：Word 内置样式名或自定义样式名
+  # 正文样式
+  normal_style: "Normal"                    # 取值来源：Word 内置样式名或自定义样式名
+  # 首行缩进（twips，480=两个中文字符 ≈ 24pt）
+  first_line_indent: 480                    # 约束: ≥ 0
+  # 首段是否也缩进
+  first_paragraph_indent: false
+  # 段间距
+  paragraph_spacing_before: 0
+  paragraph_spacing_after: 0
+
+# ---- 页眉页脚 ---------------------------------------------------------------
+header_footer:
+  # 首页是否使用不同的页眉页脚
+  different_first_page: true
+  # 奇偶页是否使用不同的页眉页脚
+  different_odd_even: false
+  # 页眉
+  header:
+    # text=固定文字, chapter_title=当前章节名, none=无
+    mode: "chapter_title"
+    # 如果 mode=text，固定文字内容
+    text: ""
+    style: "Header"
+    # 页眉下方是否有装饰线
+    border_bottom: true
+    border_style: "thinThickSmallGap"
+  # 页脚
+  footer:
+    mode: "page_number"                # page_number=页码, text=固定文字
+    alignment: "center"
+    style: "Footer"
+  # 页码格式
+  page_number:
+    format: "decimal"                  # decimal=阿拉伯, chinese=中文, roman=罗马
+    # 首页是否不显示页码
+    suppress_first_page: true
+    # 前置部分（摘要、目录等）页码格式
+    front_matter_format: "roman"       # roman=罗马数字, decimal=阿拉伯, none=无页码
+    # 前置部分起始页码
+    front_matter_start: 1
+    # 正文起始页码
+    body_start: 1
+    # 附录起始页码（0=延续正文编号）
+    appendix_start: 1
+    # 页码字号
+    font_size: 9
+  # ---- 分节页眉页脚 ---------------------------------------------------------
+  sections:
+    front_matter:
+      # 页眉模式：none / text / chapter_title
+      header_mode: "none"
+      header_text: ""
+      header_enabled: true
+      # 页脚模式：page_number / text
+      footer_mode: "page_number"
+      page_number_format: "roman"
+      page_number_start: 1
+    body:
+      header_mode: "chapter_title"
+      header_text: ""
+      header_enabled: true
+      footer_mode: "page_number"
+      page_number_format: "decimal"
+      page_number_start: 1
+    appendix:
+      header_mode: "chapter_title"
+      header_text: ""
+      header_enabled: true
+      footer_mode: "page_number"
+      page_number_format: "decimal"
+      page_number_start: 1
+
+# ---- 交叉引用文本映射 -------------------------------------------------------
+cross_references:
+  # 内部引用类型的中英文显示名映射
+  display_names:
+    figure: "图"
+    table: "表"
+    equation: "公式"
+    section: "节"
+    chapter: "章"
+    appendix: "附录"
+    theorem: "定理"
+    lemma: "引理"
+    proposition: "命题"
+    corollary: "推论"
+
+# ---- 后处理审计规则 ---------------------------------------------------------
+audit:
+  # 是否在生成后自动审计
+  enabled: true
+  checks:
+    # 空行检查（连续空段落数上限）
+    max_consecutive_blank_paragraphs: 2
+    # 参考文献条目是否必须以 [数字] 开头
+    reference_prefix_check: true
+    # 参考文献条目是否以句号结尾
+    reference_ending_check: true
+    # 图表标题是否缺少前后空行
+    figure_table_blank_check: true
+    # 关键词标点检查
+    keyword_punct_check: true
+    # 英文摘要标点检查
+    en_abstract_punct_check: true
+    # 正文主体中是否误留了分页符
+    manual_page_break_check: true
+    # 公式块样式检查
+    equation_block_style_check: true

@@ -1,0 +1,366 @@
+# =============================================================================
+# 天津财经大学博士论文 V2 Schema Overlay — 脱敏示例
+# ⚠️ 使用前请将所有 <...> 占位符替换为真实信息
+# =============================================================================
+school:
+  name: "天津财经大学"
+  name_en: "Tianjin University of Finance and Economics"
+  spec_version: "2026.03"
+
+metadata:
+  author: "<作者姓名>"            # 例："张三"
+  author_en: "<Author Name>"     # 例："Zhang San"
+  advisor: "<导师姓名>"           # 例："李四教授"
+  advisor_en: "<Advisor Name>"   # 例："Prof. Li Si"
+  school: "<学院名称>"            # 例："统计学院"
+  school_en: "<School Name>"     # 例："School of Statistics"
+  major: "<专业名称>"            # 例："应用数学"
+  major_en: "<Major Name>"      # 例："Applied Mathematics"
+  research_direction: "<研究方向>"   # 例："金融数学"
+  research_direction_en: "<Research Direction>"
+  student_id: "<学号>"           # 例："2023000001"
+  classification_number: "<分类号>"  # 例："F830.9"
+  udc: ""
+  confidentiality_level: "公开"
+  confidentiality_level_en: "Public"
+  submit_date: "<提交日期>"       # 例："二○二六年三月"
+  submit_date_en: "<Submit Date>"
+  defense_date: "<答辩日期>"
+  defense_date_en: "<Defense Date>"
+  degree_conferral_date: "<学位授予日期>"
+  degree_conferral_date_en: "<Degree Conferral Date>"
+  title: "<论文题目>"
+  title_en: "<Paper Title>"
+  subtitle: ""
+  subtitle_en: ""
+  degree_display: "理学博士"
+  degree_display_en: "Doctor of Science"
+
+degree_levels:
+  doctor:
+    label: "博士"
+    cn_abstract_min_chars: 2000
+    cn_abstract_max_chars: 3500
+    body_min_chars: 100000
+
+page:
+  size: "A4"
+  margins:
+    top: 1134
+    bottom: 850
+    left: 1134
+    right: 1134
+    header_distance: 850
+    footer_distance: 992
+    gutter: 0
+    gutter_position: "left"
+
+cover:
+  enabled: true
+  top_lines:
+    - "天津财经大学"
+  title_style: "Title"
+  subtitle_style: "Subtitle"
+  subtitle_prefix: "——"
+  blank_above_title: 1
+  blank_below_title: 2
+  info_fields:
+    - label: "专业名称"
+      value: "<专业名称>"       # ⚠️ 与 metadata.major 同步
+  blank_after_info_table: 4
+  date_style: "CoverDate"
+  pagebreak_after: true
+
+title_page:
+  enabled: true
+  degree_line: "天津财经大学博士毕业（学位）论文"
+  degree_line_style: "TitlePageDegree"
+  blank_above_title: 1
+  en_title_style: "EnglishTitle"
+  en_subtitle_style: "EnglishSubtitle"
+  blank_above_en_title: 3
+  blank_above_info_table: 5
+  info_fields:
+    - label: "论文作者"
+      value: "<作者姓名>"       # ⚠️ 与 metadata.author 同步
+    - label: "指导教师"
+      value: "<导师姓名>"       # ⚠️ 与 metadata.advisor 同步
+    - label: "申请学位"
+      value: "<学位>"           # ⚠️ 与 metadata.degree_display 同步
+    - label: "培养单位"
+      value: "<学院名称>"       # ⚠️ 与 metadata.school 同步
+    - label: "学科专业"
+      value: "<专业名称>"       # ⚠️ 与 metadata.major 同步
+    - label: "研究方向"
+      value: "<研究方向>"       # ⚠️ 与 metadata.research_direction 同步
+    - label: "答辩委员会主席"
+      value: "待定"
+    - label: "论文评阅人"
+      value: "匿名评审"
+  compact_names: true
+  compact_name_labels:
+    - "作者"
+    - "导师姓名"
+    - "论文作者"
+    - "指导教师"
+  cn_date_fields:
+    - "答辩日期"
+    - "提交日期"
+  pagebreak_after: true
+
+declarations:
+  enabled: false
+
+cn_abstract:
+  heading: "摘要"
+  heading_style: "AbstractTitleCN"
+  body_style: "AbstractBodyCN"
+  pagebreak_before: true
+
+cn_keywords:
+  label: "关键词："
+  label_style: "KeywordLabelCN"
+  line_style: "KeywordsLineCN"
+  delimiter: "，"
+  min_count: 3
+  max_count: 5
+  blank_before: 1
+  forbid_halfwidth_punct: true
+
+en_abstract:
+  heading: "Abstract"
+  heading_style: "AbstractTitleEN"
+  body_style: "AbstractBodyEN"
+  pagebreak_before: true
+  auto_normalize_punct: true
+
+en_keywords:
+  label: "Key Words:"
+  label_style: "KeywordLabelEN"
+  line_style: "KeywordsLineEN"
+  delimiter: "; "
+  min_count: 3
+  max_count: 5
+  blank_before: 1
+  forbid_cjk_punct: true
+  require_space_after_delimiter: true
+
+toc:
+  enabled: true
+  heading: "目录"
+  heading_style: "TOCHeading"
+  depth: 3
+  pagebreak_before: true
+  pagebreak_after: true
+  list_of_figures:
+    enabled: true
+    heading: "插图目录"
+    heading_en: "List of Figures"
+    heading_style: "TOCHeading"
+    pagebreak_before: false
+    pagebreak_after: false
+  list_of_tables:
+    enabled: true
+    heading: "附表目录"
+    heading_en: "List of Tables"
+    heading_style: "TOCHeading"
+    pagebreak_before: false
+    pagebreak_after: false
+
+sections:
+  heading1_format: "第{chapter}章  {title}"
+  chapter_numbering: "decimal"
+  heading2_format: "{chapter}.{section}  {title}"
+  heading3_format: "{chapter}.{section}.{subsection}  {title}"
+  numbering_depth: 3
+  heading1_pagebreak: true
+
+appendix:
+  label_style: "alpha"
+  heading_format: "附录{label}  {title}"
+  sub_heading_format: "{label}.{section}  {title}"
+  pagebreak_before: true
+
+bibliography:
+  heading: "参考文献"
+  heading_style: "ReferencesHeading"
+  body_style: "Bibliography"
+  pagebreak_before: true
+  entry_prefix: "["
+  entry_suffix: "]"
+  per_chapter: false
+  footnote_number_format: "decimalEnclosedCircleChinese"
+  min_entries_by_level:
+    doctor: 100
+  recent_year_ratio: 0.25
+  foreign_ratio: 0.20
+  url_probe: false
+
+research_outputs:
+  enabled: true
+  heading: "在学期间发表的学术论文与研究成果"
+  heading_style: "ResearchOutputsHeading"
+  body_style: "Bibliography"
+  pagebreak_before: true
+
+glossary:
+  enabled: false
+
+acknowledgements:
+  heading: "后记"
+  heading_style: "AcknowledgementsHeading"
+  body_style: "AcknowledgementsBody"
+  pagebreak_before: true
+  signature:
+    enabled: true
+    style: "SignatureLine"
+
+typography:
+  body_font_cn: "SimSun"
+  heading_font_cn: "SimHei"
+  body_font_en: "Times New Roman"
+  heading_font_en: "Times New Roman"
+  body_line_spacing:
+    value: 20
+    unit: pt
+  body_line_rule: "exact"
+  heading_line_spacing:
+    value: 20
+    unit: pt
+  heading_line_rule: "atLeast"
+  footnote_line_spacing:
+    value: 15
+    unit: pt
+  footnote_line_rule: "exact"
+
+font_sizes:
+  body: 12
+  heading1: 16
+  heading2: 14
+  heading3: 12
+  abstract_body: 12
+  abstract_title: 16
+  keywords: 12
+  caption: 10.5
+  table_content: 10.5
+  source_note: 9
+  header_footer: 9
+  footnote: 9
+  cover_title: 22
+  cover_info: 14
+  cover_date: 14
+
+figures_tables:
+  figure:
+    prefix: "图"
+    numbering: "chapter-seq"
+    caption_style: "ImageCaption"
+    caption_position: "below"
+    caption_separator: "    "
+    blank_before_cluster: true
+    blank_after_cluster: true
+  table:
+    prefix: "表"
+    numbering: "chapter-seq"
+    caption_style: "TableCaption"
+    caption_position: "above"
+    caption_separator: "    "
+    blank_before_cluster: true
+    blank_after_cluster: true
+    border_style: "three_line"
+    header_bold: true
+    content_align: "center"
+    meta_line_style: "TableMetaLine"
+    source_style: "SourceNote"
+    source_prefixes:
+      - "资料来源："
+      - "数据来源："
+      - "来源："
+  continued:
+    figure_prefix: "续图"
+    table_prefix: "表"
+    renumber: false
+
+equations:
+  numbering: "chapter-seq"
+  label_format: "（{chapter}-{seq}）"
+  block_style: "EquationBlock"
+  label_font_size: 12
+  label_font_cn: "SimSun"
+  label_font_en: "Times New Roman"
+  spacing_before: 120
+  spacing_after: 120
+
+body_text:
+  first_paragraph_style: "FirstParagraph"
+  normal_style: "Normal"
+  first_line_indent: 480
+  first_paragraph_indent: false
+  paragraph_spacing_before: 0
+  paragraph_spacing_after: 0
+
+header_footer:
+  different_first_page: true
+  different_odd_even: false
+  header:
+    mode: "chapter_title"
+    text: ""
+    style: "Header"
+    border_bottom: true
+    border_style: "thinThickSmallGap"
+  footer:
+    mode: "page_number"
+    alignment: "center"
+    style: "Footer"
+  page_number:
+    format: "decimal"
+    suppress_first_page: true
+    front_matter_format: "roman"
+    front_matter_start: 1
+    body_start: 1
+    appendix_start: 1
+    font_size: 9
+  sections:
+    front_matter:
+      header_mode: "none"
+      header_enabled: true
+      footer_mode: "page_number"
+      page_number_format: "roman"
+      page_number_start: 1
+    body:
+      header_mode: "chapter_title"
+      header_enabled: true
+      footer_mode: "page_number"
+      page_number_format: "decimal"
+      page_number_start: 1
+    appendix:
+      header_mode: "chapter_title"
+      header_enabled: true
+      footer_mode: "page_number"
+      page_number_format: "decimal"
+      page_number_start: 1
+
+cross_references:
+  display_names:
+    figure: "图"
+    table: "表"
+    equation: "公式"
+    section: "节"
+    chapter: "章"
+    appendix: "附录"
+    theorem: "定理"
+    lemma: "引理"
+    proposition: "命题"
+    corollary: "推论"
+
+audit:
+  enabled: true
+  checks:
+    max_consecutive_blank_paragraphs: 2
+    reference_prefix_check: true
+    reference_ending_check: true
+    figure_table_blank_check: true
+    keyword_punct_check: true
+    en_abstract_punct_check: true
+    manual_page_break_check: true
+    equation_block_style_check: true

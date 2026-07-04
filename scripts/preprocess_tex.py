@@ -537,6 +537,15 @@ def inject_generic_label_markers(text: str) -> str:
     return GENERIC_LABEL_RE.sub(lambda m: f'\n{LABEL_MARKER_FMT.format(label=m.group(1))}\n', text)
 
 
+def strip_latex_preamble(text: str) -> str:
+    """Remove LaTeX preamble (everything before \\begin{document}) and \\end{document}."""
+    m = re.search(r'\\begin\{document\}', text)
+    if m:
+        text = text[m.end():]
+    text = re.sub(r'\\end\{document\}', '', text)
+    return text
+
+
 def replace_ctexbook_commands(text: str) -> str:
     """Convert ctexbook-specific commands to standard LaTeX that pandoc understands."""
     # Abstract: \begin{abstract} → \chapter*{摘要}
@@ -599,6 +608,7 @@ def main() -> None:
     aux_path = discover_aux(input_path, Path(args.aux).resolve() if args.aux else None)
 
     text = input_path.read_text(errors='ignore')
+    text = strip_latex_preamble(text)
     text = unwrap_subfloat(text)
     text = normalize_math_macros(text)
     text = replace_ctexbook_commands(text)

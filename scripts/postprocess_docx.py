@@ -20,8 +20,10 @@ WP_NS = 'http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing'
 A_NS = 'http://schemas.openxmlformats.org/drawingml/2006/main'
 PIC_NS = 'http://schemas.openxmlformats.org/drawingml/2006/picture'
 
+M_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/math'
 ET.register_namespace('w', W_NS)
 ET.register_namespace('r', R_NS)
+ET.register_namespace('m', M_NS)
 ET.register_namespace('', CT_NS)
 
 PAGE_W = '10431'

@@ -16,5 +16,5 @@
 
 ### Paragraph count
 - **Baseline**: `2`
-- **Actual**: `158`
+- **Actual**: `156`
 - **Note**: Large difference in paragraph count

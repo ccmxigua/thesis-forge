@@ -50,6 +50,7 @@ def main():
     # cover
     cover = overlay.get('cover', {})
     out['insert_cover'] = cover.get('enabled', False)
+    out['cover_info_rows'] = cover.get('info_fields', [])
 
     # title page (tp already loaded above)
     out['insert_title_page'] = tp.get('enabled', False)

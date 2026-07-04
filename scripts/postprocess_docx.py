@@ -10,6 +10,11 @@ import zipfile
 from pathlib import Path
 import xml.etree.ElementTree as ET
 
+try:
+    import yaml
+except ImportError:
+    yaml = None
+
 W_NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
 M_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/math'
 R_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
@@ -26,14 +31,177 @@ ET.register_namespace('r', R_NS)
 ET.register_namespace('m', M_NS)
 ET.register_namespace('', CT_NS)
 
-PAGE_W = '10431'
-PAGE_H = '14740'
-TOP = '1134'
-BOTTOM = '850'
-LEFT = '1134'
-RIGHT = '1134'
-HEADER = '850'
-FOOTER = '992'
+# ── format defaults (TJFE) ──
+# These may be overridden by --config overlay YAML.
+_FORMAT_DEFAULTS = {
+    'page_w': '10431',
+    'page_h': '14740',
+    'top': '1134',       # 2.0 cm
+    'bottom': '850',     # 1.5 cm
+    'left': '1134',      # 2.0 cm
+    'right': '1134',     # 2.0 cm
+    'header': '850',
+    'footer': '992',
+    'doc_grid_line_pitch': '326',
+}
+
+PAGE_W = _FORMAT_DEFAULTS['page_w']
+PAGE_H = _FORMAT_DEFAULTS['page_h']
+TOP = _FORMAT_DEFAULTS['top']
+BOTTOM = _FORMAT_DEFAULTS['bottom']
+LEFT = _FORMAT_DEFAULTS['left']
+RIGHT = _FORMAT_DEFAULTS['right']
+HEADER = _FORMAT_DEFAULTS['header']
+FOOTER = _FORMAT_DEFAULTS['footer']
+LINE_PITCH = _FORMAT_DEFAULTS['doc_grid_line_pitch']
+
+# ── heading font overrides (from overlay) ──
+_FONT_SIZES: dict[str, int | None] = {
+    'body': None,
+    'heading1': None,
+    'heading2': None,
+    'heading3': None,
+}
+_TYPOGRAPHY: dict[str, str | None] = {
+    'body_font_cn': None,
+    'heading_font_cn': None,
+    'body_font_en': None,
+    'heading_font_en': None,
+}
+
+
+def _patch_styles(unzip_dir: Path) -> None:
+    """Patch styles.xml heading font sizes/fonts from overlay YAML overrides."""
+    heading_map = {'heading1': 'Heading1', 'heading2': 'Heading2', 'heading3': 'Heading3'}
+    has_overrides = any(v is not None for v in _FONT_SIZES.values()) or \
+                    any(v is not None for v in _TYPOGRAPHY.values())
+    if not has_overrides:
+        return
+
+    styles_path = unzip_dir / 'word' / 'styles.xml'
+    if not styles_path.exists():
+        return
+
+    styles_tree = ET.parse(styles_path)
+    styles_root = styles_tree.getroot()
+
+    for style_elem in styles_root.findall(qn('w', 'style')):
+        sid = style_elem.get(qn('w', 'styleId'))
+        if sid not in heading_map.values():
+            continue
+        hkey = {v: k for k, v in heading_map.items()}.get(sid)
+        if hkey is None:
+            continue
+
+        rpr = style_elem.find(qn('w', 'rPr'))
+        if rpr is None:
+            rpr = ET.SubElement(style_elem, qn('w', 'rPr'))
+
+        # font size override (pt -> half-pt)
+        if _FONT_SIZES.get(hkey) is not None:
+            sz_val = str(_FONT_SIZES[hkey] * 2)
+            sz = rpr.find(qn('w', 'sz'))
+            if sz is None:
+                sz = ET.SubElement(rpr, qn('w', 'sz'))
+            sz.set(qn('w', 'val'), sz_val)
+            szCs = rpr.find(qn('w', 'szCs'))
+            if szCs is None:
+                szCs = ET.SubElement(rpr, qn('w', 'szCs'))
+            szCs.set(qn('w', 'val'), sz_val)
+
+        # font face override
+        fonts = rpr.find(qn('w', 'rFonts'))
+        if fonts is None:
+            fonts = ET.SubElement(rpr, qn('w', 'rFonts'))
+        cn_font = _TYPOGRAPHY.get('heading_font_cn')
+        en_font = _TYPOGRAPHY.get('heading_font_en')
+        if cn_font:
+            fonts.set(qn('w', 'eastAsia'), cn_font)
+        if en_font:
+            fonts.set(qn('w', 'ascii'), en_font)
+            fonts.set(qn('w', 'hAnsi'), en_font)
+            fonts.set(qn('w', 'cs'), en_font)
+
+    styles_tree.write(styles_path, xml_declaration=True, encoding='UTF-8')
+    if has_overrides:
+        overridden = []
+        for k, v in _FONT_SIZES.items():
+            if v is not None:
+                overridden.append(f'{k}={v}pt')
+        if overridden:
+            print(f'[postprocess] style overrides: {", ".join(overridden)}', file=sys.stderr)
+
+
+def _apply_format_overrides(config_path: str) -> None:
+    """Parse a config-schema / overlay YAML and override global format variables.
+
+    Supports both nested ``page.margins.top`` and flat keys.
+    If a key is missing the TJFE default is kept.
+    """
+    if yaml is None:
+        print('[postprocess] WARNING: PyYAML not installed; cannot load --config', file=sys.stderr)
+        return
+    try:
+        with open(config_path, 'r', encoding='utf-8') as fh:
+            raw = yaml.safe_load(fh)
+    except Exception as exc:
+        print(f'[postprocess] WARNING: failed to load config {config_path}: {exc}', file=sys.stderr)
+        return
+    if not isinstance(raw, dict):
+        return
+
+    page = raw.get('page', {})
+    margins = page.get('margins', {}) if isinstance(page, dict) else {}
+
+    # Build a flat lookup that respects nesting
+    def _lookup(*keys: str) -> str | None:
+        for k in keys:
+            # 1) page.margins.<k>
+            if isinstance(margins, dict) and k in margins:
+                return str(margins[k])
+            # 2) page.<k>
+            if isinstance(page, dict) and k in page:
+                return str(page[k])
+            # 3) root level
+            if k in raw:
+                return str(raw[k])
+        return None
+
+    pairs = [
+        ('PAGE_W', 'width', 'page_width'),
+        ('PAGE_H', 'height', 'page_height'),
+        ('TOP', 'top'),
+        ('BOTTOM', 'bottom'),
+        ('LEFT', 'left'),
+        ('RIGHT', 'right'),
+        ('HEADER', 'header', 'header_distance'),
+        ('FOOTER', 'footer', 'footer_distance'),
+        ('LINE_PITCH', 'doc_grid_line_pitch'),
+    ]
+    overridden = []
+    for var_name, *keys in pairs:
+        val = _lookup(*keys)
+        if val is not None:
+            globals()[var_name] = val
+            overridden.append(f'{var_name}={val}')
+    # font sizes override
+    font_sizes = raw.get('font_sizes', {})
+    if isinstance(font_sizes, dict):
+        for k in ('body', 'heading1', 'heading2', 'heading3'):
+            if k in font_sizes and font_sizes[k] is not None:
+                _FONT_SIZES[k] = int(font_sizes[k])
+                overridden.append(f'font_{k}={font_sizes[k]}pt')
+
+    # typography override
+    typo = raw.get('typography', {})
+    if isinstance(typo, dict):
+        for k in ('body_font_cn', 'heading_font_cn', 'body_font_en', 'heading_font_en'):
+            if k in typo and typo[k] is not None:
+                _TYPOGRAPHY[k] = str(typo[k])
+                overridden.append(k)
+
+    if overridden:
+        print(f'[postprocess] format overrides from {config_path}: {", ".join(overridden)}', file=sys.stderr)
 TOC_PLACEHOLDER = '__TJUFE_TOC_PLACEHOLDER__'
 FOOTNOTE_NUMFMT = 'decimalEnclosedCircleChinese'
 UNIT_PREFIXES = ('单位：', '单位:', '计量单位：', '计量单位:', '数据单位：', '数据单位:')
@@ -414,7 +582,7 @@ def configure_sectpr(sectpr: ET.Element, *, page_fmt: str, page_start: int | Non
     configure_footnote_pr(footnote_pr)
 
     doc_grid = ET.SubElement(sectpr, qn('w', 'docGrid'))
-    doc_grid.set(qn('w', 'linePitch'), '326')
+    doc_grid.set(qn('w', 'linePitch'), LINE_PITCH)
     doc_grid.set(qn('w', 'charSpace'), '0')
 
 
@@ -1049,6 +1217,8 @@ def process_docx(input_path: Path, output_path: Path) -> None:
         with zipfile.ZipFile(input_path) as zf:
             zf.extractall(unzip_dir)
 
+        _patch_styles(unzip_dir)
+
         document_path = unzip_dir / 'word' / 'document.xml'
         settings_path = unzip_dir / 'word' / 'settings.xml'
         rels_path = unzip_dir / 'word' / '_rels' / 'document.xml.rels'
@@ -1177,11 +1347,15 @@ def _parse_args(argv: list[str]) -> argparse.Namespace:
                    help='Skip font obfuscation (use only if font license permits).')
     p.add_argument('--font-map', action='append', dest='font_maps', metavar='DOC_NAME=FONT_NAME',
                    help='Map a font name in the document to a different font file, e.g. "SimHei=Heiti TC".')
+    p.add_argument('--config', type=Path,
+                   help='YAML config / overlay file with page/typography overrides (replaces built-in defaults).')
     return p.parse_args(argv)
 
 
 def main(argv: list[str]) -> int:
     args = _parse_args(argv)
+    if args.config:
+        _apply_format_overrides(str(args.config.resolve()))
     input_path = args.input.resolve()
     output_path = args.output.resolve()
 

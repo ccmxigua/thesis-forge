@@ -95,6 +95,13 @@ echo "[convert.sh] running pandoc..." >&2
 /opt/homebrew/bin/pandoc "${PANDOC_ARGS[@]}"
 
 echo "[convert.sh] postprocessing..." >&2
-/opt/homebrew/bin/python3 "$POSTPROCESS" "$TMP_DOCX" "$OUTPUT"
+# Build postprocess args with format config
+POSTPROC_ARGS=()
+if [ -n "$OVERLAY" ] && [ -f "$OVERLAY" ]; then
+  POSTPROC_ARGS=(--config "$OVERLAY")
+else
+  POSTPROC_ARGS=(--config "$SCHEMA")
+fi
+/opt/homebrew/bin/python3 "$POSTPROCESS" "$TMP_DOCX" "$OUTPUT" "${POSTPROC_ARGS[@]}"
 
 echo "$OUTPUT"

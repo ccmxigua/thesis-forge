@@ -30,19 +30,37 @@ end
 local function meta_rows(meta, key)
   local rows = {}
   local value = meta[key]
-  if not value or value.t ~= 'MetaList' then
+  if not value then return rows end
+
+  -- pandoc 2.x: MetaList with .t and .c
+  if value.t == 'MetaList' then
+    for _, item in ipairs(value.c or value) do
+      if item.t == 'MetaMap' and item.c then
+        local label = trim(pandoc.utils.stringify(item.c['label'] or item.c['name'] or item.c['key']))
+        local row_value = trim(pandoc.utils.stringify(item.c['value'] or item.c['text'] or item.c['content']))
+        if label ~= '' or row_value ~= '' then
+          table.insert(rows, { label = label, value = row_value })
+        end
+      end
+    end
     return rows
   end
-  local items = value.c or value
-  for _, item in ipairs(items) do
-    if item.t == 'MetaMap' and item.c then
-      local label = trim(item.c['label'] or item.c['name'] or item.c['key'])
-      local row_value = trim(item.c['value'] or item.c['text'] or item.c['content'])
-      if label ~= '' or row_value ~= '' then
-        table.insert(rows, { label = label, value = row_value })
+
+  -- pandoc 3.x: plain Lua table (list of maps)
+  if type(value) == 'table' then
+    for _, item in ipairs(value) do
+      if type(item) == 'table' then
+        local labelRaw = item.label or item.name or item.key or ''
+        local valueRaw = item.value or item.text or item.content or ''
+        local label = trim(pandoc.utils.stringify(labelRaw))
+        local row_value = trim(pandoc.utils.stringify(valueRaw))
+        if label ~= '' or row_value ~= '' then
+          table.insert(rows, { label = label, value = row_value })
+        end
       end
     end
   end
+
   return rows
 end
 
@@ -289,12 +307,16 @@ local function build_frontmatter(meta)
         blocks:insert(styled_para('——' .. cn_subtitle, 'Subtitle'))
       end
       inject_blank_lines(blocks, 2)
-      blocks:insert(make_cover_info_table({
-        { label = '专业名称', value = discipline },
-        { label = '作者学号', value = student_id },
-        { label = '论文作者', value = author },
-        { label = '指导教师', value = advisor },
-      }))
+      local cover_rows = meta_rows(meta, 'cover_info_rows')
+      if #cover_rows == 0 then
+        cover_rows = {
+          { label = '专业名称', value = discipline },
+          { label = '作者学号', value = student_id },
+          { label = '论文作者', value = author },
+          { label = '指导教师', value = advisor },
+        }
+      end
+      blocks:insert(make_cover_info_table(cover_rows))
       inject_blank_lines(blocks, 4)
       if submit_date_cn ~= '' then
         blocks:insert(styled_para(submit_date_cn, 'CoverDate'))
@@ -322,7 +344,9 @@ local function build_frontmatter(meta)
     local doctoral_degree_date = meta_str(meta, 'doctoral_degree_date')
     local title_page_rows = meta_rows(meta, 'title_page_info_rows')
 
-    if doctoral_subject ~= '' or doctoral_direction ~= '' or doctoral_student_name ~= '' or doctoral_defense_date ~= '' or doctoral_degree_date ~= '' then
+    if #title_page_rows > 0 then
+      -- overlay provides custom info_fields; use them as-is
+    elseif doctoral_subject ~= '' or doctoral_direction ~= '' or doctoral_student_name ~= '' or doctoral_defense_date ~= '' or doctoral_degree_date ~= '' then
       title_page_rows = {
         { label = '论文作者', value = author },
         { label = '指导教师', value = advisor },
@@ -333,7 +357,7 @@ local function build_frontmatter(meta)
         { label = '答辩委员会主席', value = meta_str(meta, 'doctoral_committee_chair') },
         { label = '论文评阅人', value = meta_str(meta, 'doctoral_reviewers') ~= '' and meta_str(meta, 'doctoral_reviewers') or '匿名评审' },
       }
-    elseif #title_page_rows == 0 then
+    else
       title_page_rows = {
         { label = '所属学院', value = college },
         { label = '专业名称', value = discipline },

@@ -1,8 +1,8 @@
-# thesis-latex2docx
+# thesis-forge
 
 **V2 通用毕业论文 LaTeX → DOCX 转换管线** — 支持多校配置，一条命令完成从 LaTeX 源文件到符合学校排版规范的 Word 文档的全自动转换。
 
-[![Status](https://img.shields.io/badge/status-beta-orange)](https://github.com/ccmxigua/thesis-latex2docx)
+[![Status](https://img.shields.io/badge/status-beta-orange)](https://github.com/ccmxigua/thesis-forge)
 [![Python](https://img.shields.io/badge/python-3.9+-blue)](https://www.python.org/)
 [![Pandoc](https://img.shields.io/badge/pandoc-3.1+-green)](https://pandoc.org/)
 
@@ -52,7 +52,7 @@
 
 写毕业论文时，LaTeX 排版虽然精美，但很多学校要求提交 Word（.docx）格式。手动转换费时费力，而且极难保证格式完全符合学校规范。
 
-**thesis-latex2docx** 解决的就是这个问题：
+**thesis-forge** 解决的就是这个问题：
 
 - 📄 **一条命令转换**：`./convert.sh thesis.tex output.docx overlay.yaml`
 - 🏫 **多学校支持**：通过 overlay 配置覆盖学校特有规则，不改核心代码
@@ -141,8 +141,8 @@ pip3 install pyyaml
 
 ```bash
 # 1. 克隆仓库
-git clone https://github.com/ccmxigua/thesis-latex2docx.git
-cd thesis-latex2docx
+git clone https://github.com/ccmxigua/thesis-forge.git
+cd thesis-forge
 
 # 2. 填写你的个人信息到 overlay 文件
 cp schema/config-tjufe-overlay.example.yaml my-config.yaml
@@ -163,7 +163,7 @@ cp schema/config-tjufe-overlay.example.yaml my-config.yaml
 ## 目录结构
 
 ```
-thesis-latex2docx/
+thesis-forge/
 │
 ├── convert.sh                              # 🚀 主入口：一键转换脚本
 ├── validate.sh                             # 🔍 红队验证：对比输出与基线
@@ -664,7 +664,7 @@ python3 scripts/postprocess_docx.py raw.docx final.docx
 
 ### 报告问题
 
-在 [Issues](https://github.com/ccmxigua/thesis-latex2docx/issues) 中提交：
+在 [Issues](https://github.com/ccmxigua/thesis-forge/issues) 中提交：
 - 你的学校名称和规范文档来源
 - 遇到的具体问题（最好附上截图）
 - 使用的 overlay 配置（脱敏后）

@@ -1,7 +1,13 @@
 local List = require 'pandoc.List'
 
 local function stringify(x)
-  return pandoc.utils.stringify(x or '')
+  if x == nil then
+    return ''
+  end
+  if type(x) == 'boolean' then
+    return x and 'true' or 'false'
+  end
+  return pandoc.utils.stringify(x)
 end
 
 local function trim(s)
@@ -16,11 +22,23 @@ local function meta_bool(meta, key, default)
   if v == nil then
     return default
   end
+  if type(v) == 'boolean' then
+    return v
+  end
+  if type(v) == 'number' then
+    return v ~= 0
+  end
   local s = trim(v):lower()
   if s == '' then
     return default
   end
-  return not (s == 'false' or s == '0' or s == 'no')
+  if s == 'true' or s == '1' or s == 'yes' then
+    return true
+  end
+  if s == 'false' or s == '0' or s == 'no' then
+    return false
+  end
+  error(string.format('metadata.%s must be boolean, true/false, yes/no, or 0/1; got %s', key, s))
 end
 
 local function meta_str(meta, key)
@@ -30,38 +48,57 @@ end
 local function meta_rows(meta, key)
   local rows = {}
   local value = meta[key]
-  if not value then return rows end
+  if value == nil then return rows end
 
-  -- pandoc 2.x: MetaList with .t and .c
-  if value.t == 'MetaList' then
-    for _, item in ipairs(value.c or value) do
-      if item.t == 'MetaMap' and item.c then
-        local label = trim(pandoc.utils.stringify(item.c['label'] or item.c['name'] or item.c['key']))
-        local row_value = trim(pandoc.utils.stringify(item.c['value'] or item.c['text'] or item.c['content']))
-        if label ~= '' or row_value ~= '' then
-          table.insert(rows, { label = label, value = row_value })
-        end
-      end
-    end
-    return rows
+  if type(value) ~= 'table' then
+    error(string.format('metadata.%s must be a list of {label, value} rows', key))
   end
-
-  -- pandoc 3.x: plain Lua table (list of maps)
-  if type(value) == 'table' then
-    for _, item in ipairs(value) do
-      if type(item) == 'table' then
-        local labelRaw = item.label or item.name or item.key or ''
-        local valueRaw = item.value or item.text or item.content or ''
-        local label = trim(pandoc.utils.stringify(labelRaw))
-        local row_value = trim(pandoc.utils.stringify(valueRaw))
-        if label ~= '' or row_value ~= '' then
-          table.insert(rows, { label = label, value = row_value })
-        end
+  local items = value
+  if value.t == 'MetaList' then
+    items = value.c or {}
+  end
+  for _, item in ipairs(items) do
+    if type(item) == 'table' and item.t == 'MetaMap' then
+      item = item.c or {}
+    end
+    if type(item) == 'table' then
+      local labelRaw = item.label or item.name or item.key
+      local valueRaw = item.value or item.text or item.content
+      if labelRaw == nil then labelRaw = '' end
+      if valueRaw == nil then valueRaw = '' end
+      local label = trim(labelRaw)
+      local row_value = trim(valueRaw)
+      if label ~= '' or row_value ~= '' then
+        table.insert(rows, { label = label, value = row_value })
       end
+    else
+      error(string.format('metadata.%s contains a non-mapping item', key))
     end
   end
 
   return rows
+end
+
+local function meta_strings(meta, key)
+  local rows = {}
+  local value = meta[key]
+  if value == nil then return rows end
+  if type(value) ~= 'table' then
+    error(string.format('metadata.%s must be a list of strings', key))
+  end
+  local items = value.t == 'MetaList' and (value.c or {}) or value
+  for _, item in ipairs(items) do
+    if type(item) == 'table' and item.t == 'MetaInlines' then
+      item = item.c or {}
+    end
+    local s = trim(item)
+    if s ~= '' then table.insert(rows, s) end
+  end
+  return rows
+end
+
+local function has_meta(meta, key)
+  return meta[key] ~= nil
 end
 
 local function style_attr(style)
@@ -82,10 +119,30 @@ local function clone_para_with_style(para, style)
   return pandoc.Div({ para }, style_attr(style))
 end
 
-local function clone_header_with_style(level, style, new_text)
-  local h = pandoc.Header(level, { pandoc.Str(new_text) })
-  h.attr = pandoc.Attr('', {}, { ['custom-style'] = style })
+local function styled_attr(original, style)
+  local id = original and original.identifier or ''
+  local classes = {}
+  local attributes = {}
+  if original then
+    for _, class in ipairs(original.classes or {}) do table.insert(classes, class) end
+    for key, value in pairs(original.attributes or {}) do attributes[key] = value end
+  end
+  attributes['custom-style'] = style
+  return pandoc.Attr(id, classes, attributes)
+end
+
+local function clone_header_with_style(source, style, content)
+  local h = pandoc.Header(source.level, content or source.content)
+  h.attr = styled_attr(source.attr, style)
   return h
+end
+
+local function prefixed_header_content(block, prefix)
+  local content = { pandoc.Str(prefix), pandoc.Space() }
+  for _, inline in ipairs(block.content) do
+    table.insert(content, inline)
+  end
+  return content
 end
 
 local function pagebreak()
@@ -104,6 +161,16 @@ end
 
 local function starts_with(s, prefix)
   return s:sub(1, #prefix) == prefix
+end
+
+local function english_title_from_block(block)
+  if block.t == 'Div' and block.classes:includes('english-title') then
+    return trim(pandoc.utils.stringify(block))
+  end
+  if block.t == 'RawBlock' and block.format == 'latex' then
+    return trim(block.text:match('\\begin%s*{english%-title}%s*(.-)%s*\\end%s*{english%-title}') or '')
+  end
+  return ''
 end
 
 local function is_cn_abstract(title)
@@ -276,44 +343,65 @@ local function inject_blank_lines(blocks, count, style)
   end
 end
 
-local function build_frontmatter(meta)
+local function build_frontmatter(meta, en_title_override)
   local blocks = List:new()
   local insert_cover = meta_bool(meta, 'insert_cover', true)
   local insert_title_page = meta_bool(meta, 'insert_title_page', true)
 
   if insert_cover then
     local cover_degree_line = meta_str(meta, 'cover_degree_line')
-    local cover_top, cover_degree = split_cover_degree_line(cover_degree_line)
+    local cover_top_lines = meta_strings(meta, 'cover_top_lines')
+    local top_lines_defined = false
+    if has_meta(meta, 'cover_top_lines_defined') then
+      top_lines_defined = meta_bool(meta, 'cover_top_lines_defined', false)
+    else
+      -- Direct/legacy callers without the mapper still get explicit-list
+      -- semantics when they provide cover_top_lines themselves.
+      top_lines_defined = has_meta(meta, 'cover_top_lines')
+    end
+    if not top_lines_defined and #cover_top_lines == 0 and cover_degree_line ~= '' then
+      -- Legacy metadata had one combined line. Prefer explicit top_lines.
+      local legacy_top, legacy_degree = split_cover_degree_line(cover_degree_line)
+      if legacy_top ~= '' then table.insert(cover_top_lines, legacy_top) end
+      if legacy_degree ~= '' then table.insert(cover_top_lines, legacy_degree) end
+    end
     local cn_title = meta_str(meta, 'cn_title')
     local cn_subtitle = meta_str(meta, 'cn_subtitle')
+    local subtitle_prefix = meta_str(meta, 'cover_subtitle_prefix')
+    if subtitle_prefix == '' then subtitle_prefix = '——' end
     local discipline = meta_str(meta, 'discipline')
     local student_id = meta_str(meta, 'student_id')
     local author = meta_str(meta, 'author')
     local advisor = meta_str(meta, 'advisor')
+    local co_advisor = meta_str(meta, 'co_advisor')
     local submit_date_cn = meta_str(meta, 'submit_date_cn')
 
-    if cover_top ~= '' or cover_degree ~= '' or cn_title ~= '' then
-      if cover_top ~= '' then
-        blocks:insert(styled_para(cover_top, 'Cover Top Line'))
-      end
-      if cover_degree ~= '' then
-        blocks:insert(styled_para(cover_degree, 'Cover Top Line'))
+    if #cover_top_lines > 0 or cn_title ~= '' then
+      for _, top_line in ipairs(cover_top_lines) do
+        blocks:insert(styled_para(top_line, 'Cover Top Line'))
       end
       inject_blank_lines(blocks, 1)
       if cn_title ~= '' then
         blocks:insert(styled_para(cn_title, 'Title'))
       end
       if cn_subtitle ~= '' then
-        blocks:insert(styled_para('——' .. cn_subtitle, 'Subtitle'))
+        blocks:insert(styled_para(subtitle_prefix .. cn_subtitle, 'Subtitle'))
       end
       inject_blank_lines(blocks, 2)
       local cover_rows = meta_rows(meta, 'cover_info_rows')
-      if #cover_rows == 0 then
+      local cover_rows_defined
+      if has_meta(meta, 'cover_info_rows_defined') then
+        cover_rows_defined = meta_bool(meta, 'cover_info_rows_defined', false)
+      else
+        cover_rows_defined = has_meta(meta, 'cover_info_rows')
+      end
+      if not cover_rows_defined then
         cover_rows = {
           { label = '专业名称', value = discipline },
           { label = '作者学号', value = student_id },
           { label = '论文作者', value = author },
           { label = '指导教师', value = advisor },
+          { label = '合作导师', value = co_advisor },
         }
       end
       blocks:insert(make_cover_info_table(cover_rows))
@@ -327,16 +415,24 @@ local function build_frontmatter(meta)
 
   if insert_title_page then
     local class_no = meta_str(meta, 'class_no')
+    local udc = meta_str(meta, 'udc')
     local confidentiality = meta_str(meta, 'confidentiality')
     local degree_type = meta_str(meta, 'degree_type')
     local cn_title = meta_str(meta, 'cn_title')
     local cn_subtitle = meta_str(meta, 'cn_subtitle')
-    local en_title = meta_str(meta, 'en_title')
+    local subtitle_prefix = meta_str(meta, 'cover_subtitle_prefix')
+    if subtitle_prefix == '' then subtitle_prefix = '——' end
+    local en_title = trim(en_title_override)
+    if en_title == '' then en_title = meta_str(meta, 'en_title') end
     local en_subtitle = meta_str(meta, 'en_subtitle')
     local college = meta_str(meta, 'college')
     local discipline = meta_str(meta, 'discipline')
     local author = meta_str(meta, 'author')
     local advisor = meta_str(meta, 'advisor')
+    local co_advisor = meta_str(meta, 'co_advisor')
+    local research_direction = meta_str(meta, 'research_direction')
+    local defense_date = meta_str(meta, 'defense_date')
+    local degree_conferral_date = meta_str(meta, 'degree_conferral_date')
     local doctoral_subject = meta_str(meta, 'doctoral_subject')
     local doctoral_direction = meta_str(meta, 'doctoral_research_direction')
     local doctoral_student_name = meta_str(meta, 'doctoral_student_name')
@@ -344,9 +440,15 @@ local function build_frontmatter(meta)
     local doctoral_degree_date = meta_str(meta, 'doctoral_degree_date')
     local title_page_rows = meta_rows(meta, 'title_page_info_rows')
 
-    if #title_page_rows > 0 then
+    local title_rows_defined
+    if has_meta(meta, 'title_page_info_rows_defined') then
+      title_rows_defined = meta_bool(meta, 'title_page_info_rows_defined', false)
+    else
+      title_rows_defined = has_meta(meta, 'title_page_info_rows')
+    end
+    if title_rows_defined then
       -- overlay provides custom info_fields; use them as-is
-    elseif doctoral_subject ~= '' or doctoral_direction ~= '' or doctoral_student_name ~= '' or doctoral_defense_date ~= '' or doctoral_degree_date ~= '' then
+    elseif meta_str(meta, 'degree_level') == 'doctor' then
       title_page_rows = {
         { label = '论文作者', value = author },
         { label = '指导教师', value = advisor },
@@ -361,14 +463,23 @@ local function build_frontmatter(meta)
       title_page_rows = {
         { label = '所属学院', value = college },
         { label = '专业名称', value = discipline },
+        { label = '一级学科', value = meta_str(meta, 'first_discipline') },
+        { label = '二级学科', value = meta_str(meta, 'second_discipline') },
+        { label = '研究方向', value = research_direction },
         { label = '论文作者', value = author },
         { label = '指导教师', value = advisor },
+        { label = '合作导师', value = co_advisor },
+        { label = '答辩日期', value = defense_date },
+        { label = '学位授予日期', value = degree_conferral_date },
       }
     end
 
     if degree_type ~= '' or cn_title ~= '' then
       if class_no ~= '' then
         blocks:insert(styled_para('分类号：' .. class_no, 'TitlePageMeta'))
+      end
+      if udc ~= '' then
+        blocks:insert(styled_para('UDC：' .. udc, 'TitlePageMeta'))
       end
       if confidentiality ~= '' then
         blocks:insert(styled_para('密  级：' .. confidentiality, 'TitlePageMeta'))
@@ -382,7 +493,7 @@ local function build_frontmatter(meta)
         blocks:insert(styled_para(cn_title, 'Title'))
       end
       if cn_subtitle ~= '' then
-        blocks:insert(styled_para('——' .. cn_subtitle, 'Subtitle'))
+        blocks:insert(styled_para(subtitle_prefix .. cn_subtitle, 'Subtitle'))
       end
       inject_blank_lines(blocks, 3)
       if en_title ~= '' then
@@ -401,6 +512,26 @@ local function build_frontmatter(meta)
 end
 
 function Pandoc(doc)
+  -- The generic converter may receive standard LaTeX \title metadata without
+  -- a school overlay.  Preserve it as the thesis Chinese title rather than
+  -- requiring every caller to duplicate it as cn_title.
+  if meta_str(doc.meta, 'cn_title') == '' and meta_str(doc.meta, 'title') ~= '' then
+    doc.meta.cn_title = doc.meta.title
+  end
+  -- The preprocessor carries project-specific English title commands through
+  -- Pandoc as an ``english-title`` Div.  Consume it as metadata before
+  -- frontmatter is constructed.
+  local en_title = meta_str(doc.meta, 'en_title')
+  if en_title == '' then
+    for _, block in ipairs(doc.blocks) do
+      local value = english_title_from_block(block)
+      if value ~= '' then
+        en_title = value
+        doc.meta.en_title = pandoc.MetaInlines({ pandoc.Str(value) })
+        break
+      end
+    end
+  end
   local out = List:new()
   local last_was_pagebreak = false
   local chapter_no = 0
@@ -434,6 +565,10 @@ function Pandoc(doc)
     if ack_signature_inserted then
       return
     end
+    if not meta_bool(doc.meta, 'ack_signature_enabled', true) then
+      ack_signature_inserted = true
+      return
+    end
     local sign_name = meta_str(doc.meta, 'ack_signature_name')
     if sign_name == '' then
       sign_name = meta_str(doc.meta, 'author')
@@ -452,7 +587,7 @@ function Pandoc(doc)
     ack_signature_inserted = true
   end
 
-  for _, b in ipairs(build_frontmatter(doc.meta)) do
+  for _, b in ipairs(build_frontmatter(doc.meta, en_title)) do
     push(b)
   end
 
@@ -466,7 +601,9 @@ function Pandoc(doc)
       flush_ack_signature()
     end
 
-    if block.t == 'RawBlock' and block.format == 'latex' and trim(block.text) == '\\appendix' then
+    if english_title_from_block(block) ~= '' then
+      -- Metadata-only command already consumed above.
+    elseif block.t == 'RawBlock' and block.format == 'latex' and trim(block.text) == '\\appendix' then
       appendix_mode = true
     elseif block.t == 'Header' then
       local title = trim(block.content)
@@ -474,31 +611,31 @@ function Pandoc(doc)
         if is_cn_abstract(title) then
           mode = 'cn_abstract'
           ensure_pagebreak()
-          push(clone_header_with_style(1, 'Abstract Title CN', '摘 要'))
+          push(clone_header_with_style(block, 'Abstract Title CN', block.content))
           inject_blank_lines(out, 1)
         elseif is_en_abstract(title) then
           mode = 'en_abstract'
           ensure_pagebreak()
-          push(clone_header_with_style(1, 'Abstract Title EN', 'Abstract'))
+          push(clone_header_with_style(block, 'Abstract Title EN', block.content))
           inject_blank_lines(out, 1)
         elseif is_ack(title) then
           appendix_mode = false
           mode = 'ack'
           ack_signature_inserted = false
           ensure_pagebreak()
-          push(clone_header_with_style(1, 'heading 1', '后 记'))
+          push(clone_header_with_style(block, 'heading 1', block.content))
           inject_blank_lines(out, 2)
         elseif is_refs(title) then
           appendix_mode = false
           mode = 'refs'
           ensure_pagebreak()
-          push(clone_header_with_style(1, 'heading 1', '参考文献'))
+          push(clone_header_with_style(block, 'heading 1', block.content))
           inject_blank_lines(out, 2)
         elseif is_research_outputs(title) then
           appendix_mode = false
           mode = 'research_outputs'
           ensure_pagebreak()
-          push(clone_header_with_style(1, 'heading 1', '在学期间发表的学术论文与研究成果'))
+          push(clone_header_with_style(block, 'heading 1', block.content))
           inject_blank_lines(out, 2)
         elseif appendix_mode or is_appendix(title) then
           mode = 'appendix'
@@ -511,7 +648,7 @@ function Pandoc(doc)
           if is_appendix(title) then
             appendix_title = title:gsub('^附录[%sA-ZＡ-Ｚ]*[%s:：-]*', ''):gsub('^%s+', '')
           end
-          push(clone_header_with_style(1, 'heading 1', string.format('附录%s  %s', appendix_label, appendix_title)))
+          push(clone_header_with_style(block, 'heading 1', prefixed_header_content(block, string.format('附录%s', appendix_label))))
           inject_blank_lines(out, 2)
         else
           if want_toc and not inserted_toc then
@@ -523,28 +660,47 @@ function Pandoc(doc)
             inserted_toc = true
           end
           mode = 'body'
+          local unnumbered = block.classes and block.classes:includes('unnumbered')
+          if unnumbered then
+            ensure_pagebreak()
+            push(clone_header_with_style(block, 'heading 1', block.content))
+            inject_blank_lines(out, 2)
+            goto next_block
+          end
           chapter_no = chapter_no + 1
           section_no = 0
           subsection_no = 0
           ensure_pagebreak()
-          push(clone_header_with_style(1, 'heading 1', string.format('第%d章  %s', chapter_no, title)))
+          push(clone_header_with_style(
+            block, 'heading 1', prefixed_header_content(block, string.format('第%d章', chapter_no))
+          ))
           inject_blank_lines(out, 2)
         end
       elseif block.level == 2 then
+        local unnumbered = block.classes and block.classes:includes('unnumbered')
+        if unnumbered then
+          push(clone_header_with_style(block, 'heading 2', block.content))
+          goto next_block
+        end
         section_no = section_no + 1
         subsection_no = 0
         if mode == 'appendix' then
-          push(clone_header_with_style(2, 'heading 2', string.format('%s.%d  %s', string.char(string.byte('A') + appendix_no - 1), section_no, title)))
+          push(clone_header_with_style(block, 'heading 2', prefixed_header_content(block, string.format('%s.%d', string.char(string.byte('A') + appendix_no - 1), section_no))))
         else
-          push(clone_header_with_style(2, 'heading 2', string.format('%d.%d  %s', chapter_no, section_no, title)))
+          push(clone_header_with_style(block, 'heading 2', prefixed_header_content(block, string.format('%d.%d', chapter_no, section_no))))
         end
         inject_blank_lines(out, 1)
       elseif block.level == 3 then
+        local unnumbered = block.classes and block.classes:includes('unnumbered')
+        if unnumbered then
+          push(clone_header_with_style(block, 'heading 3', block.content))
+          goto next_block
+        end
         subsection_no = subsection_no + 1
         if mode == 'appendix' then
-          push(clone_header_with_style(3, 'heading 3', string.format('%s.%d.%d  %s', string.char(string.byte('A') + appendix_no - 1), section_no, subsection_no, title)))
+          push(clone_header_with_style(block, 'heading 3', prefixed_header_content(block, string.format('%s.%d.%d', string.char(string.byte('A') + appendix_no - 1), section_no, subsection_no))))
         else
-          push(clone_header_with_style(3, 'heading 3', string.format('%d.%d.%d  %s', chapter_no, section_no, subsection_no, title)))
+          push(clone_header_with_style(block, 'heading 3', prefixed_header_content(block, string.format('%d.%d.%d', chapter_no, section_no, subsection_no))))
         end
       else
         push(block)
@@ -559,7 +715,8 @@ function Pandoc(doc)
           push(clone_para_with_style(block, 'Abstract Body CN'))
         end
       elseif mode == 'en_abstract' then
-        if starts_with(text:lower(), 'key words') then
+        local lower = text:lower()
+        if lower:match('^keywords%s*[:：]') or lower:match('^key%s+words%s*[:：]') then
           inject_blank_lines(out, 1)
           push(clone_para_with_style(block, 'Keywords Line EN'))
         else
@@ -577,6 +734,7 @@ function Pandoc(doc)
     else
       push(block)
     end
+    ::next_block::
   end
 
   if mode == 'ack' then

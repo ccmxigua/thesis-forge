@@ -1,92 +1,154 @@
 #!/usr/bin/env python3
-"""
-mapper-v2-to-tjufe.py
-读取 V2 schema overlay YAML → 生成天财 Lua filter 兼容的 Pandoc metadata YAML
-"""
-import sys, yaml, json
+"""Map one resolved V2 configuration to the Pandoc/Lua metadata contract."""
+from __future__ import annotations
 
-def load(path):
-    with open(path) as f:
-        return yaml.safe_load(f)
+import argparse
+import sys
+from pathlib import Path
+from typing import Any
 
-def main():
-    if len(sys.argv) < 2:
-        print(f"Usage: {sys.argv[0]} <config-tjufe-overlay.yaml> [output.yaml]", file=sys.stderr)
-        sys.exit(2)
+import yaml
 
-    overlay = load(sys.argv[1])
-    out = {}
 
-    # --- metadata block ---
-    m = overlay.get('metadata', {})
-    out['author'] = m.get('author', '')
-    out['advisor'] = m.get('advisor', '')
-    out['student_id'] = m.get('student_id', '')
-    out['cn_title'] = m.get('title', '')
-    out['en_title'] = m.get('title_en', '')
-    out['cn_subtitle'] = m.get('subtitle', '')
-    out['en_subtitle'] = m.get('subtitle_en', '')
-    out['submit_date_cn'] = m.get('submit_date', '')
-    out['class_no'] = m.get('classification_number', '')
-    out['confidentiality'] = m.get('confidentiality_level', '')
-    out['discipline'] = m.get('major', '')
-    out['college'] = m.get('school', '')
+def load(path: Path) -> dict[str, Any]:
+    try:
+        value = yaml.safe_load(path.read_text(encoding='utf-8'))
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ValueError(f'cannot read config as UTF-8: {path}') from exc
+    if not isinstance(value, dict):
+        raise ValueError(f'{path} must contain a YAML mapping')
+    return value
 
-    # doctoral fields
-    out['doctoral_subject'] = m.get('major', '')
-    out['doctoral_research_direction'] = m.get('research_direction', '')
-    out['doctoral_student_name'] = m.get('author', '')
-    out['doctoral_defense_date'] = m.get('defense_date', '')
-    out['doctoral_degree_date'] = m.get('degree_conferral_date', '')
-    out['doctoral_apply_degree'] = m.get('degree_display', '')
-    out['doctoral_college'] = m.get('school', '')
-    out['doctoral_major'] = m.get('major', '')
-    # 从 title_page.info_fields 中按 label 提取，不再硬编码
-    tp = overlay.get('title_page', {})
-    info_map = {f['label']: f['value'] for f in tp.get('info_fields', [])}
-    out['doctoral_committee_chair'] = info_map.get('答辩委员会主席', '待定')
-    out['doctoral_reviewers'] = info_map.get('论文评阅人', '匿名评审')
 
-    # cover
-    cover = overlay.get('cover', {})
-    out['insert_cover'] = cover.get('enabled', False)
-    out['cover_info_rows'] = cover.get('info_fields', [])
+def _rows(node: Any) -> list[dict[str, Any]]:
+    if node is None:
+        return []
+    if not isinstance(node, list):
+        raise ValueError('info_fields must be a list')
+    rows: list[dict[str, Any]] = []
+    for index, row in enumerate(node):
+        if not isinstance(row, dict):
+            raise ValueError(f'info_fields[{index}] must be a mapping')
+        if 'label' not in row or 'value' not in row:
+            raise ValueError(f'info_fields[{index}] requires label and value')
+        rows.append({'label': row.get('label', ''), 'value': row.get('value', '')})
+    return rows
 
-    # title page (tp already loaded above)
-    out['insert_title_page'] = tp.get('enabled', False)
-    out['degree_type'] = tp.get('degree_line', m.get('degree_display', ''))
-    out['cover_degree_line'] = tp.get('degree_line', '')
-    out['title_page_info_rows'] = tp.get('info_fields', [])
 
-    # toc
-    toc = overlay.get('toc', {})
-    out['insert_toc'] = toc.get('enabled', False)
+def _rows_defined(node: Any) -> bool:
+    """Distinguish an explicit empty list from the schema's blank placeholder."""
+    if not isinstance(node, list):
+        raise ValueError('info_fields must be a list')
+    if not node:
+        return True
+    return not (
+        len(node) == 1
+        and isinstance(node[0], dict)
+        and node[0].get('label', '') == ''
+        and node[0].get('value', '') == ''
+    )
 
-    # acknowledgements / signature
-    ack = overlay.get('acknowledgements', {})
-    sig = ack.get('signature', {})
-    if sig.get('enabled', False):
-        out['ack_signature_name'] = m.get('author', '')
-        out['ack_signature_date'] = m.get('submit_date', '')
 
-    # page margins (for reference, though the Lua filter reads some from metadata)
-    page = overlay.get('page', {}).get('margins', {})
-    out['page_left_margin'] = page.get('left', 1134)
-    out['page_right_margin'] = page.get('right', 1134)
-    out['page_top_margin'] = page.get('top', 1134)
-    out['page_bottom_margin'] = page.get('bottom', 850)
+def _put_nonempty(out: dict[str, Any], key: str, value: Any) -> None:
+    """Do not let blank config defaults erase explicit source metadata."""
+    if isinstance(value, str):
+        if value != '':
+            out[key] = value
+    elif value is not None:
+        out[key] = value
 
-    # --- Font sizes for reference ---
-    fs = overlay.get('font_sizes', {})
-    out['font_size_body'] = fs.get('body', 12)
 
-    # --- Schema version marker ---
-    out['tjufe_config_source'] = 'config-schema-v2 + config-tjufe-overlay.yaml'
+def map_config(config: dict[str, Any], source: str = '') -> dict[str, Any]:
+    """Produce the intentionally small metadata interface consumed by Lua."""
+    metadata = config.get('metadata') or {}
+    if not isinstance(metadata, dict):
+        raise ValueError('metadata must be a mapping')
+    cover = config.get('cover') or {}
+    title_page = config.get('title_page') or {}
+    toc = config.get('toc') or {}
+    acknowledgements = config.get('acknowledgements') or {}
+    signature = acknowledgements.get('signature') or {}
 
-    # Write output
-    out_path = sys.argv[2] if len(sys.argv) > 2 else '/dev/stdout'
-    with open(out_path, 'w') if out_path != '/dev/stdout' else sys.stdout as f:
-        yaml.dump(out, f, allow_unicode=True, default_flow_style=False, sort_keys=False, width=120)
+    out: dict[str, Any] = {
+        'insert_cover': bool(cover.get('enabled', False)),
+        # Keep an explicit empty list distinguishable from the legacy absence
+        # of this key.  Lua may only synthesize the old degree line when the
+        # caller did not provide cover.top_lines at all.
+        'cover_top_lines': cover.get('top_lines') if isinstance(cover.get('top_lines'), list) else [],
+        'cover_top_lines_defined': 'top_lines' in cover,
+        'cover_info_rows': _rows(cover.get('info_fields')),
+        'cover_info_rows_defined': _rows_defined(cover.get('info_fields')),
+        'cover_subtitle_prefix': cover.get('subtitle_prefix', '——'),
+        'insert_title_page': bool(title_page.get('enabled', False)),
+        'title_page_info_rows': _rows(title_page.get('info_fields')),
+        'title_page_info_rows_defined': _rows_defined(title_page.get('info_fields')),
+        'insert_toc': bool(toc.get('enabled', False)),
+        # This is an explicit value, including false.  Lua must not infer it
+        # from author/date fields.
+        'ack_signature_enabled': bool(signature.get('enabled', False)),
+        'ack_signature_name': metadata.get('author', ''),
+        'ack_signature_date': metadata.get('submit_date', ''),
+        'font_size_body': (config.get('font_sizes') or {}).get('body', 12),
+        'tjufe_config_source': source or 'resolved-config',
+    }
+
+    for key, value in {
+        'author': metadata.get('author', ''),
+        'advisor': metadata.get('advisor', ''),
+        'co_advisor': metadata.get('co_advisor', ''),
+        'student_id': metadata.get('student_id', ''),
+        'cn_title': metadata.get('title', ''),
+        'en_title': metadata.get('title_en', ''),
+        'cn_subtitle': metadata.get('subtitle', ''),
+        'en_subtitle': metadata.get('subtitle_en', ''),
+        'submit_date_cn': metadata.get('submit_date', ''),
+        'class_no': metadata.get('classification_number', ''),
+        'udc': metadata.get('udc', ''),
+        'confidentiality': metadata.get('confidentiality_level', ''),
+        'discipline': metadata.get('major', ''),
+        'college': metadata.get('school', ''),
+        'research_direction': metadata.get('research_direction', ''),
+        'degree_level': metadata.get('degree_level', ''),
+        'degree_type': title_page.get('degree_line', '') or metadata.get('degree_display', ''),
+        'cover_degree_line': title_page.get('degree_line', ''),
+        'ack_signature_name': metadata.get('author', ''),
+        'ack_signature_date': metadata.get('submit_date', ''),
+    }.items():
+        _put_nonempty(out, key, value)
+
+    # Doctor-specific fields are opt-in.  A populated author/major pair is not
+    # evidence that the thesis uses the doctoral title-page template.
+    if metadata.get('degree_level') == 'doctor':
+        doctor_values = {
+            'doctoral_subject': metadata.get('major', ''),
+            'doctoral_research_direction': metadata.get('research_direction', ''),
+            'doctoral_student_name': metadata.get('author', ''),
+            'doctoral_defense_date': metadata.get('defense_date', ''),
+            'doctoral_degree_date': metadata.get('degree_conferral_date', ''),
+            'doctoral_apply_degree': metadata.get('degree_display', ''),
+            'doctoral_college': metadata.get('school', ''),
+            'doctoral_major': metadata.get('major', ''),
+        }
+        for key, value in doctor_values.items():
+            _put_nonempty(out, key, value)
+
+    return out
+
+
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('config', type=Path)
+    parser.add_argument('output', nargs='?', type=Path)
+    args = parser.parse_args(argv)
+    mapped = map_config(load(args.config), str(args.config.resolve()))
+    stream = sys.stdout if args.output is None else args.output.open('w', encoding='utf-8')
+    try:
+        yaml.safe_dump(mapped, stream, allow_unicode=True, default_flow_style=False, sort_keys=False, width=120)
+    finally:
+        if args.output is not None:
+            stream.close()
+    return 0
+
 
 if __name__ == '__main__':
-    main()
+    raise SystemExit(main(sys.argv[1:]))

@@ -8,6 +8,7 @@ school:
   spec_version: "2026.03"
 
 metadata:
+  degree_level: "doctor"
   author: "<作者姓名>"            # 例："张三"
   author_en: "<Author Name>"     # 例："Zhang San"
   advisor: "<导师姓名>"           # 例："李四教授"

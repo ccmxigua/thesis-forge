@@ -1,333 +1,306 @@
 #!/usr/bin/env python3
-"""Extract structured data from a DOCX file for red-team comparison.
+"""Extract independently readable OOXML facts from a DOCX package.
 
-Usage:
-    python3 extract_docx.py <input.docx> --out <output_dir>
-    python3 extract_docx.py <input.docx>              # prints JSON to stdout
-
-Output files in <output_dir>:
-    styles.json     - all styles with font, size, spacing, indent
-    document.json   - paragraph list with text and style
-    numbering.json  - numbering definitions
-    page.json       - page dimensions and margins
+The extractor is deliberately structural: it reads OOXML attributes directly,
+walks all supported Word stories (including tables, footnotes and endnotes),
+and records missing values as ``null`` instead of manufacturing defaults.
 """
+from __future__ import annotations
 
+import argparse
+import hashlib
 import json
-import os
-import sys
 import zipfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from typing import Any
 
-# ── XML namespaces ──────────────────────────────────────────────────────
-NS = {
-    "w":  "http://schemas.openxmlformats.org/wordprocessingml/2006/main",
-    "r":  "http://schemas.openxmlformats.org/officeDocument/2006/relationships",
-    "mc": "http://schemas.openxmlformats.org/markup-compatibility/2006",
-    "w14":"http://schemas.microsoft.com/office/word/2010/wordml",
-    "w15":"http://schemas.microsoft.com/office/word/2012/wordml",
-}
-
-# ── Helpers ─────────────────────────────────────────────────────────────
-
-def _tag(t):
-    """Expand short tag name to fully qualified."""
-    if ":" in t:
-        return "{%s}%s" % (NS[t.split(":")[0]], t.split(":")[1])
-    return t
-
-def _el_text(el, child_tag, default=None):
-    c = el.find(_tag(child_tag)) if el is not None else None
-    if c is None:
-        return default
-    return (c.text or "").strip() or default
-
-def _el_val(el, child_tag, default=None):
-    c = el.find(_tag(child_tag)) if el is not None else None
-    return (c.get(_tag("w:val")) if c is not None else None) or default
-
-def _parse_spacing(style_el):
-    """Extract spacing info from <w:pPr> or <w:rPr> parent."""
-    spacing = {}
-    sp = style_el.find(_tag("w:spacing")) if style_el is not None else None
-    if sp is not None:
-        for attr in ["before", "after", "line", "lineRule"]:
-            val = sp.get(_tag("w:" + attr))
-            if val is not None:
-                spacing[attr] = int(val) if val.lstrip("-").isdigit() else val
-    return spacing
-
-def _parse_ind(style_el):
-    """Extract paragraph indentation."""
-    ind = {}
-    ind_el = style_el.find(_tag("w:ind")) if style_el is not None else None
-    if ind_el is not None:
-        for attr in ["left", "right", "firstLine", "hanging"]:
-            val = ind_el.get(_tag("w:" + attr))
-            if val is not None:
-                ind[attr] = int(val) if val.lstrip("-").isdigit() else val
-    return ind
-
-def _parse_justify(style_el):
-    """Extract justification."""
-    jc = style_el.find(_tag("w:jc"))
-    return _el_val(jc, "w:val") if jc is not None else None
-
-def _parse_fonts(rpr_el):
-    """Extract font info from <w:rPr>."""
-    fonts = {}
-    rFonts = rpr_el.find(_tag("w:rFonts")) if rpr_el is not None else None
-    if rFonts is not None:
-        for attr in ["ascii", "hAnsi", "eastAsia", "cs"]:
-            v = rFonts.get(_tag("w:" + attr))
-            if v:
-                fonts[attr] = v
-    return fonts
-
-def _parse_sz(rpr_el):
-    """Extract font size in half-points."""
-    sz = rpr_el.find(_tag("w:sz"))
-    if sz is not None:
-        return int(sz.get(_tag("w:val"), 0))
-    return None
-
-def _parse_bold(rpr_el):
-    b = rpr_el.find(_tag("w:b"))
-    return b is not None and b.get(_tag("w:val"), "1") != "0"
-
-def _parse_italic(rpr_el):
-    i = rpr_el.find(_tag("w:i"))
-    return i is not None and i.get(_tag("w:val"), "1") != "0"
+W_NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+M_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/math'
+R_NS = 'http://schemas.openxmlformats.org/officeDocument/2006/relationships'
+REL_NS = 'http://schemas.openxmlformats.org/package/2006/relationships'
+NS = {'w': W_NS, 'r': R_NS, 'rel': REL_NS}
 
 
-# ── Extract styles.xml ──────────────────────────────────────────────────
+def qn(local: str, ns: str = W_NS) -> str:
+    return f'{{{ns}}}{local}'
 
-def extract_styles(style_xml):
-    """Return dict of style_id -> {name, type, fonts, size, bold, italic, spacing, indent, jc, basedOn}."""
-    styles = {}
+
+def attr(element: ET.Element | None, local: str, ns: str = W_NS) -> str | None:
+    return element.get(qn(local, ns)) if element is not None else None
+
+
+def int_or_value(value: str | None) -> int | str | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        return value
+
+
+def child_attr(element: ET.Element | None, child: str, attribute: str = 'val') -> str | None:
+    if element is None:
+        return None
+    return attr(element.find(qn(child)), attribute)
+
+
+def _parse_spacing(parent: ET.Element | None) -> dict[str, int | str]:
+    spacing = parent.find(qn('spacing')) if parent is not None else None
+    return {
+        key: parsed
+        for key, parsed in (
+            (key, int_or_value(attr(spacing, key)))
+            for key in ('before', 'after', 'line', 'lineRule')
+        )
+        if parsed is not None
+    }
+
+
+def _parse_ind(parent: ET.Element | None) -> dict[str, int | str]:
+    ind = parent.find(qn('ind')) if parent is not None else None
+    keys = ('left', 'right', 'firstLine', 'hanging', 'leftChars', 'rightChars', 'firstLineChars', 'hangingChars')
+    return {
+        key: parsed
+        for key, parsed in (
+            (key, int_or_value(attr(ind, key)))
+            for key in keys
+        )
+        if parsed is not None
+    }
+
+
+def _parse_justify(parent: ET.Element | None) -> str | None:
+    # w:jc stores w:val as an attribute on the already-located element.  It is
+    # not a child element.
+    return child_attr(parent, 'jc')
+
+
+def _parse_fonts(rpr: ET.Element | None) -> dict[str, str]:
+    fonts = rpr.find(qn('rFonts')) if rpr is not None else None
+    if fonts is None:
+        return {}
+    return {
+        key: value
+        for key, value in ((key, attr(fonts, key)) for key in ('ascii', 'hAnsi', 'eastAsia', 'cs'))
+        if value is not None
+    }
+
+
+def _parse_run_format(rpr: ET.Element | None) -> dict[str, Any]:
+    size = child_attr(rpr, 'sz')
+    return {
+        'fonts': _parse_fonts(rpr),
+        'size_halfpt': int_or_value(size),
+        'bold': _bool_element(rpr.find(qn('b')) if rpr is not None else None),
+        'italic': _bool_element(rpr.find(qn('i')) if rpr is not None else None),
+    }
+
+
+def _bool_element(element: ET.Element | None) -> bool | None:
+    if element is None:
+        return None
+    value = attr(element, 'val')
+    if value is None:
+        return True
+    return value not in {'0', 'false', 'off', 'no'}
+
+
+def extract_styles(style_xml: bytes | str) -> dict[str, dict[str, Any]]:
     root = ET.fromstring(style_xml)
-    for st in root.findall(_tag("w:style")):
-        sid = st.get(_tag("w:styleId"))
-        if not sid:
+    styles: dict[str, dict[str, Any]] = {}
+    for style in root.findall(qn('style')):
+        style_id = attr(style, 'styleId')
+        if not style_id or style_id in styles:
             continue
-        name = _el_val(st, "w:name")
-        based = _el_val(st, "w:basedOn")
-
-        ppr = st.find(_tag("w:pPr"))
-        rpr = st.find(_tag("w:rPr"))
-
-        # Duplicate style handling: keep first definition (reference.docx comes first)
-        if styles.get(sid):
-            continue
-
-        styles[sid] = {
-            "name": name,
-            "type": st.get(_tag("w:type"), ""),
-            "basedOn": based,
-            "fonts": _parse_fonts(rpr) if rpr is not None else {},
-            "size_halfpt": _parse_sz(rpr) if rpr is not None else None,
-            "bold": _parse_bold(rpr) if rpr is not None else False,
-            "italic": _parse_italic(rpr) if rpr is not None else False,
-            "spacing": _parse_spacing(ppr) if ppr is not None else {},
-            "indent": _parse_ind(ppr) if ppr is not None else {},
-            "justify": _parse_justify(ppr) if ppr is not None else None,
+        ppr = style.find(qn('pPr'))
+        rpr = style.find(qn('rPr'))
+        run = _parse_run_format(rpr)
+        styles[style_id] = {
+            'name': child_attr(style, 'name'),
+            'type': attr(style, 'type'),
+            'basedOn': child_attr(style, 'basedOn'),
+            **run,
+            'spacing': _parse_spacing(ppr),
+            'indent': _parse_ind(ppr),
+            'justify': _parse_justify(ppr),
         }
-
-        # Also grab default paragraph properties
-        dp = st.find(_tag("w:rPrDefault"))
-        if dp is not None and rpr is None:
-            rpr_d = dp.find(_tag("w:rPr"))
-            if rpr_d is not None:
-                styles[sid]["fonts"] = _parse_fonts(rpr_d)
-                styles[sid]["size_halfpt"] = _parse_sz(rpr_d)
-
     return styles
 
 
-# ── Extract document.xml ────────────────────────────────────────────────
+def _paragraph_text(paragraph: ET.Element) -> str:
+    chunks = []
+    for node in paragraph.iter():
+        if node.tag in {qn('t'), qn('instrText'), qn('delText'), qn('delInstrText'), qn('t', 'http://schemas.openxmlformats.org/officeDocument/2006/math')}:
+            if node.text:
+                chunks.append(node.text)
+        elif node.tag == qn('tab'):
+            chunks.append('\t')
+        elif node.tag == qn('br'):
+            chunks.append('\n')
+    return ''.join(chunks)
 
-def extract_paragraphs(doc_xml, max_text=120):
-    """Return list of {text, style, bold, italic, size_halfpt, fonts, spacing, indent}."""
-    paragraphs = []
+
+def _paragraph_has_image(paragraph: ET.Element) -> bool:
+    return any(node.tag == qn('drawing') for node in paragraph.iter())
+
+
+def extract_paragraphs(doc_xml: bytes | str, max_text: int = 120, story: str = 'word/document.xml') -> list[dict[str, Any]]:
     root = ET.fromstring(doc_xml)
-    body = root.find(_tag("w:body"))
-    if body is None:
-        return paragraphs
-
-    for p in body.findall(_tag("w:p")):
-        ppr = p.find(_tag("w:pPr"))
-        pstyle = _el_val(ppr, "w:pStyle") if ppr is not None else None
-        p_spacing = _parse_spacing(ppr) if ppr is not None else {}
-        p_indent = _parse_ind(ppr) if ppr is not None else {}
-        p_jc = _parse_justify(ppr) if ppr is not None else None
-
-        # Collect run-level props (only first run for style info)
-        first_rpr = None
-        run_texts = []
-        first_run_fonts = {}
-        first_run_sz = None
-        first_run_bold = False
-        first_run_italic = False
-
-        runs = p.findall(_tag("w:r"))
-        for i, r in enumerate(runs):
-            rpr = r.find(_tag("w:rPr"))
-            if i == 0 and rpr is not None:
-                first_rpr = rpr
-                first_run_fonts = _parse_fonts(rpr)
-                first_run_sz = _parse_sz(rpr)
-                first_run_bold = _parse_bold(rpr)
-                first_run_italic = _parse_italic(rpr)
-
-            t_els = r.findall(_tag("w:t"))
-            for t in t_els:
-                if t.text:
-                    run_texts.append(t.text)
-
-        text = "".join(run_texts).strip()
-        if not text:
-            # Check for images
-            for r in runs:
-                drawings = r.findall(_tag("w:drawing"))
-                if drawings:
-                    text = "[IMAGE]"
-                    break
-
-        paragraphs.append({
-            "text": text[:max_text],
-            "full_length": len(text),
-            "style": pstyle,
-            "fonts": first_run_fonts,
-            "size_halfpt": first_run_sz,
-            "bold": first_run_bold,
-            "italic": first_run_italic,
-            "spacing": p_spacing,
-            "indent": p_indent,
-            "justify": p_jc,
+    result: list[dict[str, Any]] = []
+    for paragraph in root.iter(qn('p')):
+        ppr = paragraph.find(qn('pPr'))
+        pstyle = child_attr(ppr, 'pStyle')
+        text = _paragraph_text(paragraph)
+        if not text and _paragraph_has_image(paragraph):
+            text = '[IMAGE]'
+        runs = list(paragraph.iter(qn('r')))
+        first_rpr = runs[0].find(qn('rPr')) if runs else None
+        result.append({
+            'story': story,
+            'text': text[:max_text],
+            'full_length': len(text),
+            'style': pstyle,
+            **_parse_run_format(first_rpr),
+            'spacing': _parse_spacing(ppr),
+            'indent': _parse_ind(ppr),
+            'justify': _parse_justify(ppr),
+            'has_math': any(node.tag in {qn('oMath', M_NS), qn('oMathPara', M_NS), qn('t', M_NS)} for node in paragraph.iter()),
+            'has_image': _paragraph_has_image(paragraph),
         })
+    return result
 
-    return paragraphs
 
-
-# ── Extract numbering.xml ───────────────────────────────────────────────
-
-def extract_numbering(num_xml):
-    """Return dict of numId -> {abstractNumVal, level_count, level_formats}."""
-    numbering = {}
+def extract_numbering(num_xml: bytes | str | None) -> dict[str, Any]:
     if not num_xml:
-        return numbering
+        return {}
     root = ET.fromstring(num_xml)
-    for num in root.findall(_tag("w:num")):
-        num_id = num.get(_tag("w:numId"))
-        abstract_id = _el_val(num.find(_tag("w:abstractNumId")), "w:val")
-        numbering[num_id] = {"abstractNumId": abstract_id, "levels": {}}
-
-    for anum in root.findall(_tag("w:abstractNum")):
-        aid = anum.get(_tag("w:abstractNumId"))
-        for lvl in anum.findall(_tag("w:lvl")):
-            ilvl = lvl.get(_tag("w:ilvl"))
-            numFmt = _el_val(lvl, "w:numFmt")
-            lvlText = _el_val(lvl, "w:lvlText")
-            start = _el_val(lvl, "w:start")
-            # Find the num using this abstractNum
-            for nid, ndata in numbering.items():
-                if ndata["abstractNumId"] == aid:
-                    numbering[nid]["levels"][ilvl] = {
-                        "format": numFmt,
-                        "text": lvlText,
-                        "start": start,
-                    }
-
+    numbering: dict[str, Any] = {}
+    abstract_levels: dict[str, dict[str, Any]] = {}
+    for abstract in root.findall(qn('abstractNum')):
+        abstract_id = attr(abstract, 'abstractNumId')
+        if abstract_id is None:
+            continue
+        levels: dict[str, Any] = {}
+        for level in abstract.findall(qn('lvl')):
+            ilvl = attr(level, 'ilvl')
+            if ilvl is None:
+                continue
+            levels[ilvl] = {
+                'format': child_attr(level, 'numFmt'),
+                'text': child_attr(level, 'lvlText'),
+                'start': int_or_value(child_attr(level, 'start')),
+                'indent': _parse_ind(level.find(qn('pPr'))),
+                'justify': _parse_justify(level.find(qn('pPr'))),
+            }
+        abstract_levels[abstract_id] = levels
+    for num in root.findall(qn('num')):
+        num_id = attr(num, 'numId')
+        if num_id is None:
+            continue
+        abstract_id = child_attr(num, 'abstractNumId')
+        numbering[num_id] = {
+            'abstractNumId': abstract_id,
+            'levels': abstract_levels.get(abstract_id, {}) if abstract_id is not None else {},
+        }
     return numbering
 
 
-# ── Extract page settings ───────────────────────────────────────────────
+def _page_section(sect: ET.Element) -> dict[str, Any]:
+    page_size = sect.find(qn('pgSz'))
+    margins = sect.find(qn('pgMar'))
+    result: dict[str, Any] = {
+        'width': int_or_value(attr(page_size, 'w')),
+        'height': int_or_value(attr(page_size, 'h')),
+        'orient': attr(page_size, 'orient'),
+        'margins': {},
+        'page_number_format': child_attr(sect, 'pgNumType', 'fmt'),
+        'page_number_start': int_or_value(child_attr(sect, 'pgNumType', 'start')),
+    }
+    result['margins'] = {
+        key: parsed
+        for key, parsed in ((key, int_or_value(attr(margins, key))) for key in ('top', 'bottom', 'left', 'right', 'header', 'footer', 'gutter'))
+        if parsed is not None
+    }
+    return result
 
-def extract_page_settings(doc_xml):
-    """Return page dimensions and margins from the first sectPr."""
+
+def extract_page_settings(doc_xml: bytes | str) -> dict[str, Any]:
     root = ET.fromstring(doc_xml)
-    body = root.find(_tag("w:body"))
-    if body is None:
-        return {}
-    sect = body.find(_tag("w:sectPr"))
-    if sect is None:
-        return {}
-
-    pgSz = sect.find(_tag("w:pgSz"))
-    pgMar = sect.find(_tag("w:pgMar"))
-
-    page = {}
-    if pgSz is not None:
-        page["width"] = int(pgSz.get(_tag("w:w"), 0))
-        page["height"] = int(pgSz.get(_tag("w:h"), 0))
-        orient = pgSz.get(_tag("w:orient"))
-        if orient:
-            page["orient"] = orient
-
-    if pgMar is not None:
-        page["margins"] = {}
-        for key in ("top", "bottom", "left", "right", "header", "footer"):
-            v = pgMar.get(_tag("w:" + key))
-            if v is not None:
-                page["margins"][key] = int(v)
-
-    return page
+    sections = [_page_section(sect) for sect in root.iter(qn('sectPr'))]
+    if not sections:
+        return {'sections': []}
+    result = dict(sections[0])
+    result['sections'] = sections
+    return result
 
 
-# ── Main ────────────────────────────────────────────────────────────────
-
-def extract_docx(docx_path):
-    """Extract all structured data from a DOCX file."""
-    data = {"styles": {}, "paragraphs": [], "numbering": {}, "page": {}}
-
-    with zipfile.ZipFile(docx_path, "r") as z:
-        # styles.xml
-        if "word/styles.xml" in z.namelist():
-            data["styles"] = extract_styles(z.read("word/styles.xml"))
-
-        # document.xml
-        if "word/document.xml" in z.namelist():
-            doc_xml = z.read("word/document.xml")
-            data["paragraphs"] = extract_paragraphs(doc_xml)
-            data["page"] = extract_page_settings(doc_xml)
-
-        # numbering.xml
-        if "word/numbering.xml" in z.namelist():
-            data["numbering"] = extract_numbering(z.read("word/numbering.xml"))
-
-    return data
+def _story_files(names: list[str]) -> list[str]:
+    preferred = ['word/document.xml', 'word/footnotes.xml', 'word/endnotes.xml', 'word/comments.xml']
+    return [name for name in preferred if name in names] + sorted(
+        name for name in names if name.startswith('word/header') or name.startswith('word/footer')
+    )
 
 
-def main(argv):
-    if len(argv) < 1:
-        print("usage: extract_docx.py <input.docx> [--out <output_dir>]", file=sys.stderr)
-        return 2
+def extract_docx(docx_path: Path) -> dict[str, Any]:
+    package_hash = hashlib.sha256(docx_path.read_bytes()).hexdigest()
+    with zipfile.ZipFile(docx_path) as archive:
+        names = archive.namelist()
+        xml_data = {name: archive.read(name) for name in names if name.endswith('.xml') or name.endswith('.rels')}
+        if 'word/document.xml' not in xml_data:
+            raise ValueError('DOCX package has no word/document.xml')
+        for name, data in xml_data.items():
+            try:
+                ET.fromstring(data)
+            except ET.ParseError as exc:
+                raise ValueError(f'invalid XML part {name}: {exc}') from exc
+        paragraphs: list[dict[str, Any]] = []
+        stories = _story_files(names)
+        for name in stories:
+            paragraphs.extend(extract_paragraphs(xml_data[name], story=name))
+        page = extract_page_settings(xml_data['word/document.xml'])
+        return {
+            'schema_version': '2.0',
+            'package_hash': package_hash,
+            'styles': extract_styles(xml_data['word/styles.xml']) if 'word/styles.xml' in xml_data else {},
+            'document': paragraphs,
+            'numbering': extract_numbering(xml_data.get('word/numbering.xml')),
+            'page': page,
+            'manifest': {
+                'xml_parts': {
+                    name: hashlib.sha256(data).hexdigest() for name, data in sorted(xml_data.items())
+                },
+                'media_parts': {
+                    name: hashlib.sha256(archive.read(name)).hexdigest()
+                    for name in sorted(names)
+                    if name.startswith('word/media/')
+                },
+                'stories': stories,
+                'paragraph_count': len(paragraphs),
+                'image_paragraph_count': sum(bool(item['has_image']) for item in paragraphs),
+                'math_paragraph_count': sum(bool(item['has_math']) for item in paragraphs),
+            },
+        }
 
-    docx_path = argv[0]
-    out_dir = None
 
-    i = 1
-    while i < len(argv):
-        if argv[i] == "--out" and i + 1 < len(argv):
-            out_dir = argv[i + 1]
-            i += 2
-        else:
-            i += 1
-
-    data = extract_docx(docx_path)
-
-    if out_dir:
-        os.makedirs(out_dir, exist_ok=True)
-        for key, val in data.items():
-            out_path = os.path.join(out_dir, f"{key}.json")
-            with open(out_path, "w", encoding="utf-8") as f:
-                json.dump(val, f, ensure_ascii=False, indent=2)
-            print(f"  wrote {out_path} ({len(json.dumps(val, ensure_ascii=False))} bytes)")
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('input', type=Path)
+    parser.add_argument('--out', type=Path)
+    args = parser.parse_args(argv)
+    data = extract_docx(args.input)
+    if args.out:
+        args.out.mkdir(parents=True, exist_ok=True)
+        for key, filename in (
+            ('styles', 'styles.json'), ('document', 'paragraphs.json'),
+            ('numbering', 'numbering.json'), ('page', 'page.json'), ('manifest', 'manifest.json'),
+        ):
+            (args.out / filename).write_text(json.dumps(data[key], ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+        (args.out / 'document.json').write_text(json.dumps(data['document'], ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
     else:
         print(json.dumps(data, ensure_ascii=False, indent=2))
-
     return 0
 
 
-if __name__ == "__main__":
-    raise SystemExit(main(sys.argv[1:]))
+if __name__ == '__main__':
+    raise SystemExit(main(__import__('sys').argv[1:]))

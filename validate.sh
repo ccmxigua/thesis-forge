@@ -1,89 +1,113 @@
-#!/bin/bash
-# validate.sh — Red-team compliance validation for thesis-latex2docx
-# Usage: ./validate.sh config-<school>-overlay.yaml
-#
-# Runs the full pipeline on the fixed sample thesis,
-# then compares the output DOCX against the reference baseline.
-
+#!/usr/bin/env bash
+# Validate one conversion against the source and the resolved configuration.
+# This intentionally does not compare against reference.docx: a seed/template
+# is not an independent expected thesis manifest.
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-REDTEAM_DIR="$SCRIPT_DIR/redteam"
-TESTS_DIR="$SCRIPT_DIR/tests"
-BASELINE_DIR="$REDTEAM_DIR/baseline"
-CANDIDATE_DIR="$REDTEAM_DIR/candidate"
-REPORT_PATH="$REDTEAM_DIR/report.md"
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+PYTHON_BIN="${PYTHON:-$(command -v python3 || true)}"
+if [ -z "$PYTHON_BIN" ] || [ ! -x "$PYTHON_BIN" ]; then
+  echo "python3 not found; set PYTHON to an executable interpreter" >&2
+  exit 2
+fi
 
-# ── Args ────────────────────────────────────────────────────────────────
 OVERLAY="${1:-}"
+REPORT_PATH="$SCRIPT_DIR/reports/validation-report.json"
 if [ -z "$OVERLAY" ]; then
-  echo "usage: ./validate.sh <config-overlay.yaml>"
+  echo "usage: ./validate.sh <config-overlay.yaml> [--out report.json]" >&2
   exit 2
 fi
+shift
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --out)
+      if [ "$#" -lt 2 ] || [ -z "$2" ]; then
+        echo "missing value for --out" >&2
+        exit 2
+      fi
+      REPORT_PATH="$2"
+      shift 2
+      ;;
+    *)
+      echo "unknown validate.sh option: $1" >&2
+      exit 2
+      ;;
+  esac
+done
 
-if [ ! -f "$OVERLAY" ]; then
-  echo "ERROR: overlay not found: $OVERLAY"
+if [ ! -f "$OVERLAY" ] || [ ! -r "$OVERLAY" ]; then
+  echo "config overlay is missing or unreadable: $OVERLAY" >&2
   exit 2
 fi
-
-SAMPLE_TEX="$TESTS_DIR/sample-thesis.tex"
+SAMPLE_TEX="$SCRIPT_DIR/tests/sample-thesis.tex"
 if [ ! -f "$SAMPLE_TEX" ]; then
-  echo "ERROR: sample thesis not found: $SAMPLE_TEX"
+  echo "sample thesis not found: $SAMPLE_TEX" >&2
   exit 2
 fi
 
-REF_DOCX="$SCRIPT_DIR/reference.docx"
-if [ ! -f "$REF_DOCX" ]; then
-  echo "ERROR: reference.docx not found: $REF_DOCX"
+REPORT_PARENT="$(dirname -- "$REPORT_PATH")"
+mkdir -p "$REPORT_PARENT"
+if [ ! -w "$REPORT_PARENT" ]; then
+  echo "report directory is not writable: $REPORT_PARENT" >&2
   exit 2
 fi
 
-echo "============================================"
-echo " thesis-latex2docx Red-Team Validation"
-echo "============================================"
-echo ""
+TMP_DIR="$(mktemp -d "${TMPDIR:-/tmp}/thesis-forge-validate.XXXXXXXX")"
+cleanup() {
+  rm -rf -- "$TMP_DIR"
+}
+trap cleanup EXIT
 
-# ── Step 0: Ensure baseline exists ──────────────────────────────────────
-if [ ! -f "$BASELINE_DIR/styles.json" ]; then
-  echo "[0/3] Extracting baseline from reference.docx..."
-  mkdir -p "$BASELINE_DIR"
-  python3 "$REDTEAM_DIR/extract_docx.py" "$REF_DOCX" --out "$BASELINE_DIR"
-  echo "  baseline ready"
-else
-  echo "[0/3] Baseline exists, using cached."
+TMP_DOCX="$TMP_DIR/candidate.docx"
+EXTRACT_DIR="$TMP_DIR/extract"
+COMPAT_REPORT="$TMP_DIR/ooxml.json"
+VALIDATE_REPORT="$TMP_DIR/validation.json"
+RESOLVED_CONFIG="$TMP_DIR/resolved-config.yaml"
+EXPECTED_MANIFEST="$SCRIPT_DIR/tests/expected/sample-thesis.manifest.json"
+
+echo "[1/4] converting sample thesis..."
+"$PYTHON_BIN" "$SCRIPT_DIR/scripts/config_v2.py" "$SCRIPT_DIR/schema/config-schema-v2.yaml" "$OVERLAY" "$RESOLVED_CONFIG" --strict >/dev/null
+"$SCRIPT_DIR/convert.sh" "$SAMPLE_TEX" "$TMP_DOCX" --config "$RESOLVED_CONFIG" >/dev/null
+echo "[2/4] extracting serialized OOXML..."
+"$PYTHON_BIN" "$SCRIPT_DIR/redteam/extract_docx.py" "$TMP_DOCX" --out "$EXTRACT_DIR"
+echo "[3/4] running independent OOXML compatibility audit..."
+set +e
+"$PYTHON_BIN" "$SCRIPT_DIR/scripts/ooxml_compatibility.py" "$TMP_DOCX" --out "$COMPAT_REPORT" >/dev/null
+COMPAT_STATUS=$?
+set -e
+echo "[4/4] checking source/output/config invariants..."
+set +e
+"$PYTHON_BIN" "$SCRIPT_DIR/scripts/validate_artifact.py" "$TMP_DOCX" --source "$SAMPLE_TEX" --config "$RESOLVED_CONFIG" --compatibility-report "$COMPAT_REPORT" --expected "$EXPECTED_MANIFEST" --out "$VALIDATE_REPORT" >/dev/null
+VALIDATE_STATUS=$?
+set -e
+
+"$PYTHON_BIN" - "$VALIDATE_REPORT" "$REPORT_PATH" "$COMPAT_STATUS" "$OVERLAY" "$RESOLVED_CONFIG" <<'PY'
+import json
+import hashlib
+import sys
+from pathlib import Path
+
+validation_path = Path(sys.argv[1])
+report_path = Path(sys.argv[2])
+compat_status = int(sys.argv[3])
+input_config = Path(sys.argv[4]).resolve()
+resolved_config = Path(sys.argv[5]).resolve()
+data = json.loads(validation_path.read_text(encoding='utf-8'))
+data['validation_entrypoint'] = 'validate.sh'
+data['compatibility_exit_status'] = compat_status
+data['valid'] = bool(data.get('valid')) and compat_status == 0
+data['input_config'] = str(input_config)
+data['resolved_config'] = str(resolved_config)
+data.setdefault('hashes', {})['input_config_sha256'] = hashlib.sha256(input_config.read_bytes()).hexdigest()
+if compat_status != 0:
+    data.setdefault('errors', []).append('ooxml_compatibility.py exited non-zero')
+report_path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + '\n', encoding='utf-8')
+print(json.dumps(data, ensure_ascii=False))
+PY
+
+if [ "$VALIDATE_STATUS" -eq 0 ] && [ "$COMPAT_STATUS" -eq 0 ]; then
+  echo "Validation PASSED: $REPORT_PATH"
+  exit 0
 fi
-echo ""
-
-# ── Step 1: Generate DOCX from sample thesis ────────────────────────────
-echo "[1/3] Running convert.sh on sample-thesis.tex..."
-TMP_DOCX="$(mktemp /tmp/v2-validate-XXXXXXXXXX)".docx
-
-"$SCRIPT_DIR/convert.sh" "$SAMPLE_TEX" "$TMP_DOCX" "$OVERLAY"
-echo "  generated: $TMP_DOCX ($(wc -c < "$TMP_DOCX" | tr -d ' ') bytes)"
-echo ""
-
-# ── Step 2: Extract candidate ───────────────────────────────────────────
-echo "[2/3] Extracting candidate DOCX..."
-rm -rf "$CANDIDATE_DIR"
-mkdir -p "$CANDIDATE_DIR"
-python3 "$REDTEAM_DIR/extract_docx.py" "$TMP_DOCX" --out "$CANDIDATE_DIR"
-echo ""
-
-# ── Step 3: Compare ─────────────────────────────────────────────────────
-echo "[3/3] Comparing baseline vs candidate..."
-python3 "$REDTEAM_DIR/compare.py" "$BASELINE_DIR" "$CANDIDATE_DIR" --out "$REPORT_PATH"
-EXIT_CODE=$?
-echo ""
-
-# ── Cleanup ─────────────────────────────────────────────────────────────
-rm -f "$TMP_DOCX"
-
-# ── Result ──────────────────────────────────────────────────────────────
-if [ $EXIT_CODE -eq 0 ]; then
-  echo "✅ Validation PASSED — no CRITICAL or HIGH findings."
-else
-  echo "❌ Validation FAILED — CRITICAL or HIGH findings detected."
-  echo "   See report: $REPORT_PATH"
-fi
-
-exit $EXIT_CODE
+echo "Validation FAILED: $REPORT_PATH" >&2
+exit 1

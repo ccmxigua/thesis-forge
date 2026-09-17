@@ -21,6 +21,9 @@ school:
 # ---- 学位层次 ---------------------------------------------------------------
 # 不同学位层次可能有不同的字数/篇幅要求
 metadata:
+  # Explicit profile selector.  Leave empty for a neutral/default title page;
+  # consumers must not infer doctoral layout from author or major fields.
+  degree_level: ""                 # doctor / master / professional_master
   # 作者姓名
   author: ""
   author_en: ""

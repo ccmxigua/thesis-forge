@@ -1,12 +1,16 @@
-#!/opt/homebrew/bin/python3
+#!/usr/bin/env python3
 from __future__ import annotations
 
+import argparse
+import os
 import shutil
 import subprocess
 import tempfile
 import zipfile
 from pathlib import Path
 import xml.etree.ElementTree as ET
+
+import yaml
 
 W_NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
 XML_NS = 'http://www.w3.org/XML/1998/namespace'
@@ -15,7 +19,7 @@ ET.register_namespace('w', W_NS)
 
 ROOT = Path(__file__).resolve().parent.parent
 OUT_DOCX = ROOT / 'reference.docx'
-PANDOC = shutil.which('pandoc') or '/opt/homebrew/bin/pandoc'
+PANDOC = shutil.which('pandoc')
 
 PAGE_W = '10431'   # 16K 184mm
 PAGE_H = '14740'   # 16K 260mm
@@ -214,18 +218,124 @@ def ensure_document_section(document_root: ET.Element) -> None:
     doc_grid.set(qn('w:charSpace'), '0')
 
 
-def build_seed_docx(tmpdir: Path) -> Path:
+def _apply_config(config_path: Path | None) -> dict:
+    """Apply resolved page/style settings while retaining legacy no-arg use."""
+    global PAGE_W, PAGE_H, TOP, BOTTOM, LEFT, RIGHT, HEADER, FOOTER, DOCGRID_LINE_PITCH
+    # The builder is also imported and called from tests/embedding hosts.  A
+    # prior configured invocation must not leak page settings into a later
+    # no-arg or differently configured build.
+    PAGE_W, PAGE_H = '10431', '14740'
+    TOP, BOTTOM, LEFT, RIGHT = '1134', '850', '1134', '1134'
+    HEADER, FOOTER, DOCGRID_LINE_PITCH = '850', '992', '326'
+    if config_path is None:
+        return {}
+    try:
+        config = yaml.safe_load(config_path.read_text(encoding='utf-8'))
+    except (OSError, UnicodeDecodeError) as exc:
+        raise ValueError(f'cannot read config as UTF-8: {config_path}') from exc
+    if not isinstance(config, dict):
+        raise ValueError(f'{config_path} must contain a YAML mapping')
+    page = config.get('page') or {}
+    size = page.get('size')
+    if size == 'A4':
+        PAGE_W, PAGE_H = '11906', '16838'
+    elif size in {'16K', '16k', 'B5'}:
+        PAGE_W, PAGE_H = '10431', '14740'
+    elif isinstance(size, dict):
+        PAGE_W, PAGE_H = str(size.get('width', PAGE_W)), str(size.get('height', PAGE_H))
+    margins = page.get('margins') or {}
+    TOP = str(margins.get('top', TOP))
+    BOTTOM = str(margins.get('bottom', BOTTOM))
+    LEFT = str(margins.get('left', LEFT))
+    RIGHT = str(margins.get('right', RIGHT))
+    HEADER = str(margins.get('header_distance', HEADER))
+    FOOTER = str(margins.get('footer_distance', FOOTER))
+    typography = config.get('typography') or {}
+    grid = typography.get('doc_grid_line_pitch')
+    if grid is not None:
+        DOCGRID_LINE_PITCH = str(grid)
+    return config
+
+
+def _patch_style_specs(style_specs: list[tuple], config: dict) -> None:
+    """Project resolved font and line-spacing fields into generated styles."""
+    font_sizes = config.get('font_sizes') or {}
+    typography = config.get('typography') or {}
+    body_size = font_sizes.get('body')
+    heading_sizes = {
+        'Heading1': font_sizes.get('heading1'),
+        'Heading2': font_sizes.get('heading2'),
+        'Heading3': font_sizes.get('heading3'),
+    }
+    body_style_ids = {'Normal', 'BodyText', 'FirstParagraph', 'AbstractBodyCN', 'AbstractBodyEN', 'AcknowledgementsBody', 'StatementBody'}
+    style_size_groups = {
+        'body': body_style_ids,
+        'heading1': {'Heading1'},
+        'heading2': {'Heading2'},
+        'heading3': {'Heading3'},
+        'abstract_body': {'AbstractBodyCN', 'AbstractBodyEN'},
+        'abstract_title': {'AbstractTitleCN', 'AbstractTitleEN'},
+        'keywords': {'KeywordsLineCN', 'KeywordsLineEN'},
+        'caption': {'Caption', 'TableCaption', 'ImageCaption'},
+        'source_note': {'SourceNote'},
+        'header_footer': {'Header', 'Footer'},
+        'footnote': {'FootnoteText'},
+        'cover_title': {'Title', 'Subtitle', 'EnglishTitle', 'EnglishSubtitle'},
+        'cover_info': {'CoverTopLine', 'CoverInfoLabel', 'CoverInfoValue', 'TitlePageMeta', 'TitlePageDegree', 'TitlePageInfoLabel', 'TitlePageInfoValue'},
+        'cover_date': {'CoverDate'},
+    }
+    for style_id, _stype, _name, p_spec, r_spec, _based_on, _custom in style_specs:
+        for key, style_ids in style_size_groups.items():
+            value = font_sizes.get(key)
+            if value is not None and style_id in style_ids:
+                r_spec['size'] = int(round(float(value) * 2))
+        if style_id in body_style_ids:
+            if typography.get('body_font_cn'):
+                r_spec['eastAsia'] = str(typography['body_font_cn'])
+            if typography.get('body_font_en'):
+                r_spec['ascii'] = str(typography['body_font_en'])
+                r_spec['hAnsi'] = str(typography['body_font_en'])
+        elif style_id in {'Heading1', 'Heading2', 'Heading3'}:
+            if typography.get('heading_font_cn'):
+                r_spec['eastAsia'] = str(typography['heading_font_cn'])
+            if typography.get('heading_font_en'):
+                r_spec['ascii'] = str(typography['heading_font_en'])
+                r_spec['hAnsi'] = str(typography['heading_font_en'])
+
+        if style_id == 'FootnoteText':
+            spacing_key = 'footnote_line_spacing'
+            rule_key = 'footnote_line_rule'
+        else:
+            spacing_key = 'heading_line_spacing' if style_id in {'Heading1', 'Heading2', 'Heading3'} else 'body_line_spacing'
+            rule_key = 'heading_line_rule' if spacing_key.startswith('heading') else 'body_line_rule'
+        spacing = typography.get(spacing_key) or {}
+        if spacing.get('value') is not None:
+            p_spec['line'] = int(round(float(spacing['value']) * 20))
+        if typography.get(rule_key):
+            p_spec['lineRule'] = str(typography[rule_key])
+
+
+def build_seed_docx(tmpdir: Path, pandoc: str) -> Path:
     seed_md = tmpdir / 'seed.md'
     seed_md.write_text('# Seed\n\nReference template seed.\n', encoding='utf-8')
     out = tmpdir / 'seed.docx'
-    subprocess.run([PANDOC, str(seed_md), '-o', str(out)], check=True)
+    subprocess.run([pandoc, str(seed_md), '-o', str(out)], check=True)
     return out
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
+    parser = argparse.ArgumentParser(description='Build the editable reference DOCX from the resolved config.')
+    parser.add_argument('--config', type=Path, help='resolved V2 YAML configuration')
+    parser.add_argument('--output', type=Path, default=OUT_DOCX)
+    args = parser.parse_args(argv)
+    pandoc = PANDOC or shutil.which('pandoc')
+    if not pandoc:
+        raise RuntimeError('pandoc not found on PATH; set PATH or install pandoc before building reference.docx')
+    config = _apply_config(args.config.resolve() if args.config else None)
+    output_path = args.output.resolve()
     with tempfile.TemporaryDirectory() as td:
         td_path = Path(td)
-        seed_docx = build_seed_docx(td_path)
+        seed_docx = build_seed_docx(td_path, pandoc)
         unzip_dir = td_path / 'unzipped'
         unzip_dir.mkdir()
         with zipfile.ZipFile(seed_docx) as zf:
@@ -318,6 +428,8 @@ def main() -> None:
             ('Footer', 'paragraph', 'Footer', {'align': 'center', 'before': 0, 'after': 0, 'line': 240, 'lineRule': 'exact', 'firstLineChars': 0}, footer_r, 'Normal', False),
         ]
 
+        _patch_style_specs(style_specs, config)
+
         for spec in style_specs:
             upsert_style(styles_root, *spec)
 
@@ -341,17 +453,23 @@ def main() -> None:
         ensure_document_section(document_root)
         document_tree.write(document_path, encoding='utf-8', xml_declaration=True)
 
-        if OUT_DOCX.exists():
-            OUT_DOCX.unlink()
-        with zipfile.ZipFile(OUT_DOCX, 'w', zipfile.ZIP_DEFLATED) as zf:
-            for path in sorted(unzip_dir.rglob('*')):
-                if path.is_file():
-                    zf.write(path, path.relative_to(unzip_dir))
+        output_path.parent.mkdir(parents=True, exist_ok=True)
+        fd, temp_name = tempfile.mkstemp(
+            prefix=f'.{output_path.stem}-', suffix='.docx.tmp', dir=str(output_path.parent)
+        )
+        os.close(fd)
+        temp_path = Path(temp_name)
+        try:
+            with zipfile.ZipFile(temp_path, 'w', zipfile.ZIP_DEFLATED) as zf:
+                for path in sorted(unzip_dir.rglob('*')):
+                    if path.is_file():
+                        zf.write(path, path.relative_to(unzip_dir))
+            os.replace(temp_path, output_path)
+        finally:
+            temp_path.unlink(missing_ok=True)
 
-    print(str(OUT_DOCX))
+    print(str(output_path))
 
 
 if __name__ == '__main__':
     main()
-
-

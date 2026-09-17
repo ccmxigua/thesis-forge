@@ -1,0 +1,24 @@
+{
+  "schema_version": "1.0",
+  "name": "sample-thesis-independent-output",
+  "required_texts": [
+    "摘要",
+    "Abstract",
+    "目 录",
+    "第1章",
+    "第2章",
+    "第3章",
+    "附录A",
+    "附录B",
+    "参考文献",
+    "后记"
+  ],
+  "exact": {
+    "math_paragraphs": 11,
+    "image_paragraphs": 3,
+    "chapter_headings": 3
+  },
+  "minimum": {
+    "paragraphs": 200
+  }
+}

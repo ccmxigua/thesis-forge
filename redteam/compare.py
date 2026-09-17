@@ -1,374 +1,251 @@
 #!/usr/bin/env python3
-"""Compare baseline DOCX extraction JSON against candidate.
+"""Compare independently extracted DOCX structure with a complete baseline.
 
-Usage:
-    python3 compare.py <baseline_dir> <candidate_dir> [--out <report.md>] [--config <config-overlay.yaml>]
-
-Outputs a compliance report with severity levels: CRITICAL, HIGH, MEDIUM, LOW, INFO.
-Exits with code 0 if no CRITICAL or HIGH findings, 1 otherwise.
-
-The optional --config overlay is used to distinguish expected differences
-(postprocess deliberately enforcing schema values) from genuine bugs.
+The comparator is a regression gate, not a thesis correctness oracle.  It
+refuses incomplete JSON inputs and treats missing structural evidence as a
+failure instead of allowing a text-only fake document to pass.
 """
+from __future__ import annotations
 
+import argparse
 import json
-import os
 import sys
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
-# ── Severity constants ──────────────────────────────────────────────────
-CRITICAL = "CRITICAL"
-HIGH     = "HIGH"
-MEDIUM   = "MEDIUM"
-LOW      = "LOW"
-INFO     = "INFO"
+import yaml
 
-# Styled entry for a single finding
+CRITICAL = 'CRITICAL'
+HIGH = 'HIGH'
+MEDIUM = 'MEDIUM'
+LOW = 'LOW'
+INFO = 'INFO'
+
+
+@dataclass
 class Finding:
-    def __init__(self, severity, check, baseline_val, actual_val, note=""):
-        self.severity = severity
-        self.check = check
-        self.baseline = baseline_val
-        self.actual = actual_val
-        self.note = note
+    severity: str
+    check: str
+    baseline: Any
+    actual: Any
+    note: str = ''
 
-# ── Load data ───────────────────────────────────────────────────────────
+    def as_dict(self) -> dict[str, Any]:
+        return {
+            'severity': self.severity, 'check': self.check,
+            'baseline': self.baseline, 'actual': self.actual, 'note': self.note,
+        }
 
-def load_json_dir(d):
-    """Load all JSON files from a directory into a dict."""
-    data = {}
-    for fname, key in (("styles.json", "styles"), ("paragraphs.json", "document"), ("numbering.json", "numbering"), ("page.json", "page")):
-        fpath = os.path.join(d, fname)
-        if os.path.exists(fpath):
-            with open(fpath, "r", encoding="utf-8") as f:
-                data[key] = json.load(f)
+
+REQUIRED = ('styles.json', 'paragraphs.json', 'numbering.json', 'page.json', 'manifest.json')
+
+
+def load_json_dir(directory: str | Path) -> dict[str, Any]:
+    path = Path(directory)
+    missing = [name for name in REQUIRED if not (path / name).is_file()]
+    if missing:
+        raise ValueError(f'incomplete extraction directory {path}; missing {", ".join(missing)}')
+    data: dict[str, Any] = {}
+    for filename, key in (
+        ('styles.json', 'styles'), ('paragraphs.json', 'document'),
+        ('numbering.json', 'numbering'), ('page.json', 'page'), ('manifest.json', 'manifest'),
+    ):
+        try:
+            data[key] = json.loads((path / filename).read_text(encoding='utf-8'))
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f'invalid {path / filename}: {exc}') from exc
+    manifest = data['manifest']
+    if manifest.get('schema_version') != '2.0':
+        raise ValueError(f'{path / "manifest.json"} has unsupported schema_version')
+    if not isinstance(manifest.get('xml_parts'), dict) or not manifest.get('xml_parts'):
+        raise ValueError(f'{path / "manifest.json"} lacks complete XML-part hashes')
+    if not isinstance(manifest.get('stories'), list):
+        raise ValueError(f'{path / "manifest.json"} lacks story topology')
     return data
 
 
-# ── Compare page settings ───────────────────────────────────────────────
-
-def compare_page(baseline, candidate):
-    findings = []
-    bp = baseline.get("page", {})
-    cp = candidate.get("page", {})
-
-    # Page size
-    bw, bh = bp.get("width"), bp.get("height")
-    cw, ch = cp.get("width"), cp.get("height")
-    if bw and cw and bw != cw:
-        findings.append(Finding(HIGH, "Page width", f"{bw} twips", f"{cw} twips",
-                                "Page width mismatch"))
-    if bh and ch and bh != ch:
-        findings.append(Finding(HIGH, "Page height", f"{bh} twips", f"{ch} twips",
-                                "Page height mismatch"))
-
-    # Margins
-    bm = bp.get("margins", {})
-    cm = cp.get("margins", {})
-    for key in ("top", "bottom", "left", "right", "header", "footer"):
-        bv = bm.get(key)
-        cv = cm.get(key)
-        if bv is not None and cv is not None:
-            if abs(bv - cv) > 20:  # >20 twips = ~0.35mm threshold
-                severity = HIGH if abs(bv - cv) > 100 else MEDIUM
-                findings.append(Finding(severity,
-                    f"Margin {key}", f"{bv} twips", f"{cv} twips",
-                    f"Margin {key} differs by {cv - bv} twips"))
-            elif bv != cv:
-                findings.append(Finding(LOW,
-                    f"Margin {key}", f"{bv} twips", f"{cv} twips",
-                    f"Margin {key} differs by {cv - bv} twips (within tolerance)"))
-
+def compare_page(baseline: dict[str, Any], candidate: dict[str, Any]) -> list[Finding]:
+    findings: list[Finding] = []
+    bp, cp = baseline.get('page', {}), candidate.get('page', {})
+    if not bp.get('sections') or not cp.get('sections'):
+        return [Finding(CRITICAL, 'page sections', bool(bp.get('sections')), bool(cp.get('sections')), 'all section properties are required')]
+    for key in ('width', 'height'):
+        if bp.get(key) is not None and cp.get(key) != bp.get(key):
+            findings.append(Finding(HIGH, f'page {key}', bp.get(key), cp.get(key), 'page dimension mismatch'))
+    bm, cm = bp.get('margins', {}), cp.get('margins', {})
+    for key in ('top', 'bottom', 'left', 'right', 'header', 'footer', 'gutter'):
+        if key in bm and cm.get(key) != bm.get(key):
+            findings.append(Finding(HIGH, f'margin {key}', bm.get(key), cm.get(key), 'margin mismatch'))
+    if len(bp['sections']) != len(cp['sections']):
+        findings.append(Finding(HIGH, 'section count', len(bp['sections']), len(cp['sections']), 'section topology changed'))
     return findings
 
 
-# ── Compare styles ──────────────────────────────────────────────────────
-
-def _style_summary(s):
-    """One-line summary of a style."""
-    parts = []
-    if s.get("fonts"):
-        fn = s["fonts"].get("ascii") or s["fonts"].get("eastAsia") or ""
-        parts.append(fn)
-    if s.get("size_halfpt"):
-        parts.append(f"{s['size_halfpt']/2}pt")
-    if s.get("bold"):
-        parts.append("bold")
-    if s.get("italic"):
-        parts.append("italic")
-    sp = s.get("spacing", {})
-    if sp.get("line") is not None:
-        rule = sp.get("lineRule", "auto")
-        parts.append(f"line:{sp['line']}({rule})")
-    indent = s.get("indent", {})
-    if indent.get("firstLine"):
-        parts.append(f"indent:{indent['firstLine']}")
-    return " ".join(parts) if parts else "(empty)"
-
-def compare_styles(baseline, candidate):
-    findings = []
-    bs = baseline.get("styles", {})
-    cs = candidate.get("styles", {})
-
-    b_ids = set(bs.keys())
-    c_ids = set(cs.keys())
-
-    # Missing styles
-    missing = b_ids - c_ids
-    for m in sorted(missing):
-        name = bs[m].get("name", m)
-        findings.append(Finding(HIGH, f"Missing style", f"{m} ({name})", "absent",
-                                f"Baseline style '{name}' ({m}) not found in candidate"))
-
-    # Extra styles (not necessarily a problem)
-    extra = c_ids - b_ids
-    for e in sorted(extra):
-        name = cs[e].get("name", e)
-        if not name or name == e:
-            findings.append(Finding(INFO, f"Extra style", "absent", f"{e}",
-                                    f"Style '{e}' exists only in candidate (may be harmless)"))
-        else:
-            findings.append(Finding(LOW, f"Extra style", "absent", f"{e} ({name})",
-                                    f"Style '{name}' ({e}) only in candidate, not in baseline"))
-
-    # Compare common styles
-    common = b_ids & c_ids
-    for sid in sorted(common):
-        b = bs[sid]
-        c = cs[sid]
-        name = b.get("name", sid)
-
-        # Size
-        bsz = b.get("size_halfpt")
-        csz = c.get("size_halfpt")
-        if bsz is not None and csz is not None and bsz != csz:
-            findings.append(Finding(HIGH,
-                f"Style '{name}' font size", f"{bsz/2}pt", f"{csz/2}pt",
-                f"Font size mismatch in style '{name}' ({sid})"))
-
-        # Bold
-        if b.get("bold") != c.get("bold"):
-            findings.append(Finding(MEDIUM,
-                f"Style '{name}' bold", str(b.get("bold")), str(c.get("bold"))))
-
-        # Italic
-        if b.get("italic") != c.get("italic"):
-            findings.append(Finding(LOW,
-                f"Style '{name}' italic", str(b.get("italic")), str(c.get("italic"))))
-
-        # Fonts
-        b_fonts = b.get("fonts", {})
-        c_fonts = c.get("fonts", {})
-        for fk in ("eastAsia", "ascii", "hAnsi"):
-            bf = b_fonts.get(fk)
-            cf = c_fonts.get(fk)
-            if bf and cf and bf != cf:
-                findings.append(Finding(HIGH,
-                    f"Style '{name}' font ({fk})", bf, cf,
-                    f"Font mismatch in style '{name}' ({sid})"))
-
-        # Line spacing
-        b_sp = b.get("spacing", {})
-        c_sp = c.get("spacing", {})
-        bl = b_sp.get("line")
-        cl = c_sp.get("line")
-        if bl is not None and cl is not None and bl != cl:
-            br = b_sp.get("lineRule", "")
-            cr = c_sp.get("lineRule", "")
-            findings.append(Finding(MEDIUM,
-                f"Style '{name}' line spacing", f"{bl} ({br})", f"{cl} ({cr})",
-                f"Line spacing mismatch in style '{name}' ({sid})"))
-
-        # lineRule
-        br = b_sp.get("lineRule")
-        cr = c_sp.get("lineRule")
-        if br and cr and br != cr:
-            findings.append(Finding(MEDIUM,
-                f"Style '{name}' line rule", br, cr,
-                f"Line rule mismatch: baseline={br}, candidate={cr}"))
-
-        # First-line indent
-        bi = b.get("indent", {}).get("firstLine")
-        ci = c.get("indent", {}).get("firstLine")
-        if bi is not None and ci is not None and bi != ci:
-            findings.append(Finding(MEDIUM,
-                f"Style '{name}' first-line indent", f"{bi} twips", f"{ci} twips"))
-
+def compare_styles(baseline: dict[str, Any], candidate: dict[str, Any]) -> list[Finding]:
+    findings: list[Finding] = []
+    bs, cs = baseline.get('styles', {}), candidate.get('styles', {})
+    for style_id in sorted(set(bs) - set(cs)):
+        findings.append(Finding(HIGH, 'missing style', style_id, None, 'style required by baseline is absent'))
+    for style_id in sorted(set(bs) & set(cs)):
+        b, c = bs[style_id], cs[style_id]
+        for key in ('size_halfpt', 'bold', 'italic', 'justify'):
+            if b.get(key) is not None and c.get(key) != b.get(key):
+                findings.append(Finding(MEDIUM, f'style {style_id}.{key}', b.get(key), c.get(key), 'style property mismatch'))
+        for key in ('ascii', 'hAnsi', 'eastAsia'):
+            bv = b.get('fonts', {}).get(key)
+            if bv is not None and cs[style_id].get('fonts', {}).get(key) != bv:
+                findings.append(Finding(MEDIUM, f'style {style_id}.fonts.{key}', bv, cs[style_id].get('fonts', {}).get(key), 'font mismatch'))
     return findings
 
 
-# ── Compare document structure ──────────────────────────────────────────
+def _norm(text: str) -> str:
+    return ''.join(text.replace('\xa0', '').split()).lower()
 
-def compare_document(baseline, candidate):
-    findings = []
-    bp = baseline.get("document", [])
-    cp = candidate.get("document", [])
 
-    # Paragraph count
-    if abs(len(bp) - len(cp)) > 20:
-        findings.append(Finding(MEDIUM,
-            "Paragraph count", str(len(bp)), str(len(cp)),
-            "Large difference in paragraph count"))
+def _structural_evidence(document: list[dict[str, Any]]) -> dict[str, Any]:
+    texts = [item.get('text', '') for item in document]
+    return {
+        'paragraphs': len(document),
+        'nonempty': sum(bool(_norm(text)) for text in texts),
+        'math': sum(bool(item.get('has_math')) or bool('式（' in text or '式(' in text) for item, text in zip(document, texts)),
+        'images': sum(bool(item.get('has_image')) or '[IMAGE]' in text for item, text in zip(document, texts)),
+        'chapters': sum(_norm(text).startswith('第') and '章' in text for text in texts),
+        'sections': sum(term in _norm(text) for text in texts for term in ('摘要', 'abstract', '参考文献', '后记', '目录')),
+    }
 
-    # Check for key sections: cover, toc, abstract heading, references, acknowledgments
-    KEY_TERMS = [
-        ("中文摘要 heading", "摘要", MEDIUM),
-        ("英文摘要 heading", "Abstract", MEDIUM),
-        ("目录 heading", "目录", HIGH),
-        ("References heading", "参考文献", HIGH),
-        ("致谢/后记 heading", "后记", MEDIUM),
+
+def compare_document(baseline: dict[str, Any], candidate: dict[str, Any]) -> list[Finding]:
+    findings: list[Finding] = []
+    bp, cp = baseline.get('document', []), candidate.get('document', [])
+    be, ce = _structural_evidence(bp), _structural_evidence(cp)
+    if not bp or not cp:
+        findings.append(Finding(CRITICAL, 'document paragraphs', len(bp), len(cp), 'empty document evidence is not comparable'))
+        return findings
+    if ce['nonempty'] == 0 or ce['chapters'] == 0:
+        findings.append(Finding(CRITICAL, 'candidate structural evidence', be, ce, 'candidate has no independently readable chapter/content structure'))
+    if be['chapters'] > 0 and ce['chapters'] < be['chapters']:
+        findings.append(Finding(HIGH, 'chapter count', be['chapters'], ce['chapters'], 'candidate lost chapter headings'))
+    for key in ('math', 'images'):
+        if be[key] > 0 and ce[key] < be[key]:
+            findings.append(Finding(HIGH, f'{key} evidence', be[key], ce[key], f'candidate lost {key} structure'))
+    if abs(be['paragraphs'] - ce['paragraphs']) > max(20, be['paragraphs'] // 2):
+        findings.append(Finding(HIGH, 'paragraph count', be['paragraphs'], ce['paragraphs'], 'large structural loss'))
+    baseline_terms = {_norm(term): term for term in ('摘要', 'Abstract', '目录', '参考文献', '后记') if any(_norm(term) in _norm(text) for text in [item.get('text', '') for item in bp])}
+    candidate_text = [_norm(item.get('text', '')) for item in cp]
+    for normalized, term in baseline_terms.items():
+        if not any(normalized in text for text in candidate_text):
+            findings.append(Finding(HIGH, f'section {term}', 'present', 'missing', 'baseline section is absent'))
+    return findings
+
+
+def compare_numbering(baseline: dict[str, Any], candidate: dict[str, Any]) -> list[Finding]:
+    findings: list[Finding] = []
+    bn, cn = baseline.get('numbering', {}), candidate.get('numbering', {})
+    if bn and not cn:
+        findings.append(Finding(HIGH, 'numbering definitions', len(bn), len(cn), 'numbering evidence missing'))
+    return findings
+
+
+def _config_page(config: dict[str, Any]) -> tuple[int | None, int | None, dict[str, Any]]:
+    page = config.get('page') or {}
+    size = page.get('size')
+    if size == 'A4':
+        width, height = 11906, 16838
+    elif size in {'16K', '16k', 'B5'}:
+        width, height = 10431, 14740
+    elif isinstance(size, dict):
+        width, height = size.get('width'), size.get('height')
+    else:
+        width = height = None
+    raw_margins = page.get('margins') or {}
+    margins = {
+        ('header' if key == 'header_distance' else 'footer' if key == 'footer_distance' else key): value
+        for key, value in raw_margins.items()
+        if key in {'top', 'bottom', 'left', 'right', 'header_distance', 'footer_distance', 'gutter'}
+    }
+    return width, height, margins
+
+
+def compare_config(candidate: dict[str, Any], config: dict[str, Any]) -> list[Finding]:
+    """Check the candidate against the effective config supplied for this run."""
+    findings: list[Finding] = []
+    expected_width, expected_height, expected_margins = _config_page(config)
+    page = candidate.get('page', {})
+    if expected_width is not None and page.get('width') != expected_width:
+        findings.append(Finding(HIGH, 'resolved config page width', expected_width, page.get('width'), 'candidate does not consume the supplied config'))
+    if expected_height is not None and page.get('height') != expected_height:
+        findings.append(Finding(HIGH, 'resolved config page height', expected_height, page.get('height'), 'candidate does not consume the supplied config'))
+    sections = page.get('sections') or []
+    if not sections:
+        findings.append(Finding(CRITICAL, 'resolved config section evidence', True, False, 'candidate has no section evidence'))
+    for index, section in enumerate(sections):
+        if expected_width is not None and section.get('width') != expected_width:
+            findings.append(Finding(HIGH, f'resolved config section {index}.width', expected_width, section.get('width'), 'section does not consume the supplied config'))
+        if expected_height is not None and section.get('height') != expected_height:
+            findings.append(Finding(HIGH, f'resolved config section {index}.height', expected_height, section.get('height'), 'section does not consume the supplied config'))
+        for key, expected in expected_margins.items():
+            if section.get('margins', {}).get(key) != expected:
+                findings.append(Finding(HIGH, f'resolved config section {index}.margin {key}', expected, section.get('margins', {}).get(key), 'section margin does not consume the supplied config'))
+    return findings
+
+
+def compare_all(
+    baseline: dict[str, Any], candidate: dict[str, Any], config: dict[str, Any] | None = None
+) -> list[Finding]:
+    findings = compare_page(baseline, candidate) + compare_styles(baseline, candidate) + \
+        compare_numbering(baseline, candidate) + compare_document(baseline, candidate)
+    if config is not None:
+        findings.extend(compare_config(candidate, config))
+    return findings
+
+
+def generate_report(
+    findings: list[Finding], baseline_dir: str | Path, candidate_dir: str | Path,
+    out_path: str | Path | None = None, config_path: str | Path | None = None,
+) -> str:
+    order = {CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3, INFO: 4}
+    findings = sorted(findings, key=lambda item: (order.get(item.severity, 9), item.check))
+    counts = {severity: sum(item.severity == severity for item in findings) for severity in (CRITICAL, HIGH, MEDIUM, LOW, INFO)}
+    verdict = 'FAIL' if counts[CRITICAL] or counts[HIGH] else ('PASS WITH WARNINGS' if counts[MEDIUM] else 'PASS')
+    lines = [
+        '# DOCX Compliance Report', '', f'- Baseline: `{baseline_dir}`', f'- Candidate: `{candidate_dir}`',
+        *([f'- Effective config: `{config_path}`'] if config_path is not None else []), '',
+        f'**Verdict: {verdict}**', '', '| Severity | Count |', '|---|---:|',
     ]
-
-    # Space-normalized comparison
-    def norm(s):
-        return s.replace(' ', '').replace('\xa0', '').lower()
-
-    c_texts_norm = [norm(p.get("text", "")) for p in cp]
-
-    for label, term, severity in KEY_TERMS:
-        found = any(norm(term) in t for t in c_texts_norm)
-        if not found:
-            # Also check by style name
-            for p in cp:
-                style = (p.get("style") or "").lower()
-                tblur = norm(term)
-                if tblur in norm(style) or tblur in norm(p.get("text", "")):
-                    found = True
-                    break
-        if not found:
-            findings.append(Finding(severity, label, "expected", "not found",
-                                    f"'{term}' not found in candidate document"))
-
-    # Check chapter headings exist
-    c_texts = [p.get("text", "") for p in cp]
-    for ch_num in (1, 2, 3):
-        prefix = f"第{ch_num}章"
-        found = any(norm(prefix) in norm(t) for t in c_texts)
-        if not found:
-            findings.append(Finding(HIGH,
-                f"Chapter {ch_num} heading", "expected", "not found",
-                f"Chapter {ch_num} heading missing in candidate"))
-
-    # Check for equations (parenthesized numbered labels like （3-1） or （3.1）)
-    import re
-    eq_pattern = re.compile(r'（\d[\.\-\u2010-\u2015]\d）')
-    eq_count = sum(1 for t in c_texts if eq_pattern.search(t))
-    if eq_count < 3:
-        findings.append(Finding(MEDIUM,
-            "Equation count", ">=5 expected", f"{eq_count} found",
-            "Fewer equations than expected"))
-
-    return findings
+    lines.extend(f'| {severity} | {counts[severity]} |' for severity in (CRITICAL, HIGH, MEDIUM, LOW, INFO) if counts[severity])
+    lines.extend(['', '## Findings', ''])
+    for item in findings:
+        lines.append(f'- **{item.severity}** `{item.check}`: baseline={item.baseline!r}; actual={item.actual!r}. {item.note}')
+    report = '\n'.join(lines) + '\n'
+    if out_path is not None:
+        Path(out_path).write_text(report, encoding='utf-8')
+    return report
 
 
-# ── Output ──────────────────────────────────────────────────────────────
-
-def severity_order(s):
-    return {CRITICAL: 0, HIGH: 1, MEDIUM: 2, LOW: 3, INFO: 4}.get(s, 5)
-
-def generate_report(findings, baseline_dir, candidate_dir, out_path=None):
-    """Generate a markdown compliance report."""
-    findings.sort(key=lambda f: (severity_order(f.severity), f.check))
-
-    lines = []
-    lines.append("# DOCX Compliance Report")
-    lines.append("")
-    lines.append(f"- **Baseline**: `{baseline_dir}`")
-    lines.append(f"- **Candidate**: `{candidate_dir}`")
-    lines.append("")
-
-    # Summary
-    counts = {CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0, INFO: 0}
-    for f in findings:
-        counts[f.severity] += 1
-
-    total = sum(counts.values())
-    lines.append(f"## Summary: {total} findings")
-    lines.append("")
-    lines.append(f"| Severity | Count |")
-    lines.append(f"|----------|-------|")
-    for sev in (CRITICAL, HIGH, MEDIUM, LOW, INFO):
-        if counts[sev]:
-            lines.append(f"| {sev} | {counts[sev]} |")
-    lines.append(f"| **Total** | **{total}** |")
-    lines.append("")
-
-    verdict = "❌ FAIL"
-    if counts[CRITICAL] == 0 and counts[HIGH] == 0:
-        verdict = "⚠️ PASS WITH WARNINGS" if counts[MEDIUM] > 0 else "✅ PASS"
-    lines.append(f"**Verdict**: {verdict}")
-    lines.append("")
-
-    # Detail
-    current_sev = None
-    for f in findings:
-        if f.severity != current_sev:
-            current_sev = f.severity
-            lines.append(f"## {current_sev}")
-            lines.append("")
-        lines.append(f"### {f.check}")
-        lines.append(f"- **Baseline**: `{f.baseline}`")
-        lines.append(f"- **Actual**: `{f.actual}`")
-        if f.note:
-            lines.append(f"- **Note**: {f.note}")
-        lines.append("")
-
-    report = "\n".join(lines)
-
-    if out_path:
-        os.makedirs(os.path.dirname(out_path) or ".", exist_ok=True)
-        with open(out_path, "w", encoding="utf-8") as f:
-            f.write(report)
-        print(f"Report written to {out_path}")
-
-    return report, counts
+def main(argv: list[str]) -> int:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('baseline')
+    parser.add_argument('candidate')
+    parser.add_argument('--out', type=Path)
+    parser.add_argument('--config', type=Path, help='effective YAML config whose page settings must match the candidate')
+    args = parser.parse_args(argv)
+    baseline = load_json_dir(args.baseline)
+    candidate = load_json_dir(args.candidate)
+    config = None
+    if args.config is not None:
+        try:
+            config = yaml.safe_load(args.config.read_text(encoding='utf-8'))
+        except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
+            raise ValueError(f'invalid effective config {args.config}: {exc}') from exc
+        if not isinstance(config, dict):
+            raise ValueError(f'effective config {args.config} must contain a YAML mapping')
+    findings = compare_all(baseline, candidate, config)
+    report = generate_report(findings, args.baseline, args.candidate, args.out, args.config)
+    if not args.out:
+        print(report, end='')
+    return 1 if any(item.severity in {CRITICAL, HIGH} for item in findings) else 0
 
 
-# ── Main ────────────────────────────────────────────────────────────────
-
-def main(argv):
-    if len(argv) < 2:
-        print("usage: compare.py <baseline_dir> <candidate_dir> [--out <report.md>]", file=sys.stderr)
-        return 2
-
-    baseline_dir = argv[0]
-    candidate_dir = argv[1]
-    out_path = None
-
-    i = 2
-    while i < len(argv):
-        if argv[i] == "--out" and i + 1 < len(argv):
-            out_path = argv[i + 1]
-            i += 2
-        else:
-            i += 1
-
-    baseline = load_json_dir(baseline_dir)
-    candidate = load_json_dir(candidate_dir)
-
-    if not baseline:
-        print(f"ERROR: no JSON data loaded from {baseline_dir}", file=sys.stderr)
-        return 3
-    if not candidate:
-        print(f"ERROR: no JSON data loaded from {candidate_dir}", file=sys.stderr)
-        return 3
-
-    findings = []
-    findings.extend(compare_page(baseline, candidate))
-    findings.extend(compare_styles(baseline, candidate))
-    findings.extend(compare_document(baseline, candidate))
-
-    report, counts = generate_report(findings, baseline_dir, candidate_dir, out_path)
-
-    # Print summary to stdout
-    print()
-    print(report[:report.index("\n## ") if "\n## " in report else 500])
-
-    # Exit code
-    if counts[CRITICAL] > 0 or counts[HIGH] > 0:
-        return 1
-    return 0
-
-
-if __name__ == "__main__":
+if __name__ == '__main__':
     raise SystemExit(main(sys.argv[1:]))

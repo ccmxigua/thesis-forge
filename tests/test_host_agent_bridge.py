@@ -271,6 +271,39 @@ class HostAgentBridgeTests(unittest.TestCase):
             self.assertNotIn("--deliver", command)
             self.assertTrue((review_dir / "host-agent-run.json").is_file())
 
+    def test_bridge_calls_native_codex_without_openclaw_route_or_session(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            review_dir, chunk = self._packet(Path(td) / "requirements")
+            response = self._response(chunk)
+            events = "\n".join([
+                json.dumps({"type": "thread.started", "thread_id": "codex-thread"}),
+                json.dumps({
+                    "type": "item.completed",
+                    "item": {"type": "agent_message", "text": json.dumps(response)},
+                }),
+                json.dumps({"type": "turn.completed", "usage": {"output_tokens": 1}}),
+            ])
+            response_out = Path(td) / "host-agent-response.json"
+            fake = subprocess.CompletedProcess(["codex", "exec"], 0, events, "")
+            with patch.dict(os.environ, {"THESIS_FORGE_HOST_RUNTIME": "codex"}):
+                with patch.object(bridge, "_run_command", return_value=fake) as run:
+                    audit = bridge.run_bridge(
+                        review_dir, response_out=response_out,
+                        timeout=1, max_attempts=1,
+                        codex_bin=sys.executable,
+                    )
+            command = run.call_args.args[0]
+            self.assertEqual(command[1], "exec")
+            self.assertIn("--json", command)
+            self.assertIn("--sandbox", command)
+            self.assertNotIn("openclaw", " ".join(command).lower())
+            self.assertNotIn("--session-key", command)
+            self.assertEqual(audit["adapter_id"], "codex")
+            self.assertEqual(audit["route_visibility"], "unobservable")
+            self.assertEqual(audit["observed_routes"], ["unobservable"])
+            self.assertEqual(audit["chunk_runs"][0]["actual_route"], "unobservable")
+            self.assertEqual(json.loads(response_out.read_text(encoding="utf-8"))["contract_version"], "2.1")
+
     def test_resolve_parent_model_copies_provider_and_model_override(self) -> None:
         parent_key = "agent:main:telegram:direct:chat:thread:38479"
         sessions = {

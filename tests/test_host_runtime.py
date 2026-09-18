@@ -17,6 +17,14 @@ from host_runtime import (  # noqa: E402
 
 
 class HostRuntimeTests(unittest.TestCase):
+    def test_codex_selects_the_codex_native_adapter(self) -> None:
+        context = inspect_host_runtime(
+            expected="codex",
+            environ={"THESIS_FORGE_HOST_RUNTIME": "codex"},
+            require=True,
+        )
+        self.assertEqual(automatic_adapter_id(context), "codex")
+
     def test_a_new_declared_host_is_not_rejected_as_an_unknown_name(self) -> None:
         context = inspect_host_runtime(
             expected="vertex",

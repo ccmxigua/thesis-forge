@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""Run the current OpenClaw Host Agent over a fresh semantic-review packet.
+"""Run the declared native Host Agent over a fresh semantic-review packet.
 
 This is the optional host-runtime adapter for the otherwise provider-neutral
-pipeline.  It deliberately invokes the local OpenClaw CLI instead of owning
-an API client or an API key.  Every chunk receives a fresh isolated turn, the
-run snapshots the invoking parent session's effective provider/model, and the
-response is captured without delivery to Telegram.  The existing offline
-merger remains the only authority that can accept the response.
+pipeline.  It invokes only the explicitly declared native host CLI (currently
+OpenClaw or Codex) instead of owning an API client or an API key.  Every chunk
+receives a fresh isolated turn, and the response is captured without delivery
+to an external channel.  The existing offline merger remains the only
+authority that can accept the response.
 """
 from __future__ import annotations
 
@@ -121,8 +121,8 @@ def _run_command(
 ) -> subprocess.CompletedProcess[str]:
     """Run a child in its own process group and reap descendants on timeout.
 
-    ``openclaw agent`` can spawn an ``openclaw-agent`` child that inherits the
-    captured stdout/stderr pipes.  Killing only the CLI parent leaves those
+    A host CLI can spawn a child that inherits the captured stdout/stderr
+    pipes.  Killing only the CLI parent leaves those
     pipes open and can make ``subprocess.run`` hang forever after its timeout.
     Keeping the process group explicit lets the bridge fail closed and return
     a deterministic timeout to the retry loop.
@@ -171,6 +171,7 @@ def _run_command(
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
+from host_adapters import codex as codex_adapter  # noqa: E402
 from host_adapters import openclaw as openclaw_adapter  # noqa: E402
 from host_review_contract import (  # noqa: E402
     summarize_contract_errors as _shared_summarize_contract_errors,
@@ -419,7 +420,7 @@ def _route_audit_fields(
     })
     observed_route = observed_routes[0] if len(observed_routes) == 1 else None
     observed_provider = observed_model = None
-    if observed_route:
+    if observed_route and observed_route != "unobservable":
         observed_provider, observed_model = _split_model_route(observed_route)
     return {
         "expected_provider": expected_provider,
@@ -487,6 +488,10 @@ the unchanged provenance object requested by the chunk.
 
 def _resolve_openclaw(binary: str | None) -> str:
     return openclaw_adapter.resolve_binary(binary)
+
+
+def _resolve_codex(binary: str | None) -> str:
+    return codex_adapter.resolve_binary(binary)
 
 
 def _load_session_records(
@@ -620,7 +625,7 @@ def run_host_agent_chunk(
     chunk_count: int,
     agent_id: str,
     timeout: int,
-    openclaw_bin: str,
+    openclaw_bin: str | None,
     prompt_path: Path,
     model: str | None = None,
     openclaw_config: Path | None = None,
@@ -629,6 +634,8 @@ def run_host_agent_chunk(
     auth_env_only: bool = False,
     runner: str = "exec",
     controller: RunController | None = None,
+    adapter_id: str = "openclaw",
+    codex_bin: str | None = None,
 ) -> dict[str, Any]:
     if controller is not None:
         controller.check()
@@ -647,28 +654,52 @@ def run_host_agent_chunk(
         ),
         encoding="utf-8",
     )
-    session_key = openclaw_adapter.session_key(
-        agent_id=agent_id, run_id=run_id,
-        chunk_index=chunk_index, attempt=attempt,
-    )
-    # ``openclaw agent`` accepts --model but still consults the global fallback
-    # chain for a new child session.  ``agent exec`` lets this invocation pass
-    # a route-local fallback list; repeating the snapshot route is deliberate:
-    # a provider outage may retry on the same route, but may never jump to a
-    # different user's/global provider.  The normal command remains available
-    # for the explicit no-model compatibility mode and non-main agents.
-    command, use_isolated_exec = openclaw_adapter.build_command(
-        binary=openclaw_bin,
-        agent_id=agent_id,
-        session_key_value=session_key,
-        prompt_path=prompt_path,
-        model=model,
-        runner=runner,
-        timeout=timeout,
-        cwd=ROOT,
-        config=openclaw_config,
-        auth_env_only=auth_env_only,
-    )
+    session_key: str | None = None
+    use_isolated_exec = False
+    last_message_path: Path | None = None
+    if adapter_id == "openclaw":
+        if not openclaw_bin:
+            raise ValueError("OpenClaw executable is missing")
+        session_key = openclaw_adapter.session_key(
+            agent_id=agent_id, run_id=run_id,
+            chunk_index=chunk_index, attempt=attempt,
+        )
+        # ``openclaw agent`` accepts --model but still consults the global fallback
+        # chain for a new child session.  ``agent exec`` lets this invocation pass
+        # a route-local fallback list; repeating the snapshot route is deliberate:
+        # a provider outage may retry on the same route, but may never jump to a
+        # different user's/global provider.  The normal command remains available
+        # for the explicit no-model compatibility mode and non-main agents.
+        command, use_isolated_exec = openclaw_adapter.build_command(
+            binary=openclaw_bin,
+            agent_id=agent_id,
+            session_key_value=session_key,
+            prompt_path=prompt_path,
+            model=model,
+            runner=runner,
+            timeout=timeout,
+            cwd=ROOT,
+            config=openclaw_config,
+            auth_env_only=auth_env_only,
+        )
+    elif adapter_id == "codex":
+        if not codex_bin:
+            raise ValueError("Codex executable is missing")
+        last_message_path = response_path.with_name(
+            f"{response_path.stem}.last-message.txt"
+        )
+        if last_message_path.exists():
+            raise ValueError(
+                f"refusing to overwrite existing Codex final message: {last_message_path}"
+            )
+        command = codex_adapter.build_command(
+            binary=codex_bin,
+            prompt_path=prompt_path,
+            last_message_path=last_message_path,
+            cwd=ROOT,
+        )
+    else:
+        raise ValueError(f"unsupported Host Agent adapter: {adapter_id}")
     started = time.time()
     try:
         result = _run_command(
@@ -685,6 +716,14 @@ def run_host_agent_chunk(
     if raw_envelope_path.exists():
         raise ValueError(f"refusing to overwrite existing raw Host Agent output: {raw_envelope_path}")
     raw_envelope_path.write_text(result.stdout or "", encoding="utf-8")
+    raw_stderr_path: Path | None = None
+    if adapter_id == "codex" and result.stderr:
+        raw_stderr_path = response_path.with_name(
+            f"{response_path.stem}.raw-stderr.txt"
+        )
+        if raw_stderr_path.exists():
+            raise ValueError(f"refusing to overwrite existing Codex stderr: {raw_stderr_path}")
+        raw_stderr_path.write_text(result.stderr, encoding="utf-8")
     if result.returncode:
         detail = (result.stderr or result.stdout or "").strip()[-1600:]
         raise RuntimeError(
@@ -693,8 +732,22 @@ def run_host_agent_chunk(
         )
     if controller is not None:
         controller.check()
-    response, envelope = openclaw_adapter.parse_result(result.stdout)
-    route = verify_host_agent_route(envelope, model)
+    if adapter_id == "openclaw":
+        response, envelope = openclaw_adapter.parse_result(result.stdout)
+        route = verify_host_agent_route(envelope, model)
+    else:
+        final_message = None
+        if last_message_path is not None and last_message_path.exists():
+            final_message = last_message_path.read_text(encoding="utf-8")
+        response, envelope = codex_adapter.parse_result(
+            result.stdout, last_message=final_message,
+        )
+        route = {
+            "provider": None,
+            "model": None,
+            "route": "unobservable",
+            "fallback_used": None,
+        }
     expected_provenance = chunk.get("provenance")
     observed_provenance = response.get("provenance") if isinstance(response, dict) else None
     provenance_mismatch_fields: list[str] = []
@@ -725,18 +778,24 @@ def run_host_agent_chunk(
         json.dumps(response, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
     audit = {
+        "adapter_id": adapter_id,
         "chunk_index": chunk_index,
         "chunk_count": chunk_count,
         "attempt": attempt,
         "session_key": session_key,
-        "openclaw_run_id": envelope.get("runId"),
+        "openclaw_run_id": envelope.get("runId") if adapter_id == "openclaw" else None,
+        "codex_event_count": envelope.get("event_count") if adapter_id == "codex" else None,
+        "codex_event_types": envelope.get("event_types") if adapter_id == "codex" else None,
+        "codex_stream_warnings": envelope.get("stream_warnings") if adapter_id == "codex" else [],
         "status": envelope.get("status", "ok"),
         "returncode": result.returncode,
         "elapsed_s": elapsed,
-        "runner": "agent-exec" if use_isolated_exec else (
+        "runner": "codex-exec" if adapter_id == "codex" else (
+            "agent-exec" if use_isolated_exec else (
             "gateway-agent" if runner == "gateway" else "agent"
+            )
         ),
-        "expected_route": model,
+        "expected_route": model if adapter_id == "openclaw" else "unobservable",
         "actual_provider": route.get("provider"),
         "actual_model": route.get("model"),
         "actual_route": route.get("route"),
@@ -750,6 +809,8 @@ def run_host_agent_chunk(
     }
     audit["provenance_observed"] = isinstance(observed_provenance, dict)
     audit["provenance_mismatch_fields"] = provenance_mismatch_fields
+    if raw_stderr_path is not None:
+        audit["raw_stderr_path"] = str(raw_stderr_path.resolve())
     return audit
 
 
@@ -765,6 +826,7 @@ def run_bridge(
     model: str | None = None,
     openclaw_bin: str | None = None,
     openclaw_config: Path | None = None,
+    codex_bin: str | None = None,
     inherit_parent_model: bool = False,
     parent_session_key: str | None = None,
     auth_env_only: bool = False,
@@ -773,13 +835,34 @@ def run_bridge(
 ) -> dict[str, Any]:
     host_context = require_host_runtime(host_runtime)
     adapter_id = automatic_adapter_id(host_context)
-    if adapter_id != "openclaw":
-        raise HostAdapterUnavailable(
-            f"automatic adapter {adapter_id!r} is not implemented by this bridge"
-        )
-    if model is None and not inherit_parent_model and not host_context.parent_session_id:
+    if adapter_id == "openclaw" and model is None and not inherit_parent_model and not host_context.parent_session_id:
         raise HostRuntimeError(
             "automatic OpenClaw execution requires an explicit model route or a bound parent session; refusing the gateway default"
+        )
+    if adapter_id == "codex":
+        forbidden_options = []
+        if model:
+            forbidden_options.append("--model")
+        if openclaw_bin:
+            forbidden_options.append("--openclaw-bin")
+        if openclaw_config:
+            forbidden_options.append("--openclaw-config")
+        if parent_session_key:
+            forbidden_options.append("--parent-session-key")
+        if inherit_parent_model:
+            forbidden_options.append("--inherit-parent-model")
+        if auth_env_only:
+            forbidden_options.append("--auth-env-only")
+        if runner != "exec":
+            forbidden_options.append("--runner")
+        if forbidden_options:
+            raise HostRuntimeError(
+                "Codex native adapter does not accept OpenClaw-only options: "
+                + ", ".join(forbidden_options)
+            )
+    elif adapter_id != "openclaw":
+        raise HostAdapterUnavailable(
+            f"automatic adapter {adapter_id!r} is not implemented by this bridge"
         )
     review_dir = review_dir.resolve()
     manifest_path = review_dir / "host-agent-review-manifest.json"
@@ -837,29 +920,39 @@ def run_bridge(
     started_at = datetime.now(timezone.utc).isoformat()
     prompt_dir = review_dir / "host-agent-prompts"
     controller = RunController()
-    binary = _resolve_openclaw(openclaw_bin)
-    if openclaw_config is not None:
-        openclaw_config = openclaw_config.expanduser().resolve()
-        if not openclaw_config.is_file():
-            raise ValueError(f"OpenClaw config does not exist: {openclaw_config}")
+    binary: str | None = None
+    codex_binary: str | None = None
+    if adapter_id == "openclaw":
+        binary = _resolve_openclaw(openclaw_bin)
+        if openclaw_config is not None:
+            openclaw_config = openclaw_config.expanduser().resolve()
+            if not openclaw_config.is_file():
+                raise ValueError(f"OpenClaw config does not exist: {openclaw_config}")
+    else:
+        codex_binary = _resolve_codex(codex_bin)
+        openclaw_config = None
     resolution: dict[str, Any] = {
-        "model": model,
-        "source": "explicit-model" if model else "gateway-default",
+        "model": model if adapter_id == "openclaw" else None,
+        "source": (
+            "explicit-model" if model else "gateway-default"
+        ) if adapter_id == "openclaw" else "native-codex-default",
         "parent_session_key": None,
         "parent_model_override": None,
         "parent_provider_override": None,
         "parent_effective_provider": None,
         "parent_effective_model": None,
     }
-    bound_parent_session = require_parent_session(
-        host_context, parent_session_key,
-    ) if (inherit_parent_model or parent_session_key or host_context.parent_session_id) else None
-    if model is None and (inherit_parent_model or bound_parent_session):
-        resolution = resolve_parent_model(
-            binary,
-            agent_id=agent_id,
-            parent_session_key=bound_parent_session,
-        )
+    bound_parent_session = None
+    if adapter_id == "openclaw":
+        bound_parent_session = require_parent_session(
+            host_context, parent_session_key,
+        ) if (inherit_parent_model or parent_session_key or host_context.parent_session_id) else None
+        if model is None and (inherit_parent_model or bound_parent_session):
+            resolution = resolve_parent_model(
+                binary,
+                agent_id=agent_id,
+                parent_session_key=bound_parent_session,
+            )
     effective_model = resolution.get("model")
     if effective_model:
         _split_model_route(str(effective_model))
@@ -879,12 +972,20 @@ def run_bridge(
             "max_attempts": max_attempts,
             "model": effective_model,
             **_route_audit_fields(effective_model, chunk_runs),
+            "route_visibility": "provider-model" if adapter_id == "openclaw" else "unobservable",
             "auth_env_only": bool(auth_env_only),
             "runner": runner,
             "model_source": resolution.get("source"),
             "openclaw_config": str(openclaw_config) if openclaw_config else None,
-            "route_policy": "parent-effective-route-snapshot",
-            "route_verification": "child-winner-must-match; fallback-must-be-false",
+            "codex_bin": codex_binary,
+            "route_policy": (
+                "parent-effective-route-snapshot"
+                if adapter_id == "openclaw" else "native-codex-default"
+            ),
+            "route_verification": (
+                "child-winner-must-match; fallback-must-be-false"
+                if adapter_id == "openclaw" else "provider-model-unobservable"
+            ),
             "started_at": started_at,
             "finished_at": datetime.now(timezone.utc).isoformat(),
             "error_type": type(error).__name__,
@@ -943,6 +1044,7 @@ def run_bridge(
                     agent_id=agent_id,
                     timeout=timeout,
                     openclaw_bin=binary,
+                    codex_bin=codex_binary,
                     openclaw_config=openclaw_config,
                     prompt_path=prompt_dir / f"prompt-{index:04d}-attempt-{attempt:02d}.txt",
                     model=effective_model,
@@ -950,6 +1052,7 @@ def run_bridge(
                     auth_env_only=auth_env_only,
                     runner=runner,
                     controller=controller,
+                    adapter_id=adapter_id,
                     retry_hint=(
                         "local contract validation failed; repair the response: "
                         + failures[-1]
@@ -1052,18 +1155,26 @@ def run_bridge(
         "max_attempts": max_attempts,
         "model": effective_model,
         **_route_audit_fields(effective_model, chunk_audits),
+        "route_visibility": "provider-model" if adapter_id == "openclaw" else "unobservable",
         "local_process_state": "completed",
         "remote_operation_state": "remote_operation_completed",
         "auth_env_only": bool(auth_env_only),
         "runner": runner,
         "model_source": resolution.get("source"),
+        "codex_bin": codex_binary,
         "parent_session_key": resolution.get("parent_session_key"),
         "parent_model_override": resolution.get("parent_model_override"),
         "parent_provider_override": resolution.get("parent_provider_override"),
         "parent_effective_provider": resolution.get("parent_effective_provider"),
         "parent_effective_model": resolution.get("parent_effective_model"),
-        "route_policy": "parent-effective-route-snapshot",
-        "route_verification": "child-winner-must-match; fallback-must-be-false",
+        "route_policy": (
+            "parent-effective-route-snapshot"
+            if adapter_id == "openclaw" else "native-codex-default"
+        ),
+        "route_verification": (
+            "child-winner-must-match; fallback-must-be-false"
+            if adapter_id == "openclaw" else "provider-model-unobservable"
+        ),
         "started_at": started_at,
         "finished_at": datetime.now(timezone.utc).isoformat(),
         "response_path": str(response_out),
@@ -1091,15 +1202,15 @@ def main(argv: list[str] | None = None) -> int:
              "THESIS_FORGE_HOST_RUNTIME and is never a cross-host fallback",
     )
     parser.add_argument("--agent-id", default="main",
-                        help="OpenClaw agent id used for the current Host Agent")
+                        help="OpenClaw agent id used by the OpenClaw adapter")
     parser.add_argument("--timeout", type=int, default=900,
-                        help="per-chunk OpenClaw timeout in seconds (default: 900)")
+                        help="per-chunk native Host Agent timeout in seconds (default: 900)")
     parser.add_argument("--max-concurrency", type=int, default=4,
                         help="maximum number of independent Host Agent chunks in flight (default: 4)")
     parser.add_argument("--max-attempts", type=int, default=2,
                         help="maximum attempts per chunk before failing closed (default: 2)")
     parser.add_argument("--model",
-                        help="explicit OpenClaw provider/model route; omitted means inherit the parent session")
+                        help="explicit OpenClaw provider/model route; rejected by the Codex adapter")
     parser.add_argument("--parent-session-key",
                         help="exact parent session key whose effective provider/model route should be copied")
     parser.add_argument("--auth-env-only", action="store_true",
@@ -1116,6 +1227,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="optional path to the openclaw executable")
     parser.add_argument("--openclaw-config", type=Path,
                         help="optional config file passed explicitly to `openclaw agent exec`")
+    parser.add_argument("--codex-bin",
+                        help="optional path to the native codex executable")
     args = parser.parse_args(argv)
     if not args.inherit_parent_model and not args.model:
         parser.error("--no-inherit-parent-model requires an explicit --model route")
@@ -1131,6 +1244,7 @@ def main(argv: list[str] | None = None) -> int:
             model=args.model,
             openclaw_bin=args.openclaw_bin,
             openclaw_config=args.openclaw_config,
+            codex_bin=args.codex_bin,
             inherit_parent_model=args.inherit_parent_model,
             parent_session_key=args.parent_session_key,
             auth_env_only=args.auth_env_only,

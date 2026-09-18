@@ -5,8 +5,9 @@ This intentionally exposes no rule-only, known-template, or supported-subset
 switch.  Preparation writes an evidence-bound host-Agent review packet; final
 formatting consumes the response produced by the Agent currently running this
 skill.  ``--prepare-agent-review`` is the host-neutral packet workflow.
-``--auto-host-agent`` is an explicit OpenClaw adapter mode only after the host
-runtime has been declared and validated as OpenClaw.
+``--auto-host-agent`` selects an explicit native adapter only after the host
+runtime has been declared and validated.  The selected adapter is always the
+native CLI for that declared host; it never falls back across hosts.
 
 Written requirements may be supplied as legacy binary Word ``.doc`` or OOXML
 ``.docx``.  Legacy input is normalized automatically in an isolated run
@@ -101,6 +102,8 @@ def main(argv: list[str]) -> int:
                    help="OpenClaw agent id used by --auto-host-agent (default: main)")
     p.add_argument("--openclaw-bin",
                    help="optional openclaw executable used by --auto-host-agent")
+    p.add_argument("--codex-bin",
+                   help="optional native codex executable used by --auto-host-agent")
     p.add_argument("--render-report", type=Path)
     p.add_argument("--require-submission-ready", action="store_true")
     p.add_argument("--strict-release", action="store_true",
@@ -118,14 +121,32 @@ def main(argv: list[str]) -> int:
         p.error("--host-agent-max-concurrency must be a positive integer")
     if args.host_agent_max_attempts <= 0:
         p.error("--host-agent-max-attempts must be a positive integer")
+    adapter_id: str | None = None
     if args.auto_host_agent:
         if args.no_host_agent_model_inheritance and not args.host_agent_model:
             p.error("--no-host-agent-model-inheritance requires --host-agent-model")
         try:
             runtime = require_host_runtime(args.host_runtime)
-            automatic_adapter_id(runtime)
+            adapter_id = automatic_adapter_id(runtime)
         except HostRuntimeError as exc:
             p.error(str(exc))
+        if adapter_id == "codex":
+            forbidden = []
+            if args.host_agent_model:
+                forbidden.append("--host-agent-model")
+            if args.host_agent_parent_session_key:
+                forbidden.append("--host-agent-parent-session-key")
+            if args.no_host_agent_model_inheritance:
+                forbidden.append("--no-host-agent-model-inheritance")
+            if args.host_agent_id != "main":
+                forbidden.append("--host-agent-id")
+            if args.openclaw_bin:
+                forbidden.append("--openclaw-bin")
+            if forbidden:
+                p.error(
+                    "Codex native adapter does not accept OpenClaw-only options: "
+                    + ", ".join(forbidden)
+                )
         work = args.work_dir.resolve()
         output = args.output.resolve() if args.output else None
         if work.exists() and any(work.iterdir()):
@@ -153,24 +174,30 @@ def main(argv: list[str]) -> int:
             str(args.work_dir.resolve() / "requirements"),
             "--response-out", str(response_out),
             "--run-id", str(run_id),
-            "--agent-id", args.host_agent_id,
             "--timeout", str(args.host_agent_timeout),
             "--max-concurrency", str(args.host_agent_max_concurrency),
             "--max-attempts", str(args.host_agent_max_attempts),
         ]
-        if args.host_agent_model:
-            bridge += ["--model", args.host_agent_model]
-        elif args.no_host_agent_model_inheritance:
-            bridge.append("--no-inherit-parent-model")
-        else:
-            bridge.append("--inherit-parent-model")
-        if args.host_agent_parent_session_key:
-            bridge += ["--parent-session-key", args.host_agent_parent_session_key]
         if args.host_runtime:
             bridge += ["--host-runtime", args.host_runtime]
-        if args.openclaw_bin:
-            bridge += ["--openclaw-bin", args.openclaw_bin]
-        code = run_stage(bridge, "explicit OpenClaw adapter review + provenance merge")
+        if adapter_id == "codex":
+            if args.codex_bin:
+                bridge += ["--codex-bin", args.codex_bin]
+            label = "explicit Codex native adapter review + provenance merge"
+        else:
+            bridge += ["--agent-id", args.host_agent_id]
+            if args.host_agent_model:
+                bridge += ["--model", args.host_agent_model]
+            elif args.no_host_agent_model_inheritance:
+                bridge.append("--no-inherit-parent-model")
+            else:
+                bridge.append("--inherit-parent-model")
+            if args.host_agent_parent_session_key:
+                bridge += ["--parent-session-key", args.host_agent_parent_session_key]
+            if args.openclaw_bin:
+                bridge += ["--openclaw-bin", args.openclaw_bin]
+            label = "explicit OpenClaw adapter review + provenance merge"
+        code = run_stage(bridge, label)
         if code:
             return code
         final = pipeline_command(args, llm_response=response_out, run_id=str(run_id))

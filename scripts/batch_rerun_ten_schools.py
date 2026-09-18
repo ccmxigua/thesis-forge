@@ -316,6 +316,9 @@ GLOBAL_FATAL_MARKERS = (
     "parent session key was not found",
     "cannot inspect openclaw parent sessions",
     "openclaw executable was not found",
+    "codex executable was not found",
+    "codex returned invalid jsonl",
+    "codex turn did not complete",
 )
 
 
@@ -349,10 +352,12 @@ def run_case(base: Path, source: Path, case: dict[str, Any], *, prepare_host_rev
              host_agent_auth_env_only: bool = False,
              host_agent_runner: str = "exec",
              host_runtime: str | None = None,
+             host_adapter_id: str | None = None,
              inherit_parent_model: bool = True,
              host_review_chunk_size: int = 20,
              host_agent_id: str = "main", openclaw_bin: str | None = None,
              openclaw_config: Path | None = None,
+             codex_bin: str | None = None,
              neutral_reference_docx: Path | None = None) -> dict[str, Any]:
     case_dir = base / str(case["id"])
     work = case_dir / "work"
@@ -405,28 +410,32 @@ def run_case(base: Path, source: Path, case: dict[str, Any], *, prepare_host_rev
                 str(work / "requirements"),
                 "--response-out", str(response_out),
                 "--run-id", str(run_id),
-                "--agent-id", host_agent_id,
                 "--timeout", str(host_agent_timeout),
                 "--max-concurrency", str(host_agent_max_concurrency),
                 "--max-attempts", str(host_agent_max_attempts),
             ]
-            if host_agent_auth_env_only:
-                bridge_command.append("--auth-env-only")
-            bridge_command.extend(["--runner", host_agent_runner])
             if host_runtime:
                 bridge_command.extend(["--host-runtime", host_runtime])
-            if host_agent_model:
-                bridge_command.extend(["--model", host_agent_model])
-            elif inherit_parent_model:
-                bridge_command.append("--inherit-parent-model")
+            if host_adapter_id == "codex":
+                if codex_bin:
+                    bridge_command.extend(["--codex-bin", codex_bin])
             else:
-                bridge_command.append("--no-inherit-parent-model")
-            if host_agent_parent_session_key:
-                bridge_command.extend(["--parent-session-key", host_agent_parent_session_key])
-            if openclaw_bin:
-                bridge_command.extend(["--openclaw-bin", openclaw_bin])
-            if openclaw_config:
-                bridge_command.extend(["--openclaw-config", str(openclaw_config)])
+                bridge_command.extend(["--agent-id", host_agent_id])
+                if host_agent_auth_env_only:
+                    bridge_command.append("--auth-env-only")
+                bridge_command.extend(["--runner", host_agent_runner])
+                if host_agent_model:
+                    bridge_command.extend(["--model", host_agent_model])
+                elif inherit_parent_model:
+                    bridge_command.append("--inherit-parent-model")
+                else:
+                    bridge_command.append("--no-inherit-parent-model")
+                if host_agent_parent_session_key:
+                    bridge_command.extend(["--parent-session-key", host_agent_parent_session_key])
+                if openclaw_bin:
+                    bridge_command.extend(["--openclaw-bin", openclaw_bin])
+                if openclaw_config:
+                    bridge_command.extend(["--openclaw-config", str(openclaw_config)])
             host_result = run_command(
                 bridge_command,
                 label=f"[{case['id']}] current Host Agent review + provenance merge",
@@ -482,13 +491,13 @@ def main(argv: list[str] | None = None) -> int:
         help="explicitly allow rule_only/known_template compatibility cases; default batches require llm_primary",
     )
     parser.add_argument("--host-agent-timeout", type=int, default=900,
-                        help="per-chunk OpenClaw Host Agent timeout in seconds (default: 900)")
+                        help="per-chunk native Host Agent timeout in seconds (default: 900)")
     parser.add_argument("--host-agent-max-concurrency", type=int, default=4,
                         help="maximum number of independent Host Agent chunks in flight (default: 4)")
     parser.add_argument("--host-agent-max-attempts", type=int, default=2,
                         help="maximum attempts per Host Agent chunk before failing closed (default: 2)")
     parser.add_argument("--host-agent-model",
-                        help="explicit OpenClaw model; omitted means copy the parent session modelOverride")
+                        help="explicit OpenClaw provider/model route; rejected by the Codex adapter")
     parser.add_argument("--host-agent-parent-session-key",
                         help="exact parent session key to use for route inheritance; never auto-discovered")
     parser.add_argument("--host-agent-auth-env-only", action="store_true",
@@ -505,6 +514,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="optional openclaw executable used by --auto-host-agent")
     parser.add_argument("--openclaw-config", type=Path,
                         help="optional config file passed explicitly to `openclaw agent exec`")
+    parser.add_argument("--codex-bin",
+                        help="optional native codex executable used by --auto-host-agent")
     args = parser.parse_args(argv)
     try:
         source, cases, manifest_path = load_manifest(args.template_manifest)
@@ -539,14 +550,38 @@ def main(argv: list[str] | None = None) -> int:
         args.prepare_host_review or args.auto_host_agent
     ):
         parser.error("fresh-only batch requires --prepare-host-review or --auto-host-agent for llm_primary cases")
+    adapter_id: str | None = None
     if args.auto_host_agent:
         if args.no_host_agent_model_inheritance and not args.host_agent_model:
             parser.error("--no-host-agent-model-inheritance requires --host-agent-model")
         try:
             runtime = require_host_runtime(args.host_runtime)
-            automatic_adapter_id(runtime)
+            adapter_id = automatic_adapter_id(runtime)
         except HostRuntimeError as exc:
             parser.error(str(exc))
+        if adapter_id == "codex":
+            forbidden = []
+            if args.host_agent_model:
+                forbidden.append("--host-agent-model")
+            if args.host_agent_parent_session_key:
+                forbidden.append("--host-agent-parent-session-key")
+            if args.host_agent_auth_env_only:
+                forbidden.append("--host-agent-auth-env-only")
+            if args.host_agent_runner != "exec":
+                forbidden.append("--host-agent-runner")
+            if args.no_host_agent_model_inheritance:
+                forbidden.append("--no-host-agent-model-inheritance")
+            if args.host_agent_id != "main":
+                forbidden.append("--host-agent-id")
+            if args.openclaw_bin:
+                forbidden.append("--openclaw-bin")
+            if args.openclaw_config:
+                forbidden.append("--openclaw-config")
+            if forbidden:
+                parser.error(
+                    "Codex native adapter does not accept OpenClaw-only options: "
+                    + ", ".join(forbidden)
+                )
 
     neutral_reference = None
     if args.neutral_reference_docx:
@@ -602,11 +637,13 @@ def main(argv: list[str] | None = None) -> int:
                 host_agent_auth_env_only=args.host_agent_auth_env_only,
                 host_agent_runner=args.host_agent_runner,
                 host_runtime=args.host_runtime,
+                host_adapter_id=adapter_id,
                 inherit_parent_model=not args.no_host_agent_model_inheritance,
                 host_review_chunk_size=args.host_review_chunk_size,
                 host_agent_id=args.host_agent_id,
                 openclaw_bin=args.openclaw_bin,
                 openclaw_config=args.openclaw_config,
+                codex_bin=args.codex_bin,
                 neutral_reference_docx=neutral_reference,
             )
         except Exception as exc:  # keep each school independently auditable

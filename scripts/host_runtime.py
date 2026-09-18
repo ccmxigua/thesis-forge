@@ -120,6 +120,8 @@ def automatic_adapter_id(context: HostRuntimeContext) -> str:
     """Return only an adapter explicitly implemented for ``context``."""
     if context.runtime == "openclaw":
         return "openclaw"
+    if context.runtime == "codex":
+        return "codex"
     if context.runtime is None:
         raise HostAdapterUnavailable(
             "no host runtime is declared; use the current host's packet workflow "

@@ -52,10 +52,12 @@ provenance anchor; `rule_only` and `known_template` are not fallback paths.
 
 The default workflow is orchestrated by the host Agent that is currently
 executing this skill.  The Python pipeline performs deterministic preparation,
-then stops at evidence-bound packets.  The current host Agent reads every
-packet, writes the declarative JSON responses, and invokes the local merge and
-formatting stages.  A Python subprocess does not attempt to call back into the
-current chat session.
+then either stops at evidence-bound packets or, when `--auto-host-agent` is
+explicitly requested, invokes the native adapter for the declared host.  The
+current host Agent must read every packet, write the declarative JSON responses,
+and invoke the local merge and formatting stages; an adapter is only a native
+CLI bridge for that same host and never a cross-host substitute.  A Python
+subprocess does not call back into the current chat session implicitly.
 
 Prepare a fresh run with:
 
@@ -79,14 +81,40 @@ hosts.  The host identity and the model/provider identity are separate
 dimensions.  If a host does not expose a model name, record it as
 `unobservable`; do not infer it from an installed CLI or from a model label.
 
-## OpenClaw adapter (explicit opt-in)
+## Native host adapters (explicit opt-in)
 
-`--auto-host-agent` is only an OpenClaw adapter invocation when the execution
-context explicitly declares `THESIS_FORGE_HOST_RUNTIME=openclaw` (or the
-matching `--host-runtime openclaw`).  It is not the general meaning of
-"current Host Agent".  The adapter is selected after host-runtime validation;
-on Codex, Claude, or an unknown host it stops with an actionable error instead
-of calling OpenClaw because it happens to be installed.
+`--auto-host-agent` is selected only after the execution context explicitly
+declares `THESIS_FORGE_HOST_RUNTIME` (or the matching `--host-runtime`).  The
+runtime declaration is the dispatch boundary: `openclaw` selects the explicit
+OpenClaw adapter, and `codex` selects the native `codex exec` adapter.  An
+unknown or currently unsupported host stops with an actionable error instead
+of calling an installed program from another environment.
+
+The Codex adapter uses an ephemeral, read-only `codex exec --json` invocation
+per chunk, validates the JSONL terminal event and final message, then applies
+the same provenance, contract, merge, and deterministic DOCX gates as the
+packet workflow.  It does not read OpenClaw sessions or accept OpenClaw route
+parameters.  The Codex CLI's provider/model identity is not inferred from the
+binary name; when it is not exposed, the run audit records route visibility as
+`unobservable`.
+
+For a Codex host, use the current Codex CLI and its configured native account:
+
+```bash
+THESIS_FORGE_HOST_RUNTIME=codex \
+python3 scripts/thesis_format.py \
+  requirements.doc input.tex output.docx \
+  --work-dir build/host-codex-$(date -u +%Y%m%d-%H%M%S) \
+  --host-runtime codex \
+  --auto-host-agent \
+  --codex-bin "$(command -v codex)"
+```
+
+The same selection applies to the ten-school batch runner.  Do not pass
+OpenClaw-only options such as a parent session key or provider/model route to a
+Codex run; the command fails closed if they are supplied.
+
+### OpenClaw adapter (explicit opt-in)
 
 When this explicit adapter is authorized, a complete fresh path can be run
 with:

@@ -26,6 +26,7 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = Path("inputs/ten-school-template-manifest.json")
 if str(ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(ROOT / "scripts"))
+from host_adapters import codex as codex_adapter  # noqa: E402
 from host_runtime import (  # noqa: E402
     HostRuntimeError,
     automatic_adapter_id,
@@ -358,6 +359,7 @@ def run_case(base: Path, source: Path, case: dict[str, Any], *, prepare_host_rev
              host_agent_id: str = "main", openclaw_bin: str | None = None,
              openclaw_config: Path | None = None,
              codex_bin: str | None = None,
+             codex_model: str = codex_adapter.DEFAULT_MODEL,
              neutral_reference_docx: Path | None = None) -> dict[str, Any]:
     case_dir = base / str(case["id"])
     work = case_dir / "work"
@@ -419,6 +421,7 @@ def run_case(base: Path, source: Path, case: dict[str, Any], *, prepare_host_rev
             if host_adapter_id == "codex":
                 if codex_bin:
                     bridge_command.extend(["--codex-bin", codex_bin])
+                bridge_command.extend(["--codex-model", codex_model])
             else:
                 bridge_command.extend(["--agent-id", host_agent_id])
                 if host_agent_auth_env_only:
@@ -516,6 +519,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="optional config file passed explicitly to `openclaw agent exec`")
     parser.add_argument("--codex-bin",
                         help="optional native codex executable used by --auto-host-agent")
+    parser.add_argument("--codex-model", default=codex_adapter.DEFAULT_MODEL,
+                        help=f"explicit native Codex model (default: {codex_adapter.DEFAULT_MODEL})")
     args = parser.parse_args(argv)
     try:
         source, cases, manifest_path = load_manifest(args.template_manifest)
@@ -644,6 +649,7 @@ def main(argv: list[str] | None = None) -> int:
                 openclaw_bin=args.openclaw_bin,
                 openclaw_config=args.openclaw_config,
                 codex_bin=args.codex_bin,
+                codex_model=args.codex_model,
                 neutral_reference_docx=neutral_reference,
             )
         except Exception as exc:  # keep each school independently auditable

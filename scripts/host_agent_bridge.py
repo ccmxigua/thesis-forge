@@ -636,6 +636,7 @@ def run_host_agent_chunk(
     controller: RunController | None = None,
     adapter_id: str = "openclaw",
     codex_bin: str | None = None,
+    codex_model: str | None = None,
 ) -> dict[str, Any]:
     if controller is not None:
         controller.check()
@@ -697,6 +698,7 @@ def run_host_agent_chunk(
             prompt_path=prompt_path,
             last_message_path=last_message_path,
             cwd=ROOT,
+            model=codex_model or codex_adapter.DEFAULT_MODEL,
         )
     else:
         raise ValueError(f"unsupported Host Agent adapter: {adapter_id}")
@@ -796,6 +798,7 @@ def run_host_agent_chunk(
             )
         ),
         "expected_route": model if adapter_id == "openclaw" else "unobservable",
+        "requested_model": codex_model if adapter_id == "codex" else model,
         "actual_provider": route.get("provider"),
         "actual_model": route.get("model"),
         "actual_route": route.get("route"),
@@ -832,9 +835,14 @@ def run_bridge(
     auth_env_only: bool = False,
     runner: str = "exec",
     host_runtime: str | None = None,
+    codex_model: str | None = None,
 ) -> dict[str, Any]:
     host_context = require_host_runtime(host_runtime)
     adapter_id = automatic_adapter_id(host_context)
+    if adapter_id == "codex":
+        codex_model = (codex_model or codex_adapter.DEFAULT_MODEL).strip()
+        if not codex_model:
+            raise HostRuntimeError("Codex native adapter requires a non-empty explicit model")
     if adapter_id == "openclaw" and model is None and not inherit_parent_model and not host_context.parent_session_id:
         raise HostRuntimeError(
             "automatic OpenClaw execution requires an explicit model route or a bound parent session; refusing the gateway default"
@@ -932,10 +940,10 @@ def run_bridge(
         codex_binary = _resolve_codex(codex_bin)
         openclaw_config = None
     resolution: dict[str, Any] = {
-        "model": model if adapter_id == "openclaw" else None,
+        "model": model if adapter_id == "openclaw" else codex_model,
         "source": (
             "explicit-model" if model else "gateway-default"
-        ) if adapter_id == "openclaw" else "native-codex-default",
+        ) if adapter_id == "openclaw" else "explicit-native-codex-model",
         "parent_session_key": None,
         "parent_model_override": None,
         "parent_provider_override": None,
@@ -954,7 +962,7 @@ def run_bridge(
                 parent_session_key=bound_parent_session,
             )
     effective_model = resolution.get("model")
-    if effective_model:
+    if effective_model and adapter_id == "openclaw":
         _split_model_route(str(effective_model))
 
     def persist_failure_audit(error: BaseException, chunk_runs: list[dict[str, Any]]) -> None:
@@ -971,7 +979,10 @@ def run_bridge(
             "max_concurrency": max_concurrency,
             "max_attempts": max_attempts,
             "model": effective_model,
-            **_route_audit_fields(effective_model, chunk_runs),
+            **_route_audit_fields(
+                effective_model if adapter_id == "openclaw" else None,
+                chunk_runs,
+            ),
             "route_visibility": "provider-model" if adapter_id == "openclaw" else "unobservable",
             "auth_env_only": bool(auth_env_only),
             "runner": runner,
@@ -980,7 +991,7 @@ def run_bridge(
             "codex_bin": codex_binary,
             "route_policy": (
                 "parent-effective-route-snapshot"
-                if adapter_id == "openclaw" else "native-codex-default"
+                if adapter_id == "openclaw" else "explicit-native-codex-model"
             ),
             "route_verification": (
                 "child-winner-must-match; fallback-must-be-false"
@@ -1053,6 +1064,7 @@ def run_bridge(
                     runner=runner,
                     controller=controller,
                     adapter_id=adapter_id,
+                    codex_model=codex_model,
                     retry_hint=(
                         "local contract validation failed; repair the response: "
                         + failures[-1]
@@ -1154,7 +1166,10 @@ def run_bridge(
         "max_concurrency": max_concurrency,
         "max_attempts": max_attempts,
         "model": effective_model,
-        **_route_audit_fields(effective_model, chunk_audits),
+        **_route_audit_fields(
+            effective_model if adapter_id == "openclaw" else None,
+            chunk_audits,
+        ),
         "route_visibility": "provider-model" if adapter_id == "openclaw" else "unobservable",
         "local_process_state": "completed",
         "remote_operation_state": "remote_operation_completed",
@@ -1169,7 +1184,7 @@ def run_bridge(
         "parent_effective_model": resolution.get("parent_effective_model"),
         "route_policy": (
             "parent-effective-route-snapshot"
-            if adapter_id == "openclaw" else "native-codex-default"
+            if adapter_id == "openclaw" else "explicit-native-codex-model"
         ),
         "route_verification": (
             "child-winner-must-match; fallback-must-be-false"
@@ -1229,6 +1244,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="optional config file passed explicitly to `openclaw agent exec`")
     parser.add_argument("--codex-bin",
                         help="optional path to the native codex executable")
+    parser.add_argument("--codex-model", default=codex_adapter.DEFAULT_MODEL,
+                        help=f"explicit native Codex model (default: {codex_adapter.DEFAULT_MODEL})")
     args = parser.parse_args(argv)
     if args.inherit_parent_model is False and not args.model:
         parser.error("--no-inherit-parent-model requires an explicit --model route")
@@ -1252,6 +1269,7 @@ def main(argv: list[str] | None = None) -> int:
             openclaw_bin=args.openclaw_bin,
             openclaw_config=args.openclaw_config,
             codex_bin=args.codex_bin,
+            codex_model=args.codex_model,
             inherit_parent_model=args.inherit_parent_model,
             parent_session_key=args.parent_session_key,
             auth_env_only=args.auth_env_only,

@@ -27,6 +27,7 @@ class CodexAdapterTests(unittest.TestCase):
             )
         self.assertEqual(command[:2], ["/opt/homebrew/bin/codex", "exec"])
         self.assertIn("--ephemeral", command)
+        self.assertEqual(command[command.index("--model") + 1], codex.DEFAULT_MODEL)
         self.assertIn("--sandbox", command)
         self.assertIn("read-only", command)
         self.assertIn("--json", command)

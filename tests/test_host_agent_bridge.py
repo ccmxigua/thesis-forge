@@ -296,6 +296,7 @@ class HostAgentBridgeTests(unittest.TestCase):
             self.assertEqual(command[1], "exec")
             self.assertIn("--json", command)
             self.assertIn("--sandbox", command)
+            self.assertEqual(command[command.index("--model") + 1], "gpt-5.6-luna")
             self.assertNotIn("openclaw", " ".join(command).lower())
             self.assertNotIn("--session-key", command)
             self.assertEqual(audit["adapter_id"], "codex")
@@ -314,6 +315,7 @@ class HostAgentBridgeTests(unittest.TestCase):
                     ])
             self.assertEqual(code, 0)
             self.assertFalse(run.call_args.kwargs["inherit_parent_model"])
+            self.assertEqual(run.call_args.kwargs["codex_model"], "gpt-5.6-luna")
 
     def test_resolve_parent_model_copies_provider_and_model_override(self) -> None:
         parent_key = "agent:main:telegram:direct:chat:thread:38479"

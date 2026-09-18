@@ -13,6 +13,8 @@ from pathlib import Path
 import shutil
 from typing import Any
 
+DEFAULT_MODEL = "gpt-5.6-luna"
+
 
 def resolve_binary(binary: str | None) -> str:
     """Resolve an explicitly supplied or installed native Codex executable."""
@@ -33,6 +35,7 @@ def build_command(
     prompt_path: Path,
     last_message_path: Path,
     cwd: Path,
+    model: str = DEFAULT_MODEL,
 ) -> list[str]:
     """Build an isolated, read-only native Codex invocation.
 
@@ -43,10 +46,13 @@ def build_command(
     prompt = prompt_path.read_text(encoding="utf-8")
     if not prompt.strip():
         raise ValueError(f"Codex prompt is empty: {prompt_path}")
+    if not isinstance(model, str) or not model.strip():
+        raise ValueError("Codex model must be a non-empty string")
     return [
         binary,
         "exec",
         "--ephemeral",
+        "--model", model.strip(),
         "--sandbox", "read-only",
         "--json",
         "--color", "never",

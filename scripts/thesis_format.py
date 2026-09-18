@@ -25,6 +25,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(ROOT / "scripts"))
 
+from host_adapters import codex as codex_adapter  # noqa: E402
 from host_runtime import (  # noqa: E402
     HostRuntimeError,
     automatic_adapter_id,
@@ -104,6 +105,8 @@ def main(argv: list[str]) -> int:
                    help="optional openclaw executable used by --auto-host-agent")
     p.add_argument("--codex-bin",
                    help="optional native codex executable used by --auto-host-agent")
+    p.add_argument("--codex-model", default=codex_adapter.DEFAULT_MODEL,
+                   help=f"explicit native Codex model (default: {codex_adapter.DEFAULT_MODEL})")
     p.add_argument("--render-report", type=Path)
     p.add_argument("--require-submission-ready", action="store_true")
     p.add_argument("--strict-release", action="store_true",
@@ -183,6 +186,7 @@ def main(argv: list[str]) -> int:
         if adapter_id == "codex":
             if args.codex_bin:
                 bridge += ["--codex-bin", args.codex_bin]
+            bridge += ["--codex-model", args.codex_model]
             label = "explicit Codex native adapter review + provenance merge"
         else:
             bridge += ["--agent-id", args.host_agent_id]

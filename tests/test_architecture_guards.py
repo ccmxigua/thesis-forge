@@ -26,6 +26,10 @@ CORE_PIPELINE_FILES = (
     "scripts/template_reconciliation.py",
     "scripts/format_spec_validation.py",
     "scripts/docx_semantics.py",
+    "scripts/host_agent_bridge.py",
+    "scripts/host_review_contract.py",
+    "scripts/host_runtime.py",
+    "scripts/preflight.py",
 )
 FORBIDDEN_SCHOOL_TOKENS = {
     "szu", "xzhmu", "tju", "dlut", "ujs", "cauc", "bsu", "ustb", "btbu", "neau",

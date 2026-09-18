@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -17,6 +18,16 @@ from semantic_contract import attach_request_provenance  # noqa: E402
 
 
 class HostAgentBridgeTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self._host_runtime_env = patch.dict(
+            os.environ,
+            {"THESIS_FORGE_HOST_RUNTIME": "openclaw"},
+        )
+        self._host_runtime_env.start()
+
+    def tearDown(self) -> None:
+        self._host_runtime_env.stop()
+
     def _packet(self, directory: Path) -> tuple[Path, dict]:
         directory.mkdir(parents=True, exist_ok=True)
         clauses = [{
@@ -116,8 +127,10 @@ class HostAgentBridgeTests(unittest.TestCase):
             valid = self._executable_response(chunk)
             envelopes = [
                 {"runId": "openclaw-run-contract-retry-1", "status": "ok",
+                 "provider": "openai", "model": "gpt-5.6-luna",
                  "result": {"payloads": [{"text": json.dumps(invalid)}]}},
                 {"runId": "openclaw-run-contract-retry-2", "status": "ok",
+                 "provider": "openai", "model": "gpt-5.6-luna",
                  "result": {"payloads": [{"text": json.dumps(valid)}]}},
             ]
             response_out = Path(td) / "host-agent-response.json"
@@ -129,7 +142,7 @@ class HostAgentBridgeTests(unittest.TestCase):
                 audit = bridge.run_bridge(
                     review_dir, response_out=response_out,
                     agent_id="main", timeout=1, max_attempts=2,
-                    openclaw_bin="openclaw",
+                    openclaw_bin="openclaw", model="openai/gpt-5.6-luna",
                 )
             self.assertEqual(audit["status"], "merged")
             self.assertEqual(audit["chunk_runs"][0]["attempt"], 2)
@@ -140,7 +153,7 @@ class HostAgentBridgeTests(unittest.TestCase):
             ).read_text(encoding="utf-8")
             self.assertIn("local contract validation failed", second_prompt)
 
-    def test_bridge_owns_transport_provenance_when_model_echo_is_truncated(self) -> None:
+    def test_bridge_rejects_truncated_provenance_and_preserves_raw_response(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             review_dir, chunk = self._packet(Path(td) / "requirements")
             response = self._response(chunk)
@@ -149,6 +162,7 @@ class HostAgentBridgeTests(unittest.TestCase):
             envelope = {
                 "runId": "openclaw-run-provenance-copy",
                 "status": "ok",
+                "provider": "openai", "model": "gpt-5.6-luna",
                 "result": {"payloads": [{"text": json.dumps(response)}]},
             }
             response_out = Path(td) / "host-agent-response.json"
@@ -156,17 +170,50 @@ class HostAgentBridgeTests(unittest.TestCase):
                 ["openclaw"], 0, json.dumps(envelope), "",
             )
             with patch.object(bridge, "_run_command", return_value=fake):
-                audit = bridge.run_bridge(
-                    review_dir, response_out=response_out,
-                    agent_id="main", timeout=1, openclaw_bin="openclaw",
-                )
-            merged = json.loads(response_out.read_text(encoding="utf-8"))
-            full_request = json.loads(
-                (review_dir / "llm-request.json").read_text(encoding="utf-8")
+                with self.assertRaises(bridge.HostAgentProvenanceMismatch):
+                    bridge.run_bridge(
+                        review_dir, response_out=response_out,
+                        agent_id="main", timeout=1, max_attempts=1,
+                        openclaw_bin="openclaw", model="openai/gpt-5.6-luna",
+                    )
+            self.assertFalse(response_out.exists())
+            raw_responses = list(review_dir.glob("*.raw.json"))
+            self.assertEqual(len(raw_responses), 1)
+            raw = json.loads(raw_responses[0].read_text(encoding="utf-8"))
+            self.assertEqual(
+                raw["provenance"]["request_sha256"],
+                chunk["provenance"]["request_sha256"][:48],
             )
-            self.assertEqual(merged["provenance"], full_request["provenance"])
-            warning = audit["chunk_runs"][0]["provenance_copy_warning"]
-            self.assertIn("request_sha256", warning["mismatch_fields"])
+
+    def test_bridge_requires_declared_host_runtime(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            review_dir, _chunk = self._packet(Path(td) / "requirements")
+            with patch.dict(os.environ, {}, clear=True):
+                with self.assertRaisesRegex(RuntimeError, "THESIS_FORGE_HOST_RUNTIME"):
+                    bridge.run_bridge(review_dir, openclaw_bin="openclaw")
+
+    def test_bridge_refuses_host_runtime_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            review_dir, _chunk = self._packet(Path(td) / "requirements")
+            with self.assertRaisesRegex(RuntimeError, "host runtime mismatch"):
+                bridge.run_bridge(
+                    review_dir, host_runtime="codex", openclaw_bin="openclaw",
+                )
+
+    def test_bridge_refuses_recent_parent_session_guess(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            review_dir, _chunk = self._packet(Path(td) / "requirements")
+            with self.assertRaisesRegex(RuntimeError, "refusing to select a recent"):
+                bridge.run_bridge(
+                    review_dir, inherit_parent_model=True,
+                    openclaw_bin="openclaw",
+                )
+
+    def test_bridge_refuses_unbound_gateway_default(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            review_dir, _chunk = self._packet(Path(td) / "requirements")
+            with self.assertRaisesRegex(RuntimeError, "explicit model route"):
+                bridge.run_bridge(review_dir, openclaw_bin="openclaw")
 
     def test_failed_bridge_persists_failure_audit_without_merged_response(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -176,6 +223,7 @@ class HostAgentBridgeTests(unittest.TestCase):
             envelope = {
                 "runId": "openclaw-run-final-contract-failure",
                 "status": "ok",
+                "provider": "openai", "model": "gpt-5.6-luna",
                 "result": {"payloads": [{"text": json.dumps(response)}]},
             }
             response_out = Path(td) / "host-agent-response.json"
@@ -187,7 +235,7 @@ class HostAgentBridgeTests(unittest.TestCase):
                     bridge.run_bridge(
                         review_dir, response_out=response_out,
                         agent_id="main", timeout=1, max_attempts=1,
-                        openclaw_bin="openclaw",
+                        openclaw_bin="openclaw", model="openai/gpt-5.6-luna",
                     )
             failure = json.loads((review_dir / "host-agent-run.json").read_text(encoding="utf-8"))
             self.assertEqual(failure["status"], "failed")
@@ -201,6 +249,7 @@ class HostAgentBridgeTests(unittest.TestCase):
             envelope = {
                 "runId": "openclaw-run-test",
                 "status": "ok",
+                "provider": "openai", "model": "gpt-5.6-luna",
                 "result": {"payloads": [{"text": json.dumps(response, ensure_ascii=False)}]},
             }
             response_out = Path(td) / "host-agent-response.json"
@@ -211,6 +260,7 @@ class HostAgentBridgeTests(unittest.TestCase):
                 audit = bridge.run_bridge(
                     review_dir, response_out=response_out,
                     agent_id="main", timeout=1, openclaw_bin="openclaw",
+                    model="openai/gpt-5.6-luna", runner="gateway",
                 )
             self.assertEqual(audit["status"], "merged")
             self.assertEqual(audit["chunk_count"], 1)
@@ -436,7 +486,10 @@ class HostAgentBridgeTests(unittest.TestCase):
             )["response_files"][0]
             (review_dir / response_name).write_text("{}\n", encoding="utf-8")
             with self.assertRaisesRegex(ValueError, "refusing to reuse an existing chunk response"):
-                bridge.run_bridge(review_dir, response_out=Path(td) / "response.json", timeout=1)
+                bridge.run_bridge(
+                    review_dir, response_out=Path(td) / "response.json", timeout=1,
+                    model="openai/gpt-5.6-luna",
+                )
 
     def test_bridge_retries_rejected_json_in_a_new_session(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -445,6 +498,7 @@ class HostAgentBridgeTests(unittest.TestCase):
             envelope = {
                 "runId": "openclaw-run-retry-test",
                 "status": "ok",
+                "provider": "openai", "model": "gpt-5.6-luna",
                 "result": {"payloads": [{"text": json.dumps(response, ensure_ascii=False)}]},
             }
             response_out = Path(td) / "host-agent-response.json"
@@ -456,7 +510,8 @@ class HostAgentBridgeTests(unittest.TestCase):
                 audit = bridge.run_bridge(
                     review_dir, response_out=response_out,
                     agent_id="main", timeout=1, max_attempts=2,
-                    openclaw_bin="openclaw",
+                    openclaw_bin="openclaw", model="openai/gpt-5.6-luna",
+                    runner="gateway",
                 )
             self.assertEqual(audit["status"], "merged")
             self.assertEqual(audit["chunk_runs"][0]["attempt"], 2)
@@ -484,6 +539,54 @@ class HostAgentBridgeTests(unittest.TestCase):
         self.assertTrue(popen.call_args.kwargs["start_new_session"])
         killpg.assert_called_once_with(1234, bridge.signal.SIGTERM)
         self.assertEqual(process.communicate.call_count, 2)
+
+    def test_cancellation_after_raw_response_never_publishes_accepted_response(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            review_dir, chunk = self._packet(Path(td) / "requirements")
+            response = self._response(chunk)
+            envelope = {
+                "runId": "openclaw-run-cancel-race",
+                "status": "ok",
+                "result": {"payloads": [{"text": json.dumps(response)}]},
+            }
+
+            class CancelAfterRaw(bridge.RunController):
+                def __init__(self) -> None:
+                    super().__init__()
+                    self.check_count = 0
+
+                def check(self) -> None:
+                    self.check_count += 1
+                    if self.check_count >= 3:
+                        raise bridge.HostAgentCancelled("fatal sibling failure")
+
+            controller = CancelAfterRaw()
+            response_path = review_dir / "llm-response-chunk-0001.attempt-01.json"
+            with patch.object(
+                bridge, "_run_command",
+                return_value=subprocess.CompletedProcess(
+                    ["openclaw"], 0, json.dumps(envelope), ""
+                ),
+            ):
+                with self.assertRaises(bridge.HostAgentCancelled):
+                    bridge.run_host_agent_chunk(
+                        request_path=review_dir / "llm-request.json",
+                        chunk_path=review_dir / "llm-request-chunks.json",
+                        chunk=chunk,
+                        response_path=response_path,
+                        run_id="run-bridge-test",
+                        chunk_index=1,
+                        chunk_count=1,
+                        agent_id="main",
+                        timeout=1,
+                        openclaw_bin="openclaw",
+                        prompt_path=review_dir / "prompt.txt",
+                        controller=controller,
+                    )
+            self.assertFalse(response_path.exists())
+            self.assertTrue(response_path.with_name(
+                f"{response_path.stem}.raw{response_path.suffix}"
+            ).exists())
 
     def test_parse_openclaw_result_accepts_one_json_fence(self) -> None:
         envelope = {

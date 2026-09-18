@@ -18,6 +18,14 @@ jobs:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: requirements-test.txt
+      - name: Install pinned Pandoc
+        uses: pandoc/actions/setup@v1
+        with:
+          version: "3.7.0.2"
+      - name: Verify conversion toolchain
+        run: |
+          pandoc --version
+          test "$(pandoc --version | sed -n '1s/^pandoc //p')" = "3.7.0.2"
       - name: Install deterministic test dependencies
         run: python -m pip install --requirement requirements-test.txt
       - name: Compile and run unit tests

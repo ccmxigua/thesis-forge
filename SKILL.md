@@ -48,44 +48,72 @@ the normalized DOCX still goes to the current Host Agent for the complete
 contract-2.1 review. The original `.doc` identity and SHA-256 remain the source
 provenance anchor; `rule_only` and `known_template` are not fallback paths.
 
-## One-command workflow
+## Host-native workflow (default)
 
-When the local OpenClaw Gateway is available, the normal user-facing command
-can run the complete fresh path:
+The default workflow is orchestrated by the host Agent that is currently
+executing this skill.  The Python pipeline performs deterministic preparation,
+then stops at evidence-bound packets.  The current host Agent reads every
+packet, writes the declarative JSON responses, and invokes the local merge and
+formatting stages.  A Python subprocess does not attempt to call back into the
+current chat session.
+
+Prepare a fresh run with:
 
 ```bash
 python3 scripts/thesis_format.py \
   requirements.doc input.tex output.docx \
   --work-dir build/host-auto-$(date -u +%Y%m%d-%H%M%S) \
-  --auto-host-agent
+  --prepare-agent-review
 ```
 
-This invokes the current Host Agent once per fresh request chunk through the
-local isolated `openclaw agent exec --json` CLI, without `--deliver`. By
-default packets contain 20 clauses and at most four independent chunk turns
-run concurrently. At run start the bridge snapshots the exact parent
-session's effective `provider/model` route, preferring a session override when
-one is present. Every child receives that route explicitly and may retry only
-on the same route; it cannot fall through to the Gateway's global fallback
-chain. The bridge records and verifies each child winner route before saving
-its response. If the parent route is unavailable, or any child reports a
-different provider/model, the run fails closed immediately. Each chunk may be
-retried once in a new isolated turn if its response is invalid. The bridge
-writes only the current chunk responses, the existing offline merger validates
-contract 2.1/provenance, and the pipeline then performs the full deterministic
-DOCX, declaration-resource, and audit stages. A non-empty prior work directory
-or existing output is rejected in this mode. Invalid, incomplete, stale, or
-route-mismatched responses fail closed; there is no fallback to an older
-response.
+Then the current host Agent must read the manifest and all chunk requests,
+write one response per requested filename, and run the offline merge followed
+by the final deterministic pipeline.  It must not copy a response from an
+earlier run or silently hand the semantic work to another host.  When the
+current host does not expose an automatic adapter, this packet workflow is
+the supported path; the missing capability is reported rather than replaced
+by OpenClaw, Claude, Codex, or another installed program.
 
-The parent session key can be supplied with
-`--host-agent-parent-session-key`. If omitted, the bridge checks
-`OPENCLAW_PARENT_SESSION_KEY` and `OPENCLAW_SESSION_KEY`, then uses the
-freshest recent interactive session available from `openclaw sessions`.
-Use `--host-agent-model provider/model` only when an explicit route is
-intentionally desired. `--no-host-agent-model-inheritance` is an explicit
-compatibility escape hatch and delegates to the ordinary OpenClaw default;
-the normal multi-user workflow should leave inheritance enabled.
+The packet workflow remains valid for Codex, Claude, OpenClaw, and other
+hosts.  The host identity and the model/provider identity are separate
+dimensions.  If a host does not expose a model name, record it as
+`unobservable`; do not infer it from an installed CLI or from a model label.
+
+## OpenClaw adapter (explicit opt-in)
+
+`--auto-host-agent` is only an OpenClaw adapter invocation when the execution
+context explicitly declares `THESIS_FORGE_HOST_RUNTIME=openclaw` (or the
+matching `--host-runtime openclaw`).  It is not the general meaning of
+"current Host Agent".  The adapter is selected after host-runtime validation;
+on Codex, Claude, or an unknown host it stops with an actionable error instead
+of calling OpenClaw because it happens to be installed.
+
+When this explicit adapter is authorized, a complete fresh path can be run
+with:
+
+```bash
+THESIS_FORGE_HOST_RUNTIME=openclaw \
+python3 scripts/thesis_format.py \
+  requirements.doc input.tex output.docx \
+  --work-dir build/host-openclaw-$(date -u +%Y%m%d-%H%M%S) \
+  --host-runtime openclaw \
+  --auto-host-agent \
+  --host-agent-parent-session-key '<exact-bound-parent-session>'
+```
+
+The parent session key must be supplied by trusted invocation context or an
+explicit argument.  The bridge never selects a recent Telegram session, a
+global default, or another "most active" session.  `--host-agent-model`
+selects an intentional OpenClaw route only; it does not prove that the current
+caller is the parent session.  A missing or conflicting host/session binding
+fails closed before semantic requests start.  The adapter records the
+runtime, invocation, parent session, expected/observed route, and verification
+status in the run audit.  Local process exit does not by itself prove that a
+remote Gateway operation was cancelled.
+
+All hosts use the same response contract and offline merge.  OpenClaw is a
+legal host and is not prohibited; it simply cannot silently substitute for a
+different current host.
 
 The deterministic `rule_only` and `known_template` modes are compatibility and
 development modes only. They are never selected implicitly for a user input;

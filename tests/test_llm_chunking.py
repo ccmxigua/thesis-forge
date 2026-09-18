@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import requirements_engine as engine  # noqa: E402
+from host_review_contract import validate_response as validate_host_review_response  # noqa: E402
 from semantic_contract import HOST_AGENT_ORIGIN, attach_request_provenance  # noqa: E402
 
 
@@ -19,6 +20,29 @@ class HostAgentReviewTests(unittest.TestCase):
         return attach_request_provenance(
             request, source_sha256="a" * 64, evidence_doc=evidence, clauses=clauses,
         )
+
+    def _response_for_chunk(self, chunk: dict, *, requirement_indexes: list[object] | None = None) -> dict:
+        clauses = chunk["clauses"]
+        requirements = []
+        reviews = []
+        for clause in clauses:
+            requirements.append({
+                "role": "body_text", "properties": {"font": {"size_pt": 12}},
+                "clause_ids": [clause["id"]], "evidence_ids": clause["evidence_ids"],
+                "confidence": 1, "reason": "The supplied clause states this requirement.",
+            })
+            reviews.append({
+                "clause_id": clause["id"], "classification": "executable",
+                "requirement_indexes": [0] if requirement_indexes is None else requirement_indexes,
+                "reason": "The clause is executable in DOCX.",
+            })
+        return {
+            "contract_version": "2.1",
+            "provenance": chunk["provenance"],
+            "requirements": requirements,
+            "clause_reviews": reviews,
+            "unsupported_items": [], "reported_conflicts": [],
+        }
 
     def test_packets_are_offline_and_expose_only_matching_existing_rules(self) -> None:
         clauses = [{
@@ -131,6 +155,61 @@ class HostAgentReviewTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(ValueError, "provenance_origin_mismatch"):
                 engine.merge_host_agent_review_packets(review_dir)
+
+    def test_shared_validator_rejects_local_indexes_before_global_offset(self) -> None:
+        clauses = [
+            {"id": "C1", "text": "正文使用宋体", "evidence_ids": ["E1"],
+             "source_kind": "paragraph", "location": {}, "part_index": 0},
+            {"id": "C2", "text": "标题居中", "evidence_ids": ["E2"],
+             "source_kind": "paragraph", "location": {}, "part_index": 0},
+        ]
+        evidence = {
+            "evidence": [
+                {"id": "E1", "text": "正文使用宋体", "kind": "paragraph"},
+                {"id": "E2", "text": "标题居中", "kind": "paragraph"},
+            ],
+        }
+        request = self._request(clauses, evidence)
+        with tempfile.TemporaryDirectory() as td:
+            review_dir = Path(td)
+            engine.prepare_host_agent_review_packets(
+                request, clauses, evidence, "a" * 64, review_dir, chunk_size=1,
+            )
+            chunks = json.loads((review_dir / "llm-request-chunks.json").read_text(encoding="utf-8"))
+            for index, chunk in enumerate(chunks):
+                bad_index = [1] if index == 1 else None
+                response = self._response_for_chunk(chunk, requirement_indexes=bad_index)
+                path = review_dir / chunk["batch"]["response_filename"]
+                path.write_text(json.dumps(response, ensure_ascii=False), encoding="utf-8")
+                if bad_index is not None:
+                    errors = validate_host_review_response(response, chunk)
+                    self.assertTrue(any("invalid_integer" in item for item in errors))
+            merged_path = review_dir.parent / "merged.json"
+            with self.assertRaisesRegex(ValueError, "contract failed"):
+                engine.merge_host_agent_review_packets(review_dir, response_out=merged_path)
+            self.assertFalse(merged_path.exists())
+            self.assertFalse((review_dir / "merge-receipt.json").exists())
+
+    def test_merge_rejects_response_path_outside_run_directory(self) -> None:
+        clauses = [{
+            "id": "C1", "text": "正文使用宋体", "evidence_ids": ["E1"],
+            "source_kind": "paragraph", "location": {}, "part_index": 0,
+        }]
+        evidence = {"evidence": [{"id": "E1", "text": "正文使用宋体", "kind": "paragraph"}]}
+        request = self._request(clauses, evidence)
+        with tempfile.TemporaryDirectory() as td:
+            review_dir = Path(td) / "requirements"
+            review_dir.mkdir()
+            engine.prepare_host_agent_review_packets(
+                request, clauses, evidence, "a" * 64, review_dir, chunk_size=1,
+            )
+            manifest_path = review_dir / "host-agent-review-manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["response_files"] = ["../outside.json"]
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "escapes its run directory"):
+                engine.merge_host_agent_review_packets(review_dir)
+            self.assertFalse((review_dir / "merge-receipt.json").exists())
 
 
 if __name__ == "__main__":

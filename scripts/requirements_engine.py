@@ -22,6 +22,7 @@ from uuid import uuid4
 import xml.etree.ElementTree as ET
 
 from format_spec_validation import load_and_validate, validate_instance
+from host_review_contract import validate_response as validate_host_review_response
 from compliance import (
     ALLOWED_REVIEW_CLASSIFICATIONS,
     build_clause_records,
@@ -2004,8 +2005,53 @@ def prepare_host_agent_review_packets(
 
 
 def _manifest_path(review_dir: Path, value: str) -> Path:
+    root = review_dir.resolve()
     path = Path(value)
-    return path if path.is_absolute() else review_dir / path
+    resolved = (path if path.is_absolute() else root / path).resolve()
+    if resolved == root or root not in resolved.parents:
+        raise ValueError(
+            f"manifest path escapes its run directory: {value!r} -> {resolved}"
+        )
+    return resolved
+
+
+def _merge_output_path(review_dir: Path, value: Path) -> Path:
+    """Resolve an output below the enclosing run directory, never elsewhere."""
+    run_root = review_dir.resolve().parent
+    resolved = value.expanduser().resolve()
+    if resolved == run_root or run_root not in resolved.parents:
+        raise ValueError(
+            f"merge output escapes its run directory: {value} -> {resolved}"
+        )
+    return resolved
+
+
+def _write_json_artifacts_atomic(artifacts: list[tuple[Path, Any]]) -> None:
+    """Stage all JSON artifacts, then publish them without overwriting old files."""
+    if not artifacts:
+        return
+    paths = [path for path, _ in artifacts]
+    if len(set(paths)) != len(paths):
+        raise ValueError("merge artifacts must use distinct output paths")
+    for path in paths:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists():
+            raise ValueError(f"refusing to overwrite existing merge artifact: {path}")
+    temporary_paths: list[tuple[Path, Path]] = []
+    try:
+        for path, value in artifacts:
+            temporary = path.with_name(f".{path.name}.tmp-{uuid4().hex}")
+            temporary.write_text(
+                json.dumps(value, ensure_ascii=False, indent=2) + "\n",
+                encoding="utf-8",
+            )
+            temporary_paths.append((temporary, path))
+        for temporary, path in temporary_paths:
+            temporary.replace(path)
+    finally:
+        for temporary, _ in temporary_paths:
+            if temporary.exists():
+                temporary.unlink()
 
 
 def merge_host_agent_review_packets(
@@ -2021,6 +2067,8 @@ def merge_host_agent_review_packets(
     full_request = json.loads(
         _manifest_path(review_dir, str(manifest.get("request_path", "llm-request.json"))).read_text(encoding="utf-8")
     )
+    if not isinstance(full_request, dict) or not isinstance(full_request.get("provenance"), dict):
+        raise ValueError("host-agent full request is missing an object provenance")
     request_chunks = json.loads(
         _manifest_path(review_dir, str(manifest.get("request_chunks_path", "llm-request-chunks.json"))).read_text(encoding="utf-8")
     )
@@ -2029,6 +2077,22 @@ def merge_host_agent_review_packets(
         raise ValueError("host-agent request chunks are missing or empty")
     if not isinstance(response_files, list) or len(response_files) != len(request_chunks):
         raise ValueError("host-agent response file manifest does not match request chunks")
+    if any(not isinstance(item, str) or not item.strip() for item in response_files):
+        raise ValueError("host-agent response file manifest contains a non-string path")
+    if len(set(response_files)) != len(response_files):
+        raise ValueError("host-agent response file manifest contains duplicate paths")
+
+    response_out_path = (
+        _merge_output_path(review_dir, response_out)
+        if response_out is not None else None
+    )
+    merge_receipt_path = review_dir.resolve() / "merge-receipt.json"
+    if response_out_path and response_out_path == merge_receipt_path:
+        raise ValueError("merged response and merge receipt must use distinct paths")
+    if response_out_path and response_out_path.exists():
+        raise ValueError(f"refusing to overwrite existing merge artifact: {response_out_path}")
+    if merge_receipt_path.exists():
+        raise ValueError(f"refusing to overwrite existing merge artifact: {merge_receipt_path}")
 
     aggregate_requirements: list[dict[str, Any]] = []
     aggregate_reviews: list[dict[str, Any]] = []
@@ -2036,12 +2100,22 @@ def merge_host_agent_review_packets(
     aggregate_conflicts: list[dict[str, Any]] = []
     response_clause_counts: list[int] = []
     for index, (chunk_request, response_name) in enumerate(zip(request_chunks, response_files), start=1):
+        if not isinstance(chunk_request, dict):
+            raise ValueError(f"host-agent request chunk {index}/{len(request_chunks)} is not an object")
         response_path = _manifest_path(review_dir, str(response_name))
         if not response_path.is_file():
             raise ValueError(f"missing host-agent response {index}/{len(request_chunks)}: {response_path}")
         response = json.loads(response_path.read_text(encoding="utf-8"))
+        if not isinstance(response, dict):
+            raise ValueError(f"host-agent response {index}/{len(request_chunks)} is not an object")
         if response.get("contract_version") != "2.1":
             raise ValueError(f"host-agent response {index}/{len(request_chunks)} is not contract 2.1")
+        contract_errors = validate_host_review_response(response, chunk_request)
+        if contract_errors:
+            raise ValueError(
+                f"host-agent response {index}/{len(request_chunks)} contract failed: "
+                + "; ".join(contract_errors[:12])
+            )
         provenance_errors = validate_response_provenance(
             response, chunk_request.get("provenance", {}), require_fresh_origin=True,
         )
@@ -2069,7 +2143,7 @@ def merge_host_agent_review_packets(
         for review in reviews:
             shifted = copy.deepcopy(review)
             shifted["requirement_indexes"] = [
-                int(item) + offset for item in (review.get("requirement_indexes") or [])
+                item + offset for item in (review.get("requirement_indexes") or [])
             ]
             aggregate_reviews.append(shifted)
         for item in response.get("unsupported_items", []):
@@ -2086,19 +2160,34 @@ def merge_host_agent_review_packets(
         "unsupported_items": aggregate_unsupported,
         "reported_conflicts": aggregate_conflicts,
     }
+    aggregate_errors = validate_host_review_response(aggregate, full_request)
+    if aggregate_errors:
+        raise ValueError(
+            "merged host-agent response contract failed: "
+            + "; ".join(aggregate_errors[:12])
+        )
     metadata = {
         "protocol": "host_agent_semantic_review",
         "chunked": len(request_chunks) > 1,
         "chunk_count": len(request_chunks),
         "chunk_size": manifest.get("chunk_size"),
         "response_clause_reviews": response_clause_counts,
-        "merged_response_path": str(response_out.resolve()) if response_out else None,
+        "merged_response_path": str(response_out_path) if response_out_path else None,
+        "merge_receipt_path": str(merge_receipt_path.resolve()),
+        "aggregate_sha256": sha256_json(aggregate),
     }
-    if response_out:
-        response_out.parent.mkdir(parents=True, exist_ok=True)
-        write_json(response_out, aggregate)
-    manifest["merge"] = metadata
-    write_json(manifest_path, manifest)
+    receipt = {
+        "schema_version": "1.0",
+        "status": "merged",
+        "protocol": "host_agent_semantic_review",
+        "run_id": full_request.get("provenance", {}).get("run_id"),
+        "request_sha256": full_request.get("provenance", {}).get("request_sha256"),
+        **metadata,
+    }
+    artifacts = [(merge_receipt_path, receipt)]
+    if response_out_path:
+        artifacts.insert(0, (response_out_path, aggregate))
+    _write_json_artifacts_atomic(artifacts)
     return aggregate, metadata
 
 

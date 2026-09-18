@@ -20,16 +20,41 @@ import word_render_validate
 
 
 class WordRenderExportTest(unittest.TestCase):
-    def test_wait_for_document_accepts_macos_tmp_alias_and_returns_word_path(self) -> None:
-        with patch.object(
-            word_render_export,
-            "active_document_path",
-            return_value="/tmp/render/.final.docx.abc.docx",
-        ):
-            opened = word_render_export.wait_for_document(
-                "/private/tmp/render/.final.docx.abc.docx", 1
-            )
-        self.assertEqual(opened, "/tmp/render/.final.docx.abc.docx")
+    def test_wait_for_document_accepts_a_portable_alias_and_returns_word_path(self) -> None:
+        # Do not make the unit test depend on macOS's real /tmp -> /private/tmp
+        # alias.  The production resolver must compare canonical filesystem
+        # identities, so a syntactic alias inside a temporary directory tests
+        # the same behavior on every supported platform.
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            actual = root / "render" / ".final.docx.abc.docx"
+            actual.parent.mkdir()
+            actual.write_bytes(b"docx-placeholder")
+            expected = str(actual)
+            word_spelling = str(actual.parent / "." / actual.name)
+            with patch.object(
+                word_render_export,
+                "active_document_path",
+                return_value=word_spelling,
+            ):
+                opened = word_render_export.wait_for_document(expected, 1)
+            self.assertEqual(opened, word_spelling)
+
+    def test_wait_for_document_rejects_a_different_file_with_a_similar_name(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            expected = root / "render" / ".final.docx.abc.docx"
+            other = root / "other" / ".final.docx.abc.docx"
+            expected.parent.mkdir()
+            other.parent.mkdir()
+            expected.write_bytes(b"expected")
+            other.write_bytes(b"other")
+            with patch.object(
+                word_render_export,
+                "active_document_path",
+                return_value=str(other),
+            ), self.assertRaisesRegex(RuntimeError, "did not activate"):
+                word_render_export.wait_for_document(str(expected), 1)
 
     def test_repairs_stale_parallel_toc_targets_by_entry_order(self) -> None:
         with tempfile.TemporaryDirectory() as td:

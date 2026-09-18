@@ -6,7 +6,7 @@ build, old clause corpus, or old semantic response.  Each invocation receives
 its template inputs from a manifest and creates a new output directory.  The
 default fresh batch requires every case to use ``llm_primary`` and, with
 ``--auto-host-agent``, continues automatically from each fresh packet through
-the current OpenClaw Host Agent, offline provenance merge, and full
+the explicitly declared native host adapter, offline provenance merge, and full
 DOCX/declaration generation.  ``rule_only`` and ``known_template`` remain
 available only through the explicit ``--allow-supported-subset`` opt-in for
 development and compatibility regression runs.
@@ -24,6 +24,13 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = Path("inputs/ten-school-template-manifest.json")
+if str(ROOT / "scripts") not in sys.path:
+    sys.path.insert(0, str(ROOT / "scripts"))
+from host_runtime import (  # noqa: E402
+    HostRuntimeError,
+    automatic_adapter_id,
+    require_host_runtime,
+)
 
 
 def resolve_project_path(value: str | Path, *, label: str) -> Path:
@@ -301,6 +308,38 @@ def select_cases(cases: list[dict[str, Any]], requested: list[str] | None = None
     return [case for case in cases if str(case["id"]) in requested_ids]
 
 
+GLOBAL_FATAL_MARKERS = (
+    "host runtime mismatch",
+    "thesis_forge_host_runtime",
+    "no automatic adapter",
+    "parent session binding is missing",
+    "parent session key was not found",
+    "cannot inspect openclaw parent sessions",
+    "openclaw executable was not found",
+)
+
+
+def global_fatal_reason(result: dict[str, Any]) -> str | None:
+    """Return a reason that must stop the whole batch, not just one case."""
+    text_parts: list[str] = []
+    if isinstance(result.get("error"), str):
+        text_parts.append(result["error"])
+    stages = result.get("stages")
+    if isinstance(stages, dict):
+        for stage in stages.values():
+            if not isinstance(stage, dict):
+                continue
+            for key in ("stderr_tail", "stdout_tail", "error"):
+                if isinstance(stage.get(key), str):
+                    text_parts.append(stage[key])
+    combined = "\n".join(text_parts)
+    lowered = combined.lower()
+    for marker in GLOBAL_FATAL_MARKERS:
+        if marker in lowered:
+            return marker
+    return None
+
+
 def run_case(base: Path, source: Path, case: dict[str, Any], *, prepare_host_review: bool,
              auto_host_agent: bool = False, host_agent_timeout: int = 900,
              host_agent_max_concurrency: int = 4,
@@ -309,6 +348,7 @@ def run_case(base: Path, source: Path, case: dict[str, Any], *, prepare_host_rev
              host_agent_parent_session_key: str | None = None,
              host_agent_auth_env_only: bool = False,
              host_agent_runner: str = "exec",
+             host_runtime: str | None = None,
              inherit_parent_model: bool = True,
              host_review_chunk_size: int = 20,
              host_agent_id: str = "main", openclaw_bin: str | None = None,
@@ -373,6 +413,8 @@ def run_case(base: Path, source: Path, case: dict[str, Any], *, prepare_host_rev
             if host_agent_auth_env_only:
                 bridge_command.append("--auth-env-only")
             bridge_command.extend(["--runner", host_agent_runner])
+            if host_runtime:
+                bridge_command.extend(["--host-runtime", host_runtime])
             if host_agent_model:
                 bridge_command.extend(["--model", host_agent_model])
             elif inherit_parent_model:
@@ -429,7 +471,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument(
         "--auto-host-agent", action="store_true",
-        help="one command: fresh extraction -> current OpenClaw Host Agent -> full DOCX",
+        help="one command through the explicitly declared native host adapter",
+    )
+    parser.add_argument(
+        "--host-runtime",
+        help="expected native host runtime; must match THESIS_FORGE_HOST_RUNTIME",
     )
     parser.add_argument(
         "--allow-supported-subset", action="store_true",
@@ -444,13 +490,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--host-agent-model",
                         help="explicit OpenClaw model; omitted means copy the parent session modelOverride")
     parser.add_argument("--host-agent-parent-session-key",
-                        help="exact parent session key to use for modelOverride inheritance; otherwise auto-discover a recent parent")
+                        help="exact parent session key to use for route inheritance; never auto-discovered")
     parser.add_argument("--host-agent-auth-env-only", action="store_true",
                         help="pass --auth-env-only to OpenClaw and ignore stored provider credentials")
     parser.add_argument("--host-agent-runner", choices=("exec", "gateway"), default="exec",
                         help="OpenClaw invocation path used by --auto-host-agent (default: exec)")
     parser.add_argument("--no-host-agent-model-inheritance", action="store_true",
-                        help="do not copy a parent model when --host-agent-model is omitted")
+                        help="disable parent inheritance only with an explicit --host-agent-model route")
     parser.add_argument("--host-review-chunk-size", type=int, default=20,
                         help="clauses per fresh Host Agent packet (default: 20)")
     parser.add_argument("--host-agent-id", default="main",
@@ -493,6 +539,14 @@ def main(argv: list[str] | None = None) -> int:
         args.prepare_host_review or args.auto_host_agent
     ):
         parser.error("fresh-only batch requires --prepare-host-review or --auto-host-agent for llm_primary cases")
+    if args.auto_host_agent:
+        if args.no_host_agent_model_inheritance and not args.host_agent_model:
+            parser.error("--no-host-agent-model-inheritance requires --host-agent-model")
+        try:
+            runtime = require_host_runtime(args.host_runtime)
+            automatic_adapter_id(runtime)
+        except HostRuntimeError as exc:
+            parser.error(str(exc))
 
     neutral_reference = None
     if args.neutral_reference_docx:
@@ -508,6 +562,8 @@ def main(argv: list[str] | None = None) -> int:
     base.mkdir(parents=True, exist_ok=False)
 
     results: dict[str, Any] = {}
+    terminal_status = "completed"
+    global_stop_reason: str | None = None
 
     def write_batch_results() -> None:
         payload = {
@@ -525,6 +581,8 @@ def main(argv: list[str] | None = None) -> int:
             ),
             "allow_supported_subset": bool(args.allow_supported_subset),
             "canonical_case_order": [str(case["id"]) for case in selected],
+            "terminal_status": terminal_status,
+            "global_stop_reason": global_stop_reason,
             "cases": results,
         }
         (base / "run-results.json").write_text(
@@ -543,6 +601,7 @@ def main(argv: list[str] | None = None) -> int:
                 host_agent_parent_session_key=args.host_agent_parent_session_key,
                 host_agent_auth_env_only=args.host_agent_auth_env_only,
                 host_agent_runner=args.host_agent_runner,
+                host_runtime=args.host_runtime,
                 inherit_parent_model=not args.no_host_agent_model_inheritance,
                 host_review_chunk_size=args.host_review_chunk_size,
                 host_agent_id=args.host_agent_id,
@@ -562,8 +621,17 @@ def main(argv: list[str] | None = None) -> int:
         result["acceptance"] = case_acceptance(result)
         results[str(case["id"])] = result
         write_batch_results()
+        fatal_reason = global_fatal_reason(result)
+        if fatal_reason:
+            terminal_status = "stopped_global_fatal"
+            global_stop_reason = fatal_reason
+            write_batch_results()
+            break
 
-    print(f"\nALL DONE -> {base}")
+    if terminal_status == "stopped_global_fatal":
+        print(f"\nBATCH STOPPED ({global_stop_reason}) -> {base}")
+    else:
+        print(f"\nALL DONE -> {base}")
     failed = False
     for case_id, result in results.items():
         code = result.get("returncode")

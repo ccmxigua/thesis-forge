@@ -85,6 +85,17 @@ class BatchAcceptanceTests(unittest.TestCase):
             self.assertTrue(accepted["accepted"], accepted)
             self.assertEqual(accepted["status"], "accepted")
 
+    def test_host_binding_failure_is_global_batch_stop(self) -> None:
+        result = {
+            "returncode": 2,
+            "stages": {
+                "host_agent": {
+                    "stderr_tail": "host runtime mismatch: expected codex, observed openclaw",
+                },
+            },
+        }
+        self.assertEqual(batch.global_fatal_reason(result), "host runtime mismatch")
+
     def test_manifest_boundary_and_canonical_selection(self) -> None:
         if not batch.DEFAULT_MANIFEST.is_file():
             self.skipTest("external ten-school manifest is not included in this source checkout")

@@ -1,0 +1,161 @@
+{
+  "schema_version": "1.0",
+  "profile_id": "tju-academic-master-2025",
+  "title": "天津大学研究生学位论文统一格式（学术型硕士封面对象）",
+  "authority": {
+    "organization": "天津大学研究生院",
+    "source_url": "https://gs.tju.edu.cn/",
+    "effective_version": "2025-06-05"
+  },
+  "resources": [
+    {
+      "id": "official-template",
+      "path": "resources/academic-master-title-page.docx",
+      "sha256": "0960f5f5351c8e7693f2111bf5d47b0261ff01349ec382bbe133c48597b5d0c7",
+      "kind": "official_docx"
+    }
+  ],
+  "required_metadata": [
+    "cover_metadata.title_zh",
+    "cover_metadata.degree_discipline",
+    "cover_metadata.research_direction",
+    "cover_metadata.author_name",
+    "cover_metadata.supervisor_name"
+  ],
+  "structure": {
+    "ordered_roles": [
+      {
+        "role": "cover",
+        "selector": {
+          "kind": "paragraph",
+          "body_child_index": 1,
+          "text": "中文题目（宋体二号加粗）"
+        },
+        "required": true
+      },
+      {
+        "role": "body",
+        "selector": {
+          "kind": "paragraph",
+          "body_child_index": 15,
+          "normalized_text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "required": false
+      }
+    ]
+  },
+  "render_rules": {
+    "body_start_anchors": [
+      "第一章"
+    ],
+    "no_header_before_body": true,
+    "unnumbered_roles": [
+      "cover"
+    ]
+  },
+  "regions": {
+    "graph_id": "tju-academic-master-official-regions",
+    "source_section_policy": "discard",
+    "nodes": [
+      {
+        "id": "official_front_matter",
+        "kind": "fixed_protected",
+        "start_selector": {
+          "kind": "paragraph",
+          "body_child_index": 0,
+          "normalized_text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "end_selector": {
+          "kind": "paragraph",
+          "body_child_index": 14,
+          "text": "二〇XX年XX月"
+        },
+        "range_policy": "preserve_between",
+        "metadata_bindings": [
+          {
+            "field": "cover_metadata.title_zh",
+            "selector": {
+              "kind": "paragraph",
+              "body_child_index": 1,
+              "text": "中文题目（宋体二号加粗）"
+            },
+            "required": true,
+            "missing_policy": "error",
+            "replace_mode": "all_text"
+          },
+          {
+            "field": "cover_metadata.degree_discipline",
+            "selector": {
+              "kind": "paragraph",
+              "text": "一级学科：",
+              "match": "contains",
+              "body_child_index": 10
+            },
+            "required": true,
+            "missing_policy": "error",
+            "replace_mode": "after_prefix",
+            "prefix": "一级学科："
+          },
+          {
+            "field": "cover_metadata.research_direction",
+            "selector": {
+              "kind": "paragraph",
+              "text": "研究方向：",
+              "match": "contains",
+              "body_child_index": 10
+            },
+            "required": true,
+            "missing_policy": "error",
+            "replace_mode": "after_prefix",
+            "prefix": "研究方向："
+          },
+          {
+            "field": "cover_metadata.author_name",
+            "selector": {
+              "kind": "paragraph",
+              "text": "作者姓名：",
+              "match": "contains",
+              "body_child_index": 10
+            },
+            "required": true,
+            "missing_policy": "error",
+            "replace_mode": "after_prefix",
+            "prefix": "作者姓名："
+          },
+          {
+            "field": "cover_metadata.supervisor_name",
+            "selector": {
+              "kind": "paragraph",
+              "text": "指导教师：",
+              "match": "contains",
+              "body_child_index": 10
+            },
+            "required": true,
+            "missing_policy": "error",
+            "replace_mode": "after_prefix",
+            "prefix": "指导教师："
+          }
+        ]
+      },
+      {
+        "id": "body",
+        "kind": "dynamic_content",
+        "content_role": "body",
+        "start_selector": {
+          "kind": "paragraph",
+          "body_child_index": 15,
+          "normalized_text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        },
+        "end_boundary": "body_end",
+        "range_policy": "replace_between"
+      }
+    ],
+    "edges": [
+      {
+        "kind": "order",
+        "from": "official_front_matter",
+        "to": "body"
+      }
+    ]
+  }
+}

@@ -1,0 +1,11 @@
+# Reproducible dependencies for the deterministic parser/auditor test suite.
+# Microsoft Word itself is intentionally not a Python dependency; Word E2E
+# export is a macOS release-stage check rather than a portable CI prerequisite.
+# Keep pytest here so the portable test environment does not depend on PATH
+# exposing a user-site console script.
+pytest==9.1.1
+lxml==6.1.0
+python-docx==1.2.0
+PyMuPDF==1.27.2.3
+pypdf==6.6.2
+PyYAML==6.0.3

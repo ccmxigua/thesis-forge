@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://thesis-forge.local/schema/template-fixed-values.schema.json",
+  "title": "Audited template fixed values",
+  "type": "object",
+  "required": ["schema_version", "schools"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "schools": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "school_code": {"type": "string", "pattern": "^[0-9A-Za-z_-]+$"}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

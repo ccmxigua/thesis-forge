@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/thesis-latex2docx/assembly-plan.schema.json",
+  "title": "Compiled AssemblyPlan Result",
+  "type": "object",
+  "required": ["schema_version", "profile_id", "graph_id", "status", "template_path", "assembly_plan", "findings"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "profile_id": {"type": ["string", "null"]},
+    "graph_id": {"type": ["string", "null"]},
+    "status": {"enum": ["compiled", "invalid"]},
+    "template_path": {"type": ["string", "null"]},
+    "assembly_plan": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "type": "object",
+          "required": ["schema_version", "profile_id", "graph_id", "operations", "preconditions", "protection_assertions", "structural_postconditions"],
+          "properties": {
+            "schema_version": {"const": "1.0"},
+            "profile_id": {"type": ["string", "null"]},
+            "graph_id": {"type": ["string", "null"]},
+            "operations": {
+              "type": "array",
+              "items": {
+                "type": "object",
+                "required": ["sequence", "node_id", "kind", "action", "prerequisites", "locator", "range_locator", "content_role", "condition", "metadata_bindings"],
+                "properties": {
+                  "sequence": {"type": "integer", "minimum": 1},
+                  "node_id": {"type": "string"},
+                  "kind": {"enum": ["fixed_protected", "dynamic_content", "generated", "optional"]},
+                  "action": {"enum": ["preserve", "replace_content", "generate_content", "conditionally_assemble"]},
+                  "prerequisites": {"type": "array"},
+                  "locator": {"type": ["object", "null"]},
+                  "range_locator": {
+                    "oneOf": [
+                      {"type": "null"},
+                      {
+                        "type": "object",
+                        "required": ["start", "end", "policy"],
+                        "properties": {
+                          "start": {"type": "object"},
+                          "end": {"type": "object"},
+                          "policy": {"enum": ["replace_between", "preserve_between"]}
+                        },
+                        "additionalProperties": false
+                      }
+                    ]
+                  },
+                  "content_role": {"type": ["string", "null"]},
+                  "condition": {"type": ["string", "null"]},
+                  "metadata_bindings": {"type": "array", "items": {"type": "object"}}
+                },
+                "additionalProperties": false
+              }
+            },
+            "preconditions": {"type": "array"},
+            "protection_assertions": {"type": "array"},
+            "structural_postconditions": {"type": "array"}
+          },
+          "additionalProperties": false
+        }
+      ]
+    },
+    "findings": {"type": "array"}
+  },
+  "additionalProperties": false
+}

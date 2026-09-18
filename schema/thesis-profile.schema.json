@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.example/thesis-profile.schema.json",
+  "title": "Thesis Profile",
+  "type": "object",
+  "required": ["schema_version", "degree_level", "writing_language"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "degree_level": {"enum": ["master", "doctor", null]},
+    "degree_category": {"enum": ["academic", "professional"]},
+    "writing_language": {"enum": ["zh", "en", "other", null]},
+    "metadata_status": {"enum": ["complete", "pending"]},
+    "pending_fields": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "pending_metadata": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/pendingMetadata"}
+    },
+    "provenance": {"$ref": "#/$defs/provenance"},
+    "security_level": {"enum": ["public", "restricted", "classified"]},
+    "has_appendices": {"type": "boolean"},
+    "has_figure_list": {"type": "boolean"},
+    "has_table_list": {"type": "boolean"},
+    "has_symbol_list": {"type": "boolean"},
+    "co_supervisor_count": {"type": "integer", "minimum": 0, "maximum": 2},
+    "student_id": {"type": "string"},
+    "completion_date": {"type": "string", "pattern": "^\\d{4}-(?:0[1-9]|1[0-2])(?:-(?:0[1-9]|[12]\\d|3[01]))?$"},
+    "cover_metadata": {"$ref": "#/$defs/coverMetadata"}
+  },
+  "$defs": {
+    "coverMetadata": {
+      "type": "object",
+      "required": ["trust", "author_name", "title_zh", "title_en", "student_id", "supervisor_name", "completion_date"],
+      "properties": {
+        "trust": {
+          "type": "object",
+          "required": ["source", "confirmed"],
+          "properties": {
+            "source": {"enum": ["user_confirmed", "source_document", "authoritative_record"]},
+            "confirmed": {"const": true},
+            "note": {"type": "string"}
+          },
+          "additionalProperties": false
+        },
+        "classification_number": {"type": "string"},
+        "unit_code": {"type": "string", "minLength": 1},
+        "title_zh": {"type": "string", "minLength": 1},
+        "title_en": {"type": "string", "minLength": 1},
+        "subtitle_zh": {"type": "string"},
+        "subtitle_en": {"type": "string"},
+        "author_name": {"type": "string", "minLength": 1},
+        "student_id": {"type": "string", "minLength": 1},
+        "college_name": {"type": "string"},
+        "degree_discipline": {"type": "string"},
+        "professional_degree_type": {"type": "string"},
+        "program_name": {"type": "string"},
+        "field_name": {"type": "string"},
+        "research_direction": {"type": "string"},
+        "supervisor_name": {"type": "string", "minLength": 1},
+        "co_supervisors": {
+          "type": "array",
+          "maxItems": 2,
+          "items": {
+            "type": "object",
+            "required": ["name", "kind"],
+            "properties": {
+              "name": {"type": "string", "minLength": 1},
+              "kind": {"enum": ["academic", "enterprise", "other"]}
+            },
+            "additionalProperties": false
+          }
+        },
+        "completion_date": {"type": "string", "pattern": "^\\d{4}-(?:0[1-9]|1[0-2])(?:-(?:0[1-9]|[12]\\d|3[01]))?$"},
+        "security_marking": {"type": "string"},
+        "embargo_until": {"type": "string", "pattern": "^\\d{4}-(?:0[1-9]|1[0-2])(?:-(?:0[1-9]|[12]\\d|3[01]))?$"},
+        "administrative_verification": {"const": "external_required"}
+      },
+      "additionalProperties": false
+    },
+    "trustSpec": {
+      "type": "object",
+      "required": ["source", "confirmed"],
+      "properties": {
+        "source": {"enum": ["user_confirmed", "source_document", "authoritative_record"]},
+        "confirmed": {"const": true},
+        "note": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "pendingMetadata": {
+      "type": "object",
+      "required": ["field", "reason", "resolution"],
+      "properties": {
+        "field": {"type": "string", "minLength": 1},
+        "reason": {"enum": ["missing_source_value", "invalid_source_value", "ambiguous_source_value", "requires_user_confirmation"]},
+        "resolution": {"const": "supply_user_confirmed_value"}
+      },
+      "additionalProperties": false
+    },
+    "provenance": {
+      "type": "object",
+      "required": ["source_kind", "source_document", "normalizer", "trust", "field_sources"],
+      "properties": {
+        "source_kind": {"const": "semantic_metadata"},
+        "source_document": {"type": "string", "minLength": 1},
+        "source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "normalizer": {"const": "extract_semantic_metadata.normalize_semantic_metadata"},
+        "trust": {"$ref": "#/$defs/trustSpec"},
+        "field_sources": {"type": "object", "additionalProperties": {"type": "string", "minLength": 1}}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

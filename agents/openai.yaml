@@ -1,0 +1,7 @@
+interface:
+  display_name: "Thesis LaTeX/DOCX Formatter"
+  short_description: "Format theses with host-model semantic review"
+  default_prompt: "Use $thesis-latex2docx to format this thesis from the supplied university requirements and produce an audited DOCX."
+
+policy:
+  allow_implicit_invocation: true

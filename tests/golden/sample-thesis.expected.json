@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0",
+  "roles": {
+    "thesis_title_zh": {"minimum": 1},
+    "thesis_title_en": {"minimum": 1},
+    "figure": {"exact": 3},
+    "figure_caption": {"exact": 3},
+    "table": {"minimum": 2},
+    "table_caption": {"exact": 2},
+    "table_text": {"exact": 50},
+    "equation": {"exact": 6}
+  }
+}

@@ -1,0 +1,523 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.example/template-profile.schema.json",
+  "title": "Official DOCX Template Profile",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "profile_id",
+    "authority",
+    "resources",
+    "structure",
+    "render_rules"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "profile_id": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]+$"
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1
+    },
+    "authority": {
+      "type": "object",
+      "required": [
+        "organization",
+        "source_url",
+        "effective_version"
+      ],
+      "properties": {
+        "organization": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_url": {
+          "type": "string",
+          "minLength": 1
+        },
+        "effective_version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "published_date": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "resources": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "path",
+          "sha256",
+          "kind"
+        ],
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "path": {
+            "type": "string",
+            "minLength": 1
+          },
+          "sha256": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "kind": {
+            "enum": [
+              "official_docx",
+              "rules_pdf",
+              "reference_pdf",
+              "other"
+            ]
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "variants": {
+      "type": "object",
+      "properties": {
+        "selector": {
+          "type": "string"
+        },
+        "allowed": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "required": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "required_metadata": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true
+    },
+    "fixed_texts": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "text"
+        ],
+        "properties": {
+          "id": {
+            "type": "string"
+          },
+          "text": {
+            "type": "string",
+            "minLength": 1
+          },
+          "required": {
+            "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      }
+    },
+    "fixed_values": {
+      "type": "object",
+      "properties": {
+        "school_code": {
+          "type": "string",
+          "pattern": "^[0-9A-Za-z_-]+$"
+        }
+      },
+      "additionalProperties": false
+    },
+    "structure": {
+      "type": "object",
+      "required": [
+        "ordered_roles"
+      ],
+      "properties": {
+        "ordered_roles": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": [
+              "role"
+            ],
+            "anyOf": [
+              {"required": ["anchors"]},
+              {"required": ["selector"]},
+              {"required": ["selector_variants"]}
+            ],
+            "properties": {
+              "role": {
+                "type": "string"
+              },
+              "anchors": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "string"
+                }
+              },
+              "selector": {
+                "$ref": "#/$defs/nodeSelector"
+              },
+              "selector_variants": {
+                "type": "array",
+                "minItems": 1,
+                "items": {
+                  "type": "object",
+                  "required": ["when", "selector"],
+                  "properties": {
+                    "when": {
+                      "type": "object",
+                      "minProperties": 1,
+                      "additionalProperties": {
+                        "type": ["string", "number", "integer", "boolean"]
+                      }
+                    },
+                    "selector": {
+                      "$ref": "#/$defs/nodeSelector"
+                    }
+                  },
+                  "additionalProperties": false
+                }
+              },
+              "required": {
+                "type": "boolean"
+              },
+              "conditional": {
+                "type": "string"
+              },
+              "heading_level": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 9
+              },
+              "must_start_new_page": {
+                "type": "boolean"
+              },
+              "min_occurrences": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "max_occurrences": {
+                "type": "integer",
+                "minimum": 1
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "forbidden_toc_titles": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "forbidden_numbered_titles": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "render_rules": {
+      "type": "object",
+      "properties": {
+        "body_start_anchors": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        },
+        "no_header_before_body": {
+          "type": "boolean"
+        },
+        "header_markers": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "unnumbered_roles": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "numbering_phases": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "start_role",
+              "format",
+              "start"
+            ],
+            "properties": {
+              "start_role": {
+                "type": "string"
+              },
+              "format": {
+                "enum": [
+                  "roman",
+                  "roman_upper",
+                  "decimal"
+                ]
+              },
+              "start": {
+                "type": "integer",
+                "minimum": 1
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "same_page_roles": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "minItems": 2,
+            "maxItems": 2,
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "build": {
+      "type": "object",
+      "required": [
+        "locators",
+        "operations"
+      ],
+      "properties": {
+        "locators": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/nodeSelector"
+          }
+        },
+        "operations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "op",
+              "start",
+              "end"
+            ],
+            "properties": {
+              "op": {
+                "enum": [
+                  "keep_range",
+                  "delete_range",
+                  "replace_range_from_docx"
+                ]
+              },
+              "start": {
+                "type": "string",
+                "minLength": 1
+              },
+              "end": {
+                "type": "string",
+                "minLength": 1
+              },
+              "input": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "regions": {
+      "$ref": "#/$defs/regionGraph"
+    }
+  },
+  "$defs": {
+    "regionGraph": {
+      "type": "object",
+      "required": ["graph_id", "nodes", "edges"],
+      "properties": {
+        "graph_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$"},
+        "source_section_policy": {"enum": ["reject", "discard"]},
+        "nodes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "object",
+            "required": ["id", "kind"],
+            "properties": {
+              "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+              "kind": {"enum": ["fixed_protected", "dynamic_content", "generated", "optional"]},
+              "selector": {"$ref": "#/$defs/nodeSelector"},
+              "start_selector": {"$ref": "#/$defs/nodeSelector"},
+              "end_selector": {"$ref": "#/$defs/nodeSelector"},
+              "end_boundary": {"enum": ["body_end"]},
+              "range_policy": {"enum": ["replace_between", "preserve_between"]},
+              "condition": {"type": "string", "minLength": 1},
+              "content_role": {"type": "string", "minLength": 1},
+              "metadata_bindings": {
+                "type": "array",
+                "minItems": 1,
+                "items": {"$ref": "#/$defs/metadataBinding"}
+              }
+            },
+            "allOf": [
+              {
+                "if": {"properties": {"kind": {"const": "fixed_protected"}}, "required": ["kind"]},
+                "then": {
+                  "oneOf": [
+                    {"required": ["selector"], "not": {"anyOf": [{"required": ["start_selector"]}, {"required": ["end_selector"]}, {"required": ["range_policy"]}]}},
+                    {"required": ["start_selector", "end_selector", "range_policy"], "properties": {"range_policy": {"const": "preserve_between"}}, "not": {"required": ["selector"]}},
+                    {"required": ["start_selector", "end_boundary", "range_policy"], "properties": {"range_policy": {"const": "preserve_between"}}, "not": {"required": ["selector"]}}
+                  ]
+                }
+              },
+              {
+                "if": {"properties": {"kind": {"const": "dynamic_content"}}, "required": ["kind"]},
+                "then": {
+                  "oneOf": [
+                    {"required": ["selector"], "not": {"anyOf": [{"required": ["start_selector"]}, {"required": ["end_selector"]}, {"required": ["end_boundary"]}, {"required": ["range_policy"]}]}},
+                    {"required": ["start_selector", "end_selector", "range_policy"], "not": {"anyOf": [{"required": ["selector"]}, {"required": ["end_boundary"]}]}},
+                    {"required": ["start_selector", "end_boundary", "range_policy"], "not": {"anyOf": [{"required": ["selector"]}, {"required": ["end_selector"]}]}}
+                  ]
+                }
+              },
+              {
+                "if": {"properties": {"kind": {"const": "optional"}}, "required": ["kind"]},
+                "then": {
+                  "required": ["condition"],
+                  "oneOf": [
+                    {"required": ["selector"], "not": {"anyOf": [{"required": ["start_selector"]}, {"required": ["end_selector"]}, {"required": ["end_boundary"]}, {"required": ["range_policy"]}]}},
+                    {"required": ["start_selector", "end_selector", "range_policy", "content_role"], "not": {"anyOf": [{"required": ["selector"]}, {"required": ["end_boundary"]}]}},
+                    {"required": ["start_selector", "end_boundary", "range_policy", "content_role"], "not": {"anyOf": [{"required": ["selector"]}, {"required": ["end_selector"]}]}}
+                  ]
+                }
+              }
+            ],
+            "additionalProperties": false
+          }
+        },
+        "edges": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["kind", "from", "to"],
+            "properties": {
+              "kind": {"enum": ["order", "boundary", "section_policy"]},
+              "from": {"type": "string", "minLength": 1},
+              "to": {"type": "string", "minLength": 1},
+              "policy": {"type": "object", "minProperties": 1}
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "metadataBinding": {
+      "type": "object",
+      "required": ["field", "selector"],
+      "properties": {
+        "field": {"type": "string", "pattern": "^cover_metadata\\.[A-Za-z0-9_]+$"},
+        "selector": {"$ref": "#/$defs/nodeSelector"},
+        "required": {"type": "boolean"},
+        "missing_policy": {"enum": ["preserve", "error"]},
+        "replace_mode": {"enum": ["all_text", "after_prefix"]},
+        "prefix": {"type": "string", "minLength": 1},
+        "value_transform": {"enum": ["chinese_year_month"]}
+      },
+      "additionalProperties": false
+    },
+    "nodeSelector": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "enum": ["paragraph", "table"]
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1
+        },
+        "accepted_texts": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "match": {
+          "enum": ["exact", "starts_with", "contains"]
+        },
+        "style_id": {
+          "type": ["string", "null"]
+        },
+        "accepted_style_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": ["string", "null"]
+          }
+        },
+        "normalized_text_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "body_child_index": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "section_index": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "table_cell_path": {
+          "type": "object",
+          "required": ["table_index", "row_index", "cell_index", "cell_paragraph_index"],
+          "properties": {
+            "table_index": {"type": "integer", "minimum": 0},
+            "row_index": {"type": "integer", "minimum": 0},
+            "cell_index": {"type": "integer", "minimum": 0},
+            "cell_paragraph_index": {"type": "integer", "minimum": 0}
+          },
+          "additionalProperties": false
+        }
+      },
+      "anyOf": [
+        {"required": ["text"]},
+        {"required": ["normalized_text_sha256"]}
+      ],
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

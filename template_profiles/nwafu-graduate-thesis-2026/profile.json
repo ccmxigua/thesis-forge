@@ -1,0 +1,376 @@
+{
+  "schema_version": "1.0",
+  "profile_id": "nwafu-graduate-thesis-2026",
+  "title": "西北农林科技大学研究生学位论文格式示例（2026年3月附件）",
+  "authority": {
+    "organization": "西北农林科技大学研究生院（党委研究生工作部）",
+    "source_url": "https://yjshy.nwsuaf.edu.cn/xwgl/xwsy/xwlwxzgf/8ae4dda6e6be4ac6895f509d84bc68c3.htm",
+    "effective_version": "2026-03",
+    "published_date": "2024-03-14"
+  },
+  "resources": [
+    {
+      "id": "official_word_template",
+      "path": "resources/official-template.docx",
+      "sha256": "d1e569f1ac824e8d2c75c254bc93bec0ad5cdd7aaced56ae53f7f8049ba80c0c",
+      "kind": "official_docx"
+    },
+    {
+      "id": "official_writing_rules",
+      "path": "resources/rules.docx",
+      "sha256": "5268e0cf06d561fc10a31ed26acb867389780572f096b0a500cfa7566c704cc7",
+      "kind": "other"
+    },
+    {
+      "id": "official_reference_rules",
+      "path": "resources/references-rules.docx",
+      "sha256": "30e7137ab96ac550730f88b8262d75442d96a30e6e086cb676196fb23bfc94f4",
+      "kind": "other"
+    },
+    {
+      "id": "official_download_package",
+      "path": "resources/official-package.zip",
+      "sha256": "83d02baf7a3f30f0e716a7eeb3c4f3fb4ef4f9eaebc52707e858113608dc6313",
+      "kind": "other"
+    }
+  ],
+  "variants": {
+    "selector": "thesis_profile.degree_category",
+    "allowed": [
+      "academic",
+      "professional"
+    ],
+    "required": true
+  },
+  "required_metadata": [
+    "cover_metadata.title_zh",
+    "cover_metadata.title_en",
+    "cover_metadata.author_name",
+    "cover_metadata.student_id",
+    "cover_metadata.supervisor_name",
+    "cover_metadata.degree_discipline",
+    "cover_metadata.college_name",
+    "cover_metadata.completion_date"
+  ],
+  "fixed_texts": [
+    {
+      "id": "originality_declaration_2026",
+      "required": true,
+      "text": "本人声明：所呈交的学位论文是我个人在导师指导下独立进行的研究工作及取得的研究成果；论文中的研究数据及结果的获得完全符合学术道德的有关规定,如有违反，一切后果与法律责任均由本人承担。"
+    },
+    {
+      "id": "supervisor_commitment_2026",
+      "required": true,
+      "text": "本人承诺：我的研究生             所呈交的学位论文是在我指导下独立开展研究工作及取得的研究成果，并严格遵守学术道德的有关规定。如有违反，我愿接受按学校有关规定的处罚处理并承担相应导师连带责任。"
+    },
+    {
+      "id": "authorization_2026",
+      "required": true,
+      "text": "本学位论文的知识产权归属西北农林科技大学。本人及导师同意学校保存或向国家有关部门或机构送交论文的纸质版和电子版，允许论文被查阅和借阅；同意学校将本学位论文的全部或部分内容授权汇编录入《中国博士/硕士学位论文全文数据库》和《中国学位论文全文数据库》进行出版，并享受相关权益。"
+    }
+  ],
+  "structure": {
+    "ordered_roles": [
+      {
+        "role": "cover",
+        "selector_variants": [
+          {
+            "when": {
+              "degree_category": "academic"
+            },
+            "selector": {
+              "kind": "paragraph",
+              "text": "学术学位论文封面",
+              "match": "exact",
+              "body_child_index": 0,
+              "section_index": 0
+            }
+          },
+          {
+            "when": {
+              "degree_category": "professional"
+            },
+            "selector": {
+              "kind": "paragraph",
+              "text": "专业学位论文封面",
+              "match": "exact",
+              "body_child_index": 27,
+              "section_index": 0
+            }
+          }
+        ],
+        "required": true,
+        "must_start_new_page": true,
+        "min_occurrences": 1,
+        "max_occurrences": 1
+      },
+      {
+        "role": "cover_en",
+        "selector_variants": [
+          {
+            "when": {
+              "degree_category": "academic"
+            },
+            "selector": {
+              "kind": "paragraph",
+              "text": "for the Degree of",
+              "match": "exact",
+              "body_child_index": 57,
+              "section_index": 0
+            }
+          },
+          {
+            "when": {
+              "degree_category": "professional"
+            },
+            "selector": {
+              "kind": "paragraph",
+              "text": "for the Professional Degree of",
+              "match": "exact",
+              "body_child_index": 81,
+              "section_index": 0
+            }
+          }
+        ],
+        "required": true,
+        "must_start_new_page": true
+      },
+      {
+        "role": "title_page",
+        "required": true,
+        "must_start_new_page": true,
+        "selector": {
+          "kind": "paragraph",
+          "text": "西北农林科技大学博/硕士学位论文",
+          "match": "exact",
+          "body_child_index": 108,
+          "section_index": 0
+        }
+      },
+      {
+        "role": "funding_statement",
+        "required": false,
+        "must_start_new_page": true,
+        "selector": {
+          "kind": "paragraph",
+          "text": "本研究得到某某基金（编号：□□□）资助。(三号黑体)",
+          "match": "exact",
+          "body_child_index": 131,
+          "section_index": 0
+        }
+      },
+      {
+        "role": "declarations",
+        "required": true,
+        "must_start_new_page": true,
+        "selector": {
+          "kind": "paragraph",
+          "text": "研究生学位论文的独创性声明",
+          "match": "exact",
+          "body_child_index": 134,
+          "section_index": 0
+        }
+      },
+      {
+        "role": "declarations_en",
+        "required": false,
+        "must_start_new_page": true,
+        "selector": {
+          "kind": "paragraph",
+          "text": "Declaration on the Originality of Graduate Thesis",
+          "match": "exact",
+          "body_child_index": 163,
+          "section_index": 0
+        }
+      },
+      {
+        "role": "authorization_en",
+        "required": false,
+        "must_start_new_page": true,
+        "selector": {
+          "kind": "paragraph",
+          "text": "Authorization to Use the Graduate Thesis",
+          "match": "exact",
+          "body_child_index": 182,
+          "section_index": 1
+        }
+      },
+      {
+        "role": "abstract_cn",
+        "required": true,
+        "must_start_new_page": true,
+        "selector": {
+          "kind": "paragraph",
+          "text": "摘要",
+          "match": "contains",
+          "style_id": "1",
+          "body_child_index": 199,
+          "section_index": 2
+        }
+      },
+      {
+        "role": "keywords_cn",
+        "required": true,
+        "selector": {
+          "kind": "paragraph",
+        "text": "关键词：",
+        "match": "contains",
+        "style_id": "a7",
+        "accepted_style_ids": [
+          "NWAFUKeywordsZH"
+        ],
+        "body_child_index": 221,
+          "section_index": 2
+        }
+      },
+      {
+        "role": "abstract_en",
+        "required": true,
+        "must_start_new_page": true,
+        "selector": {
+          "kind": "paragraph",
+          "text": "ABSTRACT",
+          "match": "contains",
+          "style_id": "1",
+          "body_child_index": 225,
+          "section_index": 3
+        }
+      },
+      {
+        "role": "keywords_en",
+        "required": true,
+        "selector": {
+          "kind": "paragraph",
+        "text": "Key Words:",
+        "match": "contains",
+        "style_id": "a7",
+        "accepted_style_ids": [
+          "NWAFUKeywordsEN"
+        ],
+        "body_child_index": 246,
+          "section_index": 3
+        }
+      },
+      {
+        "role": "toc",
+        "required": true,
+        "must_start_new_page": true,
+        "selector": {
+          "kind": "paragraph",
+          "text": "目录",
+          "match": "contains",
+          "style_id": "TOC",
+          "body_child_index": 249,
+          "section_index": 4
+        }
+      },
+      {
+        "role": "body",
+        "required": true,
+        "must_start_new_page": true,
+        "selector": {
+          "kind": "paragraph",
+          "text": "第一章  XXXXX",
+          "match": "contains",
+          "style_id": "1",
+          "body_child_index": 253,
+          "section_index": 5
+        }
+      },
+      {
+        "role": "references",
+        "required": true,
+        "must_start_new_page": true,
+        "selector": {
+          "kind": "paragraph",
+          "text": "参考文献",
+          "match": "exact",
+          "style_id": "1",
+          "body_child_index": 308,
+          "section_index": 7
+        }
+      }
+    ],
+    "forbidden_toc_titles": [
+      "目录"
+    ],
+    "forbidden_numbered_titles": [
+      "摘要",
+      "ABSTRACT",
+      "目录",
+      "参考文献",
+      "附录",
+      "致谢",
+      "个人简历"
+    ]
+  },
+  "render_rules": {
+    "body_start_anchors": [
+      "第一章",
+      "第1章"
+    ],
+    "no_header_before_body": false,
+    "header_markers": [
+      "西北农林科技大学博士学位论文",
+      "西北农林科技大学硕士学位论文",
+      "西北农林科技大学博/硕士学位论文"
+    ],
+    "unnumbered_roles": [
+      "cover",
+      "cover_en",
+      "title_page",
+      "funding_statement",
+      "declarations",
+      "declarations_en",
+      "authorization_en"
+    ],
+    "numbering_phases": [
+      {
+        "start_role": "abstract_cn",
+        "format": "roman_upper",
+        "start": 1
+      },
+      {
+        "start_role": "body",
+        "format": "decimal",
+        "start": 1
+      }
+    ],
+    "same_page_roles": [
+      [
+        "abstract_cn",
+        "keywords_cn"
+      ],
+      [
+        "abstract_en",
+        "keywords_en"
+      ]
+    ]
+  },
+  "build": {
+    "locators": {
+      "originality_fixed": {
+        "kind": "paragraph",
+        "text": "本人声明：所呈交的学位论文是我个人在导师指导下独立进行的研究工作",
+        "match": "starts_with",
+        "body_child_index": 135,
+        "section_index": 0
+      },
+      "supervisor_commitment_fixed": {
+        "kind": "paragraph",
+        "text": "本人承诺：我的研究生",
+        "match": "starts_with",
+        "body_child_index": 143,
+        "section_index": 0
+      },
+      "authorization_fixed": {
+        "kind": "paragraph",
+        "text": "本学位论文的知识产权归属西北农林科技大学",
+        "match": "starts_with",
+        "body_child_index": 150,
+        "section_index": 0
+      }
+    },
+    "operations": []
+  }
+}

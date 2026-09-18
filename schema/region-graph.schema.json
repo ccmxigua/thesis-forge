@@ -1,0 +1,154 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.example/region-graph.schema.json",
+  "title": "Template Region Graph Declaration",
+  "type": "object",
+  "required": ["graph_id", "nodes", "edges"],
+  "properties": {
+    "graph_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$"},
+    "source_section_policy": {"enum": ["reject", "discard"]},
+    "nodes": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/node"}
+    },
+    "edges": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/edge"}
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "node": {
+      "type": "object",
+      "required": ["id", "kind"],
+      "properties": {
+        "id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]*$"},
+        "kind": {"enum": ["fixed_protected", "dynamic_content", "generated", "optional"]},
+        "selector": {"$ref": "#/$defs/nodeSelector"},
+        "start_selector": {"$ref": "#/$defs/nodeSelector"},
+        "end_selector": {"$ref": "#/$defs/nodeSelector"},
+        "end_boundary": {"enum": ["body_end"]},
+        "range_policy": {"enum": ["replace_between", "preserve_between"]},
+        "condition": {"type": "string", "minLength": 1},
+        "content_role": {"type": "string", "minLength": 1},
+        "metadata_bindings": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"$ref": "#/$defs/metadataBinding"}
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"kind": {"const": "fixed_protected"}}, "required": ["kind"]},
+          "then": {
+            "oneOf": [
+              {"required": ["selector"], "not": {"anyOf": [{"required": ["start_selector"]}, {"required": ["end_selector"]}, {"required": ["range_policy"]}]}},
+              {"required": ["start_selector", "end_selector", "range_policy"], "properties": {"range_policy": {"const": "preserve_between"}}, "not": {"required": ["selector"]}},
+              {"required": ["start_selector", "end_boundary", "range_policy"], "properties": {"range_policy": {"const": "preserve_between"}}, "not": {"required": ["selector"]}}
+            ]
+          }
+        },
+        {
+          "if": {"properties": {"kind": {"const": "dynamic_content"}}, "required": ["kind"]},
+          "then": {
+            "oneOf": [
+              {"required": ["selector"], "not": {"anyOf": [{"required": ["start_selector"]}, {"required": ["end_selector"]}, {"required": ["range_policy"]}]}},
+              {"required": ["start_selector", "end_selector", "range_policy"], "not": {"anyOf": [{"required": ["selector"]}, {"required": ["end_boundary"]}]}},
+              {"required": ["start_selector", "end_boundary", "range_policy"], "not": {"anyOf": [{"required": ["selector"]}, {"required": ["end_selector"]}]}}
+            ]
+          }
+        },
+        {
+          "if": {"properties": {"kind": {"const": "optional"}}, "required": ["kind"]},
+          "then": {
+            "required": ["condition"],
+            "oneOf": [
+              {"required": ["selector"], "not": {"anyOf": [{"required": ["start_selector"]}, {"required": ["end_selector"]}, {"required": ["end_boundary"]}, {"required": ["range_policy"]}]}},
+              {"required": ["start_selector", "end_selector", "range_policy", "content_role"], "not": {"anyOf": [{"required": ["selector"]}, {"required": ["end_boundary"]}]}},
+              {"required": ["start_selector", "end_boundary", "range_policy", "content_role"], "not": {"anyOf": [{"required": ["selector"]}, {"required": ["end_selector"]}]}}
+            ]
+          }
+        }
+      ],
+      "additionalProperties": false
+    },
+    "edge": {
+      "type": "object",
+      "required": ["kind", "from", "to"],
+      "properties": {
+        "kind": {"enum": ["order", "boundary", "section_policy"]},
+        "from": {"type": "string", "minLength": 1},
+        "to": {"type": "string", "minLength": 1},
+        "policy": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {
+            "type": ["string", "number", "integer", "boolean", "null"]
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"kind": {"enum": ["boundary", "section_policy"]}}, "required": ["kind"]},
+          "then": {"required": ["policy"]}
+        }
+      ],
+      "additionalProperties": false
+    },
+    "metadataBinding": {
+      "type": "object",
+      "required": ["field", "selector"],
+      "properties": {
+        "field": {"type": "string", "pattern": "^cover_metadata\\.[A-Za-z0-9_]+$"},
+        "selector": {"$ref": "#/$defs/nodeSelector"},
+        "required": {"type": "boolean"},
+        "missing_policy": {"enum": ["preserve", "error"]},
+        "replace_mode": {"enum": ["all_text", "after_prefix"]},
+        "prefix": {"type": "string", "minLength": 1},
+        "value_transform": {"enum": ["chinese_year_month"]}
+      },
+      "additionalProperties": false
+    },
+    "nodeSelector": {
+      "type": "object",
+      "properties": {
+        "kind": {"enum": ["paragraph", "table"]},
+        "text": {"type": "string", "minLength": 1},
+        "accepted_texts": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "match": {"enum": ["exact", "starts_with", "contains"]},
+        "normalized_text_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "style_id": {"type": ["string", "null"]},
+        "accepted_style_ids": {
+          "type": "array",
+          "items": {"type": ["string", "null"]},
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "body_child_index": {"type": "integer", "minimum": 0},
+        "section_index": {"type": "integer", "minimum": 0},
+        "table_cell_path": {
+          "type": "object",
+          "required": ["table_index", "row_index", "cell_index", "cell_paragraph_index"],
+          "properties": {
+            "table_index": {"type": "integer", "minimum": 0},
+            "row_index": {"type": "integer", "minimum": 0},
+            "cell_index": {"type": "integer", "minimum": 0},
+            "cell_paragraph_index": {"type": "integer", "minimum": 0}
+          },
+          "additionalProperties": false
+        }
+      },
+      "anyOf": [
+        {"required": ["text"]},
+        {"required": ["normalized_text_sha256"]}
+      ],
+      "additionalProperties": false
+    }
+  }
+}

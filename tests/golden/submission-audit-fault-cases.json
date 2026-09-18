@@ -1,0 +1,54 @@
+{
+  "schema_version": "1.0",
+  "description": "School-neutral, synthetic submission-audit failures. Tests generate minimal DOCX/PDF artifacts at runtime; no private thesis content is stored.",
+  "cases": [
+    {
+      "id": "missing-page-field",
+      "artifact": "docx",
+      "mutation": "omit_page_field",
+      "expected_issue_codes": ["missing_serialized_page_fields", "page_field_section_coverage_or_format_mismatch"]
+    },
+    {
+      "id": "missing-styleref",
+      "artifact": "docx",
+      "mutation": "omit_styleref_and_use_generic_degree_header",
+      "expected_issue_codes": ["missing_serialized_styleref", "unresolved_degree_header_placeholder"]
+    },
+    {
+      "id": "source-markers",
+      "artifact": "docx",
+      "mutation": "insert_unresolved_reference_markers",
+      "expected_issue_codes": ["unresolved_source_marker_bracket_reference", "unresolved_source_marker_latex_ref", "duplicate_equation_reference_prefix"]
+    },
+    {
+      "id": "chapter-claim-mismatch",
+      "artifact": "docx",
+      "mutation": "claim_six_chapters_but_emit_three",
+      "expected_issue_codes": ["chapter_count_claim_mismatch"]
+    },
+    {
+      "id": "word-render-error",
+      "artifact": "pdf",
+      "mutation": "insert_word_reference_error",
+      "expected_render_failure_codes": ["rendered_pdf_contains_word_errors"]
+    },
+    {
+      "id": "missing-rendered-page-number",
+      "artifact": "pdf",
+      "mutation": "omit_all_footer_page_numbers",
+      "expected_render_failure_codes": ["rendered_pdf_no_footer_page_number_candidates"]
+    },
+    {
+      "id": "discontinuous-rendered-page-number",
+      "artifact": "pdf",
+      "mutation": "emit_footer_page_numbers_1_and_3",
+      "expected_render_failure_codes": ["rendered_pdf_page_number_sequence_discontinuous"]
+    },
+    {
+      "id": "wrong-rendered-page-geometry",
+      "artifact": "pdf",
+      "mutation": "emit_non_a4_landscape_page",
+      "expected_render_failure_codes": ["rendered_pdf_page_size_mismatch", "rendered_pdf_page_orientation_mismatch"]
+    }
+  ]
+}

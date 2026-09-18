@@ -6,13 +6,45 @@
 \usepackage{longtable}
 \usepackage{hyperref}
 
+% ===== 合成测试元数据 =====
+% 以下个人、组织、编号和日期均为虚构数据，仅用于端到端格式测试。
 \title{基于机器学习的城市交通流预测方法研究}
+\englishtitle{Research on Urban Traffic Flow Prediction Methods Based on Machine Learning}
+\subtitle{面向多模板学位论文转换的示例研究}
+\englishsubtitle{An Example Study for Multi-Template Thesis Conversion}
+\author{测试学生甲}
+\authoren{Test Student A}
+\advisor{测试导师乙 教授}
+\advisoren{Prof. Test Advisor B}
+\coadvisor{测试合作导师丙 副教授}
+\coadvisoren{Assoc. Prof. Test Co-advisor C}
+\school{智能交通与数据科学学院}
+\schoolen{School of Intelligent Transportation and Data Science}
+\major{交通信息工程及控制}
+\majoren{Traffic Information Engineering and Control}
+\firstdiscipline{交通运输工程}
+\seconddiscipline{交通信息工程及控制}
+\researchdirection{交通大数据与智能计算}
+\researchdirectionen{Transportation Big Data and Intelligent Computing}
+\studentid{TEST20260001}
+\classificationnumber{U491.1}
+\udc{656.13}
+\confidentialitylevel{公开}
+\confidentialitylevelen{Public}
+\submitdate{2026年6月}
+\submitdateen{June 2026}
+\defensedate{2026年5月20日}
+\defensedateen{May 20, 2026}
+\degreeconferraldate{2026年6月30日}
+\degreeconferraldateen{June 30, 2026}
+\degreedisplay{工学硕士学位论文}
+\degreedisplayen{Thesis for the Degree of Master of Engineering}
 
 \begin{document}
 
 % ===== 中文摘要 =====
 \begin{abstract}
-随着城市化进程的加速，城市交通拥堵问题日益严重，精准的交通流预测对智能交通系统建设具有重要意义。本文系统梳理了交通流预测领域的研究现状，分析了传统统计模型与深度学习模型的优缺点。在此基础上，提出了一种融合注意力机制的时空图卷积网络模型。该模型通过图卷积网络捕捉路网拓扑结构中的空间依赖关系，利用门控循环单元提取时间序列特征，并通过多头注意力机制增强长距离依赖建模能力。实验结果表明，所提模型在PeMSD4和PeMSD8数据集上的预测精度均优于基线模型，平均绝对误差降低幅度达到百分之八以上。此外，本文还对模型的可解释性进行了分析，探讨了不同类型的注意力头在时空建模中的实际作用。全文包含六章内容，系统地阐述了从问题提出到模型构建、实验验证及结论总结的完整研究过程。
+随着城市化进程的加速，城市交通拥堵问题日益严重，精准的交通流预测对智能交通系统建设具有重要意义。本文系统梳理了交通流预测领域的研究现状，分析了传统统计模型与深度学习模型的优缺点。在此基础上，提出了一种融合注意力机制的时空图卷积网络模型。该模型通过图卷积网络捕捉路网拓扑结构中的空间依赖关系，利用门控循环单元提取时间序列特征，并通过多头注意力机制增强长距离依赖建模能力。实验结果表明，所提模型在PeMSD4和PeMSD8数据集上的预测精度均优于基线模型，平均绝对误差降低幅度达到百分之八以上。此外，本文还对模型的可解释性进行了分析，探讨了不同类型的注意力头在时空建模中的实际作用。全文包含三章编号正文，系统地阐述了从问题提出到模型构建及方法说明的研究过程；实验环境与补充结果另列于附录。
 
 交通流预测是智能交通系统中的核心技术问题。随着传感器技术的普及和海量交通数据的积累，数据驱动的预测方法逐渐成为主流。然而，现有方法在建模复杂的时空依赖关系时仍面临诸多挑战。本文的创新点主要体现在三个方面：第一，设计了一种自适应邻接矩阵，能够动态调整路网节点之间的连接权重；第二，提出了时空联合嵌入表示，将时间和空间信息融合到一个统一的向量空间中；第三，引入了课程学习策略，通过由易到难的训练方式提升模型的泛化性能。
 \end{abstract}
@@ -21,7 +53,7 @@
 
 % ===== 英文摘要 =====
 \begin{abstract}[english]
-With the acceleration of urbanization, urban traffic congestion has become increasingly severe. Accurate traffic flow prediction is of great significance for the construction of intelligent transportation systems. This thesis systematically reviews the current state of research in the field of traffic flow prediction and analyzes the strengths and weaknesses of traditional statistical models and deep learning models. On this basis, a spatio-temporal graph convolutional network model integrating attention mechanisms is proposed. The model captures spatial dependencies in road network topology through graph convolutional networks, extracts temporal features using gated recurrent units, and enhances long-range dependency modeling capability through multi-head attention mechanisms. Experimental results demonstrate that the proposed model outperforms baseline models on both the PeMSD4 and PeMSD8 datasets, with a reduction in mean absolute error exceeding eight percent. Furthermore, this thesis analyzes the interpretability of the model and explores the practical roles of different types of attention heads in spatio-temporal modeling. The thesis consists of six chapters, systematically presenting the complete research process from problem formulation to model construction, experimental validation, and conclusion summarization.
+With the acceleration of urbanization, urban traffic congestion has become increasingly severe. Accurate traffic flow prediction is of great significance for the construction of intelligent transportation systems. This thesis systematically reviews the current state of research in the field of traffic flow prediction and analyzes the strengths and weaknesses of traditional statistical models and deep learning models. On this basis, a spatio-temporal graph convolutional network model integrating attention mechanisms is proposed. The model captures spatial dependencies in road network topology through graph convolutional networks, extracts temporal features using gated recurrent units, and enhances long-range dependency modeling capability through multi-head attention mechanisms. Experimental results demonstrate that the proposed model outperforms baseline models on both the PeMSD4 and PeMSD8 datasets, with a reduction in mean absolute error exceeding eight percent. Furthermore, this thesis analyzes the interpretability of the model and explores the practical roles of different types of attention heads in spatio-temporal modeling. The numbered body of this thesis consists of three chapters, systematically presenting the research process from problem formulation to model construction and method implementation; experimental settings and supplementary results are provided in the appendices.
 
 Traffic flow prediction is a core technical problem in intelligent transportation systems. With the widespread deployment of sensors and the accumulation of massive traffic data, data-driven prediction methods have gradually become mainstream. However, existing methods still face many challenges in modeling complex spatio-temporal dependencies. The innovations of this thesis are mainly reflected in three aspects: first, an adaptive adjacency matrix is designed that can dynamically adjust the connection weights between road network nodes; second, a spatio-temporal joint embedding representation is proposed, integrating temporal and spatial information into a unified vector space; third, a curriculum learning strategy is introduced to enhance the generalization performance of the model through an easy-to-hard training approach.
 \end{abstract}
@@ -50,7 +82,7 @@ Traffic flow prediction is a core technical problem in intelligent transportatio
 本文围绕城市交通流预测问题展开研究，主要工作和创新点包括以下方面：提出了一种融合多头注意力机制的时空图卷积网络模型，设计了自适应邻接矩阵以动态建模路网空间依赖关系，引入了时空联合嵌入表示方法，并采用课程学习策略提升模型训练效果。
 
 \section{论文的结构安排}
-本文共分为六章。第一章介绍研究背景和意义，综述国内外研究现状，明确本文的研究内容和创新点。第二章介绍相关的理论基础，包括图卷积网络、循环神经网络和注意力机制。第三章详细阐述本文提出的模型结构。第四章介绍实验设计和结果分析。第五章对全文进行总结，并展望未来的研究方向。此外，本文还包含参考文献、附录和致谢等部分。
+本文编号正文共分为三章。第一章介绍研究背景和意义，综述国内外研究现状，明确本文的研究内容和创新点。第二章介绍相关的理论基础，包括图卷积网络、循环神经网络和注意力机制。第三章详细阐述本文提出的模型结构与实现方法。此外，本文还包含参考文献、附录、致谢和攻读硕士学位期间的学术成果等部分。
 
 % ===== 第2章 相关理论基础（含图表） =====
 \chapter{相关理论基础}
@@ -59,7 +91,7 @@ Traffic flow prediction is a core technical problem in intelligent transportatio
 
 \begin{figure}[htbp]
 \centering
-\rule{0.75\textwidth}{4cm}
+\includegraphics[width=0.75\textwidth]{assets/gcn-aggregation.png}
 \caption{图卷积网络的信息聚合过程示意图}
 \label{fig:gcn}
 \end{figure}
@@ -71,7 +103,7 @@ Traffic flow prediction is a core technical problem in intelligent transportatio
 
 \begin{figure}[htbp]
 \centering
-\rule{0.65\textwidth}{3.5cm}
+\includegraphics[width=0.65\textwidth]{assets/gru-structure.png}
 \caption{门控循环单元的内部结构}
 \label{fig:gru}
 \end{figure}
@@ -83,7 +115,7 @@ Traffic flow prediction is a core technical problem in intelligent transportatio
 
 \begin{figure}[htbp]
 \centering
-\rule{0.7\textwidth}{3cm}
+\includegraphics[width=0.7\textwidth]{assets/multihead-attention.png}
 \caption{多头注意力机制的计算流程}
 \label{fig:attention}
 \end{figure}
@@ -224,9 +256,9 @@ Zheng C, Fan X, Wang C, et al. GMAN: A Graph Multi-Attention Network for Traffic
 
 % ===== 后记 =====
 \acknowledgments{
-时光荏苒，博士求学生涯即将画上句号。回首过去的几年，感慨万千。
+时光荏苒，硕士求学生涯即将画上句号。回首过去的几年，感慨万千。
 
-首先，衷心感谢我的导师张教授。在博士学习期间，张老师不仅在学术研究上给予我悉心指导，还在生活中给予我无私关怀。张老师严谨的治学态度、开阔的学术视野和谦逊的人格魅力，将永远是我学习的榜样。
+首先，衷心感谢我的导师张教授。在硕士学习期间，张老师不仅在学术研究上给予我悉心指导，还在生活中给予我无私关怀。张老师严谨的治学态度、开阔的学术视野和谦逊的人格魅力，将永远是我学习的榜样。
 
 感谢实验室的各位同门，与你们一起度过的时光是我人生中最宝贵的财富。特别感谢李明同学在实验设计和论文写作过程中提供的帮助和建议。感谢我的室友王磊，在无数个挑灯夜读的夜晚，我们互相鼓励、共同进步。
 
@@ -234,7 +266,17 @@ Zheng C, Fan X, Wang C, et al. GMAN: A Graph Multi-Attention Network for Traffic
 
 最后，感谢百忙之中参与本文评审和答辩的各位专家老师，你们的宝贵意见将使本文更加完善。
 
-博士生涯的结束不是终点，而是新征程的起点。我将带着在这里收获的知识和友谊，继续探索未知的世界。
+硕士生涯的结束不是终点，而是新征程的起点。我将带着在这里收获的知识和友谊，继续探索未知的世界。
 }
+
+% ===== 在学期间研究成果（仅用于端到端格式测试） =====
+% 以下条目均为虚构测试数据，不代表任何真实作者的学术成果。
+\chapter{在学期间发表的学术论文与研究成果}
+
+本节内容仅用于验证论文转换管线对学术成果章节的识别、装配和格式处理能力，所有名称、题目和出版信息均为虚构测试数据。
+
+\noindent （1）测试作者甲，测试作者乙．面向论文格式转换的结构化文档处理方法[J]．示例学术期刊，2025，1(1)：1--10．
+
+\noindent （2）测试作者甲．多模板学位论文自动排版系统的设计与实现[C]．示例学术会议，2025：20--28．
 
 \end{document}

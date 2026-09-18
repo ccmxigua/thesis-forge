@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.example/regression-baseline.schema.json",
+  "title": "Normalized multi-case pipeline regression baseline",
+  "type": "object",
+  "required": ["schema_version", "cases"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "source_root": {"type": "string"},
+    "generated_at": {"type": "string"},
+    "cases": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["case_id", "manifest_path", "manifest_sha256", "status", "steps"],
+        "properties": {
+          "case_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9._-]*$"},
+          "manifest_path": {"type": "string"},
+          "manifest_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "status": {"enum": ["running", "blocked", "failed", "completed", "unknown"]},
+          "reason": {"type": ["string", "null"]},
+          "pipeline_level": {"type": ["string", "null"]},
+          "compliance_mode": {"type": ["string", "null"]},
+          "overall_status": {"type": ["string", "null"]},
+          "pipeline_valid": {"type": ["boolean", "null"]},
+          "supported_subset_valid": {"type": ["boolean", "null"]},
+          "serialized_docx_valid": {"type": ["boolean", "null"]},
+          "submission_ready": {"type": ["boolean", "null"]},
+          "docx_fully_compliant": {"type": ["boolean", "null"]},
+          "output_artifact": {"type": ["object", "null"]},
+          "steps": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": ["name", "returncode"],
+              "properties": {
+                "name": {"type": "string"},
+                "returncode": {"type": "integer"}
+              },
+              "additionalProperties": false
+            }
+          },
+          "blocking_reasons": {"type": "array", "items": {"type": "string"}},
+          "finding_codes": {"type": "array", "items": {"type": "string"}},
+          "counts": {"type": "object", "additionalProperties": {"type": "integer"}}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

@@ -1,0 +1,346 @@
+{
+  "schema_version": "1.0",
+  "profile_id": "cau-graduate-thesis-2025-winter",
+  "title": "中国农业大学研究生学位论文模板（2025冬）",
+  "authority": {
+    "organization": "中国农业大学",
+    "source_url": "https://cab.cau.edu.cn/art/2026/1/28/art_48176_1098163.html",
+    "effective_version": "2025-winter",
+    "published_date": "2026-01-28"
+  },
+  "resources": [
+    {
+      "id": "official_word_template",
+      "path": "resources/official-template.docx",
+      "sha256": "7f27268b043e1f2538aad848a18182c0509e6951fd863d040383e812b8307fdf",
+      "kind": "official_docx"
+    },
+    {
+      "id": "official_format_rules",
+      "path": "resources/rules.pdf",
+      "sha256": "fcfcd354c15e7a0109d6f80460ef4d6787fc0274c4fc1dcc493047c81baaa5e2",
+      "kind": "rules_pdf"
+    },
+    {
+      "id": "official_latex_reference",
+      "path": "resources/reference.pdf",
+      "sha256": "eae6be739794145965cb9615cd30949a09f43535daaa9f0c7fddd7fd1f9931cc",
+      "kind": "reference_pdf"
+    }
+  ],
+  "variants": {
+    "selector": "thesis_profile.degree_category",
+    "allowed": [
+      "academic",
+      "professional"
+    ],
+    "required": true
+  },
+  "required_metadata": [
+    "cover_metadata.classification_number",
+    "cover_metadata.title_zh",
+    "cover_metadata.title_en",
+    "cover_metadata.author_name",
+    "cover_metadata.student_id",
+    "cover_metadata.supervisor_name",
+    "cover_metadata.degree_discipline",
+    "cover_metadata.program_name",
+    "cover_metadata.research_direction",
+    "cover_metadata.college_name",
+    "cover_metadata.completion_date"
+  ],
+  "fixed_texts": [
+    {
+      "id": "originality_declaration_2025",
+      "required": true,
+      "text": "本人声明所呈交的学位论文是我个人在导师指导下进行的研究工作及取得的研究成果。尽我所知，除了文中已经注明引用、已经声明生成式人工智能使用情况和致谢的内容外，论文中不包含其他人已经发表或撰写过的研究成果，不包含使用生成式人工智能直接生成的内容，也不包含本人为获得中国农业大学或其他教育机构的学位或证书而使用过的材料。与我一同工作的同志对本研究所做的任何贡献均已在论文中作了明确的说明并表达了谢意。"
+    },
+    {
+      "id": "authorization_2025",
+      "required": true,
+      "text": "本人完全了解中国农业大学有关保留、使用学位论文的规定。本人同意中国农业大学有权保存及向国家有关部门和机构送交论文的纸质版和电子版，允许论文被查阅和借阅。"
+    },
+    {
+      "id": "confidentiality_note",
+      "required": true,
+      "text": "(保密的学位论文在解密后应遵守此协议)"
+    }
+  ],
+  "structure": {
+    "ordered_roles": [
+      {
+        "role": "cover",
+        "anchors": [
+          "硕士/博士学位论文",
+          "中国农业大学博士学位论文",
+          "中国农业大学硕士学位论文"
+        ],
+        "selector_variants": [
+          {
+            "when": {"degree_category": "academic"},
+            "selector": {
+              "kind": "paragraph",
+              "text": "硕士/博士学位论文",
+              "match": "exact",
+              "body_child_index": 7
+            }
+          },
+          {
+            "when": {"degree_category": "professional"},
+            "selector": {
+              "kind": "paragraph",
+              "text": "硕士/博士学位论文",
+              "match": "exact",
+              "body_child_index": 41
+            }
+          }
+        ],
+        "required": true,
+        "must_start_new_page": true,
+        "min_occurrences": 1,
+        "max_occurrences": 1
+      },
+      {
+        "role": "declarations",
+        "anchors": [
+          "独 创 性 声 明",
+          "独创性声明"
+        ],
+        "required": true,
+        "must_start_new_page": true
+      },
+      {
+        "role": "abstract_cn",
+        "anchors": [
+          "摘 要",
+          "摘要"
+        ],
+        "required": true,
+        "must_start_new_page": true
+      },
+      {
+        "role": "keywords_cn",
+        "anchors": [
+          "关键词："
+        ],
+        "required": true
+      },
+      {
+        "role": "abstract_en",
+        "anchors": [
+          "Abstract"
+        ],
+        "required": true,
+        "must_start_new_page": true
+      },
+      {
+        "role": "keywords_en",
+        "anchors": [
+          "Key words:",
+          "Keywords:"
+        ],
+        "required": true
+      },
+      {
+        "role": "toc",
+        "anchors": [
+          "目 录",
+          "目录"
+        ],
+        "required": true,
+        "must_start_new_page": true
+      },
+      {
+        "role": "figure_table_list",
+        "anchors": [
+          "插图和附表清单"
+        ],
+        "conditional": "has_figure_list or has_table_list",
+        "must_start_new_page": true
+      },
+      {
+        "role": "symbol_list",
+        "anchors": [
+          "主要符号表"
+        ],
+        "conditional": "has_symbol_list",
+        "must_start_new_page": true
+      },
+      {
+        "role": "body",
+        "anchors": [
+          "第1章",
+          "第一章"
+        ],
+        "selector": {
+          "kind": "paragraph",
+          "text": "MACROBUTTON Title1 [单击并输入第一级标题，对应样式：标题1]",
+          "accepted_texts": [
+            "单击并输入第一级标题，对应样式：标题1"
+          ],
+          "match": "exact",
+          "style_id": "2",
+          "accepted_style_ids": [
+            "1"
+          ],
+          "section_index": 7
+        },
+        "required": true,
+        "heading_level": 1,
+        "must_start_new_page": true
+      },
+      {
+        "role": "references",
+        "anchors": [
+          "参考文献"
+        ],
+        "selector": {
+          "kind": "paragraph",
+          "text": "参考文献",
+          "match": "exact",
+          "style_id": "2",
+          "accepted_style_ids": [
+            "1"
+          ]
+        },
+        "required": true,
+        "heading_level": 1,
+        "must_start_new_page": true
+      },
+      {
+        "role": "acknowledgments",
+        "anchors": [
+          "致 谢",
+          "致谢"
+        ],
+        "selector": {
+          "kind": "paragraph",
+          "text": "致 谢",
+          "match": "exact",
+          "style_id": "2",
+          "accepted_style_ids": [
+            "1"
+          ]
+        },
+        "required": true,
+        "heading_level": 1,
+        "must_start_new_page": true
+      },
+      {
+        "role": "appendices",
+        "anchors": [
+          "附录"
+        ],
+        "selector": {
+          "kind": "paragraph",
+          "text": "附录",
+          "match": "exact",
+          "style_id": "2",
+          "accepted_style_ids": [
+            "1"
+          ]
+        },
+        "conditional": "has_appendices",
+        "heading_level": 1,
+        "must_start_new_page": true
+      },
+      {
+        "role": "author_bio",
+        "anchors": [
+          "作者简介"
+        ],
+        "selector": {
+          "kind": "paragraph",
+          "text": "作者简介",
+          "match": "exact",
+          "style_id": "2",
+          "accepted_style_ids": [
+            "1"
+          ]
+        },
+        "required": true,
+        "heading_level": 1,
+        "must_start_new_page": true
+      }
+    ],
+    "forbidden_toc_titles": [
+      "目 录",
+      "目录"
+    ],
+    "forbidden_numbered_titles": [
+      "参考文献",
+      "致 谢",
+      "致谢",
+      "附录",
+      "作者简介"
+    ]
+  },
+  "render_rules": {
+    "body_start_anchors": [
+      "第1章",
+      "第一章"
+    ],
+    "no_header_before_body": true,
+    "header_markers": [
+      "中国农业大学博士学位论文",
+      "中国农业大学硕士学位论文"
+    ],
+    "unnumbered_roles": [
+      "cover",
+      "declarations"
+    ],
+    "numbering_phases": [
+      {
+        "start_role": "abstract_cn",
+        "format": "roman_upper",
+        "start": 1
+      },
+      {
+        "start_role": "body",
+        "format": "decimal",
+        "start": 1
+      }
+    ],
+    "same_page_roles": [
+      [
+        "abstract_cn",
+        "keywords_cn"
+      ],
+      [
+        "abstract_en",
+        "keywords_en"
+      ]
+    ]
+  },
+  "build": {
+    "locators": {
+      "spine_start": {
+        "kind": "paragraph",
+        "text": "书 脊 的 书 写",
+        "match": "contains"
+      },
+      "spine_example_table": {
+        "kind": "table",
+        "text": "题目姓名",
+        "match": "exact"
+      },
+      "originality_fixed": {
+        "kind": "paragraph",
+        "text": "本人声明所呈交的学位论文",
+        "match": "starts_with"
+      },
+      "authorization_fixed": {
+        "kind": "paragraph",
+        "text": "本人完全了解中国农业大学有关保留、使用学位论文的规定",
+        "match": "starts_with"
+      }
+    },
+    "operations": [
+      {
+        "op": "delete_range",
+        "start": "spine_start",
+        "end": "spine_example_table"
+      }
+    ]
+  }
+}

@@ -1,0 +1,614 @@
+{
+  "schema_version": "1.0",
+  "profile_id": "neau-academic-master-2026",
+  "title": "东北农业大学学术学位硕士学位论文模板（2026版）",
+  "authority": {
+    "organization": "东北农业大学研究生院",
+    "source_url": "https://graduate.neau.edu.cn/info/1029/4331.htm",
+    "effective_version": "2026",
+    "published_date": "2026-03-13"
+  },
+  "resources": [
+    {
+      "id": "official_word_template",
+      "path": "resources/official-template.docx",
+      "sha256": "d42cd155c8c6a727c68404948f9c7ff41af1a1dd35df22f6ee182ef0e82fa790",
+      "kind": "official_docx"
+    }
+  ],
+  "variants": {
+    "selector": "thesis_profile.degree_level",
+    "allowed": [
+      "master"
+    ],
+    "required": true
+  },
+  "required_metadata": [
+    "cover_metadata.title_zh",
+    "cover_metadata.title_en",
+    "cover_metadata.author_name",
+    "cover_metadata.student_id",
+    "cover_metadata.supervisor_name",
+    "cover_metadata.degree_discipline",
+    "cover_metadata.completion_date"
+  ],
+  "fixed_texts": [
+    {
+      "id": "originality_declaration_2026",
+      "required": true,
+      "text": "本人声明所呈交的学位论文是本人在导师指导下进行的研究工作及取得的研究成果。据我所知，除了文中特别加以标注和致谢的地方外，论文中不包含其他人已经发表或撰写过的研究成果，也不包含未获得                    （注：如没有其他需要特别声明的，本栏可空）或其他教育机构的学位或证书使用过的材料。与我一同工作的同志对本研究所做的任何贡献均已在论文中作了明确的说明并表示谢意。"
+    },
+    {
+      "id": "authorization_2026",
+      "required": true,
+      "text": "本学位论文作者完全了解学校有关保留、使用学位论文的规定，学校有权保留并向国家有关部门或机构送交论文的复印件和磁盘，允许论文被查阅和借阅。本人授权学校可以将学位论文的全部或部分内容编入有关数据库进行检索，可以采用影印、缩印或扫描等复制手段保存、汇编学位论文。（保密的学位论文在解密后适用本授权书）"
+    }
+  ],
+  "fixed_values": {
+    "school_code": "10224"
+  },
+  "structure": {
+    "ordered_roles": [
+      {
+        "role": "cover",
+        "required": true,
+        "must_start_new_page": true,
+        "min_occurrences": 1,
+        "max_occurrences": 1,
+        "selector": {
+          "kind": "paragraph",
+          "text": "硕士学位论文",
+          "match": "exact",
+          "body_child_index": 6,
+          "section_index": 0
+        }
+      },
+      {
+        "role": "cover_en",
+        "required": true,
+        "must_start_new_page": true,
+        "selector": {
+          "kind": "paragraph",
+          "text": "Thesis for the Master Degree",
+          "match": "exact",
+          "body_child_index": 21,
+          "section_index": 1
+        }
+      },
+      {
+        "role": "declarations",
+        "required": true,
+        "must_start_new_page": true,
+        "selector": {
+          "kind": "paragraph",
+          "text": "原 创 性 声 明",
+          "match": "exact",
+          "body_child_index": 36,
+          "section_index": 2
+        }
+      },
+      {
+        "role": "defense_committee",
+        "required": true,
+        "must_start_new_page": true,
+        "selector": {
+          "kind": "paragraph",
+          "text": "硕士研究生学位答辩委员会名单",
+          "match": "exact",
+          "body_child_index": 57,
+          "section_index": 3
+        }
+      },
+      {
+        "role": "abstract_cn",
+        "required": true,
+        "must_start_new_page": true,
+        "selector": {
+          "kind": "paragraph",
+          "text": "摘  要",
+          "match": "exact",
+          "body_child_index": 64,
+          "section_index": 4
+        }
+      },
+      {
+        "role": "keywords_cn",
+        "required": true,
+        "selector": {
+          "kind": "paragraph",
+          "text": "关键词：",
+          "match": "starts_with",
+          "body_child_index": 69,
+          "section_index": 4
+        }
+      },
+      {
+        "role": "abstract_en",
+        "required": true,
+        "must_start_new_page": true,
+        "selector": {
+          "kind": "paragraph",
+          "text": "Abstract",
+          "match": "exact",
+          "body_child_index": 88,
+          "section_index": 5
+        }
+      },
+      {
+        "role": "keywords_en",
+        "required": true,
+        "selector": {
+          "kind": "paragraph",
+          "text": "Key words:",
+          "match": "starts_with",
+          "body_child_index": 92,
+          "section_index": 5
+        }
+      },
+      {
+        "role": "toc",
+        "required": true,
+        "must_start_new_page": true,
+        "selector": {
+          "kind": "paragraph",
+          "text": "目  录",
+          "match": "exact",
+          "body_child_index": 102,
+          "section_index": 6
+        }
+      },
+      {
+        "role": "toc_en",
+        "required": true,
+        "must_start_new_page": true,
+        "selector": {
+          "kind": "paragraph",
+          "text": "CONTENTS",
+          "match": "exact",
+          "body_child_index": 131,
+          "section_index": 7
+        }
+      },
+      {
+        "role": "body",
+        "required": true,
+        "must_start_new_page": true,
+        "selector": {
+          "kind": "paragraph",
+          "text": "1  引言",
+          "match": "exact",
+          "section_index": 8
+        }
+      },
+      {
+        "role": "acknowledgments",
+        "required": true,
+        "must_start_new_page": true,
+        "selector": {
+          "kind": "paragraph",
+          "text": "致  谢",
+          "match": "exact",
+          "section_index": 13,
+          "accepted_texts": [
+            "致谢"
+          ]
+        }
+      },
+      {
+        "role": "references",
+        "required": true,
+        "must_start_new_page": true,
+        "selector": {
+          "kind": "paragraph",
+          "text": "参考文献",
+          "match": "exact",
+          "section_index": 14
+        }
+      },
+      {
+        "role": "appendices",
+        "conditional": "has_appendices",
+        "must_start_new_page": true,
+        "selector": {
+          "kind": "paragraph",
+          "text": "附录A",
+          "match": "starts_with",
+          "body_child_index": 324,
+          "section_index": 15
+        }
+      },
+      {
+        "role": "academic_outputs",
+        "required": true,
+        "must_start_new_page": true,
+        "selector": {
+          "kind": "paragraph",
+          "text": "攻读硕士学位期间的学术成果",
+          "match": "exact",
+          "section_index": 16
+        }
+      }
+    ],
+    "forbidden_toc_titles": [
+      "目  录",
+      "目录",
+      "CONTENTS"
+    ],
+    "forbidden_numbered_titles": [
+      "致  谢",
+      "致谢",
+      "参考文献",
+      "附录",
+      "攻读硕士学位期间的学术成果"
+    ]
+  },
+  "render_rules": {
+    "body_start_anchors": [
+      "1  引言",
+      "1 引言",
+      "第1章",
+      "第一章"
+    ],
+    "no_header_before_body": false,
+    "header_markers": [
+      "东北农业大学农学硕士学位论文",
+      "东北农业大学硕士学位论文",
+      "摘  要",
+      "Abstract",
+      "目  录",
+      "CONTENTS"
+    ],
+    "unnumbered_roles": [
+      "cover",
+      "cover_en",
+      "declarations",
+      "defense_committee"
+    ],
+    "numbering_phases": [
+      {
+        "start_role": "abstract_cn",
+        "format": "roman_upper",
+        "start": 1
+      },
+      {
+        "start_role": "body",
+        "format": "decimal",
+        "start": 1
+      }
+    ],
+    "same_page_roles": [
+      [
+        "abstract_cn",
+        "keywords_cn"
+      ],
+      [
+        "abstract_en",
+        "keywords_en"
+      ]
+    ]
+  },
+  "regions": {
+    "graph_id": "neau-academic-master-2026-assembly",
+    "source_section_policy": "discard",
+    "nodes": [
+      {
+        "id": "body",
+        "kind": "dynamic_content",
+        "content_role": "body",
+        "metadata_bindings": [
+          {
+            "field": "cover_metadata.title_zh",
+            "selector": {
+              "kind": "paragraph",
+              "text": "论文中文题目",
+              "match": "exact",
+              "body_child_index": 10,
+              "section_index": 0
+            },
+            "required": true,
+            "missing_policy": "error"
+          },
+          {
+            "field": "cover_metadata.author_name",
+            "selector": {
+              "kind": "paragraph",
+              "text": "XXX",
+              "match": "exact",
+              "body_child_index": 13,
+              "section_index": 0,
+              "table_cell_path": {
+                "table_index": 0,
+                "row_index": 2,
+                "cell_index": 3,
+                "cell_paragraph_index": 0
+              }
+            },
+            "required": true,
+            "missing_policy": "error"
+          },
+          {
+            "field": "cover_metadata.student_id",
+            "selector": {
+              "kind": "paragraph",
+              "normalized_text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+              "body_child_index": 13,
+              "section_index": 0,
+              "table_cell_path": {
+                "table_index": 0,
+                "row_index": 3,
+                "cell_index": 3,
+                "cell_paragraph_index": 0
+              }
+            },
+            "required": true,
+            "missing_policy": "error"
+          },
+          {
+            "field": "cover_metadata.supervisor_name",
+            "selector": {
+              "kind": "paragraph",
+              "text": "XXX  教授",
+              "match": "exact",
+              "body_child_index": 13,
+              "section_index": 0,
+              "table_cell_path": {
+                "table_index": 0,
+                "row_index": 4,
+                "cell_index": 3,
+                "cell_paragraph_index": 0
+              }
+            },
+            "required": true,
+            "missing_policy": "error"
+          },
+          {
+            "field": "cover_metadata.college_name",
+            "selector": {
+              "kind": "paragraph",
+              "text": "工程学院",
+              "match": "exact",
+              "body_child_index": 13,
+              "section_index": 0,
+              "table_cell_path": {
+                "table_index": 0,
+                "row_index": 5,
+                "cell_index": 3,
+                "cell_paragraph_index": 0
+              }
+            },
+            "required": true,
+            "missing_policy": "error"
+          },
+          {
+            "field": "cover_metadata.degree_discipline",
+            "selector": {
+              "kind": "paragraph",
+              "text": "农业工程",
+              "match": "exact",
+              "body_child_index": 13,
+              "section_index": 0,
+              "table_cell_path": {
+                "table_index": 0,
+                "row_index": 6,
+                "cell_index": 3,
+                "cell_paragraph_index": 0
+              }
+            },
+            "required": true,
+            "missing_policy": "error"
+          },
+          {
+            "field": "cover_metadata.program_name",
+            "selector": {
+              "kind": "paragraph",
+              "text": "农业机械化工程",
+              "match": "exact",
+              "body_child_index": 13,
+              "section_index": 0,
+              "table_cell_path": {
+                "table_index": 0,
+                "row_index": 7,
+                "cell_index": 3,
+                "cell_paragraph_index": 0
+              }
+            },
+            "required": true,
+            "missing_policy": "error"
+          },
+          {
+            "field": "cover_metadata.completion_date",
+            "selector": {
+              "kind": "paragraph",
+              "text": "二○二六年六月",
+              "match": "exact",
+              "body_child_index": 15,
+              "section_index": 0
+            },
+            "required": true,
+            "missing_policy": "error",
+            "value_transform": "chinese_year_month"
+          },
+          {
+            "field": "cover_metadata.title_en",
+            "selector": {
+              "kind": "paragraph",
+              "text": "Title of Master's Thesis",
+              "match": "exact",
+              "body_child_index": 23,
+              "section_index": 1
+            },
+            "required": true,
+            "missing_policy": "error"
+          },
+          {
+            "field": "cover_metadata.supervisor_name",
+            "selector": {
+              "kind": "paragraph",
+              "text": "Prof.□□□",
+              "match": "exact",
+              "body_child_index": 29,
+              "section_index": 1,
+              "table_cell_path": {
+                "table_index": 1,
+                "row_index": 3,
+                "cell_index": 3,
+                "cell_paragraph_index": 0
+              }
+            },
+            "required": true,
+            "missing_policy": "error",
+            "replace_mode": "after_prefix",
+            "prefix": "Prof."
+          }
+        ],
+        "start_selector": {
+          "kind": "paragraph",
+          "text": "1  引言",
+          "accepted_texts": ["1 引言"],
+          "match": "exact",
+          "section_index": 8
+        },
+        "end_selector": {
+          "kind": "paragraph",
+          "text": "致  谢",
+          "accepted_texts": ["致谢"],
+          "match": "exact",
+          "section_index": 13
+        },
+        "range_policy": "replace_between"
+      },
+      {
+        "id": "acknowledgments",
+        "kind": "dynamic_content",
+        "content_role": "acknowledgments",
+        "start_selector": {
+          "kind": "paragraph",
+          "text": "致  谢",
+          "accepted_texts": ["致谢"],
+          "match": "exact",
+          "section_index": 13
+        },
+        "end_selector": {
+          "kind": "paragraph",
+          "text": "参考文献",
+          "match": "exact",
+          "section_index": 14
+        },
+        "range_policy": "replace_between"
+      },
+      {
+        "id": "references",
+        "kind": "dynamic_content",
+        "content_role": "references",
+        "start_selector": {
+          "kind": "paragraph",
+          "text": "参考文献",
+          "match": "exact",
+          "section_index": 14
+        },
+        "end_selector": {
+          "kind": "paragraph",
+          "text": "附录A",
+          "match": "starts_with",
+          "section_index": 15
+        },
+        "range_policy": "replace_between"
+      },
+      {
+        "id": "appendices",
+        "kind": "optional",
+        "content_role": "appendices",
+        "condition": "source_role.appendices.present",
+        "start_selector": {
+          "kind": "paragraph",
+          "text": "附录A",
+          "match": "starts_with",
+          "section_index": 15
+        },
+        "end_selector": {
+          "kind": "paragraph",
+          "text": "攻读硕士学位期间的学术成果",
+          "match": "exact",
+          "section_index": 16
+        },
+        "range_policy": "replace_between"
+      },
+      {
+        "id": "academic_outputs",
+        "kind": "dynamic_content",
+        "content_role": "academic_outputs",
+        "start_selector": {
+          "kind": "paragraph",
+          "text": "攻读硕士学位期间的学术成果",
+          "match": "exact",
+          "section_index": 16
+        },
+        "end_boundary": "body_end",
+        "range_policy": "replace_between"
+      }
+    ],
+    "edges": [
+      {"kind": "order", "from": "body", "to": "acknowledgments"},
+      {"kind": "order", "from": "acknowledgments", "to": "references"},
+      {"kind": "order", "from": "references", "to": "appendices"},
+      {"kind": "order", "from": "appendices", "to": "academic_outputs"},
+      {
+        "kind": "boundary",
+        "from": "body",
+        "to": "acknowledgments",
+        "policy": {
+          "preserve_template_boundaries": true,
+          "preserve_headers_footers": true,
+          "preserve_page_numbering": true
+        }
+      },
+      {
+        "kind": "boundary",
+        "from": "acknowledgments",
+        "to": "references",
+        "policy": {
+          "preserve_template_boundaries": true,
+          "preserve_headers_footers": true,
+          "preserve_page_numbering": true
+        }
+      },
+      {
+        "kind": "section_policy",
+        "from": "references",
+        "to": "appendices",
+        "policy": {
+          "preserve_template_sections": true,
+          "preserve_headers_footers": true,
+          "preserve_page_numbering": true
+        }
+      },
+      {
+        "kind": "section_policy",
+        "from": "appendices",
+        "to": "academic_outputs",
+        "policy": {
+          "preserve_template_sections": true,
+          "preserve_headers_footers": true,
+          "preserve_page_numbering": true
+        }
+      }
+    ]
+  },
+  "build": {
+    "locators": {
+      "originality_fixed": {
+        "kind": "paragraph",
+        "text": "本人声明所呈交的学位论文是本人在导师指导下",
+        "match": "starts_with",
+        "body_child_index": 37
+      },
+      "authorization_fixed": {
+        "kind": "paragraph",
+        "text": "本学位论文作者完全了解学校有关保留、使用学位论文的规定",
+        "match": "starts_with",
+        "body_child_index": 45
+      }
+    },
+    "operations": []
+  }
+}

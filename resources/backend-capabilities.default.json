@@ -1,0 +1,42 @@
+{
+  "schema_version": "1.0",
+  "backend": "python-docx-ooxml",
+  "capabilities": [
+    {
+      "id": "text-role-formatting",
+      "role_pattern": "^(thesis_title_(zh|en)|heading_[1-9]|heading_(appendix|conclusion|references|acknowledgments|publications)|body_text|figure_caption|table_caption|table_text|abstract_title_(zh|en)|abstract_body_(zh|en)|keywords_(zh|en)|bibliography_heading|bibliography_entry|equation|footnote|header|footer|toc|toc_title|cover_field_(label|value)|thesis_(type_zh|type_en|author|author_en|affiliation_date|classified_index))$",
+      "property_patterns": ["font.*", "paragraph.*", "numbering.*", "position", "prefix", "separator", "style_hint", "text", "header_content.*", "bottom_border.*"],
+      "disposition": "supported"
+    },
+    {
+      "id": "page-layout",
+      "role_pattern": "^page$",
+      "property_patterns": ["size", "orientation", "margins_pt.*", "different_first_page", "different_odd_even", "page_number.*", "font.*", "paragraph.*"],
+      "disposition": "supported"
+    },
+    {
+      "id": "table-layout",
+      "role_pattern": "^(table|tables)$",
+      "property_patterns": ["style", "top_border_pt", "header_border_pt", "bottom_border_pt", "remove_vertical_borders", "repeat_header_row", "allow_row_split", "keep_with_caption", "border_widths_pt.*", "continuation.*"],
+      "disposition": "supported"
+    },
+    {
+      "id": "equation-layout",
+      "role_pattern": "^equations$",
+      "property_patterns": ["alignment", "number_alignment", "number_parentheses", "same_line", "no_lines", "center_tab_twips", "right_tab_twips"],
+      "disposition": "supported"
+    },
+    {
+      "id": "object-pagination",
+      "role_pattern": "^objects$",
+      "property_patterns": ["keep_figure_with_caption", "keep_table_with_caption", "order_constraints.*"],
+      "disposition": "supported"
+    },
+    {
+      "id": "content-and-structure-contracts",
+      "role_pattern": "^(content_constraints|conditional_constraints|document_structure|appendices|cover|declarations)$",
+      "property_patterns": ["*"],
+      "disposition": "supported"
+    }
+  ]
+}

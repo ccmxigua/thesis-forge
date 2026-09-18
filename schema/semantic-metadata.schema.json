@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://thesis-forge.local/schema/semantic-metadata.schema.json",
+  "title": "Thesis semantic metadata",
+  "type": "object",
+  "required": ["schema_version", "source_document", "title_zh", "title_en", "inventory"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "source_document": {"type": "string"},
+    "source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "title_zh": {"type": "string"},
+    "title_en": {"type": "string"},
+    "author": {"type": "string"},
+    "co_supervisors": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "kind"],
+        "properties": {
+          "name": {"type": "string", "minLength": 1},
+          "kind": {"enum": ["academic", "enterprise", "other"]}
+        },
+        "additionalProperties": false
+      }
+    },
+    "first_discipline": {"type": "string"},
+    "second_discipline": {"type": "string"},
+    "first_discipline_en": {"type": "string"},
+    "second_discipline_en": {"type": "string"},
+    "discipline_category": {"type": "string"},
+    "confidentiality_period": {
+      "type": "object",
+      "properties": {
+        "start": {"type": "string"},
+        "end": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "author_post_graduation_destination": {"type": "string"},
+    "employment_unit": {"type": "string"},
+    "contact_phone": {"type": "string"},
+    "contact_address": {"type": "string"},
+    "postal_code": {"type": "string"},
+    "defense_committee": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["name", "professional_title", "institution"],
+        "properties": {
+          "name": {"type": "string", "minLength": 1},
+          "professional_title": {"type": "string", "minLength": 1},
+          "institution": {"type": "string", "minLength": 1},
+          "role": {"type": "string"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "unit_code": {"type": "string"},
+    "unit_address": {"type": "string"},
+    "completion_date": {"type": "string"},
+    "has_appendices": {"type": "boolean"},
+    "has_figure_list": {"type": "boolean"},
+    "has_table_list": {"type": "boolean"},
+    "has_symbol_list": {"type": "boolean"},
+    "abstract_zh": {"type": "string"},
+    "abstract_en": {"type": "string"},
+    "keywords_zh": {"type": "array", "items": {"type": "string"}},
+    "keywords_en": {"type": "array", "items": {"type": "string"}},
+    "cn_title": {"type": "string"},
+    "en_title": {"type": "string"},
+    "inventory": {
+      "type": "object",
+      "required": ["figures", "tables", "display_equations"],
+      "properties": {
+        "figures": {"type": "integer", "minimum": 0},
+        "tables": {"type": "integer", "minimum": 0},
+        "display_equations": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": true
+}

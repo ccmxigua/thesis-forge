@@ -1,0 +1,640 @@
+{
+  "schema_version": "1.0",
+  "roles": {
+    "thesis_title_zh": {
+      "canonical_style": "Title",
+      "style_aliases": [
+        "Thesis Cover Title ZH",
+        "ThesisTitle",
+        "CoverTitle",
+        "论文题目",
+        "论文标题",
+        "中文题目"
+      ],
+      "style_patterns": [
+        [
+          "^(Title|ThesisTitle|CoverTitle|论文题目|中文题目)$",
+          100
+        ],
+        [
+          "题目|标题",
+          35
+        ]
+      ],
+      "structural_detector": "frontmatter_title_zh",
+      "required_content": true,
+      "generated_style": "Thesis Cover Title ZH"
+    },
+    "thesis_title_en": {
+      "canonical_style": "English Title",
+      "style_aliases": [
+        "Thesis Cover Title EN",
+        "EnglishTitle",
+        "TitleEN",
+        "Thesis Title EN",
+        "Thesis Thesis Title En",
+        "Title"
+      ],
+      "style_patterns": [
+        [
+          "^(English[ _]?Title|Title[ _]?EN|英文题目)$",
+          100
+        ],
+        [
+          "^Thesis Thesis Title En$",
+          100
+        ]
+      ],
+      "structural_detector": "frontmatter_title_en",
+      "required_content": true,
+      "generated_style": "Thesis Cover Title EN"
+    },
+    "heading_1": {
+      "canonical_style": "Heading 1",
+      "style_aliases": [
+        "Heading1",
+        "标题 1"
+      ],
+      "style_patterns": [
+        [
+          "^(Heading ?1|标题 ?1|Heading1)$",
+          100
+        ],
+        [
+          "一级|章标题",
+          80
+        ]
+      ],
+      "required_content": true
+    },
+    "heading_2": {
+      "canonical_style": "Heading 2",
+      "style_aliases": [
+        "Heading2",
+        "标题 2"
+      ],
+      "style_patterns": [
+        [
+          "^(Heading ?2|标题 ?2|Heading2)$",
+          100
+        ],
+        [
+          "二级|节标题",
+          80
+        ]
+      ],
+      "required_content": true
+    },
+    "heading_3": {
+      "canonical_style": "Heading 3",
+      "style_aliases": [
+        "Heading3",
+        "标题 3"
+      ],
+      "style_patterns": [
+        [
+          "^(Heading ?3|标题 ?3|Heading3)$",
+          100
+        ],
+        [
+          "三级",
+          80
+        ]
+      ],
+      "required_content": true
+    },
+    "heading_4": {
+      "canonical_style": "Heading 4",
+      "style_aliases": [
+        "Heading4",
+        "标题 4",
+        "四级标题"
+      ],
+      "style_patterns": [
+        [
+          "^(Heading ?4|标题 ?4|Heading4|四级标题)$",
+          100
+        ],
+        [
+          "四级",
+          80
+        ]
+      ],
+      "required_content": false
+    },
+    "heading_acknowledgments": {
+      "canonical_style": "Acknowledgments Heading",
+      "style_aliases": [
+        "AcknowledgmentsHeading",
+        "Acknowledgements Heading",
+        "致谢标题",
+        "后记标题"
+      ],
+      "style_patterns": [],
+      "structural_detector": "heading_acknowledgments",
+      "required_content": false
+    },
+    "heading_appendix": {
+      "canonical_style": "Appendix Heading",
+      "style_aliases": [
+        "AppendixHeading",
+        "附录标题"
+      ],
+      "style_patterns": [],
+      "structural_detector": "heading_appendix",
+      "required_content": false
+    },
+    "heading_conclusion": {
+      "canonical_style": "Conclusion Heading",
+      "style_aliases": [
+        "ConclusionHeading",
+        "结论标题"
+      ],
+      "style_patterns": [],
+      "structural_detector": "heading_conclusion",
+      "required_content": false
+    },
+    "heading_publications": {
+      "canonical_style": "Publications Heading",
+      "style_aliases": [
+        "PublicationsHeading",
+        "Research Achievements Heading",
+        "学术成果标题",
+        "科研成果标题"
+      ],
+      "style_patterns": [],
+      "structural_detector": "heading_publications",
+      "required_content": false
+    },
+    "heading_references": {
+      "canonical_style": "References Heading",
+      "style_aliases": [
+        "ReferencesHeading",
+        "Bibliography Heading",
+        "参考文献标题"
+      ],
+      "style_patterns": [],
+      "structural_detector": "heading_references",
+      "required_content": false
+    },
+    "body_text": {
+      "canonical_style": "Normal",
+      "style_aliases": [
+        "Body Text",
+        "BodyText",
+        "正文"
+      ],
+      "style_patterns": [
+        [
+          "^(Normal|Body ?Text|正文|BodyText)$",
+          100
+        ],
+        [
+          "正文|Body",
+          50
+        ]
+      ],
+      "required_content": true
+    },
+    "figure_caption": {
+      "canonical_style": "ImageCaption",
+      "style_aliases": [
+        "FigureCaption",
+        "Image Caption",
+        "图题",
+        "图注"
+      ],
+      "style_patterns": [
+        [
+          "^(ImageCaption|Image Caption|FigureCaption|Figure Caption|图题|图注)$",
+          100
+        ],
+        [
+          "Image.*Caption|Figure.*Caption|图题",
+          80
+        ]
+      ],
+      "structural_detector": "figure_caption",
+      "required_content": true
+    },
+    "table_caption": {
+      "canonical_style": "TableCaption",
+      "style_aliases": [
+        "Table Caption",
+        "表题",
+        "表注"
+      ],
+      "style_patterns": [
+        [
+          "^(TableCaption|Table Caption|表题|表注)$",
+          100
+        ],
+        [
+          "Table.*Caption|表题",
+          80
+        ]
+      ],
+      "structural_detector": "table_caption",
+      "required_content": true
+    },
+    "table_text": {
+      "canonical_style": "TableText",
+      "style_aliases": [
+        "Table Text",
+        "Thesis Table Text",
+        "表格正文",
+        "表内文字"
+      ],
+      "style_patterns": [
+        [
+          "^(Table[ _]?Text|Thesis Table Text|表格正文|表内文字)$",
+          100
+        ]
+      ],
+      "structural_detector": "table_cell_paragraph",
+      "required_content": true,
+      "generated_style": "Thesis Table Text"
+    },
+    "abstract_title_zh": {
+      "canonical_style": "AbstractTitleCN",
+      "style_aliases": [
+        "Abstract Title CN",
+        "中文摘要标题",
+        "摘要标题"
+      ],
+      "style_patterns": [
+        [
+          "AbstractTitleCN|Abstract Title CN|中文摘要标题|摘要标题",
+          100
+        ]
+      ],
+      "structural_detector": "abstract_title_zh",
+      "required_content": false
+    },
+    "abstract_body_zh": {
+      "canonical_style": "AbstractBodyCN",
+      "style_aliases": [
+        "Abstract Body CN",
+        "中文摘要正文"
+      ],
+      "style_patterns": [
+        [
+          "AbstractBodyCN|Abstract Body CN|中文摘要正文",
+          100
+        ]
+      ],
+      "structural_detector": "abstract_body_zh",
+      "required_content": false
+    },
+    "abstract_title_en": {
+      "canonical_style": "AbstractTitleEN",
+      "style_aliases": [
+        "Abstract Title EN",
+        "英文摘要标题"
+      ],
+      "style_patterns": [
+        [
+          "AbstractTitleEN|Abstract Title EN|英文摘要标题",
+          100
+        ]
+      ],
+      "structural_detector": "abstract_title_en",
+      "required_content": false
+    },
+    "abstract_body_en": {
+      "canonical_style": "AbstractBodyEN",
+      "style_aliases": [
+        "Abstract Body EN",
+        "英文摘要正文"
+      ],
+      "style_patterns": [
+        [
+          "AbstractBodyEN|Abstract Body EN|英文摘要正文",
+          100
+        ]
+      ],
+      "structural_detector": "abstract_body_en",
+      "required_content": false
+    },
+    "keywords_zh": {
+      "canonical_style": "KeywordsLineCN",
+      "style_aliases": [
+        "Keywords Line CN",
+        "中文关键词"
+      ],
+      "style_patterns": [
+        [
+          "KeywordsLineCN|Keywords Line CN|中文关键词",
+          100
+        ]
+      ],
+      "structural_detector": "keywords_zh",
+      "required_content": false
+    },
+    "keywords_en": {
+      "canonical_style": "KeywordsLineEN",
+      "style_aliases": [
+        "Keywords Line EN",
+        "英文关键词"
+      ],
+      "style_patterns": [
+        [
+          "KeywordsLineEN|Keywords Line EN|英文关键词",
+          100
+        ]
+      ],
+      "structural_detector": "keywords_en",
+      "required_content": false
+    },
+  "bibliography_heading": {
+    "canonical_style": "ReferencesHeading",
+      "style_aliases": [
+        "References Heading",
+        "参考文献标题"
+      ],
+    "style_patterns": [
+      [
+        "ReferencesHeading|References Heading|参考文献标题",
+        100
+      ]
+    ],
+    "structural_detector": "heading_references",
+    "required_content": false
+  },
+    "bibliography_entry": {
+      "canonical_style": "Bibliography",
+      "style_aliases": [
+        "参考文献正文"
+      ],
+      "style_patterns": [
+        [
+          "Bibliography|参考文献正文",
+          100
+        ]
+      ],
+      "required_content": false
+    },
+    "equation": {
+      "canonical_style": "Equation Block",
+      "style_aliases": [
+        "EquationBlock",
+        "Display Formula",
+        "Thesis Equation"
+      ],
+      "style_patterns": [
+        [
+          "Equation[ _]?Block|Display[ _]?Formula|Thesis Equation|公式",
+          100
+        ]
+      ],
+      "structural_detector": "display_math",
+      "required_content": true
+    },
+    "footnote": {
+      "canonical_style": "Footnote Text",
+      "style_aliases": [
+        "FootnoteText",
+        "脚注"
+      ],
+      "style_patterns": [
+        [
+          "Footnote ?Text|脚注",
+          100
+        ]
+      ],
+      "required_content": false
+    },
+    "header": {
+      "canonical_style": "Header",
+      "style_aliases": [
+        "页眉"
+      ],
+      "style_patterns": [
+        [
+          "^Header$|页眉",
+          100
+        ]
+      ],
+      "required_content": false
+    },
+    "footer": {
+      "canonical_style": "Footer",
+      "style_aliases": [
+        "页脚"
+      ],
+      "style_patterns": [
+        [
+          "^Footer$|页脚",
+          100
+        ]
+      ],
+      "required_content": false
+    },
+    "toc": {
+      "canonical_style": "TOCHeading",
+      "style_aliases": [
+        "TOC Heading",
+        "目录标题"
+      ],
+      "style_patterns": [
+        [
+          "TOC ?Heading|目录标题",
+          100
+        ]
+      ],
+      "structural_detector": "toc_heading",
+      "required_content": false
+    },
+    "toc_title": {
+      "canonical_style": "TOC Heading",
+      "style_aliases": [
+        "TOCHeading",
+        "Contents Heading",
+        "目录标题"
+      ],
+      "style_patterns": [],
+      "structural_detector": "toc_heading",
+      "required_content": false
+    },
+    "cover_field_label": {
+      "canonical_style": "Thesis Cover Field Label",
+      "style_aliases": [
+        "CoverFieldLabel",
+        "封面字段标签"
+      ],
+      "style_patterns": [
+        [
+          "Thesis Cover Field Label|CoverFieldLabel|封面字段标签",
+          100
+        ]
+      ],
+      "structural_detector": "cover_field_label",
+      "required_content": false,
+      "generated_style": "Thesis Cover Field Label"
+    },
+    "cover_field_value": {
+      "canonical_style": "Thesis Cover Field Value",
+      "style_aliases": [
+        "CoverFieldValue",
+        "封面字段值"
+      ],
+      "style_patterns": [
+        [
+          "Thesis Cover Field Value|CoverFieldValue|封面字段值",
+          100
+        ]
+      ],
+      "structural_detector": "cover_field_value",
+      "required_content": false,
+      "generated_style": "Thesis Cover Field Value"
+    },
+    "thesis_type_zh": {
+      "canonical_style": "Thesis Type CN",
+      "style_aliases": [
+        "ThesisTypeCN",
+        "Degree Type CN",
+        "中文学位类型"
+      ],
+      "style_patterns": [],
+      "required_content": false
+    },
+    "thesis_type_en": {
+      "canonical_style": "Thesis Type EN",
+      "style_aliases": [
+        "ThesisTypeEN",
+        "Degree Type EN",
+        "英文学位类型"
+      ],
+      "style_patterns": [],
+      "required_content": false
+    },
+    "thesis_author": {
+      "canonical_style": "Thesis Author CN",
+      "style_aliases": [
+        "ThesisAuthor",
+        "ThesisAuthorCN",
+        "Author CN",
+        "中文作者"
+      ],
+      "style_patterns": [],
+      "required_content": false
+    },
+    "thesis_author_en": {
+      "canonical_style": "Thesis Author EN",
+      "style_aliases": [
+        "ThesisAuthorEN",
+        "Author EN",
+        "英文作者"
+      ],
+      "style_patterns": [],
+      "required_content": false
+    },
+    "thesis_affiliation_date": {
+      "canonical_style": "Thesis Affiliation Date",
+      "style_aliases": [
+        "ThesisAffiliationDate",
+        "Affiliation Date",
+        "单位日期"
+      ],
+      "style_patterns": [],
+      "required_content": false
+    },
+    "thesis_classified_index": {
+      "canonical_style": "Thesis Classified Index",
+      "style_aliases": [
+        "ThesisClassifiedIndex",
+        "Classified Index",
+        "分类号"
+      ],
+      "style_patterns": [],
+      "required_content": false
+    },
+    "declaration_heading": {
+      "canonical_style": "Thesis Declaration Heading",
+      "style_aliases": [
+        "Declaration Heading",
+        "DeclarationHeading",
+        "StatementHeading",
+        "声明标题"
+      ],
+      "style_patterns": [
+        [
+          "Thesis Declaration Heading|Declaration Heading|DeclarationHeading|StatementHeading|声明标题",
+          100
+        ]
+      ],
+      "structural_detector": "declaration_heading",
+      "required_content": false,
+      "generated_style": "Thesis Declaration Heading"
+    },
+    "declaration_body": {
+      "canonical_style": "Thesis Declaration Body",
+      "style_aliases": [
+        "Declaration Body",
+        "DeclarationBody",
+        "StatementBody",
+        "声明正文"
+      ],
+      "style_patterns": [
+        [
+          "Thesis Declaration Body|Declaration Body|DeclarationBody|StatementBody|声明正文",
+          100
+        ]
+      ],
+      "structural_detector": "declaration_body",
+      "required_content": false,
+      "generated_style": "Thesis Declaration Body"
+    },
+    "signature_line_author": {
+      "canonical_style": "Thesis Author Signature Placeholder",
+      "style_aliases": [
+        "Author Signature Placeholder",
+        "AuthorSignaturePlaceholder",
+        "作者签名栏"
+      ],
+      "style_patterns": [
+        [
+          "Thesis Author Signature Placeholder|Author Signature Placeholder|AuthorSignaturePlaceholder|作者签名栏",
+          100
+        ]
+      ],
+      "structural_detector": "signature_line_author",
+      "required_content": false,
+      "generated_style": "Thesis Author Signature Placeholder"
+    },
+    "signature_line_supervisor": {
+      "canonical_style": "Thesis Supervisor Signature Placeholder",
+      "style_aliases": [
+        "Supervisor Signature Placeholder",
+        "SupervisorSignaturePlaceholder",
+        "导师签名栏"
+      ],
+      "style_patterns": [
+        [
+          "Thesis Supervisor Signature Placeholder|Supervisor Signature Placeholder|SupervisorSignaturePlaceholder|导师签名栏",
+          100
+        ]
+      ],
+      "structural_detector": "signature_line_supervisor",
+      "required_content": false,
+      "generated_style": "Thesis Supervisor Signature Placeholder"
+    },
+    "signature_date_line": {
+      "canonical_style": "Thesis Signature Date Placeholder",
+      "style_aliases": [
+        "Signature Date Placeholder",
+        "SignatureDatePlaceholder",
+        "签名日期栏"
+      ],
+      "style_patterns": [
+        [
+          "Thesis Signature Date Placeholder|Signature Date Placeholder|SignatureDatePlaceholder|签名日期栏",
+          100
+        ]
+      ],
+      "structural_detector": "signature_date_line",
+      "required_content": false,
+      "generated_style": "Thesis Signature Date Placeholder"
+    }
+  }
+}

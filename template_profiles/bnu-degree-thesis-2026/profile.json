@@ -1,0 +1,314 @@
+{
+  "schema_version": "1.0",
+  "profile_id": "bnu-degree-thesis-2026",
+  "title": "北京师范大学研究生学位论文模板（2026年1月）",
+  "authority": {
+    "organization": "北京师范大学学位评定委员会办公室",
+    "source_url": "https://graduate.bnu.edu.cn/",
+    "effective_version": "2026-01",
+    "published_date": "2026-01"
+  },
+  "resources": [
+    {
+      "id": "official_word_template",
+      "path": "resources/official-template.docx",
+      "sha256": "d87ce6a40664886a15d57402d1ce4f61cdd8921bc763187970ee6dc6172ed4df",
+      "kind": "official_docx"
+    },
+    {
+      "id": "official_thesis_rules",
+      "path": "resources/rules.pdf",
+      "sha256": "f2ab48929724abc687d51235343312d37e0866d3a2697631054810addc332434",
+      "kind": "rules_pdf"
+    }
+  ],
+  "variants": {
+    "selector": "thesis_profile.degree_level",
+    "allowed": [
+      "master",
+      "doctor"
+    ],
+    "required": true
+  },
+  "required_metadata": [
+    "cover_metadata.title_zh",
+    "cover_metadata.title_en",
+    "cover_metadata.author_name",
+    "cover_metadata.student_id",
+    "cover_metadata.supervisor_name",
+    "cover_metadata.degree_discipline",
+    "cover_metadata.college_name",
+    "cover_metadata.completion_date"
+  ],
+  "fixed_texts": [
+    {
+      "id": "originality_declaration_2026",
+      "required": true,
+      "text": "本人郑重声明：所呈交的学位论文，是本人在导师的指导下，独立进行研究工作所取得的成果。本人恪守学术道德和学术规范，杜绝抄袭，篡改，伪造等学术不端行为及代买，买卖论文等造假行为。所有引用或参考内容均已标明出处。对本文的研究做出重要贡献的个人和集体，均已在文中以明确方式标明。本人完全意识到本声明的法律结果由本人承担。"
+    },
+    {
+      "id": "authorization_2026",
+      "required": true,
+      "text": "学位论文作者完全了解北京师范大学有关保存和使用学位论文的规定，即：学校有权保存并向国家有关部门或机构送交论文的复印件和电子版，允许学位论文被查阅和借阅；学校可以公布学位论文的全部或部分内容，可以允许采用影印、缩印或其它复制手段保存、汇编学位论文。保密的学位论文在解密后适用于本授权书。"
+    }
+  ],
+  "structure": {
+    "ordered_roles": [
+      {
+        "role": "cover",
+        "required": true,
+        "must_start_new_page": true,
+        "min_occurrences": 1,
+        "max_occurrences": 1,
+        "selector": {
+          "kind": "paragraph",
+          "text": "学术（专业）博士（硕士）研究生",
+          "match": "exact",
+          "body_child_index": 3
+        }
+      },
+      {
+        "role": "declarations",
+        "required": true,
+        "must_start_new_page": true,
+        "selector": {
+          "kind": "paragraph",
+          "text": "北京师范大学学位论文原创性声明",
+          "match": "exact",
+          "body_child_index": 25
+        }
+      },
+      {
+        "role": "abstract_cn",
+        "required": true,
+        "must_start_new_page": true,
+        "selector": {
+          "kind": "paragraph",
+          "text": "摘  要(小三号黑体，居中)",
+          "match": "exact",
+          "body_child_index": 54
+        }
+      },
+      {
+        "role": "keywords_cn",
+        "required": true,
+        "selector": {
+          "kind": "paragraph",
+          "text": "关键词（四号黑体）：",
+          "match": "starts_with",
+          "body_child_index": 59
+        }
+      },
+      {
+        "role": "abstract_en",
+        "required": true,
+        "must_start_new_page": true,
+        "selector": {
+          "kind": "paragraph",
+          "text": "ABSTRACT(四号加粗，居中)",
+          "match": "exact",
+          "body_child_index": 67
+        }
+      },
+      {
+        "role": "keywords_en",
+        "required": true,
+        "selector": {
+          "kind": "paragraph",
+          "text": "KEY WORDS:",
+          "match": "starts_with",
+          "body_child_index": 74
+        }
+      },
+      {
+        "role": "toc",
+        "required": true,
+        "must_start_new_page": true,
+        "selector": {
+          "kind": "paragraph",
+          "text": "目  录（小二号，黑体，居中）",
+          "match": "exact",
+          "body_child_index": 78
+        }
+      },
+      {
+        "role": "figure_list",
+        "conditional": "has_figure_list",
+        "must_start_new_page": true,
+        "selector": {
+          "kind": "paragraph",
+          "text": "图 目 录",
+          "match": "exact",
+          "body_child_index": 145
+        }
+      },
+      {
+        "role": "table_list",
+        "conditional": "has_table_list",
+        "must_start_new_page": true,
+        "selector": {
+          "kind": "paragraph",
+          "text": "表 目 录",
+          "match": "exact",
+          "body_child_index": 169
+        }
+      },
+      {
+        "role": "body",
+        "required": true,
+        "heading_level": 1,
+        "must_start_new_page": true,
+        "selector": {
+          "kind": "paragraph",
+          "text": "MACROBUTTON  AcceptAllChangesShown [请输入章节名称]",
+          "accepted_texts": [
+            "请输入章节名称"
+          ],
+          "match": "exact",
+          "style_id": "1",
+          "body_child_index": 189,
+          "section_index": 6
+        }
+      },
+      {
+        "role": "references",
+        "required": true,
+        "heading_level": 1,
+        "must_start_new_page": true,
+        "selector": {
+          "kind": "paragraph",
+          "text": "可采用顺序编码制，也可采用著者-出版年制，但全文必须统一。可采用顺序编码制，也可采用著者-出版年制，但全文必须统一。参考文献",
+          "match": "exact",
+          "section_index": 12
+        }
+      },
+      {
+        "role": "appendices",
+        "conditional": "has_appendices",
+        "heading_level": 1,
+        "must_start_new_page": true,
+        "selector": {
+          "kind": "paragraph",
+          "text": "附  录",
+          "match": "exact",
+          "style_id": "1",
+          "body_child_index": 478
+        }
+      },
+      {
+        "role": "index",
+        "conditional": "has_index",
+        "heading_level": 1,
+        "must_start_new_page": true,
+        "selector": {
+          "kind": "paragraph",
+          "text": "索 引",
+          "match": "exact",
+          "style_id": "1",
+          "body_child_index": 483
+        }
+      },
+      {
+        "role": "academic_outputs",
+        "required": true,
+        "heading_level": 1,
+        "must_start_new_page": true,
+        "selector": {
+          "kind": "paragraph",
+          "text": "攻读学位期间取得的学术成果",
+          "match": "exact",
+          "section_index": 15
+        }
+      },
+      {
+        "role": "acknowledgments",
+        "required": true,
+        "heading_level": 1,
+        "must_start_new_page": true,
+        "selector": {
+          "kind": "paragraph",
+          "text": "致  谢",
+          "match": "exact",
+          "section_index": 16
+        }
+      },
+      {
+        "role": "defense_committee",
+        "required": true,
+        "heading_level": 1,
+        "must_start_new_page": true,
+        "selector": {
+          "kind": "paragraph",
+          "text": "答辩委员会名单",
+          "match": "exact",
+          "section_index": 17
+        }
+      }
+    ],
+    "forbidden_toc_titles": [
+      "目  录",
+      "目录"
+    ],
+    "forbidden_numbered_titles": [
+      "参考文献",
+      "附  录",
+      "索 引",
+      "攻读学位期间取得的学术成果",
+      "致  谢",
+      "答辩委员会名单"
+    ]
+  },
+  "render_rules": {
+    "body_start_anchors": [
+      "第1章",
+      "请输入章节名称"
+    ],
+    "no_header_before_body": false,
+    "header_markers": [
+      "STYLEREF"
+    ],
+    "unnumbered_roles": [
+      "cover",
+      "declarations"
+    ],
+    "numbering_phases": [
+      {
+        "start_role": "abstract_cn",
+        "format": "roman_upper",
+        "start": 1
+      },
+      {
+        "start_role": "body",
+        "format": "decimal",
+        "start": 1
+      }
+    ],
+    "same_page_roles": [
+      [
+        "abstract_cn",
+        "keywords_cn"
+      ],
+      [
+        "abstract_en",
+        "keywords_en"
+      ]
+    ]
+  },
+  "build": {
+    "locators": {
+      "originality_fixed": {
+        "kind": "paragraph",
+        "text": "本人郑重声明：所呈交的学位论文",
+        "match": "starts_with",
+        "body_child_index": 27
+      },
+      "authorization_fixed": {
+        "kind": "paragraph",
+        "text": "学位论文作者完全了解北京师范大学有关保存和使用学位论文的规定",
+        "match": "starts_with",
+        "body_child_index": 37
+      }
+    },
+    "operations": []
+  }
+}

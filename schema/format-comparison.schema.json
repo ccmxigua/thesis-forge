@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.local/thesis-latex2docx/format-comparison.schema.json",
+  "title": "Post-generation DOCX format comparison",
+  "type": "object",
+  "required": ["schema_version", "status", "comparison_policy", "inputs", "summary", "comparisons"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "status": {"enum": ["passed", "failed"]},
+    "comparison_policy": {
+      "type": "object",
+      "required": ["precedence", "official_template_baseline_available", "blocking_statuses", "non_blocking_statuses"],
+      "properties": {
+        "precedence": {"type": "array", "items": {"type": "string"}},
+        "official_template_baseline_available": {"type": "boolean"},
+        "blocking_statuses": {"type": "array", "items": {"type": "string"}},
+        "non_blocking_statuses": {"type": "array", "items": {"type": "string"}}
+      },
+      "additionalProperties": false
+    },
+    "inputs": {
+      "type": "object",
+      "required": ["generated_docx", "generated_docx_sha256", "official_template", "official_template_sha256", "format_spec", "official_style_map", "generated_style_map"],
+      "properties": {
+        "generated_docx": {"type": "string"},
+        "generated_docx_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "official_template": {"type": "string"},
+        "official_template_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "format_spec": {"type": "string"},
+        "official_style_map": {"type": "string"},
+        "generated_style_map": {"type": "string"}
+      },
+      "additionalProperties": false
+    },
+    "summary": {
+      "type": "object",
+      "required": ["total", "pass", "fail", "conflict", "not_observable", "manual_review", "not_applicable", "blocking"],
+      "properties": {
+        "total": {"type": "integer", "minimum": 0},
+        "pass": {"type": "integer", "minimum": 0},
+        "fail": {"type": "integer", "minimum": 0},
+        "conflict": {"type": "integer", "minimum": 0},
+        "not_observable": {"type": "integer", "minimum": 0},
+        "manual_review": {"type": "integer", "minimum": 0},
+        "not_applicable": {"type": "integer", "minimum": 0},
+        "blocking": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "comparisons": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["role", "property", "written_requirement", "official_template_value", "generated_value", "authoritative_source", "status", "blocking"],
+        "properties": {
+          "role": {"type": "string"},
+          "property": {"type": "string"},
+          "written_requirement": {},
+          "official_template_value": {},
+          "generated_value": {},
+          "authoritative_source": {"enum": ["written_requirement", "official_template", "profile_default"]},
+          "status": {"enum": ["pass", "fail", "conflict", "not_observable", "manual_review", "not_applicable"]},
+          "blocking": {"type": "boolean"},
+          "note": {"type": "string"}
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

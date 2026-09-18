@@ -1,0 +1,94 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/thesis-latex2docx/section-plan.schema.json",
+  "title": "SectionPlan",
+  "type": "object",
+  "required": ["schema_version", "valid", "front_matter_start_section", "body_start_section", "section_count", "sections", "findings"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "source": {"type": ["string", "null"]},
+    "valid": {"type": "boolean"},
+    "front_matter_start_section": {"type": ["integer", "null"], "minimum": 1},
+    "body_start_section": {"type": ["integer", "null"], "minimum": 1},
+    "page_properties_policy": {"enum": ["apply_plan", "preserve_existing"]},
+    "section_count": {"type": "integer", "minimum": 1},
+    "sections": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/section"}
+    },
+    "findings": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/finding"}
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "format": {"enum": ["none", "roman", "roman_upper", "decimal"]},
+    "storyExpectation": {
+      "type": "object",
+      "required": ["active", "required_page_fields", "expected_page_switch"],
+      "properties": {
+        "active": {"type": "boolean"},
+        "required_page_fields": {"type": "integer", "minimum": 0},
+        "expected_page_switch": {"type": ["string", "null"]}
+      },
+      "additionalProperties": false
+    },
+    "storyVariants": {
+      "type": "object",
+      "required": ["default", "first", "even"],
+      "properties": {
+        "default": {"$ref": "#/$defs/storyExpectation"},
+        "first": {"$ref": "#/$defs/storyExpectation"},
+        "even": {"$ref": "#/$defs/storyExpectation"}
+      },
+      "additionalProperties": false
+    },
+    "section": {
+      "type": "object",
+      "required": ["section_index", "zone", "format", "ooxml_format", "numbered", "restart", "start", "titlePg", "evenAndOdd", "stories"],
+      "properties": {
+        "section_index": {"type": "integer", "minimum": 1},
+        "zone": {"enum": ["cover", "front", "body"]},
+        "format": {"$ref": "#/$defs/format"},
+        "ooxml_format": {"type": ["string", "null"]},
+        "numbered": {"type": "boolean"},
+        "restart": {"type": "boolean"},
+        "start": {"type": ["integer", "null"], "minimum": 1},
+        "titlePg": {"type": "boolean"},
+        "evenAndOdd": {"type": "boolean"},
+        "stories": {
+          "type": "object",
+          "required": ["header", "footer"],
+          "properties": {
+            "header": {"$ref": "#/$defs/storyVariants"},
+            "footer": {"$ref": "#/$defs/storyVariants"}
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "finding": {
+      "type": "object",
+      "required": ["code", "stage", "severity", "blocking", "evidence", "message"],
+      "properties": {
+        "code": {"type": "string", "pattern": "^[a-z][a-z0-9_.-]*$"},
+        "stage": {"const": "section_plan"},
+        "severity": {"enum": ["error", "warning", "info"]},
+        "blocking": {"type": "boolean"},
+        "message": {"type": "string", "minLength": 1},
+        "evidence": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["kind", "value"],
+            "properties": {"kind": {"type": "string"}, "value": {}, "source": {"type": "string"}},
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
+}

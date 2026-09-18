@@ -1,0 +1,1819 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.local/thesis-latex2docx/format-spec.schema.json",
+  "title": "Thesis formatting requirements",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "source_document",
+    "roles",
+    "requirements",
+    "status"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "1.0"
+    },
+    "source_document": {
+      "type": "string"
+    },
+    "run_id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "Fresh extraction-run identity. It must never be reused as a cache key."
+    },
+    "status": {
+      "enum": [
+        "rule_resolved",
+        "semantic_resolved",
+        "needs_clarification",
+        "unsupported"
+      ],
+      "description": "Execution readiness. 'unsupported' is retained for legacy documents; new producers record unsupported clauses in completeness.unsupported_items without making the whole spec non-executable."
+    },
+    "analysis_mode": {
+      "enum": [
+        "llm_primary",
+        "rule_only",
+        "known_template"
+      ]
+    },
+    "thesis_profile": {
+      "$ref": "#/$defs/thesisProfile"
+    },
+    "compliance_mode": {
+      "enum": [
+        "full",
+        "supported_subset"
+      ],
+      "description": "Full blocks on every applicable unsupported/unverifiable DOCX clause. supported_subset is an explicit compatibility/testing mode and can never claim full compliance."
+    },
+    "completeness": {
+      "$ref": "#/$defs/completenessSpec"
+    },
+    "clause_compliance": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/clauseCompliance"
+      }
+    },
+    "compliance_summary": {
+      "type": "object"
+    },
+    "blocking_errors": {
+      "type": "array",
+      "description": "Contract conflicts or other errors that make otherwise resolved requirements unsafe to execute.",
+      "items": {
+        "type": "object"
+      }
+    },
+    "semantic_review_provenance": {
+      "type": "object",
+      "required": [
+        "version",
+        "origin",
+        "source_sha256",
+        "evidence_sha256",
+        "clause_sha256",
+        "request_sha256"
+      ],
+      "properties": {
+        "version": {"type": "string"},
+        "origin": {"type": "string"},
+        "source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "evidence_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "clause_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "request_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "run_id": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    },
+    "semantic_review_provenance_valid": {
+      "type": "boolean"
+    },
+    "roles": {
+      "type": "object",
+      "additionalProperties": {
+        "$ref": "#/$defs/roleSpec"
+      }
+    },
+    "page": {
+      "$ref": "#/$defs/pageSpec"
+    },
+    "cleanup": {
+      "$ref": "#/$defs/cleanupSpec"
+    },
+    "tables": {
+      "$ref": "#/$defs/tableSpec"
+    },
+    "objects": {
+      "$ref": "#/$defs/objectPaginationSpec"
+    },
+    "content_constraints": {
+      "$ref": "#/$defs/contentConstraintSpec"
+    },
+    "conditional_constraints": {
+      "$ref": "#/$defs/conditionalConstraintSpec"
+    },
+    "document_structure": {
+      "$ref": "#/$defs/documentStructureSpec"
+    },
+    "appendices": {
+      "$ref": "#/$defs/appendixSpec"
+    },
+    "equations": {
+      "$ref": "#/$defs/equationLayoutSpec"
+    },
+    "requirements": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/requirement"
+      }
+    },
+    "content_instances": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/contentInstance"
+      }
+    },
+    "cover_field_instances": {
+      "type": "array",
+      "description": "Legacy alias accepted when reading pre-content-instance specs.",
+      "items": {
+        "$ref": "#/$defs/contentInstance"
+      }
+    },
+    "cover": {
+      "$ref": "#/$defs/coverSpec"
+    },
+    "declarations": {
+      "$ref": "#/$defs/declarationsSpec"
+    },
+    "resource_registry": {
+      "$ref": "#/$defs/resourceRegistry"
+    }
+  },
+  "$defs": {
+    "fontSpec": {
+      "type": "object",
+      "properties": {
+        "cjk": {
+          "type": "string"
+        },
+        "latin": {
+          "type": "string"
+        },
+        "size_pt": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "bold": {
+          "type": "boolean"
+        },
+        "italic": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "lineSpacing": {
+      "type": "object",
+      "required": [
+        "type",
+        "value"
+      ],
+      "properties": {
+        "type": {
+          "enum": [
+            "exact",
+            "at_least",
+            "multiple",
+            "single",
+            "one_point_five",
+            "double"
+          ]
+        },
+        "value": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "unit": {
+          "enum": [
+            "pt",
+            "multiple"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "paragraphSpec": {
+      "type": "object",
+      "properties": {
+        "alignment": {
+          "enum": [
+            "left",
+            "center",
+            "right",
+            "justify",
+            "distributed"
+          ]
+        },
+        "first_line_indent_chars": {
+          "type": "number",
+          "minimum": 0
+        },
+        "first_line_indent_pt": {
+          "type": "number",
+          "minimum": 0
+        },
+        "left_indent_pt": {
+          "type": "number",
+          "minimum": 0
+        },
+        "right_indent_pt": {
+          "type": "number",
+          "minimum": 0
+        },
+        "space_before_pt": {
+          "type": "number",
+          "minimum": 0
+        },
+        "space_after_pt": {
+          "type": "number",
+          "minimum": 0
+        },
+        "space_before_lines": {
+          "type": "number",
+          "minimum": 0
+        },
+        "space_after_lines": {
+          "type": "number",
+          "minimum": 0
+        },
+        "spacing_line_height_pt": {
+          "type": "number",
+          "exclusiveMinimum": 0
+        },
+        "line_spacing": {
+          "$ref": "#/$defs/lineSpacing"
+        },
+        "outline_level": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9
+        },
+        "page_break_before": {
+          "type": "boolean"
+        },
+        "keep_with_next": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "numberingSpec": {
+      "type": "object",
+      "properties": {
+        "format": {
+          "type": "string"
+        },
+        "style": {
+          "enum": [
+            "decimal",
+            "chinese",
+            "alpha",
+            "alpha_upper",
+            "roman",
+            "roman_upper"
+          ]
+        },
+        "depth": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9
+        }
+      },
+      "additionalProperties": false
+    },
+    "roleSpec": {
+      "type": "object",
+      "properties": {
+        "font": {
+          "$ref": "#/$defs/fontSpec"
+        },
+        "paragraph": {
+          "$ref": "#/$defs/paragraphSpec"
+        },
+        "numbering": {
+          "$ref": "#/$defs/numberingSpec"
+        },
+        "position": {
+          "enum": [
+            "above",
+            "below",
+            "inline"
+          ]
+        },
+        "prefix": {
+          "type": "string"
+        },
+        "separator": {
+          "type": "string"
+        },
+        "style_hint": {
+          "type": "string"
+        },
+        "text": {
+          "type": "string"
+        },
+        "header_content": {
+          "type": "object",
+          "properties": {
+            "left_text": {
+              "type": "string"
+            },
+            "right_field": {
+              "enum": [
+                "styleref_heading_1"
+              ]
+            }
+          },
+          "additionalProperties": false
+        },
+        "bottom_border": {
+          "type": "object",
+          "required": [
+            "style",
+            "width_pt"
+          ],
+          "properties": {
+            "style": {
+              "enum": [
+                "single",
+                "thin_thick",
+                "thick_thin"
+              ]
+            },
+            "width_pt": {
+              "type": "number",
+              "exclusiveMinimum": 0,
+              "maximum": 12
+            },
+            "space_pt": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 31
+            },
+            "color": {
+              "type": "string",
+              "pattern": "^[0-9A-Fa-f]{6}$"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "pageSpec": {
+      "type": "object",
+      "properties": {
+        "size": {
+          "type": "string"
+        },
+        "orientation": {
+          "enum": [
+            "portrait",
+            "landscape"
+          ]
+        },
+        "margins_pt": {
+          "type": "object",
+          "properties": {
+            "top": {
+              "type": "number",
+              "minimum": 0
+            },
+            "bottom": {
+              "type": "number",
+              "minimum": 0
+            },
+            "left": {
+              "type": "number",
+              "minimum": 0
+            },
+            "right": {
+              "type": "number",
+              "minimum": 0
+            },
+            "header": {
+              "type": "number",
+              "minimum": 0
+            },
+            "footer": {
+              "type": "number",
+              "minimum": 0
+            },
+            "gutter": {
+              "type": "number",
+              "minimum": 0
+            }
+          },
+          "additionalProperties": false
+        },
+        "different_first_page": {
+          "type": "boolean"
+        },
+        "different_odd_even": {
+          "type": "boolean"
+        },
+        "page_number": {
+          "type": "object",
+          "properties": {
+            "alignment": {
+              "enum": [
+                "left",
+                "center",
+                "right"
+              ]
+            },
+            "front_matter_format": {
+              "enum": [
+                "roman",
+                "roman_upper",
+                "decimal",
+                "none"
+              ]
+            },
+            "body_format": {
+              "enum": [
+                "roman",
+                "roman_upper",
+                "decimal",
+                "none"
+              ]
+            },
+            "front_matter_start": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "body_start": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "front_matter_start_selector": {
+              "$ref": "#/$defs/bodyStartSelector"
+            },
+            "body_start_selector": {
+              "$ref": "#/$defs/bodyStartSelector"
+            },
+            "preserve_existing_locations": {
+              "type": "boolean"
+            },
+            "replace_existing_fields": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "cleanupSpec": {
+      "type": "object",
+      "properties": {
+        "remove_comments": {
+          "type": "boolean"
+        },
+        "body_headers_only": {
+          "type": "boolean"
+        },
+        "remove_ranges": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["start_text", "end_text", "include_start", "include_end"],
+            "properties": {
+              "start_text": {"type": "string", "minLength": 1},
+              "end_text": {"type": "string", "minLength": 1},
+              "include_start": {"type": "boolean"},
+              "include_end": {"type": "boolean"},
+              "expected_matches": {"type": "integer", "minimum": 1, "maximum": 1}
+            },
+            "additionalProperties": false
+          }
+        },
+        "heading_1_texts": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        },
+        "remove_header_texts": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "tableSpec": {
+      "type": "object",
+      "properties": {
+        "style": {
+          "enum": [
+            "three_line"
+          ]
+        },
+        "top_border_pt": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 12
+        },
+        "header_border_pt": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 12
+        },
+        "bottom_border_pt": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "maximum": 12
+        },
+        "remove_vertical_borders": {
+          "type": "boolean"
+        },
+        "repeat_header_row": {
+          "type": "boolean"
+        },
+        "allow_row_split": {
+          "type": "boolean"
+        },
+        "keep_with_caption": {
+          "type": "boolean"
+        },
+        "border_widths_pt": {
+          "$ref": "#/$defs/tableBorderWidths"
+        },
+        "continuation": {
+          "$ref": "#/$defs/continuedTableSpec"
+        }
+      },
+      "additionalProperties": false
+    },
+    "tableBorderWidths": {
+      "type": "object",
+      "description": "Explicit table border mapping. 'header' is the bottom border of the first row; inside_h/inside_v map to internal horizontal/vertical borders.",
+      "properties": {
+        "top": {"type": "number", "minimum": 0, "maximum": 12},
+        "header": {"type": "number", "minimum": 0, "maximum": 12},
+        "bottom": {"type": "number", "minimum": 0, "maximum": 12},
+        "left": {"type": "number", "minimum": 0, "maximum": 12},
+        "right": {"type": "number", "minimum": 0, "maximum": 12},
+        "inside_h": {"type": "number", "minimum": 0, "maximum": 12},
+        "inside_v": {"type": "number", "minimum": 0, "maximum": 12}
+      },
+      "additionalProperties": false
+    },
+    "continuedTableSpec": {
+      "type": "object",
+      "description": "Cross-page table contract. Header repetition is serialized in DOCX; continuation caption/page-span behavior requires accepted Word/PDF render evidence.",
+      "required": [
+        "caption_suffix",
+        "repeat_header_row",
+        "verification"
+      ],
+      "properties": {
+        "caption_suffix": {
+          "type": "string",
+          "minLength": 1
+        },
+        "repeat_header_row": {
+          "type": "boolean"
+        },
+        "caption_required_on_continuation": {
+          "type": "boolean"
+        },
+        "verification": {
+          "enum": [
+            "word_render",
+            "pdf_render"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "objectPaginationSpec": {
+      "type": "object",
+      "properties": {
+        "keep_figure_with_caption": {
+          "type": "boolean"
+        },
+        "keep_table_with_caption": {
+          "type": "boolean"
+        },
+        "order_constraints": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/objectOrderConstraint"
+          },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "objectOrderConstraint": {
+      "type": "object",
+      "required": [
+        "object_type",
+        "preceding_prose_required"
+      ],
+      "properties": {
+        "object_type": {
+          "enum": [
+            "figure",
+            "table"
+          ]
+        },
+        "preceding_prose_required": {
+          "type": "boolean",
+          "const": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "contentConstraintSpec": {
+      "type": "object",
+      "properties": {
+        "abstract_zh": {
+          "type": "object",
+          "properties": {
+            "required": {
+              "type": "boolean"
+            },
+            "max_chars": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false
+        },
+        "abstract_en": {
+          "type": "object",
+          "properties": {
+            "required": {
+              "type": "boolean"
+            }
+          },
+          "additionalProperties": false
+        },
+        "keywords_zh": {
+          "$ref": "#/$defs/keywordConstraint"
+        },
+        "keywords_en": {
+          "$ref": "#/$defs/keywordConstraint"
+        },
+        "acknowledgments": {
+          "type": "object",
+          "properties": {
+            "max_chars": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
+    "conditionalConstraintSpec": {
+      "type": "object",
+      "properties": {
+        "abstract_zh_max_chars_by_degree": {
+          "type": "object",
+          "properties": {
+            "master": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "doctor": {
+              "type": "integer",
+              "minimum": 1
+            }
+          },
+          "additionalProperties": false
+        },
+        "require_zh_abstract_for_english_thesis": {
+          "type": "boolean"
+        },
+        "require_zh_keywords_for_english_thesis": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "keywordConstraint": {
+      "type": "object",
+      "properties": {
+        "required": {
+          "type": "boolean"
+        },
+        "min_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "max_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "separator": {
+          "enum": [
+            "chinese_comma",
+            "english_comma",
+            "semicolon"
+          ]
+        },
+        "require_after_role": {
+          "enum": [
+            "abstract_body_zh",
+            "abstract_body_en"
+          ]
+        },
+        "match_other_language_count": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "documentStructureSpec": {
+      "type": "object",
+      "properties": {
+        "required_roles": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "ordered_roles": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "toc_depth": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9
+        },
+        "max_heading_depth": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9
+        }
+      },
+      "additionalProperties": false
+    },
+    "appendixSpec": {
+      "type": "object",
+      "properties": {
+        "required_when_profile_has_appendices": {
+          "type": "boolean"
+        },
+        "label_style": {
+          "enum": [
+            "alpha_upper"
+          ]
+        },
+        "label_prefix": {
+          "type": "string"
+        },
+        "page_break_each": {
+          "type": "boolean"
+        },
+        "per_appendix_title_required": {
+          "type": "boolean"
+        }
+      },
+      "additionalProperties": false
+    },
+    "equationLayoutSpec": {
+      "type": "object",
+      "properties": {
+        "alignment": {
+          "enum": [
+            "center"
+          ]
+        },
+        "number_alignment": {
+          "enum": [
+            "right"
+          ]
+        },
+        "number_parentheses": {
+          "type": "boolean"
+        },
+        "same_line": {
+          "type": "boolean"
+        },
+        "no_lines": {
+          "type": "boolean"
+        },
+        "center_tab_twips": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "right_tab_twips": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "bodyStartSelector": {
+      "type": "object",
+      "required": [
+        "strategy"
+      ],
+      "properties": {
+        "strategy": {
+          "enum": [
+            "first_heading_1",
+            "heading_text",
+            "section_index"
+          ]
+        },
+        "heading_text_pattern": {
+          "type": "string"
+        },
+        "section_index": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "evidence_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "completenessSpec": {
+      "type": "object",
+      "required": [
+        "reviewed_by",
+        "covered_clause_ids",
+        "ignored_clause_ids",
+        "unresolved_clause_ids"
+      ],
+      "properties": {
+        "reviewed_by": {
+          "enum": [
+            "llm",
+            "rule",
+            "user"
+          ]
+        },
+        "covered_clause_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "ignored_clause_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "unresolved_clause_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "missing_clause_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "unsupported_items": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "description": "Clauses understood but not executable by this backend. They are preserved for audit and do not by themselves block supported requirements."
+        }
+      },
+      "additionalProperties": false
+    },
+    "clauseCompliance": {
+      "type": "object",
+      "required": [
+        "clause_id",
+        "evidence_ids",
+        "scope",
+        "status",
+        "requirement_ids",
+        "reason"
+      ],
+      "properties": {
+        "clause_id": {
+          "type": "string"
+        },
+        "evidence_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "scope": {
+          "enum": [
+            "docx",
+            "external_submission",
+            "informational"
+          ]
+        },
+        "status": {
+          "enum": [
+            "pending_execution",
+            "generated_and_verified",
+            "verified_existing",
+            "not_applicable",
+            "external_compliance",
+            "informational",
+            "requires_metadata",
+            "requires_source_content",
+            "unsupported_backend",
+            "unverifiable",
+            "unresolved",
+            "missing",
+            "failed"
+          ]
+        },
+        "requirement_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "uniqueItems": true
+        },
+        "reason": {
+          "type": "string"
+        },
+        "enforcement": {
+          "enum": [
+            "generate_or_repair",
+            "verify_existing"
+          ]
+        },
+        "verification_reason": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "applicabilitySpec": {
+      "type": "object",
+      "required": [
+        "status"
+      ],
+      "properties": {
+        "status": {
+          "enum": [
+            "always",
+            "conditional",
+            "excluded"
+          ]
+        },
+        "conditions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "fact",
+              "operator",
+              "value"
+            ],
+            "properties": {
+              "fact": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^(thesis_profile|source_inventory|template_profile)\\."
+              },
+              "operator": {
+                "enum": [
+                  "equals",
+                  "not_equals",
+                  "in",
+                  "present",
+                  "absent"
+                ]
+              },
+              "value": {}
+            },
+            "additionalProperties": false
+          }
+        },
+        "exceptions": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "inputPrerequisiteSpec": {
+      "type": "object",
+      "required": [
+        "kind",
+        "key",
+        "required",
+        "reason"
+      ],
+      "properties": {
+        "kind": {
+          "enum": [
+            "metadata",
+            "source_content",
+            "template_resource",
+            "runtime"
+          ]
+        },
+        "key": {
+          "type": "string",
+          "minLength": 1,
+          "pattern": "^(thesis_profile|source_inventory|template_profile|runtime)\\."
+        },
+        "required": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "verificationSpec": {
+      "type": "object",
+      "required": [
+        "mode",
+        "checks"
+      ],
+      "properties": {
+        "mode": {
+          "enum": [
+            "static_docx",
+            "word_render",
+            "pdf_render",
+            "manual",
+            "external"
+          ]
+        },
+        "checks": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "requirement": {
+      "type": "object",
+      "required": [
+        "id",
+        "role",
+        "properties",
+        "evidence_ids",
+        "resolved_by",
+        "confidence"
+      ],
+      "properties": {
+        "id": {
+          "type": "string"
+        },
+        "role": {
+          "type": "string"
+        },
+        "properties": {
+          "type": "object",
+          "minProperties": 1,
+          "description": "Executable requirements must contain at least one property; manual-only observations belong in clause_compliance, not an empty requirement."
+        },
+        "evidence_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        },
+        "resolved_by": {
+          "enum": [
+            "rule",
+            "llm",
+            "user",
+            "template"
+          ]
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "source_text": {
+          "type": "string"
+        },
+        "clause_ids": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "applicability": {
+          "$ref": "#/$defs/applicabilitySpec"
+        },
+        "input_prerequisites": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/inputPrerequisiteSpec"
+          }
+        },
+        "verification": {
+          "$ref": "#/$defs/verificationSpec"
+        },
+        "field_instance_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "contentInstance": {
+      "type": "object",
+      "required": [
+        "id",
+        "field_key",
+        "role",
+        "text",
+        "order",
+        "clause_ids",
+        "evidence_ids",
+        "reason"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "field_key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "role": {
+          "type": "string",
+          "minLength": 1
+        },
+        "text": {
+          "type": "string",
+          "minLength": 1
+        },
+        "order": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "clause_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "evidence_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "source_text": {
+          "type": "string"
+        },
+        "style_properties": {
+          "$ref": "#/$defs/roleSpec"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "trustSpec": {
+      "type": "object",
+      "required": [
+        "source",
+        "confirmed"
+      ],
+      "properties": {
+        "source": {
+          "enum": [
+            "user_confirmed",
+            "source_document",
+            "authoritative_record"
+          ]
+        },
+        "confirmed": {
+          "const": true
+        },
+        "note": {
+          "type": "string"
+        }
+      },
+      "additionalProperties": false
+    },
+    "coSupervisor": {
+      "type": "object",
+      "required": [
+        "name",
+        "kind"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "enum": [
+            "academic",
+            "enterprise",
+            "other"
+          ]
+        }
+      },
+      "additionalProperties": false
+    },
+    "pendingMetadata": {
+      "type": "object",
+      "required": [
+        "field",
+        "reason",
+        "resolution"
+      ],
+      "properties": {
+        "field": {
+          "type": "string",
+          "minLength": 1
+        },
+        "reason": {
+          "enum": [
+            "missing_source_value",
+            "invalid_source_value",
+            "ambiguous_source_value",
+            "requires_user_confirmation"
+          ]
+        },
+        "resolution": {
+          "const": "supply_user_confirmed_value"
+        }
+      },
+      "additionalProperties": false
+    },
+    "provenance": {
+      "type": "object",
+      "required": [
+        "source_kind",
+        "source_document",
+        "normalizer",
+        "trust",
+        "field_sources"
+      ],
+      "properties": {
+        "source_kind": {
+          "const": "semantic_metadata"
+        },
+        "source_document": {
+          "type": "string",
+          "minLength": 1
+        },
+        "source_sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "normalizer": {
+          "const": "extract_semantic_metadata.normalize_semantic_metadata"
+        },
+        "trust": {
+          "$ref": "#/$defs/trustSpec"
+        },
+        "field_sources": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string",
+            "minLength": 1
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "coverMetadata": {
+      "type": "object",
+      "required": [
+        "trust",
+        "author_name",
+        "title_zh",
+        "title_en",
+        "student_id",
+        "supervisor_name",
+        "completion_date"
+      ],
+      "properties": {
+        "trust": {
+          "$ref": "#/$defs/trustSpec"
+        },
+        "classification_number": {
+          "type": "string"
+        },
+        "unit_code": {
+          "type": "string",
+          "minLength": 1
+        },
+        "title_zh": {
+          "type": "string",
+          "minLength": 1
+        },
+        "title_en": {
+          "type": "string",
+          "minLength": 1
+        },
+        "subtitle_zh": {
+          "type": "string"
+        },
+        "subtitle_en": {
+          "type": "string"
+        },
+        "author_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "student_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "college_name": {
+          "type": "string"
+        },
+        "degree_discipline": {
+          "type": "string"
+        },
+        "professional_degree_type": {
+          "type": "string"
+        },
+        "program_name": {
+          "type": "string"
+        },
+        "field_name": {
+          "type": "string"
+        },
+        "research_direction": {
+          "type": "string"
+        },
+        "supervisor_name": {
+          "type": "string",
+          "minLength": 1
+        },
+        "co_supervisors": {
+          "type": "array",
+          "maxItems": 2,
+          "items": {
+            "$ref": "#/$defs/coSupervisor"
+          }
+        },
+        "completion_date": {
+          "type": "string",
+          "pattern": "^\\d{4}-(?:0[1-9]|1[0-2])(?:-(?:0[1-9]|[12]\\d|3[01]))?$"
+        },
+        "security_marking": {
+          "type": "string"
+        },
+        "embargo_until": {
+          "type": "string",
+          "pattern": "^\\d{4}-(?:0[1-9]|1[0-2])(?:-(?:0[1-9]|[12]\\d|3[01]))?$"
+        },
+        "administrative_verification": {
+          "const": "external_required"
+        }
+      },
+      "additionalProperties": false
+    },
+    "thesisProfile": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "degree_level",
+        "writing_language"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "1.0"
+        },
+        "degree_level": {
+          "enum": [
+            "master",
+            "doctor",
+            null
+          ]
+        },
+        "degree_category": {
+          "enum": [
+            "academic",
+            "professional"
+          ]
+        },
+        "writing_language": {
+          "enum": [
+            "zh",
+            "en",
+            "other",
+            null
+          ]
+        },
+        "security_level": {
+          "enum": [
+            "public",
+            "restricted",
+            "classified"
+          ]
+        },
+        "metadata_status": {
+          "enum": [
+            "complete",
+            "pending"
+          ]
+        },
+        "pending_fields": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "pending_metadata": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/pendingMetadata"
+          }
+        },
+        "provenance": {
+          "$ref": "#/$defs/provenance"
+        },
+        "has_appendices": {
+          "type": "boolean"
+        },
+        "has_figure_list": {
+          "type": "boolean"
+        },
+        "has_table_list": {
+          "type": "boolean"
+        },
+        "has_symbol_list": {
+          "type": "boolean"
+        },
+        "co_supervisor_count": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 2
+        },
+        "student_id": {
+          "type": "string"
+        },
+        "completion_date": {
+          "type": "string",
+          "pattern": "^\\d{4}-(?:0[1-9]|1[0-2])(?:-(?:0[1-9]|[12]\\d|3[01]))?$"
+        },
+        "cover_metadata": {
+          "$ref": "#/$defs/coverMetadata"
+        }
+      },
+      "additionalProperties": false
+    },
+    "coverField": {
+      "type": "object",
+      "required": [
+        "id",
+        "label",
+        "value_from",
+        "display_policy",
+        "order"
+      ],
+      "properties": {
+        "id": {
+          "enum": [
+            "classification_number",
+            "unit_code",
+            "title_zh",
+            "title_en",
+            "subtitle_zh",
+            "subtitle_en",
+            "author_name",
+            "student_id",
+            "college_name",
+            "degree_discipline",
+            "professional_degree_type",
+            "program_name",
+            "field_name",
+            "research_direction",
+            "supervisor_name",
+            "co_supervisors",
+            "completion_date",
+            "security_marking",
+            "embargo_until"
+          ]
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1
+        },
+        "value_from": {
+          "enum": [
+            "thesis_profile.cover_metadata.classification_number",
+            "thesis_profile.cover_metadata.unit_code",
+            "thesis_profile.cover_metadata.title_zh",
+            "thesis_profile.cover_metadata.title_en",
+            "thesis_profile.cover_metadata.subtitle_zh",
+            "thesis_profile.cover_metadata.subtitle_en",
+            "thesis_profile.cover_metadata.author_name",
+            "thesis_profile.cover_metadata.student_id",
+            "thesis_profile.cover_metadata.college_name",
+            "thesis_profile.cover_metadata.degree_discipline",
+            "thesis_profile.cover_metadata.professional_degree_type",
+            "thesis_profile.cover_metadata.program_name",
+            "thesis_profile.cover_metadata.field_name",
+            "thesis_profile.cover_metadata.research_direction",
+            "thesis_profile.cover_metadata.supervisor_name",
+            "thesis_profile.cover_metadata.co_supervisors",
+            "thesis_profile.cover_metadata.completion_date",
+            "thesis_profile.cover_metadata.security_marking",
+            "thesis_profile.cover_metadata.embargo_until"
+          ]
+        },
+        "display_policy": {
+          "enum": [
+            "required",
+            "if_present"
+          ]
+        },
+        "order": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "coverSpec": {
+      "type": "object",
+      "required": [
+        "institution",
+        "fields"
+      ],
+      "properties": {
+        "institution": {
+          "type": "string",
+          "minLength": 1
+        },
+        "fields": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/coverField"
+          }
+        },
+        "before_role": {
+          "enum": [
+            "document_start",
+            "abstract_title_zh"
+          ],
+          "description": "Compatibility input: the cover compiler normalizes either legacy abstract_title_zh or document_start to a document-start anchor."
+        },
+        "missing_value_policy": {
+          "const": "placeholder",
+          "description": "Generate the required cover field structure even when trusted instance metadata is unavailable."
+        },
+        "missing_value_placeholder": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Neutral text used for a required cover value that has not been supplied; defaults to two em dashes."
+        },
+        "layout_id": {
+          "enum": ["linear", "official_template_regions"],
+          "description": "Cover execution mode. linear is the generic paragraph fallback. official_template_regions requires a verified official DOCX resource and fixed-region assembly; core code must not redraw a school's cover from guessed geometry."
+        }
+      },
+      "additionalProperties": false
+    },
+    "signaturePlaceholder": {
+      "type": "object",
+      "required": [
+        "role",
+        "label",
+        "attestation_scope"
+      ],
+      "properties": {
+        "role": {
+          "enum": [
+            "author",
+            "supervisor",
+            "date"
+          ]
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1
+        },
+        "attestation_scope": {
+          "const": "placeholder_presence_only"
+        }
+      },
+      "additionalProperties": false
+    },
+    "declarationItem": {
+      "type": "object",
+      "required": [
+        "id",
+        "signature_placeholders"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "resource_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "heading": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Exact heading copied from the current source requirements."
+        },
+        "body": {
+          "type": "string",
+          "minLength": 1,
+          "description": "Compatibility form for one exact source paragraph."
+        },
+        "body_parts": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "source_evidence_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        },
+        "signature_placeholders": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/signaturePlaceholder"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "declarationsSpec": {
+      "type": "object",
+      "required": [
+        "before_role",
+        "items"
+      ],
+      "properties": {
+        "before_role": {
+          "type": "string",
+          "minLength": 1
+        },
+        "items": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/declarationItem"
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "resourceEntry": {
+      "type": "object",
+      "required": [
+        "id",
+        "kind",
+        "version",
+        "heading",
+        "body_parts",
+        "sha256",
+        "source_evidence_ids"
+      ],
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "const": "fixed_text"
+        },
+        "version": {
+          "type": "string",
+          "minLength": 1
+        },
+        "heading": {
+          "type": "string",
+          "minLength": 1
+        },
+        "body_parts": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "sha256": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "source_evidence_ids": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "uniqueItems": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "resourceRegistry": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "run_id",
+        "items"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "1.0"
+        },
+        "run_id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "items": {
+          "type": "object",
+          "additionalProperties": {
+            "$ref": "#/$defs/resourceEntry"
+          }
+        }
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

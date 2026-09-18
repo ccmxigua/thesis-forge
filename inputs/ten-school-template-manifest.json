@@ -1,0 +1,59 @@
+{
+  "schema_version": "1.0",
+  "source_tex": "tests/sample-thesis.tex",
+  "cases": [
+    {
+      "id": "bsu",
+      "requirements": "inputs/ten-school-templates/bsu-requirements.docx",
+      "analysis_mode": "llm_primary"
+    },
+    {
+      "id": "btbu",
+      "requirements": "inputs/ten-school-templates/btbu-requirements.docx",
+      "analysis_mode": "llm_primary"
+    },
+    {
+      "id": "cauc",
+      "requirements": "inputs/ten-school-templates/cauc-requirements.docx",
+      "style_template": "inputs/ten-school-templates/cauc-style.docx",
+      "analysis_mode": "llm_primary"
+    },
+    {
+      "id": "dlut",
+      "requirements": "inputs/ten-school-templates/dlut-requirements.docx",
+      "analysis_mode": "llm_primary"
+    },
+    {
+      "id": "neau",
+      "requirements": "inputs/ten-school-templates/neau-requirements.docx",
+      "template_profile": "template_profiles/neau-academic-master-2026/profile.json",
+      "analysis_mode": "llm_primary"
+    },
+    {
+      "id": "szu",
+      "requirements": "inputs/ten-school-templates/szu-requirements.docx",
+      "analysis_mode": "llm_primary"
+    },
+    {
+      "id": "tju",
+      "requirements": "inputs/ten-school-templates/tju-requirements.docx",
+      "analysis_mode": "llm_primary"
+    },
+    {
+      "id": "ujs",
+      "requirements": "inputs/ten-school-templates/ujs-requirements.docx",
+      "analysis_mode": "llm_primary"
+    },
+    {
+      "id": "ustb",
+      "requirements": "inputs/ten-school-templates/ustb-requirements.docx",
+      "template_boundary": "requirements_only",
+      "analysis_mode": "llm_primary"
+    },
+    {
+      "id": "xzhmu",
+      "requirements": "inputs/ten-school-templates/xzhmu-requirements.docx",
+      "analysis_mode": "llm_primary"
+    }
+  ]
+}

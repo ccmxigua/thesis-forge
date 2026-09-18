@@ -435,7 +435,8 @@ def _route_audit_fields(
 def _host_prompt(*, request_path: Path, chunk_path: Path,
                  response_path: Path, run_id: str, chunk_index: int,
                  chunk_count: int, attempt: int = 1,
-                 retry_hint: str | None = None) -> str:
+                 retry_hint: str | None = None,
+                 provenance: dict[str, Any] | None = None) -> str:
     retry_text = ""
     if retry_hint:
         retry_text = (
@@ -443,6 +444,10 @@ def _host_prompt(*, request_path: Path, chunk_path: Path,
             "Do not discuss the failure; return a newly generated valid JSON object. "
             f"Reason category: {retry_hint}.\n"
         )
+    provenance_text = json.dumps(
+        provenance or {}, ensure_ascii=False, sort_keys=True,
+        separators=(",", ":"),
+    )
     return f"""You are the current Host Agent for one fresh thesis-format semantic-review run.
 
 Return exactly ONE JSON object and nothing else. Do not use Markdown fences,
@@ -468,7 +473,10 @@ This is chunk {chunk_index} of {chunk_count}, attempt {attempt}, run_id {run_id}
 JSON and follow its contract_version 2.1 instructions literally. The local
 merger will validate the complete on-disk schema after the response. Review every
 and only the supplied clause IDs exactly once. Copy the chunk's provenance
-object unchanged. Cite only evidence and clause IDs present in this chunk.
+object unchanged. The exact provenance object to return is shown below; copy it
+without recomputing, abbreviating, or changing any character:
+{provenance_text}
+Cite only evidence and clause IDs present in this chunk.
 For declaration clauses, copy fixed headings/body paragraphs exactly from the
 cited evidence, use a run-local semantic item id, and use blank signature
 placeholders only; never invent resource_id, version, or sha256.
@@ -652,6 +660,7 @@ def run_host_agent_chunk(
             chunk_count=chunk_count,
             attempt=attempt,
             retry_hint=retry_hint,
+            provenance=chunk.get("provenance") if isinstance(chunk.get("provenance"), dict) else None,
         ),
         encoding="utf-8",
     )

@@ -4,7 +4,9 @@ from __future__ import annotations
 import base64
 import importlib.util
 import json
+import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -27,6 +29,7 @@ from tests.neutral_thesis_fixture import (
 
 ROOT = Path(__file__).resolve().parents[1]
 PY = sys.executable
+PANDOC_BIN = os.environ.get("PANDOC") or shutil.which("pandoc") or "pandoc"
 sys.path.insert(0, str(ROOT / "scripts"))
 import apply_format_spec
 import requirements_engine
@@ -296,7 +299,7 @@ b&=2\notag
             self.assertIn(r"\citet{beta}", text)
 
             native = subprocess.run(
-                ["pandoc", str(output), "-f", "latex+raw_tex", "-t", "plain"],
+                [PANDOC_BIN, str(output), "-f", "latex+raw_tex", "-t", "plain"],
                 cwd=ROOT, check=True, text=True, capture_output=True,
             ).stdout
             self.assertIn("实质正文", native)
@@ -319,7 +322,7 @@ b&=2\notag
             self.assertIn(r"\begin{equation}\text{Var}(X)=1\end{equation}", text)
 
             plain = subprocess.run(
-                ["pandoc", str(output), "-f", "latex+raw_tex", "-t", "plain"],
+                [PANDOC_BIN, str(output), "-f", "latex+raw_tex", "-t", "plain"],
                 cwd=ROOT, check=True, text=True, capture_output=True,
             ).stdout
             self.assertIn("U_BS", plain)
@@ -346,7 +349,7 @@ b&=2\notag
             self.assertNotIn(r"\DTMdate", text)
 
             subprocess.run(
-                ["pandoc", str(output), "-f", "latex+raw_tex", "-t", "docx", "-o", str(docx)],
+                [PANDOC_BIN, str(output), "-f", "latex+raw_tex", "-t", "docx", "-o", str(docx)],
                 cwd=ROOT, check=True, text=True, capture_output=True,
             )
             visible = "\n".join(p.text for p in Document(docx).paragraphs)
@@ -676,7 +679,7 @@ b&=2\notag
             )
             run("scripts/preprocess_tex.py", str(source), str(preprocessed))
             subprocess.run([
-                "pandoc", str(preprocessed), "--from=latex+raw_tex", "--to=docx", "--standalone",
+                PANDOC_BIN, str(preprocessed), "--from=latex+raw_tex", "--to=docx", "--standalone",
                 f"--reference-doc={ROOT / 'reference.docx'}",
                 f"--lua-filter={ROOT / 'filters' / 'thesis-v2.lua'}", "-o", str(output),
             ], cwd=ROOT, check=True, capture_output=True, text=True)

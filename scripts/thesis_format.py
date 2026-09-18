@@ -4,9 +4,9 @@
 This intentionally exposes no rule-only, known-template, or supported-subset
 switch.  Preparation writes an evidence-bound host-Agent review packet; final
 formatting consumes the response produced by the Agent currently running this
-skill.  ``--auto-host-agent`` is the one-command host-runtime mode: it calls
-the local OpenClaw Agent CLI for the current run, then returns to the same
-offline provenance checks and deterministic full pipeline.
+skill.  ``--prepare-agent-review`` is the host-neutral packet workflow.
+``--auto-host-agent`` is an explicit OpenClaw adapter mode only after the host
+runtime has been declared and validated as OpenClaw.
 
 Written requirements may be supplied as legacy binary Word ``.doc`` or OOXML
 ``.docx``.  Legacy input is normalized automatically in an isolated run
@@ -21,6 +21,14 @@ import sys
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT / "scripts") not in sys.path:
+    sys.path.insert(0, str(ROOT / "scripts"))
+
+from host_runtime import (  # noqa: E402
+    HostRuntimeError,
+    automatic_adapter_id,
+    require_host_runtime,
+)
 
 
 def pipeline_command(args: argparse.Namespace, *, prepare_host_review: bool = False,
@@ -70,23 +78,25 @@ def main(argv: list[str]) -> int:
     p.add_argument("--prepare-agent-review", action="store_true",
                    help="prepare packets for the current host Agent and stop before DOCX generation")
     p.add_argument("--auto-host-agent", action="store_true",
-                   help="one command: fresh extraction -> current OpenClaw Host Agent -> full DOCX")
+                   help="one command through the explicitly declared native host adapter")
+    p.add_argument("--host-runtime",
+                   help="expected native host runtime; must match THESIS_FORGE_HOST_RUNTIME")
     p.add_argument("--llm-response", type=Path,
                    help="offline complete contract-2.1 response produced by the current host Agent")
     p.add_argument("--host-review-chunk-size", type=int, default=20,
                    help="clauses per fresh Host Agent packet (default: 20)")
     p.add_argument("--host-agent-timeout", type=int, default=900,
-                   help="per-chunk OpenClaw Host Agent timeout in seconds (default: 900)")
+                   help="per-chunk native host adapter timeout in seconds (default: 900)")
     p.add_argument("--host-agent-max-concurrency", type=int, default=4,
                    help="maximum number of independent Host Agent chunks in flight (default: 4)")
     p.add_argument("--host-agent-max-attempts", type=int, default=2,
                    help="maximum attempts per Host Agent chunk before failing closed (default: 2)")
     p.add_argument("--host-agent-model",
-                   help="explicit OpenClaw provider/model route; omitted means copy the parent session's effective route")
+                   help="explicit OpenClaw route for the OpenClaw adapter; omitted means copy the bound parent route")
     p.add_argument("--host-agent-parent-session-key",
-                   help="exact parent session key to use for effective-route inheritance; otherwise auto-discover a recent parent")
+                   help="exact parent session key to use for effective-route inheritance; never auto-discovered")
     p.add_argument("--no-host-agent-model-inheritance", action="store_true",
-                   help="do not copy a parent model when --host-agent-model is omitted")
+                   help="disable parent inheritance only with an explicit --host-agent-model route")
     p.add_argument("--host-agent-id", default="main",
                    help="OpenClaw agent id used by --auto-host-agent (default: main)")
     p.add_argument("--openclaw-bin",
@@ -109,6 +119,13 @@ def main(argv: list[str]) -> int:
     if args.host_agent_max_attempts <= 0:
         p.error("--host-agent-max-attempts must be a positive integer")
     if args.auto_host_agent:
+        if args.no_host_agent_model_inheritance and not args.host_agent_model:
+            p.error("--no-host-agent-model-inheritance requires --host-agent-model")
+        try:
+            runtime = require_host_runtime(args.host_runtime)
+            automatic_adapter_id(runtime)
+        except HostRuntimeError as exc:
+            p.error(str(exc))
         work = args.work_dir.resolve()
         output = args.output.resolve() if args.output else None
         if work.exists() and any(work.iterdir()):
@@ -149,9 +166,11 @@ def main(argv: list[str]) -> int:
             bridge.append("--inherit-parent-model")
         if args.host_agent_parent_session_key:
             bridge += ["--parent-session-key", args.host_agent_parent_session_key]
+        if args.host_runtime:
+            bridge += ["--host-runtime", args.host_runtime]
         if args.openclaw_bin:
             bridge += ["--openclaw-bin", args.openclaw_bin]
-        code = run_stage(bridge, "current OpenClaw Host Agent semantic review + provenance merge")
+        code = run_stage(bridge, "explicit OpenClaw adapter review + provenance merge")
         if code:
             return code
         final = pipeline_command(args, llm_response=response_out, run_id=str(run_id))

@@ -12,13 +12,13 @@ from __future__ import annotations
 
 import argparse
 import copy
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import json
 import os
 import signal
-import shutil
 import subprocess
 import sys
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -26,21 +26,99 @@ from typing import Any
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
-# An omitted model is intentional: the bridge must inherit the parent
-# session's route when requested, rather than silently binding a provider.
-DEFAULT_HOST_AGENT_MODEL: str | None = None
 PARENT_SESSION_ENV_NAMES = (
     "OPENCLAW_PARENT_SESSION_KEY",
     "OPENCLAW_SESSION_KEY",
 )
-AUTO_PARENT_SESSION_MAX_AGE_MINUTES = 10
 
 
 class HostAgentRouteMismatch(RuntimeError):
     """Raised when a child did not execute on the run's route snapshot."""
 
 
-def _run_command(command: list[str], *, timeout: int) -> subprocess.CompletedProcess[str]:
+class HostAgentProvenanceMismatch(RuntimeError):
+    """Raised when the raw response does not echo the exact chunk identity."""
+
+
+class HostAgentCancelled(RuntimeError):
+    """Raised when a bridge run is stopped before a response is accepted."""
+
+
+class RunController:
+    """Coordinate bounded cancellation without touching unrelated processes."""
+
+    def __init__(self) -> None:
+        self.stop_event = threading.Event()
+        self._lock = threading.Lock()
+        self._processes: dict[int, subprocess.Popen[str]] = {}
+        self.reason: str | None = None
+
+    def request_stop(self, reason: str) -> None:
+        self.reason = reason
+        self.stop_event.set()
+
+    def check(self) -> None:
+        if self.stop_event.is_set():
+            raise HostAgentCancelled(
+                self.reason or "Host Agent run was cancelled before acceptance")
+
+    def register(self, process: subprocess.Popen[str]) -> None:
+        with self._lock:
+            self._processes[process.pid] = process
+        if self.stop_event.is_set():
+            self._terminate(process)
+
+    def unregister(self, process: subprocess.Popen[str]) -> None:
+        with self._lock:
+            self._processes.pop(process.pid, None)
+
+    @staticmethod
+    def _terminate(process: subprocess.Popen[str]) -> None:
+        if process.poll() is not None:
+            return
+        if os.name == "posix":
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        else:
+            process.terminate()
+
+    def terminate_all(self) -> None:
+        with self._lock:
+            processes = list(self._processes.values())
+        for process in processes:
+            self._terminate(process)
+
+
+def _terminate_and_reap(process: subprocess.Popen[str]) -> tuple[str, str]:
+    """Stop one owned process group and close its pipes before returning."""
+    if os.name == "posix":
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    else:
+        process.terminate()
+    try:
+        return process.communicate(timeout=5)
+    except subprocess.TimeoutExpired:
+        if os.name == "posix":
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+        else:
+            process.kill()
+        return process.communicate()
+
+
+def _run_command(
+    command: list[str],
+    *,
+    timeout: int,
+    controller: RunController | None = None,
+) -> subprocess.CompletedProcess[str]:
     """Run a child in its own process group and reap descendants on timeout.
 
     ``openclaw agent`` can spawn an ``openclaw-agent`` child that inherits the
@@ -57,39 +135,54 @@ def _run_command(command: list[str], *, timeout: int) -> subprocess.CompletedPro
         stderr=subprocess.PIPE,
         start_new_session=(os.name == "posix"),
     )
+    if controller is not None:
+        controller.register(process)
     try:
-        stdout, stderr = process.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired as exc:
-        if os.name == "posix":
-            try:
-                os.killpg(process.pid, signal.SIGTERM)
-            except ProcessLookupError:
-                pass
+        if controller is None:
+            stdout, stderr = process.communicate(timeout=timeout)
         else:
-            process.kill()
-        try:
-            stdout, stderr = process.communicate(timeout=5)
-        except subprocess.TimeoutExpired:
-            if os.name == "posix":
+            deadline = time.monotonic() + timeout
+            while True:
+                controller.check()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise subprocess.TimeoutExpired(command, timeout)
                 try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except ProcessLookupError:
-                    pass
-            else:
-                process.kill()
-            stdout, stderr = process.communicate()
+                    stdout, stderr = process.communicate(
+                        timeout=min(0.5, remaining)
+                    )
+                    break
+                except subprocess.TimeoutExpired:
+                    continue
+    except HostAgentCancelled:
+        _terminate_and_reap(process)
+        raise
+    except subprocess.TimeoutExpired as exc:
+        stdout, stderr = _terminate_and_reap(process)
         raise subprocess.TimeoutExpired(
             command, timeout, output=stdout, stderr=stderr,
         ) from exc
+    finally:
+        if controller is not None:
+            controller.unregister(process)
     return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
 
 
 if str(SCRIPTS) not in sys.path:
     sys.path.insert(0, str(SCRIPTS))
 
-from compliance import classification_requires_requirement  # noqa: E402
-from evidence_context_guards import sample_content_guard  # noqa: E402
-from format_spec_validation import validate_instance  # noqa: E402
+from host_adapters import openclaw as openclaw_adapter  # noqa: E402
+from host_review_contract import (  # noqa: E402
+    summarize_contract_errors as _shared_summarize_contract_errors,
+    validate_response as _shared_validate_response,
+)
+from host_runtime import (  # noqa: E402
+    HostAdapterUnavailable,
+    HostRuntimeError,
+    automatic_adapter_id,
+    require_host_runtime,
+    require_parent_session,
+)
 from requirements_engine import merge_host_agent_review_packets  # noqa: E402
 from semantic_contract import validate_response_provenance  # noqa: E402
 
@@ -101,39 +194,21 @@ def _read_json(path: Path, *, label: str) -> Any:
         raise ValueError(f"cannot read {label}: {path}: {exc}") from exc
 
 
+def _bound_path(root: Path, value: str | Path, *, label: str) -> Path:
+    """Resolve a manifest/output path while forbidding directory escape."""
+    if not isinstance(value, (str, Path)) or not str(value).strip():
+        raise ValueError(f"{label} must be a non-empty path")
+    root = root.resolve()
+    candidate = Path(value)
+    resolved = (candidate if candidate.is_absolute() else root / candidate).resolve()
+    if resolved == root or root not in resolved.parents:
+        raise ValueError(f"{label} escapes its approved run directory: {value!r}")
+    return resolved
+
+
 def _write_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
-
-
-def _strip_json_wrapper(text: str) -> str:
-    """Accept raw JSON or one Markdown JSON fence, and nothing else."""
-    value = text.strip()
-    if value.startswith("```") and value.endswith("```"):
-        lines = value.splitlines()
-        if len(lines) < 3:
-            raise ValueError("Host Agent returned an empty JSON fence")
-        value = "\n".join(lines[1:-1]).strip()
-        if not value:
-            raise ValueError("Host Agent returned an empty JSON fence")
-    try:
-        parsed = json.loads(value)
-    except json.JSONDecodeError:
-        # Models occasionally add one short sentence around an otherwise
-        # valid object.  Recover only a single complete object; the local
-        # contract/provenance merger still decides whether it is acceptable.
-        start = value.find("{")
-        end = value.rfind("}")
-        if start < 0 or end <= start:
-            raise ValueError("Host Agent did not return a JSON object") from None
-        candidate = value[start:end + 1]
-        try:
-            parsed = json.loads(candidate)
-        except json.JSONDecodeError as exc:
-            raise ValueError(f"Host Agent returned invalid JSON: {exc}") from exc
-    if not isinstance(parsed, dict):
-        raise ValueError("Host Agent response must be one JSON object")
-    return parsed
 
 
 def compact_model_packet(chunk: dict[str, Any]) -> dict[str, Any]:
@@ -237,210 +312,16 @@ def compact_model_packet(chunk: dict[str, Any]) -> dict[str, Any]:
 
 
 def _summarize_contract_errors(errors: list[str], *, limit: int = 12) -> str:
-    """Make retry feedback bounded and deterministic without exposing payloads."""
-    unique: list[str] = []
-    for error in errors:
-        if error not in unique:
-            unique.append(error)
-    suffix = f"; ... ({len(unique) - limit} more)" if len(unique) > limit else ""
-    return "; ".join(unique[:limit]) + suffix
+    return _shared_summarize_contract_errors(errors, limit=limit)
 
 
-def validate_host_agent_response(response: Any, chunk: dict[str, Any]) -> list[str]:
-    """Validate one chunk before it can be merged into the full response.
+# Compatibility name for callers that imported the bridge directly.  The
+# shared host-independent implementation is now authoritative.
+validate_host_agent_response = _shared_validate_response
 
-    This is deliberately a provider-neutral preflight.  It mirrors the
-    response-side parts of the final semantic contract while retaining the
-    final full-run merge as the authoritative gate.  Keeping the preflight
-    here gives a retry a precise, local reason instead of waiting until the
-    DOCX stage to discover schema drift.
-    """
-    if not isinstance(response, dict):
-        return ["response_must_be_object"]
-
-    errors: list[str] = []
-    response_schema = chunk.get("response_schema")
-    if not isinstance(response_schema, dict) or not response_schema:
-        errors.append("response_schema_missing")
-    else:
-        errors.extend(validate_instance(response, response_schema, response_schema))
-
-    contract = chunk.get("requirement_contract")
-    if not isinstance(contract, dict):
-        errors.append("requirement_contract_missing")
-        contract = {}
-    contract_root = {"$defs": contract.get("$defs", {})}
-    role_schemas = contract.get("role_properties_schema", {})
-    allowed_roles = set(contract.get("allowed_roles", []))
-
-    clauses = chunk.get("clauses")
-    if not isinstance(clauses, list):
-        clauses = []
-    clause_map = {
-        str(item.get("id")): item
-        for item in clauses
-        if isinstance(item, dict) and item.get("id")
-    }
-    evidence_context = chunk.get("evidence_context")
-    if not isinstance(evidence_context, dict):
-        evidence_context = {}
-    evidence_ids = {str(key) for key in evidence_context}
-
-    requirements = response.get("requirements")
-    if not isinstance(requirements, list):
-        return errors + ["requirements_must_be_array"]
-
-    requirement_clause_sets: list[set[str]] = []
-    for index, item in enumerate(requirements):
-        if not isinstance(item, dict):
-            requirement_clause_sets.append(set())
-            continue
-        role = item.get("role")
-        if role not in allowed_roles:
-            errors.append(f"$.requirements[{index}].role: unknown_or_disallowed_role")
-        role_schema = role_schemas.get(role) if isinstance(role_schemas, dict) else None
-        if isinstance(role_schema, dict):
-            try:
-                errors.extend(validate_instance(
-                    item.get("properties"), role_schema, contract_root,
-                    f"$.requirements[{index}].properties",
-                ))
-            except (KeyError, ValueError) as exc:
-                errors.append(
-                    f"$.requirements[{index}].properties: role_schema_resolution_failed:{exc}"
-                )
-
-        clause_ids = item.get("clause_ids")
-        clause_set = {str(value) for value in clause_ids} if isinstance(clause_ids, list) else set()
-        requirement_clause_sets.append(clause_set)
-        if not clause_set:
-            errors.append(f"$.requirements[{index}].clause_ids: must be non-empty")
-        unknown_clauses = sorted(clause_set - set(clause_map))
-        if unknown_clauses:
-            errors.append(
-                f"$.requirements[{index}].clause_ids: unknown:{','.join(unknown_clauses)}"
-            )
-
-        cited_evidence = {
-            str(value) for value in item.get("evidence_ids", [])
-        } if isinstance(item.get("evidence_ids"), list) else set()
-        allowed_evidence = {
-            str(evidence_id)
-            for clause_id in clause_set
-            for evidence_id in (clause_map.get(clause_id, {}).get("evidence_ids", []) or [])
-        }
-        if not cited_evidence:
-            errors.append(f"$.requirements[{index}].evidence_ids: must be non-empty")
-        unknown_evidence = sorted(cited_evidence - evidence_ids)
-        if unknown_evidence:
-            errors.append(
-                f"$.requirements[{index}].evidence_ids: not_in_chunk:{','.join(unknown_evidence)}"
-            )
-        unrelated_evidence = sorted(cited_evidence - allowed_evidence)
-        if unrelated_evidence:
-            errors.append(
-                f"$.requirements[{index}].evidence_ids: not_backed_by_clause:{','.join(unrelated_evidence)}"
-            )
-
-    expected_clause_ids = [str(item.get("id")) for item in clauses if isinstance(item, dict)]
-    reviews = response.get("clause_reviews")
-    if not isinstance(reviews, list):
-        return errors + ["clause_reviews_must_be_array"]
-    actual_clause_ids = [
-        str(item.get("clause_id")) for item in reviews if isinstance(item, dict)
-    ]
-    if (
-        len(actual_clause_ids) != len(expected_clause_ids)
-        or len(set(actual_clause_ids)) != len(actual_clause_ids)
-        or set(actual_clause_ids) != set(expected_clause_ids)
-    ):
-        errors.append("clause_reviews_must_cover_each_chunk_clause_exactly_once")
-
-    referenced_indexes: set[int] = set()
-    for review_index, review in enumerate(reviews):
-        if not isinstance(review, dict):
-            continue
-        clause_id = str(review.get("clause_id"))
-        classification = review.get("classification")
-        indexes = review.get("requirement_indexes")
-        clause = clause_map.get(clause_id)
-        if (
-            isinstance(classification, str)
-            and classification_requires_requirement(classification)
-            and isinstance(clause, dict)
-        ):
-            guard = sample_content_guard(clause, clauses)
-            if guard:
-                errors.append(
-                    f"$.clause_reviews[{review_index}]:"
-                    f"sample_content_cannot_be_executable:{guard['kind']}"
-                )
-        if not isinstance(indexes, list):
-            continue
-        valid_indexes: list[int] = []
-        for requirement_index in indexes:
-            if (
-                isinstance(requirement_index, bool)
-                or not isinstance(requirement_index, int)
-                or requirement_index < 0
-                or requirement_index >= len(requirements)
-            ):
-                errors.append(
-                    f"$.clause_reviews[{review_index}].requirement_indexes: out_of_range"
-                )
-                continue
-            valid_indexes.append(requirement_index)
-            referenced_indexes.add(requirement_index)
-            if (
-                isinstance(classification, str)
-                and classification_requires_requirement(classification)
-                and clause_id not in requirement_clause_sets[requirement_index]
-            ):
-                errors.append(
-                    f"$.clause_reviews[{review_index}]: requirement_index_not_backed_by_clause"
-                )
-        if isinstance(classification, str):
-            if classification_requires_requirement(classification) and not valid_indexes:
-                errors.append(
-                    f"$.clause_reviews[{review_index}]: executable_review_requires_requirement_index"
-                )
-            elif not classification_requires_requirement(classification) and valid_indexes:
-                errors.append(
-                    f"$.clause_reviews[{review_index}]: nonexecutable_review_must_not_reference_requirement"
-                )
-
-    unused_indexes = sorted(set(range(len(requirements))) - referenced_indexes)
-    if unused_indexes:
-        errors.append(
-            "requirements_not_referenced_by_clause_review:" + ",".join(map(str, unused_indexes))
-        )
-    return errors
-
-
-def parse_openclaw_result(stdout: str) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Extract the model payload from an OpenClaw JSON result envelope."""
-    try:
-        envelope = json.loads(stdout)
-    except json.JSONDecodeError as exc:
-        raise ValueError(f"openclaw agent did not return JSON: {exc}") from exc
-    if not isinstance(envelope, dict):
-        raise ValueError("openclaw agent JSON envelope must be an object")
-    if envelope.get("status") not in {None, "ok"}:
-        summary = envelope.get("summary") or envelope.get("status")
-        raise ValueError(f"openclaw agent failed: {summary}")
-    result = envelope.get("result")
-    payloads = result.get("payloads") if isinstance(result, dict) else None
-    if not isinstance(payloads, list):
-        # ``openclaw agent exec --json`` projects payloads at the envelope
-        # root, while ``openclaw agent --json`` nests them under result.
-        payloads = envelope.get("payloads")
-    if not isinstance(payloads, list):
-        raise ValueError("OpenClaw response has no payloads array")
-    texts = [item.get("text", "") for item in payloads
-             if isinstance(item, dict) and isinstance(item.get("text"), str) and item.get("text")]
-    if not texts:
-        raise ValueError("openclaw agent returned no text payload")
-    return _strip_json_wrapper("\n".join(texts)), envelope
+# Compatibility name; the OpenClaw envelope implementation lives in its
+# explicit adapter module rather than in the generic bridge.
+parse_openclaw_result = openclaw_adapter.parse_result
 
 
 def _split_model_route(model_ref: str) -> tuple[str, str]:
@@ -523,6 +404,33 @@ def verify_host_agent_route(
     return actual
 
 
+def _route_audit_fields(
+    expected_route: str | None,
+    chunk_audits: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Separate expected route fields from observed child route evidence."""
+    expected_provider = expected_model = None
+    if expected_route:
+        expected_provider, expected_model = _split_model_route(expected_route)
+    observed_routes = sorted({
+        str(item.get("actual_route"))
+        for item in chunk_audits
+        if isinstance(item.get("actual_route"), str) and item.get("actual_route")
+    })
+    observed_route = observed_routes[0] if len(observed_routes) == 1 else None
+    observed_provider = observed_model = None
+    if observed_route:
+        observed_provider, observed_model = _split_model_route(observed_route)
+    return {
+        "expected_provider": expected_provider,
+        "expected_model": expected_model,
+        "observed_provider": observed_provider,
+        "observed_model": observed_model,
+        "observed_routes": observed_routes,
+        "observed_route_consistent": len(observed_routes) <= 1,
+    }
+
+
 def _host_prompt(*, request_path: Path, chunk_path: Path,
                  response_path: Path, run_id: str, chunk_index: int,
                  chunk_count: int, attempt: int = 1,
@@ -578,9 +486,7 @@ the unchanged provenance object requested by the chunk.
 
 
 def _resolve_openclaw(binary: str | None) -> str:
-    if binary:
-        return binary
-    return shutil.which("openclaw") or "openclaw"
+    return openclaw_adapter.resolve_binary(binary)
 
 
 def _load_session_records(
@@ -629,43 +535,6 @@ def _parent_session_from_environment() -> str | None:
     return None
 
 
-def _is_host_agent_session(key: str) -> bool:
-    return ":thesis-host-agent:" in key or ":host-model-probe" in key
-
-
-def _select_auto_parent_session(
-    records: list[dict[str, Any]],
-    *,
-    agent_id: str,
-) -> dict[str, Any] | None:
-    """Select the freshest likely interactive parent when no key was supplied.
-
-    OpenClaw does not currently export the invoking session key to ordinary
-    subprocesses.  Prefer a recent Telegram direct session (the normal skill
-    entry point), then any other recent direct session.  Host-Agent probe and
-    bridge sessions are excluded so a retry cannot inherit from itself.
-    """
-    candidates: list[dict[str, Any]] = []
-    for record in records:
-        key = record.get("key")
-        if not isinstance(key, str) or not key.strip():
-            continue
-        if record.get("agentId") not in {None, agent_id}:
-            continue
-        if record.get("kind") not in {None, "direct"}:
-            continue
-        if _is_host_agent_session(key):
-            continue
-        if record.get("abortedLastRun") is True:
-            continue
-        candidates.append(record)
-    if not candidates:
-        return None
-    telegram = [record for record in candidates if ":telegram:" in str(record.get("key"))]
-    pool = telegram or candidates
-    return max(pool, key=lambda record: int(record.get("updatedAt") or 0))
-
-
 def _route_from_parent_record(record: dict[str, Any]) -> tuple[str, dict[str, Any]]:
     """Build the parent's effective provider/model route.
 
@@ -706,35 +575,26 @@ def resolve_parent_model(
     *,
     agent_id: str = "main",
     parent_session_key: str | None = None,
-    max_age_minutes: int = AUTO_PARENT_SESSION_MAX_AGE_MINUTES,
 ) -> dict[str, Any]:
     """Resolve the parent session route for a Host-Agent run.
 
     An explicit key wins, followed by the two supported environment names.
-    If neither is available, a recent interactive session is selected.  A
-    parent without a session override uses its stored effective
+    If neither is available, the call fails closed; a recent interactive
+    session is never selected.  A parent without a session override uses its stored effective
     ``modelProvider`` + ``model`` route.  If that route cannot be resolved,
     this function fails closed instead of using the gateway default.
     """
     requested_key = (parent_session_key or _parent_session_from_environment() or "").strip()
-    if requested_key:
-        records = _load_session_records(openclaw_bin, agent_id=agent_id)
-        record = next((item for item in records if item.get("key") == requested_key), None)
-        if record is None:
-            raise ValueError(f"parent session key was not found: {requested_key}")
-        selected_key = requested_key
-        source = "explicit-parent-session"
-    else:
-        if isinstance(max_age_minutes, bool) or max_age_minutes <= 0:
-            raise ValueError("parent session max age must be a positive integer")
-        records = _load_session_records(
-            openclaw_bin, agent_id=agent_id, active_minutes=max_age_minutes,
+    if not requested_key:
+        raise ValueError(
+            "parent session binding is missing; refusing to select a recent or global session"
         )
-        record = _select_auto_parent_session(records, agent_id=agent_id)
-        if record is None:
-            raise ValueError("no recent interactive parent session with a resolvable route")
-        selected_key = str(record["key"])
-        source = "auto-recent-parent-session"
+    records = _load_session_records(openclaw_bin, agent_id=agent_id)
+    record = next((item for item in records if item.get("key") == requested_key), None)
+    if record is None:
+        raise ValueError(f"parent session key was not found: {requested_key}")
+    selected_key = requested_key
+    source = "explicit-parent-session"
     model, metadata = _route_from_parent_record(record)
     return {
         "model": model,
@@ -768,7 +628,10 @@ def run_host_agent_chunk(
     retry_hint: str | None = None,
     auth_env_only: bool = False,
     runner: str = "exec",
+    controller: RunController | None = None,
 ) -> dict[str, Any]:
+    if controller is not None:
+        controller.check()
     prompt_path.parent.mkdir(parents=True, exist_ok=True)
     model_packet_path = prompt_path.with_name(prompt_path.stem.replace("prompt", "input") + ".json")
     _write_json(model_packet_path, compact_model_packet(chunk))
@@ -784,9 +647,9 @@ def run_host_agent_chunk(
         ),
         encoding="utf-8",
     )
-    session_key = (
-        f"agent:{agent_id}:thesis-host-agent:{run_id}:chunk-{chunk_index:04d}"
-        f":attempt-{attempt:02d}"
+    session_key = openclaw_adapter.session_key(
+        agent_id=agent_id, run_id=run_id,
+        chunk_index=chunk_index, attempt=attempt,
     )
     # ``openclaw agent`` accepts --model but still consults the global fallback
     # chain for a new child session.  ``agent exec`` lets this invocation pass
@@ -794,52 +657,43 @@ def run_host_agent_chunk(
     # a provider outage may retry on the same route, but may never jump to a
     # different user's/global provider.  The normal command remains available
     # for the explicit no-model compatibility mode and non-main agents.
-    if runner not in {"exec", "gateway"}:
-        raise ValueError(f"unsupported Host Agent runner: {runner}")
-    use_isolated_exec = bool(model) and agent_id == "main" and runner == "exec"
-    if use_isolated_exec:
-        command = [
-            openclaw_bin, "agent", "exec",
-        ]
-        if openclaw_config is not None:
-            command.extend(["--config", str(openclaw_config)])
-        command.extend([
-            "--cwd", str(ROOT),
-            "--model", model,
-            "--fallback", model,
-            "--message-file", str(prompt_path),
-            "--json", "--timeout", str(timeout),
-        ])
-        if auth_env_only:
-            command.append("--auth-env-only")
-    elif auth_env_only and runner == "exec":
-        raise ValueError(
-            "--auth-env-only requires an explicit model route with agent_id=main"
-        )
-    else:
-        command = [
-            openclaw_bin, "agent", "--agent", agent_id,
-            "--session-key", session_key,
-            "--message-file", str(prompt_path),
-        ]
-        if model:
-            command += ["--model", model]
-        command += ["--json", "--timeout", str(timeout)]
+    command, use_isolated_exec = openclaw_adapter.build_command(
+        binary=openclaw_bin,
+        agent_id=agent_id,
+        session_key_value=session_key,
+        prompt_path=prompt_path,
+        model=model,
+        runner=runner,
+        timeout=timeout,
+        cwd=ROOT,
+        config=openclaw_config,
+        auth_env_only=auth_env_only,
+    )
     started = time.time()
     try:
-        result = _run_command(command, timeout=max(timeout + 30, timeout))
+        result = _run_command(
+            command, timeout=max(timeout + 30, timeout), controller=controller,
+        )
     except subprocess.TimeoutExpired as exc:
         raise RuntimeError(
             f"Host Agent chunk {chunk_index}/{chunk_count} exceeded {timeout}s"
         ) from exc
     elapsed = round(time.time() - started, 1)
+    raw_envelope_path = response_path.with_name(
+        f"{response_path.stem}.raw-envelope.txt"
+    )
+    if raw_envelope_path.exists():
+        raise ValueError(f"refusing to overwrite existing raw Host Agent output: {raw_envelope_path}")
+    raw_envelope_path.write_text(result.stdout or "", encoding="utf-8")
     if result.returncode:
         detail = (result.stderr or result.stdout or "").strip()[-1600:]
         raise RuntimeError(
             f"Host Agent chunk {chunk_index}/{chunk_count} failed with returncode "
             f"{result.returncode}: {detail}"
         )
-    response, envelope = parse_openclaw_result(result.stdout)
+    if controller is not None:
+        controller.check()
+    response, envelope = openclaw_adapter.parse_result(result.stdout)
     route = verify_host_agent_route(envelope, model)
     expected_provenance = chunk.get("provenance")
     observed_provenance = response.get("provenance") if isinstance(response, dict) else None
@@ -852,10 +706,21 @@ def run_host_agent_chunk(
             })
         else:
             provenance_mismatch_fields = sorted(str(key) for key in expected_provenance)
-        # Provenance is transport metadata owned by this bridge.  The model's
-        # copy is retained only as an audit signal; a truncated or otherwise
-        # damaged model echo must not make a valid immutable chunk unusable.
-        response["provenance"] = copy.deepcopy(expected_provenance)
+    raw_response_path = response_path.with_name(
+        f"{response_path.stem}.raw{response_path.suffix}"
+    )
+    if raw_response_path.exists():
+        raise ValueError(f"refusing to overwrite existing raw Host Agent response: {raw_response_path}")
+    raw_response_path.write_text(
+        json.dumps(response, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    )
+    if provenance_mismatch_fields:
+        raise HostAgentProvenanceMismatch(
+            "Host Agent response provenance mismatch: "
+            + ", ".join(provenance_mismatch_fields)
+        )
+    if controller is not None:
+        controller.check()
     response_path.write_text(
         json.dumps(response, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
@@ -876,17 +741,15 @@ def run_host_agent_chunk(
         "actual_model": route.get("model"),
         "actual_route": route.get("route"),
         "fallback_used": route.get("fallback_used"),
+        "local_process_state": "completed",
+        "remote_operation_state": "remote_operation_completed",
         "response_path": str(response_path.resolve()),
+        "raw_envelope_path": str(raw_envelope_path.resolve()),
+        "raw_response_path": str(raw_response_path.resolve()),
         "finished_at": datetime.now(timezone.utc).isoformat(),
     }
-    audit["provenance_copy_warning"] = (
-        {
-            "action": "bridge_injected_expected_chunk_provenance",
-            "observed_present": isinstance(observed_provenance, dict),
-            "mismatch_fields": provenance_mismatch_fields,
-        }
-        if provenance_mismatch_fields else None
-    )
+    audit["provenance_observed"] = isinstance(observed_provenance, dict)
+    audit["provenance_mismatch_fields"] = provenance_mismatch_fields
     return audit
 
 
@@ -904,10 +767,20 @@ def run_bridge(
     openclaw_config: Path | None = None,
     inherit_parent_model: bool = False,
     parent_session_key: str | None = None,
-    parent_session_max_age_minutes: int = AUTO_PARENT_SESSION_MAX_AGE_MINUTES,
     auth_env_only: bool = False,
     runner: str = "exec",
+    host_runtime: str | None = None,
 ) -> dict[str, Any]:
+    host_context = require_host_runtime(host_runtime)
+    adapter_id = automatic_adapter_id(host_context)
+    if adapter_id != "openclaw":
+        raise HostAdapterUnavailable(
+            f"automatic adapter {adapter_id!r} is not implemented by this bridge"
+        )
+    if model is None and not inherit_parent_model and not host_context.parent_session_id:
+        raise HostRuntimeError(
+            "automatic OpenClaw execution requires an explicit model route or a bound parent session; refusing the gateway default"
+        )
     review_dir = review_dir.resolve()
     manifest_path = review_dir / "host-agent-review-manifest.json"
     manifest = _read_json(manifest_path, label="host-agent review manifest")
@@ -915,15 +788,27 @@ def run_bridge(
         raise ValueError("review manifest is not a host-agent semantic-review manifest")
     if manifest.get("contract_version") != "2.1":
         raise ValueError("host-agent review manifest is not contract 2.1")
-    request_path = review_dir / str(manifest.get("request_path", "llm-request.json"))
-    chunks_path = review_dir / str(manifest.get("request_chunks_path", "llm-request-chunks.json"))
+    request_path = _bound_path(
+        review_dir, str(manifest.get("request_path", "llm-request.json")),
+        label="host-agent request path",
+    )
+    chunks_path = _bound_path(
+        review_dir, str(manifest.get("request_chunks_path", "llm-request-chunks.json")),
+        label="host-agent request chunks path",
+    )
     full_request = _read_json(request_path, label="host-agent request")
     chunks = _read_json(chunks_path, label="host-agent request chunks")
+    if not isinstance(full_request, dict) or not isinstance(full_request.get("provenance"), dict):
+        raise ValueError("host-agent full request is missing an object provenance")
     response_files = manifest.get("response_files")
     if not isinstance(chunks, list) or not chunks:
         raise ValueError("host-agent request chunks are missing or empty")
     if not isinstance(response_files, list) or len(response_files) != len(chunks):
         raise ValueError("host-agent response file manifest does not match request chunks")
+    if any(not isinstance(item, str) or not item.strip() for item in response_files):
+        raise ValueError("host-agent response file manifest contains a non-string path")
+    if len(set(response_files)) != len(response_files):
+        raise ValueError("host-agent response file manifest contains duplicate paths")
     expected_run_id = ((full_request.get("provenance") or {}).get("run_id")
                        if isinstance(full_request, dict) else None)
     effective_run_id = run_id or expected_run_id
@@ -938,7 +823,11 @@ def run_bridge(
     if isinstance(max_attempts, bool) or max_attempts <= 0:
         raise ValueError("Host Agent max attempts must be a positive integer")
 
-    response_out = (response_out or (review_dir.parent / "host-agent-response.json")).resolve()
+    response_out = _bound_path(
+        review_dir.parent,
+        response_out or (review_dir.parent / "host-agent-response.json"),
+        label="Host Agent merged response path",
+    )
     audit_path = review_dir / "host-agent-run.json"
     if audit_path.exists():
         raise ValueError(f"refusing to reuse an existing Host Agent audit: {audit_path}")
@@ -947,6 +836,7 @@ def run_bridge(
 
     started_at = datetime.now(timezone.utc).isoformat()
     prompt_dir = review_dir / "host-agent-prompts"
+    controller = RunController()
     binary = _resolve_openclaw(openclaw_bin)
     if openclaw_config is not None:
         openclaw_config = openclaw_config.expanduser().resolve()
@@ -961,12 +851,14 @@ def run_bridge(
         "parent_effective_provider": None,
         "parent_effective_model": None,
     }
-    if model is None and (inherit_parent_model or parent_session_key):
+    bound_parent_session = require_parent_session(
+        host_context, parent_session_key,
+    ) if (inherit_parent_model or parent_session_key or host_context.parent_session_id) else None
+    if model is None and (inherit_parent_model or bound_parent_session):
         resolution = resolve_parent_model(
             binary,
             agent_id=agent_id,
-            parent_session_key=parent_session_key,
-            max_age_minutes=parent_session_max_age_minutes,
+            parent_session_key=bound_parent_session,
         )
     effective_model = resolution.get("model")
     if effective_model:
@@ -980,9 +872,13 @@ def run_bridge(
             "protocol": "host_agent_semantic_review",
             "run_id": effective_run_id,
             "agent_id": agent_id,
+            "execution_mode": "native-adapter",
+            "adapter_id": adapter_id,
+            **host_context.as_audit(),
             "max_concurrency": max_concurrency,
             "max_attempts": max_attempts,
             "model": effective_model,
+            **_route_audit_fields(effective_model, chunk_runs),
             "auth_env_only": bool(auth_env_only),
             "runner": runner,
             "model_source": resolution.get("source"),
@@ -993,16 +889,30 @@ def run_bridge(
             "finished_at": datetime.now(timezone.utc).isoformat(),
             "error_type": type(error).__name__,
             "error": str(error),
+            "terminal_status": "stopped" if isinstance(error, HostAgentCancelled) else "failed",
+            "local_process_state": (
+                "stopped" if isinstance(error, HostAgentCancelled)
+                else "failed_or_not_started"
+            ),
+            "remote_operation_state": (
+                "remote_operation_completed"
+                if any(item.get("remote_operation_state") == "remote_operation_completed"
+                       for item in chunk_runs)
+                else "remote_operation_state_unknown"
+            ),
             "chunk_runs": chunk_runs,
             "merged_response_written": False,
         })
 
     def run_and_validate(index: int, chunk: dict[str, Any], response_name: str) -> dict[str, Any]:
+        controller.check()
         if not isinstance(chunk, dict):
             raise ValueError(f"host-agent chunk {index} is not an object")
         if not isinstance(response_name, str) or not response_name:
             raise ValueError(f"host-agent response filename {index} is invalid")
-        response_path = (review_dir / response_name).resolve()
+        response_path = _bound_path(
+            review_dir, response_name, label=f"Host Agent response path {index}",
+        )
         if response_path.exists():
             raise ValueError(f"refusing to reuse an existing chunk response: {response_path}")
         provenance = chunk.get("provenance")
@@ -1039,6 +949,7 @@ def run_bridge(
                     attempt=attempt,
                     auth_env_only=auth_env_only,
                     runner=runner,
+                    controller=controller,
                     retry_hint=(
                         "local contract validation failed; repair the response: "
                         + failures[-1]
@@ -1067,12 +978,13 @@ def run_bridge(
                 attempt_response_path.replace(response_path)
                 audit["attempt_failures"] = failures
                 return audit
-            except HostAgentRouteMismatch:
+            except (HostAgentRouteMismatch, HostAgentProvenanceMismatch, HostAgentCancelled):
                 # A route mismatch is not a model-quality error.  Retrying
                 # would spend more tokens on an unauthorized route, so abort
                 # the whole run immediately and preserve fail-closed behavior.
                 raise
             except (OSError, ValueError, RuntimeError) as exc:
+                controller.check()
                 failures.append(str(exc))
                 if attempt >= max_attempts:
                     raise ValueError(
@@ -1083,17 +995,31 @@ def run_bridge(
 
     chunk_audits_by_index: dict[int, dict[str, Any]] = {}
     with ThreadPoolExecutor(max_workers=min(max_concurrency, len(chunks))) as executor:
-        futures = {
-            executor.submit(run_and_validate, index, chunk, response_name): index
-            for index, (chunk, response_name) in enumerate(
-                zip(chunks, response_files), start=1
-            )
-        }
+        pending = iter(enumerate(zip(chunks, response_files), start=1))
+        futures: dict[Any, int] = {}
+
+        def fill_slots() -> None:
+            while len(futures) < max_concurrency:
+                controller.check()
+                try:
+                    index, (chunk, response_name) = next(pending)
+                except StopIteration:
+                    return
+                futures[executor.submit(
+                    run_and_validate, index, chunk, response_name,
+                )] = index
+
+        fill_slots()
         try:
-            for future in as_completed(futures):
-                index = futures[future]
-                chunk_audits_by_index[index] = future.result()
+            while futures:
+                done, _ = wait(futures, return_when=FIRST_COMPLETED)
+                for future in done:
+                    index = futures.pop(future)
+                    chunk_audits_by_index[index] = future.result()
+                fill_slots()
         except Exception as exc:
+            controller.request_stop(str(exc))
+            controller.terminate_all()
             for future in futures:
                 future.cancel()
             persist_failure_audit(
@@ -1119,9 +1045,15 @@ def run_bridge(
         "protocol": "host_agent_semantic_review",
         "run_id": effective_run_id,
         "agent_id": agent_id,
+        "execution_mode": "native-adapter",
+        "adapter_id": adapter_id,
+        **host_context.as_audit(),
         "max_concurrency": max_concurrency,
         "max_attempts": max_attempts,
         "model": effective_model,
+        **_route_audit_fields(effective_model, chunk_audits),
+        "local_process_state": "completed",
+        "remote_operation_state": "remote_operation_completed",
         "auth_env_only": bool(auth_env_only),
         "runner": runner,
         "model_source": resolution.get("source"),
@@ -1153,6 +1085,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--response-out", type=Path,
                         help="merged response path; defaults outside review_dir")
     parser.add_argument("--run-id", help="optional run id; must match request provenance")
+    parser.add_argument(
+        "--host-runtime",
+        help="expected native host runtime; it must match "
+             "THESIS_FORGE_HOST_RUNTIME and is never a cross-host fallback",
+    )
     parser.add_argument("--agent-id", default="main",
                         help="OpenClaw agent id used for the current Host Agent")
     parser.add_argument("--timeout", type=int, default=900,
@@ -1165,9 +1102,6 @@ def main(argv: list[str] | None = None) -> int:
                         help="explicit OpenClaw provider/model route; omitted means inherit the parent session")
     parser.add_argument("--parent-session-key",
                         help="exact parent session key whose effective provider/model route should be copied")
-    parser.add_argument("--parent-session-max-age-minutes", type=int,
-                        default=AUTO_PARENT_SESSION_MAX_AGE_MINUTES,
-                        help="max age for automatic parent-session discovery (default: 10 minutes)")
     parser.add_argument("--auth-env-only", action="store_true",
                         help="use provider credentials from environment variables only")
     parser.add_argument("--runner", choices=("exec", "gateway"), default="exec",
@@ -1177,12 +1111,14 @@ def main(argv: list[str] | None = None) -> int:
                         help="copy the parent session model override when --model is omitted (default)")
     parser.add_argument("--no-inherit-parent-model", dest="inherit_parent_model",
                         action="store_false",
-                        help="use OpenClaw's ordinary default route when --model is omitted")
+                        help="disable parent inheritance only with an explicit --model route")
     parser.add_argument("--openclaw-bin",
                         help="optional path to the openclaw executable")
     parser.add_argument("--openclaw-config", type=Path,
                         help="optional config file passed explicitly to `openclaw agent exec`")
     args = parser.parse_args(argv)
+    if not args.inherit_parent_model and not args.model:
+        parser.error("--no-inherit-parent-model requires an explicit --model route")
     try:
         payload = run_bridge(
             args.review_dir,
@@ -1197,9 +1133,9 @@ def main(argv: list[str] | None = None) -> int:
             openclaw_config=args.openclaw_config,
             inherit_parent_model=args.inherit_parent_model,
             parent_session_key=args.parent_session_key,
-            parent_session_max_age_minutes=args.parent_session_max_age_minutes,
             auth_env_only=args.auth_env_only,
             runner=args.runner,
+            host_runtime=args.host_runtime,
         )
     except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
         print(f"host-agent bridge failed: {exc}", file=sys.stderr)

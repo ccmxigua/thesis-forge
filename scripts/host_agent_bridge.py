@@ -1218,8 +1218,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--runner", choices=("exec", "gateway"), default="exec",
                         help="OpenClaw invocation path (default: exec)")
     parser.add_argument("--inherit-parent-model", dest="inherit_parent_model",
-                        action="store_true", default=True,
-                        help="copy the parent session model override when --model is omitted (default)")
+                        action="store_true", default=None,
+                        help="copy the parent session model override when --model is omitted")
     parser.add_argument("--no-inherit-parent-model", dest="inherit_parent_model",
                         action="store_false",
                         help="disable parent inheritance only with an explicit --model route")
@@ -1230,8 +1230,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--codex-bin",
                         help="optional path to the native codex executable")
     args = parser.parse_args(argv)
-    if not args.inherit_parent_model and not args.model:
+    if args.inherit_parent_model is False and not args.model:
         parser.error("--no-inherit-parent-model requires an explicit --model route")
+    if args.inherit_parent_model is None:
+        # The native Codex adapter must never receive the OpenClaw-only parent
+        # route option.  Preserve the historical OpenClaw CLI default while
+        # making the unset state adapter-aware.
+        declared_runtime = (args.host_runtime or
+                             os.environ.get("THESIS_FORGE_HOST_RUNTIME", "openclaw"))
+        args.inherit_parent_model = declared_runtime.strip().lower() != "codex"
     try:
         payload = run_bridge(
             args.review_dir,

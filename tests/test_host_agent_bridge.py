@@ -304,6 +304,17 @@ class HostAgentBridgeTests(unittest.TestCase):
             self.assertEqual(audit["chunk_runs"][0]["actual_route"], "unobservable")
             self.assertEqual(json.loads(response_out.read_text(encoding="utf-8"))["contract_version"], "2.1")
 
+    def test_cli_does_not_inject_parent_inheritance_for_codex(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            with patch.dict(os.environ, {"THESIS_FORGE_HOST_RUNTIME": "codex"}):
+                with patch.object(bridge, "run_bridge", return_value={"status": "mocked"}) as run:
+                    code = bridge.main([
+                        td,
+                        "--host-runtime", "codex",
+                    ])
+            self.assertEqual(code, 0)
+            self.assertFalse(run.call_args.kwargs["inherit_parent_model"])
+
     def test_resolve_parent_model_copies_provider_and_model_override(self) -> None:
         parent_key = "agent:main:telegram:direct:chat:thread:38479"
         sessions = {

@@ -760,6 +760,18 @@
           },
           "uniqueItems": true
         },
+        "ordered_role_groups": {
+          "type": "array",
+          "items": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "minItems": 1,
+            "uniqueItems": true
+          },
+          "uniqueItems": true
+        },
         "toc_depth": {
           "type": "integer",
           "minimum": 1,

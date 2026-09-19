@@ -5,7 +5,14 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
-PYTHON_BIN="${PYTHON:-$(command -v python3 || true)}"
+if [ -n "${PYTHON:-}" ]; then
+  case "$PYTHON" in
+    */*) PYTHON_BIN="$PYTHON" ;;
+    *) PYTHON_BIN="$(command -v "$PYTHON" 2>/dev/null || true)" ;;
+  esac
+else
+  PYTHON_BIN="$(command -v python3 2>/dev/null || true)"
+fi
 if [ -z "$PYTHON_BIN" ] || [ ! -x "$PYTHON_BIN" ]; then
   echo "python3 not found; set PYTHON to an executable interpreter" >&2
   exit 2

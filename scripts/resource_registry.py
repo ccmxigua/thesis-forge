@@ -115,7 +115,43 @@ def _validate_existing_registry(spec: dict[str, Any], run_id: str) -> None:
         seen_ids.add(item_id)
 
 
-def materialize_declaration_resources(spec: dict[str, Any], run_id: str) -> dict[str, Any]:
+def _verify_source_texts(
+    item_id: str, item: dict[str, Any], source_evidence_ids: list[str], evidence: dict[str, Any],
+) -> None:
+    """Require every materialized fixed-text atom to occur in cited evidence."""
+    evidence_items = {
+        str(candidate.get("id")): candidate
+        for candidate in (evidence.get("evidence") or [])
+        if isinstance(candidate, dict) and candidate.get("id")
+    }
+    cited_texts = [
+        candidate.get("text") for evidence_id in source_evidence_ids
+        for candidate in [evidence_items.get(evidence_id)]
+        if isinstance(candidate, dict) and isinstance(candidate.get("text"), str)
+    ]
+    if len(cited_texts) != len(source_evidence_ids):
+        missing = sorted(set(source_evidence_ids) - set(evidence_items))
+        raise ValueError(f"declaration {item_id!r} cites missing source evidence: {missing}")
+    normalized_sources = {_normalized(text) for text in cited_texts}
+    atoms: list[tuple[str, str]] = []
+    heading = item.get("heading")
+    if isinstance(heading, str) and heading.strip():
+        atoms.append(("heading", heading))
+    for index, body in enumerate(_body_parts(item), start=1):
+        atoms.append((f"body_parts[{index - 1}]", body))
+    for index, placeholder in enumerate(item.get("signature_placeholders") or []):
+        if isinstance(placeholder, dict) and isinstance(placeholder.get("label"), str):
+            atoms.append((f"signature_placeholders[{index}].label", placeholder["label"]))
+    for field, value in atoms:
+        if _normalized(value) not in normalized_sources:
+            raise ValueError(
+                f"declaration {item_id!r} {field} is not present verbatim in its cited source evidence"
+            )
+
+
+def materialize_declaration_resources(
+    spec: dict[str, Any], run_id: str, *, evidence: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Bind source-derived declaration text to a new execution run.
 
     LLM output may contain ``heading`` and ``body_parts`` but must not invent a
@@ -163,6 +199,8 @@ def materialize_declaration_resources(spec: dict[str, Any], run_id: str) -> dict
         })
         if not source_evidence_ids:
             raise ValueError(f"declaration {item_id!r} needs source_evidence_ids")
+        if evidence is not None:
+            _verify_source_texts(item_id, raw, source_evidence_ids, evidence)
         seen_ids.add(item_id)
 
         digest = _resource_digest(run_id, item_id, heading.strip(), body_parts)

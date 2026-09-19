@@ -1951,18 +1951,27 @@ def audit_document_structure(doc: Document, structure: dict[str, Any], mappings:
     findings: list[dict[str, Any]] = []
     positions = {p._p: i for i, p in enumerate(doc.paragraphs)}
     role_positions: dict[str, list[int]] = {}
-    for role in set(structure.get("required_roles", [])) | set(structure.get("ordered_roles", [])):
+    ordered_groups = structure.get("ordered_role_groups", []) if isinstance(structure.get("ordered_role_groups"), list) else []
+    sequences = []
+    if isinstance(structure.get("ordered_roles"), list) and structure.get("ordered_roles"):
+        sequences.append(structure["ordered_roles"])
+    sequences.extend(group for group in ordered_groups if isinstance(group, list) and group)
+    for role in set(structure.get("required_roles", [])) | {
+        role for sequence in sequences for role in sequence
+    }:
         role_positions[role] = [positions[p._p] for p in _role_paragraphs(doc, role, mappings)]
     for role in structure.get("required_roles", []):
         if not role_positions.get(role):
             findings.append({"role": "document_structure", "property": f"required_roles.{role}", "template_value": False, "required_value": True})
-    previous = -1
-    for role in structure.get("ordered_roles", []):
-        if not role_positions.get(role): continue
-        current = min(role_positions[role])
-        if current < previous:
-            findings.append({"role": "document_structure", "property": "ordered_roles", "template_value": role, "required_value": structure["ordered_roles"]})
-        previous = max(previous, current)
+    for sequence_index, sequence in enumerate(sequences):
+        previous = -1
+        for role in sequence:
+            if not role_positions.get(role):
+                continue
+            current = min(role_positions[role])
+            if current < previous:
+                findings.append({"role": "document_structure", "property": "ordered_roles" if sequence_index == 0 else f"ordered_role_groups[{sequence_index - 1}]", "template_value": role, "required_value": sequence})
+            previous = max(previous, current)
     max_depth = structure.get("max_heading_depth")
     if max_depth is not None:
         for depth in range(int(max_depth) + 1, 10):

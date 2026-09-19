@@ -51,8 +51,10 @@ from template_reconciliation import (
 )
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+MC = "http://schemas.openxmlformats.org/markup-compatibility/2006"
 NS = {"w": W}
 Q = lambda name: f"{{{W}}}{name}"
+MCQ = lambda name: f"{{{MC}}}{name}"
 
 SIZE_PT = {
     "初号": 42, "小初": 36, "一号": 26, "小一": 24, "二号": 22,
@@ -308,8 +310,41 @@ def _register_content_instance(
     return instance_id, None
 
 
-def _text(el: ET.Element) -> str:
-    return "".join(t.text or "" for t in el.findall(".//w:t", NS)).strip()
+def _iter_text_nodes(el: ET.Element, *, include_textboxes: bool = False):
+    """Yield text nodes without letting nested textboxes duplicate a paragraph.
+
+    Word's ``mc:AlternateContent`` often stores the same textbox in both a
+    ``mc:Choice`` and a ``mc:Fallback`` branch.  The outer paragraph is still
+    the container for those nodes, so a descendant XPath would count the
+    textbox once as outer paragraph text and again as textbox evidence.
+    Explicit textbox extraction opts back in at the paragraph root.
+    """
+    def walk(node: ET.Element):
+        if node is not el and node.tag == Q("txbxContent") and not include_textboxes:
+            return
+        if node.tag == Q("t"):
+            yield node
+        for child in list(node):
+            yield from walk(child)
+
+    yield from walk(el)
+
+
+def _text(el: ET.Element, *, include_textboxes: bool = False) -> str:
+    return "".join(t.text or "" for t in _iter_text_nodes(el, include_textboxes=include_textboxes)).strip()
+
+
+def _parent_map(root: ET.Element) -> dict[ET.Element, ET.Element]:
+    return {child: parent for parent in root.iter() for child in list(parent)}
+
+
+def _ancestor(parent_map: dict[ET.Element, ET.Element], node: ET.Element, tags: set[str]) -> ET.Element | None:
+    current = parent_map.get(node)
+    while current is not None:
+        if current.tag in tags:
+            return current
+        current = parent_map.get(current)
+    return None
 
 
 def _run_format(el: ET.Element) -> dict[str, Any]:
@@ -367,19 +402,45 @@ def extract_document_evidence(docx: Path) -> dict[str, Any]:
                                 item = _paragraph_evidence(p, f"E{len(evidence)+1:05d}", "table_cell", {"part": "document", "table_child_index": child_index, "row": row_i, "column": col_i, "paragraph": para_i, "order": order})
                                 if item:
                                     evidence.append(item); order += 1
-        # Text boxes are not represented by python-docx.  Capture any text not
-        # already seen in normal paragraphs, retaining its source part.
+        # Text boxes are not represented by python-docx.  Capture them as
+        # separate evidence, but do not count the same AlternateContent twice.
+        # The outer paragraph extractor deliberately skips nested txbxContent;
+        # here we prefer mc:Choice over mc:Fallback when both are present.
         known = {(e["text"], e["location"].get("part")) for e in evidence}
         for part in sorted(n for n in names if re.match(r"word/(header|footer)\d+\.xml$", n)):
             root = ET.fromstring(zf.read(part))
+            part_parents = _parent_map(root)
             for i, p in enumerate(root.findall(".//w:p", NS)):
+                if _ancestor(part_parents, p, {Q("txbxContent")}) is not None:
+                    continue
                 item = _paragraph_evidence(p, f"E{len(evidence)+1:05d}", "header_footer", {"part": part, "paragraph": i, "order": order})
                 if item and (item["text"], part) not in known:
                     evidence.append(item); order += 1
+        parent_map = _parent_map(doc)
+        alternate_nodes = [node for node in doc.iter() if node.tag == MCQ("AlternateContent")]
+        alternate_indexes = {id(node): index for index, node in enumerate(alternate_nodes)}
         for i, txbx in enumerate(doc.findall(".//w:txbxContent", NS)):
+            alternate = _ancestor(parent_map, txbx, {MCQ("AlternateContent")})
+            branch_node = _ancestor(parent_map, txbx, {MCQ("Choice"), MCQ("Fallback")})
+            branch = branch_node.tag.rsplit("}", 1)[-1] if branch_node is not None else None
+            if alternate is not None and branch == "Fallback":
+                choice_has_textbox = any(
+                    choice.find(".//w:txbxContent", NS) is not None
+                    for choice in alternate.findall("mc:Choice", {"mc": MC})
+                )
+                if choice_has_textbox:
+                    continue
+            location_base = {
+                "part": "document", "textbox": i, "paragraph": None, "order": order,
+            }
+            if alternate is not None:
+                location_base["alternate_content_index"] = alternate_indexes[id(alternate)]
+                location_base["alternate_branch"] = branch
             for j, p in enumerate(txbx.findall(".//w:p", NS)):
-                item = _paragraph_evidence(p, f"E{len(evidence)+1:05d}", "textbox", {"part": "document", "textbox": i, "paragraph": j, "order": order})
-                if item and not any(e["text"] == item["text"] and e["kind"] != "textbox" for e in evidence):
+                location = dict(location_base)
+                location["paragraph"] = j
+                item = _paragraph_evidence(p, f"E{len(evidence)+1:05d}", "textbox", location)
+                if item:
                     evidence.append(item); order += 1
         page = _extract_page(doc)
         structure = _extract_structure(zf, doc, names)
@@ -731,6 +792,11 @@ def parse_properties(text: str) -> dict[str, Any]:
         size = out.get("font", {}).get("size_pt")
         if size is not None:
             paragraph["spacing_line_height_pt"] = float(size)
+    # Some school guides omit the word “固定值” and write the direct form
+    # “行距16磅”.  Keep this narrow so a font-size clause such as “正文14磅”
+    # cannot be mistaken for paragraph line spacing.
+    m = re.search(r"行距(?:为|采用|设置为)?\s*(\d+(?:\.\d+)?)\s*(?:磅|pt)", text, re.I)
+    if m: _set_nested(out, ("paragraph", "line_spacing"), {"type": "exact", "value": float(m.group(1)), "unit": "pt"})
     m = re.search(r"(?:行距(?:为|采用|设置为)?\s*)?固定值\s*(\d+(?:\.\d+)?)\s*(?:磅|pt)", text, re.I)
     if m: _set_nested(out, ("paragraph", "line_spacing"), {"type": "exact", "value": float(m.group(1)), "unit": "pt"})
     m = re.search(r"(?:行距(?:为|采用|设置为)?\s*)?(\d+(?:\.\d+)?)\s*倍行距", text)
@@ -821,6 +887,80 @@ def _deep_overlay(dst: dict[str, Any], src: dict[str, Any]) -> None:
             dst[key] = copy.deepcopy(value)
 
 
+def _merge_scoped_projection(
+    dst: dict[str, Any], src: dict[str, Any], *, path: str = "",
+    prefer_incoming: bool = False,
+) -> list[tuple[str, Any, Any]]:
+    """Merge clause-scoped top-level projections without list first-wins loss.
+
+    ``prefer_incoming`` is used only when applying an accepted LLM projection
+    over the deterministic baseline.  The in-memory LLM projection itself
+    remains first-value-wins for scalar disagreements and records the
+    disagreement as an audit finding; keyed collections are still unioned in
+    both modes.
+    """
+    conflicts: list[tuple[str, Any, Any]] = []
+
+    def list_key(value: Any) -> str | None:
+        if not isinstance(value, dict):
+            return None
+        for key in ("id", "object_type"):
+            if isinstance(value.get(key), str) and value[key].strip():
+                return key
+        return None
+
+    def merge_value(target: dict[str, Any], incoming: dict[str, Any], prefix: str) -> None:
+        for key, value in incoming.items():
+            current_path = f"{prefix}.{key}" if prefix else key
+            if key not in target:
+                target[key] = copy.deepcopy(value)
+                continue
+            old = target[key]
+            if isinstance(old, dict) and isinstance(value, dict):
+                merge_value(old, value, current_path)
+                continue
+            if isinstance(old, list) and isinstance(value, list):
+                list_items = [*old, *value]
+                if list_items and all(
+                    isinstance(item, dict) and list_key(item) for item in list_items
+                ):
+                    key_name = next((list_key(item) for item in list_items), None)
+                    index = {
+                        item.get(key_name): item for item in old
+                        if isinstance(item, dict) and key_name and item.get(key_name) is not None
+                    }
+                    for candidate in value:
+                        candidate_key = candidate.get(key_name) if isinstance(candidate, dict) and key_name else None
+                        if candidate_key is None or candidate_key not in index:
+                            old.append(copy.deepcopy(candidate))
+                        else:
+                            merge_value(index[candidate_key], candidate, f"{current_path}[{candidate_key}]")
+                    continue
+                if old != value:
+                    conflicts.append((current_path, copy.deepcopy(old), copy.deepcopy(value)))
+                    if prefer_incoming:
+                        target[key] = copy.deepcopy(value)
+                        continue
+                for candidate in value:
+                    if candidate not in old:
+                        old.append(copy.deepcopy(candidate))
+                continue
+            if old != value:
+                # A neutral placeholder is not an authoritative institution
+                # value.  A later evidence-bound concrete value may replace it.
+                if current_path.endswith("institution") and str(old).strip() in {"——", "--"} and str(value).strip():
+                    target[key] = copy.deepcopy(value)
+                elif current_path.endswith("institution") and str(value).strip() in {"——", "--"}:
+                    continue
+                else:
+                    conflicts.append((current_path, copy.deepcopy(old), copy.deepcopy(value)))
+                    if prefer_incoming:
+                        target[key] = copy.deepcopy(value)
+
+    merge_value(dst, src, path)
+    return conflicts
+
+
 def _declaration_body_parts(item: dict[str, Any]) -> list[str]:
     """Return source-derived body paragraphs in their supplied order."""
     parts: list[str] = []
@@ -834,6 +974,35 @@ def _declaration_body_parts(item: dict[str, Any]) -> list[str]:
             if isinstance(value, str) and value.strip()
         )
     return parts
+
+
+def _declaration_has_fixed_text(item: dict[str, Any]) -> bool:
+    if not isinstance(item, dict):
+        return False
+    props = item.get("properties") if item.get("role") == "declarations" else item
+    if not isinstance(props, dict) or not isinstance(props.get("items"), list):
+        return False
+    return any(
+        isinstance(candidate, dict)
+        and (
+            isinstance(candidate.get("heading"), str) and candidate.get("heading", "").strip()
+            or _declaration_body_parts(candidate)
+        )
+        for candidate in props["items"]
+    )
+
+
+def _declaration_items_share_entity(existing: dict[str, Any], incoming: dict[str, Any]) -> bool:
+    """Recognize a later fragment of an already identified declaration item."""
+    existing_evidence = set(existing.get("source_evidence_ids") or [])
+    incoming_evidence = set(incoming.get("source_evidence_ids") or [])
+    if not existing_evidence & incoming_evidence:
+        return False
+    existing_body = {_normalized_exact_text(value) for value in _declaration_body_parts(existing)}
+    incoming_body = {_normalized_exact_text(value) for value in _declaration_body_parts(incoming)}
+    if existing_body & incoming_body:
+        return True
+    return not incoming.get("heading") and not incoming_body
 
 
 def _append_unique_source_text(target: list[str], values: list[str]) -> None:
@@ -967,10 +1136,21 @@ def _merge_declaration_properties(
             if item_id in by_id:
                 conflicts.extend(_merge_declaration_item(by_id[item_id], item, item_id))
             else:
-                copied = copy.deepcopy(item)
-                copied["id"] = item_id
-                items.append(copied)
-                by_id[item_id] = copied
+                related = next(
+                    (candidate for candidate in items
+                     if isinstance(candidate, dict)
+                     and _declaration_items_share_entity(candidate, item)),
+                    None,
+                )
+                if related is not None:
+                    conflicts.extend(_merge_declaration_item(
+                        related, item, str(related.get("id")),
+                    ))
+                else:
+                    copied = copy.deepcopy(item)
+                    copied["id"] = item_id
+                    items.append(copied)
+                    by_id[item_id] = copied
         staged["items"] = items
     dst.clear()
     dst.update(staged)
@@ -1428,6 +1608,62 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
                 "response_indexes": sorted(manual_empty_indexes),
                 "action": "removed_from_execution_and_preserved_as_unverifiable",
             })
+        # A declaration entity without a fixed heading/body is not a
+        # materializable declaration.  Signature-looking labels in an
+        # unrelated section (for example a biography or acknowledgments
+        # sample) must not be turned into a new resource or attached to the
+        # nearest declaration by first/last-wins merging.
+        placeholder_only_declaration_indexes = {
+            index for index, item in enumerate(requirements)
+            if isinstance(item, dict)
+            and item.get("role") == "declarations"
+            and isinstance(item.get("properties"), dict)
+            and isinstance(item["properties"].get("items"), list)
+            and item["properties"].get("items")
+            and not any(
+                isinstance(declaration, dict)
+                and (
+                    isinstance(declaration.get("heading"), str)
+                    and declaration.get("heading", "").strip()
+                    or _declaration_body_parts(declaration)
+                )
+                for declaration in item["properties"]["items"]
+            )
+        }
+        if placeholder_only_declaration_indexes:
+            changes: list[dict[str, Any]] = []
+            for review in reviews:
+                if not isinstance(review, dict) or not isinstance(review.get("requirement_indexes"), list):
+                    continue
+                original_indexes = list(review["requirement_indexes"])
+                review["requirement_indexes"] = [
+                    index for index in original_indexes
+                    if index not in placeholder_only_declaration_indexes
+                ]
+                if (len(review["requirement_indexes"]) != len(original_indexes)
+                        and not review["requirement_indexes"]
+                        and classification_requires_requirement(str(review.get("classification")))):
+                    before = review.get("classification")
+                    review["classification"] = "informational"
+                    review["normative_basis"] = "sample_content"
+                    review["reason"] = (
+                        str(review.get("reason") or "").strip()
+                        + " The isolated placeholder has no fixed declaration heading or body and is not materialized as a declaration resource."
+                    ).strip()
+                    changes.append({
+                        "clause_id": review.get("clause_id"),
+                        "before_classification": before,
+                        "after_classification": "informational",
+                        "before_requirement_indexes": original_indexes,
+                        "after_requirement_indexes": [],
+                    })
+            audit.append({
+                "type": "declaration_placeholder_only_normalization",
+                "response_indexes": sorted(placeholder_only_declaration_indexes),
+                "changes": changes,
+                "action": "removed_from_execution_and_preserved_as_informational_source_content",
+            })
+        non_executable_indexes = manual_empty_indexes | placeholder_only_declaration_indexes
     for review in reviews:
         if not isinstance(review, dict):
             conflicts.append({"type": "llm_contract", "reason": "invalid_clause_review", "response": review}); continue
@@ -1451,8 +1687,17 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
         ) and len(existing_indexes) == len([
             i for i in existing_indexes if isinstance(i, int) and 0 <= i < len(requirements)
         ])
+        backed_by_fixed_declaration = bool(existing_indexes) and all(
+            isinstance(requirements[i], dict)
+            and _declaration_has_fixed_text(requirements[i])
+            for i in existing_indexes
+            if isinstance(i, int) and 0 <= i < len(requirements)
+        ) and len(existing_indexes) == len([
+            i for i in existing_indexes if isinstance(i, int) and 0 <= i < len(requirements)
+        ])
         if cid in clause_map and _requires_external_artifact_verification(clause_map[cid]["text"]):
-            if (classification_requires_requirement(classification) and not backed_by_existing) or classification in {"not_applicable", "verify_existing"}:
+            if (classification_requires_requirement(classification)
+                    and not (backed_by_existing or backed_by_fixed_declaration)) or classification in {"not_applicable", "verify_existing"}:
                 reasons.append("external_artifact_cannot_be_docx_executable_or_verified")
         if reasons:
             conflicts.append({"type": "llm_contract", "reason": reasons, "response": review}); continue
@@ -1564,9 +1809,13 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
                 "guard": "non_normative_sample_content",
             })
             continue
-        if item_index in manual_empty_indexes:
+        if item_index in non_executable_indexes:
             audit.append({"accepted": False, "response_index": item_index,
-                          "reason": "manual_empty_requirement_is_non_executable"})
+                          "reason": (
+                              "manual_empty_requirement_is_non_executable"
+                              if item_index in manual_empty_indexes
+                              else "placeholder_only_declaration_is_non_executable"
+                          )})
             continue
         if not isinstance(item, dict):
             conflicts.append({"type": "llm_contract", "reason": "requirement_must_be_object", "response": item}); continue
@@ -1701,10 +1950,19 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
                         "property": key, "existing_value": old, "new_value": new,
                         "clause_ids": sorted(clause_ids),
                     })
-                if not projection_conflicts:
+                # Different source occurrences may provide alternate labels
+                # for the same author/date placeholder.  Keep the first
+                # materializable label and retain the variant as an audit
+                # finding; a true anchor/body/entity conflict remains
+                # blocking for this response item.
+                blocking_declaration_conflicts = [
+                    conflict for conflict in projection_conflicts
+                    if ".signature_placeholders[" not in str(conflict[1])
+                ]
+                if not blocking_declaration_conflicts:
                     llm_primary_top_level_props[top_key] = staged_declarations
                     spec[top_key] = copy.deepcopy(staged_declarations)
-                merge_conflicts = projection_conflicts
+                merge_conflicts = blocking_declaration_conflicts
             else:
                 # Project compatible fields into the shared role object, but keep
                 # each requirement as the authoritative clause-scoped record.  A
@@ -1713,9 +1971,32 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
                 # or a degree-conditional keyword count); that projection conflict
                 # must not discard the valid requirement itself.
                 staged_llm = copy.deepcopy(llm_primary_top_level_props.get(top_key, {}))
+                scoped_props = copy.deepcopy(props)
+                if top_key == "document_structure" and isinstance(scoped_props.get("ordered_roles"), list):
+                    incoming_order = scoped_props.pop("ordered_roles")
+                    groups = staged_llm.setdefault("ordered_role_groups", [])
+                    # A deterministic requirement may already have established
+                    # one valid order before the first fresh LLM projection is
+                    # seen.  Keep that order as a separate scope rather than
+                    # overwriting it or inventing one global order.
+                    baseline_order = spec.get(top_key, {}).get("ordered_roles")
+                    if isinstance(baseline_order, list) and baseline_order and baseline_order not in groups:
+                        groups.append(copy.deepcopy(baseline_order))
+                    existing_order = staged_llm.get("ordered_roles")
+                    if isinstance(existing_order, list) and existing_order and existing_order not in groups:
+                        groups.append(copy.deepcopy(existing_order))
+                    if incoming_order and incoming_order not in groups:
+                        groups.append(copy.deepcopy(incoming_order))
+                    if not isinstance(existing_order, list) or not existing_order:
+                        staged_llm["ordered_roles"] = copy.deepcopy(incoming_order)
+                    primary_order = staged_llm.get("ordered_roles")
+                    if isinstance(primary_order, list):
+                        staged_llm["ordered_role_groups"] = [
+                            group for group in groups if group != primary_order
+                        ]
                 projection_conflicts = [
                     (target_roles[0], key, old, new)
-                    for key, old, new in _deep_merge(staged_llm, props)
+                    for key, old, new in _merge_scoped_projection(staged_llm, scoped_props)
                 ]
                 for target_role, key, old, new in projection_conflicts:
                     conflicts.append({
@@ -1723,23 +2004,43 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
                         "property": key, "existing_value": old, "new_value": new,
                         "clause_ids": sorted(clause_ids),
                     })
-                if not projection_conflicts:
-                    llm_primary_top_level_props[top_key] = staged_llm
-                    # LLM-primary semantics override only the properties it
-                    # explicitly resolved, preserving unrelated deterministic
-                    # defaults.  The resulting baseline mismatch is reported by
-                    # the normal audit path rather than as an internal LLM error.
-                    baseline_probe = copy.deepcopy(preserved.get(top_key, {}))
-                    baseline_conflicts = _deep_merge(baseline_probe, props)
-                    for key, old, new in baseline_conflicts:
-                        conflicts.append({
-                            "type": "rule_llm_conflict", "role": target_roles[0],
-                            "property": key, "rule_value": old, "llm_value": new,
-                            "clause_ids": sorted(clause_ids),
-                        })
-                    merged_top_level = copy.deepcopy(spec.get(top_key, {}))
-                    _deep_overlay(merged_top_level, props)
-                    spec[top_key] = merged_top_level
+                # Projection conflicts are audit findings, not a reason to
+                # discard the whole clause-scoped requirement.  The previous
+                # all-or-nothing branch silently dropped later cover/object/
+                # structure fragments, which made a valid response appear
+                # incomplete after merging.
+                llm_primary_top_level_props[top_key] = staged_llm
+                # LLM-primary semantics override only the properties it
+                # explicitly resolved, while scoped collections are unioned
+                # into deterministic content already present in ``spec``.
+                baseline_probe = copy.deepcopy(preserved.get(top_key, {}))
+                baseline_conflicts = _deep_merge(baseline_probe, props)
+                for key, old, new in baseline_conflicts:
+                    conflicts.append({
+                        "type": "rule_llm_conflict", "role": target_roles[0],
+                        "property": key, "rule_value": old, "llm_value": new,
+                        "clause_ids": sorted(clause_ids),
+                    })
+                merged_top_level = copy.deepcopy(spec.get(top_key, {}))
+                scoped_baseline_conflicts = _merge_scoped_projection(
+                    merged_top_level, scoped_props, prefer_incoming=True,
+                )
+                for key, old, new in scoped_baseline_conflicts:
+                    conflicts.append({
+                        "type": "rule_llm_conflict", "role": target_roles[0],
+                        "property": key, "rule_value": old, "llm_value": new,
+                        "clause_ids": sorted(clause_ids),
+                    })
+                if top_key == "document_structure":
+                    if isinstance(staged_llm.get("ordered_roles"), list):
+                        merged_top_level["ordered_roles"] = copy.deepcopy(
+                            staged_llm["ordered_roles"]
+                        )
+                    if isinstance(staged_llm.get("ordered_role_groups"), list):
+                        merged_top_level["ordered_role_groups"] = copy.deepcopy(
+                            staged_llm["ordered_role_groups"]
+                        )
+                spec[top_key] = merged_top_level
                 merge_conflicts = []
         else:
             if role in CONTENT_INSTANCE_ROLES:
@@ -2038,6 +2339,7 @@ def _write_json_artifacts_atomic(artifacts: list[tuple[Path, Any]]) -> None:
         if path.exists():
             raise ValueError(f"refusing to overwrite existing merge artifact: {path}")
     temporary_paths: list[tuple[Path, Path]] = []
+    published_paths: list[Path] = []
     try:
         for path, value in artifacts:
             temporary = path.with_name(f".{path.name}.tmp-{uuid4().hex}")
@@ -2048,6 +2350,17 @@ def _write_json_artifacts_atomic(artifacts: list[tuple[Path, Any]]) -> None:
             temporary_paths.append((temporary, path))
         for temporary, path in temporary_paths:
             temporary.replace(path)
+            published_paths.append(path)
+    except Exception:
+        # No target existed before this transaction (checked above).  Remove
+        # only artifacts published by this invocation so a partial receipt can
+        # never masquerade as a complete merge after a filesystem failure.
+        for path in published_paths:
+            try:
+                path.unlink()
+            except FileNotFoundError:
+                pass
+        raise
     finally:
         for temporary, _ in temporary_paths:
             if temporary.exists():
@@ -2075,6 +2388,11 @@ def merge_host_agent_review_packets(
     response_files = manifest.get("response_files")
     if not isinstance(request_chunks, list) or not request_chunks:
         raise ValueError("host-agent request chunks are missing or empty")
+    declared_chunk_count = manifest.get("chunk_count")
+    if (isinstance(declared_chunk_count, bool)
+            or not isinstance(declared_chunk_count, int)
+            or declared_chunk_count != len(request_chunks)):
+        raise ValueError("host-agent manifest chunk_count does not match request chunks")
     if not isinstance(response_files, list) or len(response_files) != len(request_chunks):
         raise ValueError("host-agent response file manifest does not match request chunks")
     if any(not isinstance(item, str) or not item.strip() for item in response_files):
@@ -2094,6 +2412,20 @@ def merge_host_agent_review_packets(
     if merge_receipt_path.exists():
         raise ValueError(f"refusing to overwrite existing merge artifact: {merge_receipt_path}")
 
+    full_clauses = full_request.get("clauses")
+    if not isinstance(full_clauses, list) or not full_clauses:
+        raise ValueError("host-agent full request is missing clauses")
+    full_clause_ids = [
+        str(item.get("id")) for item in full_clauses
+        if isinstance(item, dict) and item.get("id")
+    ]
+    if len(full_clause_ids) != len(full_clauses) or len(set(full_clause_ids)) != len(full_clause_ids):
+        raise ValueError("host-agent full request contains duplicate or invalid clause ids")
+    full_clause_id_set = set(full_clause_ids)
+    full_provenance = full_request["provenance"]
+    seen_chunk_indexes: set[int] = set()
+    seen_chunk_clause_ids: set[str] = set()
+
     aggregate_requirements: list[dict[str, Any]] = []
     aggregate_reviews: list[dict[str, Any]] = []
     aggregate_unsupported: list[str] = []
@@ -2103,6 +2435,43 @@ def merge_host_agent_review_packets(
         if not isinstance(chunk_request, dict):
             raise ValueError(f"host-agent request chunk {index}/{len(request_chunks)} is not an object")
         response_path = _manifest_path(review_dir, str(response_name))
+        batch = chunk_request.get("batch")
+        if not isinstance(batch, dict):
+            raise ValueError(f"host-agent request chunk {index}/{len(request_chunks)} is missing batch metadata")
+        batch_index = batch.get("index")
+        batch_count = batch.get("count")
+        if (isinstance(batch_index, bool) or not isinstance(batch_index, int)
+                or batch_index != index or batch_index in seen_chunk_indexes):
+            raise ValueError(f"host-agent request chunk {index}/{len(request_chunks)} has invalid batch index")
+        if (isinstance(batch_count, bool) or not isinstance(batch_count, int)
+                or batch_count != len(request_chunks)):
+            raise ValueError(f"host-agent request chunk {index}/{len(request_chunks)} has invalid batch count")
+        expected_response_name = batch.get("response_filename")
+        if not isinstance(expected_response_name, str) or expected_response_name != response_name:
+            raise ValueError(f"host-agent response filename does not match chunk {index} batch metadata")
+        chunk_clause_ids = batch.get("clause_ids")
+        if not isinstance(chunk_clause_ids, list) or any(
+            not isinstance(item, str) or not item for item in chunk_clause_ids
+        ) or len(set(chunk_clause_ids)) != len(chunk_clause_ids):
+            raise ValueError(f"host-agent request chunk {index}/{len(request_chunks)} has invalid clause ids")
+        actual_chunk_clause_ids = [
+            str(item.get("id")) for item in chunk_request.get("clauses", [])
+            if isinstance(item, dict) and item.get("id")
+        ]
+        if actual_chunk_clause_ids != chunk_clause_ids:
+            raise ValueError(f"host-agent request chunk {index}/{len(request_chunks)} batch clauses do not match packet clauses")
+        if not set(chunk_clause_ids) <= full_clause_id_set or seen_chunk_clause_ids & set(chunk_clause_ids):
+            raise ValueError(f"host-agent request chunk {index}/{len(request_chunks)} has duplicate or unknown clauses")
+        chunk_provenance = chunk_request.get("provenance")
+        if not isinstance(chunk_provenance, dict):
+            raise ValueError(f"host-agent request chunk {index}/{len(request_chunks)} is missing provenance")
+        for key in ("version", "origin", "source_sha256"):
+            if chunk_provenance.get(key) != full_provenance.get(key):
+                raise ValueError(f"host-agent request chunk {index}/{len(request_chunks)} provenance {key} does not match full request")
+        if "run_id" in full_provenance and chunk_provenance.get("run_id") != full_provenance.get("run_id"):
+            raise ValueError(f"host-agent request chunk {index}/{len(request_chunks)} provenance run_id does not match full request")
+        seen_chunk_indexes.add(batch_index)
+        seen_chunk_clause_ids.update(chunk_clause_ids)
         if not response_path.is_file():
             raise ValueError(f"missing host-agent response {index}/{len(request_chunks)}: {response_path}")
         response = json.loads(response_path.read_text(encoding="utf-8"))
@@ -2151,6 +2520,14 @@ def merge_host_agent_review_packets(
                 aggregate_unsupported.append(item)
         aggregate_conflicts.extend(copy.deepcopy(response.get("reported_conflicts", [])))
         response_clause_counts.append(len(reviews))
+
+    if seen_chunk_clause_ids != full_clause_id_set:
+        missing = sorted(full_clause_id_set - seen_chunk_clause_ids)
+        extra = sorted(seen_chunk_clause_ids - full_clause_id_set)
+        raise ValueError(
+            "host-agent request chunks do not partition the full request clauses: "
+            f"missing={missing}, extra={extra}"
+        )
 
     aggregate = {
         "contract_version": "2.1",
@@ -2308,17 +2685,26 @@ def _sha256(path: Path) -> str:
 def prepare_fresh_extraction(source: Path, out: Path, run_id: str | None = None) -> dict[str, Any]:
     """Invalidate prior products: this output directory is not a cache."""
     out.mkdir(parents=True, exist_ok=True)
+    protected: list[str] = []
+    for name in ("host-agent-run.json", "merge-receipt.json"):
+        if (out / name).exists():
+            protected.append(name)
+    if (out / "host-agent-prompts").exists():
+        protected.append("host-agent-prompts/")
+    for pattern in ("llm-response-chunk-*.json", "llm-response-chunk-*.raw.json"):
+        protected.extend(path.name for path in sorted(out.glob(pattern)) if path.is_file())
+    if protected:
+        raise ValueError(
+            "refusing to rebuild a requirements directory containing immutable "
+            "Host Agent review artifacts; choose a new stage directory: "
+            + ", ".join(sorted(set(protected)))
+        )
     removed: list[str] = []
     for name in sorted(GENERATED_REQUIREMENT_ARTIFACTS):
         path = out / name
         if path.exists():
             path.unlink()
             removed.append(name)
-    for pattern in ("llm-response-chunk-*.json", "llm-response-chunk-*.raw.json"):
-        for path in sorted(out.glob(pattern)):
-            if path.is_file():
-                path.unlink()
-                removed.append(path.name)
     return {
         "schema_version": "1.0",
         "run_id": run_id or str(uuid4()),
@@ -2597,7 +2983,9 @@ def analyse(args: argparse.Namespace) -> int:
             reconciliation_report["status"] = "pending_semantic_review"
             reconciliation_report["summary"]["remaining_questions"] = len(questions)
     try:
-        materialize_declaration_resources(spec, extraction_manifest["run_id"])
+        materialize_declaration_resources(
+            spec, extraction_manifest["run_id"], evidence=evidence,
+        )
     except ValueError as exc:
         conflict = {"type": "resource_registry", "reason": str(exc)}
         conflicts.append(conflict)

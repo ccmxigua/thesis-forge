@@ -108,7 +108,11 @@ def load_and_validate(instance: Any, schema_path: Path) -> list[str]:
                                     for value in line_values)
             if has_nonzero_lines and "spacing_line_height_pt" not in paragraph:
                 errors.append(f"$.roles.{role}.paragraph.spacing_line_height_pt: required when spacing is expressed in lines")
-        if isinstance(spec, dict) and spec.get("position") == "inline":
+        # Inline is a valid semantic position for ordinary text/citation
+        # content.  The current executor only lacks inline placement for
+        # figure/table captions, so keep the failure closed at that boundary
+        # instead of rejecting body_text and other text roles globally.
+        if isinstance(spec, dict) and spec.get("position") == "inline" and role in {"figure_caption", "table_caption"}:
             errors.append(f"$.roles.{role}.position: inline placement is not executable by the current backend")
         numbering = spec.get("numbering") if isinstance(spec, dict) else None
         if isinstance(numbering, dict) and "depth" in numbering:

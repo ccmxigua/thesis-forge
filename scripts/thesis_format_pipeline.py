@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import shutil
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -18,6 +17,7 @@ from format_spec_validation import load_and_validate
 from pipeline_finding import evidence, finding
 from region_graph import compile_region_graph
 from section_model import compile_section_plan
+from semantic_contract import sha256_json
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -32,6 +32,10 @@ def validate_semantic_review_configuration(args: argparse.Namespace, parser: arg
     """
     if args.prepare_host_review and args.llm_response:
         parser.error("choose exactly one semantic-review stage: --prepare-host-review or --llm-response")
+    if bool(args.host_agent_audit) != bool(args.merge_receipt):
+        parser.error("--host-agent-audit and --merge-receipt must be supplied together")
+    if (args.host_agent_audit or args.merge_receipt) and not args.llm_response:
+        parser.error("host-agent receipts require --llm-response")
     if args.compliance_mode == "full" and args.analysis_mode != "llm_primary":
         parser.error(
             "--compliance-mode full requires --analysis-mode llm_primary; "
@@ -89,6 +93,61 @@ def file_record(path: Path) -> dict[str, Any]:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return {"path": str(resolved), "bytes": resolved.stat().st_size, "sha256": digest.hexdigest()}
+
+
+def _path_under(path: Path, root: Path, *, label: str) -> Path:
+    resolved = path.expanduser().resolve()
+    root = root.resolve()
+    if resolved == root or root not in resolved.parents:
+        raise ValueError(f"{label} must remain inside the work directory: {resolved}")
+    return resolved
+
+
+def validate_host_review_receipts(
+    *, response_path: Path, audit_path: Path, receipt_path: Path,
+    extraction_manifest: dict[str, Any], work: Path,
+) -> dict[str, Any]:
+    """Bind the final deterministic stage to the immutable host review."""
+    response_path = _path_under(response_path, work, label="host response")
+    audit_path = _path_under(audit_path, work, label="host audit")
+    receipt_path = _path_under(receipt_path, work, label="merge receipt")
+    response = read_json(response_path)
+    audit = read_json(audit_path)
+    receipt = read_json(receipt_path)
+    expected_run_id = extraction_manifest.get("run_id")
+    expected_request_sha = extraction_manifest.get("llm_request_sha256")
+    if not expected_run_id or not expected_request_sha:
+        raise ValueError("fresh extraction manifest is missing run_id or llm_request_sha256")
+    if receipt.get("status") != "merged" or receipt.get("protocol") != "host_agent_semantic_review":
+        raise ValueError("merge receipt is not a successful host-agent semantic-review receipt")
+    if receipt.get("run_id") != expected_run_id:
+        raise ValueError("merge receipt run_id does not match the fresh extraction")
+    if receipt.get("request_sha256") != expected_request_sha:
+        raise ValueError("merge receipt request_sha256 does not match the fresh request")
+    if receipt.get("aggregate_sha256") != sha256_json(response):
+        raise ValueError("merge receipt aggregate_sha256 does not match the response")
+    merged_response_path = receipt.get("merged_response_path")
+    if merged_response_path and Path(str(merged_response_path)).resolve() != response_path:
+        raise ValueError("merge receipt response path does not match --llm-response")
+    if audit.get("status") != "merged" or audit.get("run_id") != expected_run_id:
+        raise ValueError("host-agent audit is not a successful record for the fresh run")
+    if audit.get("response_path") and Path(str(audit["response_path"])).resolve() != response_path:
+        raise ValueError("host-agent audit response path does not match --llm-response")
+    merge = audit.get("merge") if isinstance(audit.get("merge"), dict) else {}
+    if merge.get("aggregate_sha256") != receipt.get("aggregate_sha256"):
+        raise ValueError("host-agent audit merge hash does not match the merge receipt")
+    if merge.get("request_sha256") != expected_request_sha:
+        raise ValueError("host-agent audit request hash does not match the fresh request")
+    if merge.get("merge_receipt_path") and Path(str(merge["merge_receipt_path"])).resolve() != receipt_path:
+        raise ValueError("host-agent audit receipt path does not match the supplied receipt")
+    return {
+        "response": file_record(response_path),
+        "host_agent_audit": file_record(audit_path),
+        "merge_receipt": file_record(receipt_path),
+        "aggregate_sha256": receipt.get("aggregate_sha256"),
+        "request_sha256": expected_request_sha,
+        "run_id": expected_run_id,
+    }
 
 
 def requirements_normalization_errors(
@@ -429,6 +488,8 @@ def main(argv: list[str]) -> int:
     p.add_argument("input", type=Path, help="target thesis source (.tex for end-to-end conversion, or .docx for DOCX-stage use)")
     p.add_argument("output", type=Path, help="formatted output DOCX")
     p.add_argument("--work-dir", type=Path, required=True, help="directory for all auditable JSON products")
+    p.add_argument("--requirements-dir", type=Path,
+                   help="stage-specific requirements artifact directory below --work-dir")
     p.add_argument("--style-template", type=Path,
                    help="official template DOCX used for pre-generation evidence/reconciliation and style-role analysis")
     p.add_argument("--neutral-reference-docx", type=Path,
@@ -438,6 +499,10 @@ def main(argv: list[str]) -> int:
     p.add_argument("--host-review-chunk-size", type=int, default=20,
                    help="number of clauses per host-Agent packet (default: 20)")
     p.add_argument("--llm-response", type=Path, help="offline contract-2.1 response produced by the host Agent")
+    p.add_argument("--host-agent-audit", type=Path,
+                   help="immutable host-agent-run.json bound to --llm-response")
+    p.add_argument("--merge-receipt", type=Path,
+                   help="immutable merge-receipt.json bound to --llm-response")
     p.add_argument("--run-id", help="explicit current semantic-review run id when resuming a fresh host response")
     p.add_argument("--thesis-profile", type=Path, help="JSON metadata for conditional requirements such as master/doctor limits")
     p.add_argument("--analysis-mode", choices=["llm_primary", "rule_only", "known_template"], default="llm_primary",
@@ -483,7 +548,12 @@ def main(argv: list[str]) -> int:
     if args.style_template and not args.style_template.is_file():
         p.error(f"style/official template DOCX does not exist: {args.style_template}")
 
-    work = args.work_dir.resolve(); requirements_dir = work / "requirements"; style_map = work / "style-map.json"
+    work = args.work_dir.resolve()
+    requirements_dir = (args.requirements_dir.resolve() if args.requirements_dir
+                        else work / "requirements")
+    if requirements_dir == work or work not in requirements_dir.parents:
+        p.error("--requirements-dir must be a child directory of --work-dir")
+    style_map = work / "style-map.json"
     apply_dir = work / "application"; manifest_path = work / "pipeline-manifest.json"
     capability_report_path = work / "capability-preflight.json"
     metadata_path = work / "semantic-metadata.json"
@@ -500,8 +570,8 @@ def main(argv: list[str]) -> int:
         p.error("requirements input must be a .doc or .docx Word file")
     if requirements_source.is_relative_to(requirements_dir):
         p.error(
-            "requirements input cannot be inside <work-dir>/requirements because that directory "
-            "is rebuilt for every fresh extraction; choose another --work-dir"
+            "requirements input cannot be inside the stage requirements directory because that "
+            "directory is rebuilt for every fresh extraction"
         )
     work.mkdir(parents=True, exist_ok=True)
     source_input = args.input.resolve()
@@ -573,15 +643,16 @@ def main(argv: list[str]) -> int:
         manifest["validation_mode"] = "neutral_reference"
 
     # A supplied school-requirements DOCX always starts a new extraction run.
-    # The work directory is an audit destination, never a format-spec cache.
-    if requirements_dir.exists():
-        shutil.rmtree(requirements_dir)
+    # The stage directory is an audit destination, never a format-spec cache.
+    # requirements_engine removes only deterministic products and refuses to
+    # rebuild over immutable Host Agent review artifacts.
     requirements_dir.mkdir(parents=True, exist_ok=True)
     manifest["requirements_extraction"] = {
         "policy": "fresh_required_docx_extraction",
         "input_normalization_policy": "fresh_per_invocation_no_cache",
         "cache_reused": False,
         "source_sha256": manifest["inputs"]["requirements"]["sha256"],
+        "stage_directory": str(requirements_dir),
     }
     req_cmd = [sys.executable, str(ROOT / "scripts" / "requirements_engine.py"), str(requirements_source), "--out", str(requirements_dir),
                "--analysis-mode", args.analysis_mode, "--structure-docx", str(effective_input),
@@ -617,6 +688,19 @@ def main(argv: list[str]) -> int:
         manifest.update(status="failed", reason="fresh requirements extraction provenance mismatch")
         manifest["requirements_normalization_errors"] = normalization_errors
         write_json(manifest_path, manifest); print(json.dumps(manifest, ensure_ascii=False)); return 10
+    if args.llm_response and args.host_agent_audit and args.merge_receipt:
+        try:
+            manifest["host_review_receipts"] = validate_host_review_receipts(
+                response_path=args.llm_response,
+                audit_path=args.host_agent_audit,
+                receipt_path=args.merge_receipt,
+                extraction_manifest=extraction_manifest,
+                work=work,
+            )
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            manifest.update(status="failed", reason="host-agent review receipt gate failed",
+                            host_review_receipt_error=str(exc))
+            write_json(manifest_path, manifest); print(json.dumps(manifest, ensure_ascii=False)); return 10
     manifest["requirements_input_normalization"] = normalization
     manifest["inputs"]["requirements_normalized"] = normalization["normalized"]
     manifest["requirements_extraction"].update({

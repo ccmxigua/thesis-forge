@@ -126,6 +126,9 @@ def pipeline_command(case: dict[str, Any], source: Path, work_dir: Path, output_
                      neutral_reference_docx: Path | None = None,
                      llm_response: Path | None = None,
                      run_id: str | None = None,
+                     requirements_dir: Path | None = None,
+                     host_agent_audit: Path | None = None,
+                     merge_receipt: Path | None = None,
                      host_review_chunk_size: int = 20) -> list[str]:
     command = [
         sys.executable, "scripts/thesis_format_pipeline.py",
@@ -135,6 +138,8 @@ def pipeline_command(case: dict[str, Any], source: Path, work_dir: Path, output_
         "--compliance-mode", compliance_mode,
         "--host-review-chunk-size", str(host_review_chunk_size),
     ]
+    if requirements_dir:
+        command.extend(["--requirements-dir", str(requirements_dir)])
     if neutral_reference_docx:
         command.extend(["--neutral-reference-docx", str(neutral_reference_docx)])
     elif case.get("style_template"):
@@ -145,6 +150,10 @@ def pipeline_command(case: dict[str, Any], source: Path, work_dir: Path, output_
         command.extend(["--llm-response", str(llm_response)])
     if run_id:
         command.extend(["--run-id", str(run_id)])
+    if host_agent_audit:
+        command.extend(["--host-agent-audit", str(host_agent_audit)])
+    if merge_receipt:
+        command.extend(["--merge-receipt", str(merge_receipt)])
     if case.get("template_profile") and not neutral_reference_docx:
         command.extend(["--template-profile", str(case["template_profile"])])
     return command
@@ -162,8 +171,9 @@ def canonical_profile_report(work: Path) -> dict[str, Any] | None:
     }
 
 
-def extraction_report(work: Path) -> dict[str, Any]:
-    requirements = work / "requirements"
+def extraction_report(work: Path, *, requirements_dir: Path | None = None,
+                      host_review_dir: Path | None = None) -> dict[str, Any]:
+    requirements = requirements_dir or (work / "requirements")
     extraction_manifest = requirements / "extraction-manifest.json"
     format_spec = requirements / "format-spec.json"
     pipeline_manifest = work / "pipeline-manifest.json"
@@ -172,6 +182,14 @@ def extraction_report(work: Path) -> dict[str, Any]:
         "format_spec": str(format_spec.resolve()) if format_spec.exists() else None,
         "pipeline_manifest": str(pipeline_manifest.resolve()) if pipeline_manifest.exists() else None,
     }
+    if host_review_dir is not None:
+        audit = host_review_dir / "host-agent-run.json"
+        receipt = host_review_dir / "merge-receipt.json"
+        report.update({
+            "host_review_dir": str(host_review_dir.resolve()),
+            "host_agent_audit": str(audit.resolve()) if audit.exists() else None,
+            "merge_receipt": str(receipt.resolve()) if receipt.exists() else None,
+        })
     if extraction_manifest.exists():
         data = json.loads(extraction_manifest.read_text(encoding="utf-8"))
         report.update({
@@ -231,6 +249,19 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
         blockers.append("fresh_run_not_proven")
     if not fresh.get("run_id"):
         blockers.append("fresh_run_id_missing")
+    if result.get("analysis_mode") == "llm_primary":
+        audit_path, audit = _read_artifact_json(fresh.get("host_agent_audit"), root=root)
+        receipt_path, receipt = _read_artifact_json(fresh.get("merge_receipt"), root=root)
+        checks["host_agent_audit"] = str(audit_path) if audit_path else None
+        checks["merge_receipt"] = str(receipt_path) if receipt_path else None
+        if audit is None or audit.get("status") != "merged":
+            blockers.append("host_agent_audit_not_merged")
+        elif audit.get("run_id") != fresh.get("run_id"):
+            blockers.append("host_agent_audit_run_mismatch")
+        if receipt is None or receipt.get("status") != "merged":
+            blockers.append("merge_receipt_not_merged")
+        elif receipt.get("run_id") != fresh.get("run_id"):
+            blockers.append("merge_receipt_run_mismatch")
 
     manifest_path, manifest = _read_artifact_json(fresh.get("pipeline_manifest"), root=root)
     checks["pipeline_manifest"] = str(manifest_path) if manifest_path else None
@@ -363,6 +394,8 @@ def run_case(base: Path, source: Path, case: dict[str, Any], *, prepare_host_rev
              neutral_reference_docx: Path | None = None) -> dict[str, Any]:
     case_dir = base / str(case["id"])
     work = case_dir / "work"
+    review_requirements = work / "review" / "requirements"
+    execution_requirements = work / "execution" / "requirements"
     output = case_dir / "generated.docx"
     llm_case = case["analysis_mode"] == "llm_primary"
     if llm_case and not (prepare_host_review or auto_host_agent):
@@ -380,6 +413,7 @@ def run_case(base: Path, source: Path, case: dict[str, Any], *, prepare_host_rev
         pipeline_command(case, source, work, output,
                          compliance_mode=compliance_mode,
                          prepare_host_review=host_review,
+                         requirements_dir=(review_requirements if host_review else execution_requirements),
                          host_review_chunk_size=host_review_chunk_size,
                          neutral_reference_docx=neutral_reference_docx),
         label=(f"[{case['id']}] fresh extraction + host-agent packet"
@@ -392,7 +426,7 @@ def run_case(base: Path, source: Path, case: dict[str, Any], *, prepare_host_rev
     result = dict(prepare_result)
     stages: dict[str, Any] = {"prepare": prepare_result}
     if llm_case and auto_host_agent and prepare_result["returncode"] == 0:
-        extraction_manifest = work / "requirements" / "extraction-manifest.json"
+        extraction_manifest = review_requirements / "extraction-manifest.json"
         try:
             extraction = json.loads(extraction_manifest.read_text(encoding="utf-8"))
             run_id = extraction["run_id"]
@@ -406,10 +440,10 @@ def run_case(base: Path, source: Path, case: dict[str, Any], *, prepare_host_rev
                 "stderr_tail": f"cannot read fresh run_id: {exc}",
             }
         else:
-            response_out = work / "host-agent-response.json"
+            response_out = work / "review" / "host-agent-response.json"
             bridge_command = [
                 sys.executable, "scripts/host_agent_bridge.py",
-                str(work / "requirements"),
+                str(review_requirements),
                 "--response-out", str(response_out),
                 "--run-id", str(run_id),
                 "--timeout", str(host_agent_timeout),
@@ -451,9 +485,12 @@ def run_case(base: Path, source: Path, case: dict[str, Any], *, prepare_host_rev
                     case, source, work, output,
                     compliance_mode=compliance_mode,
                     prepare_host_review=False,
+                    requirements_dir=execution_requirements,
                     neutral_reference_docx=neutral_reference_docx,
-                    llm_response=work / "host-agent-response.json",
+                    llm_response=response_out,
                     run_id=str(run_id),
+                    host_agent_audit=review_requirements / "host-agent-run.json",
+                    merge_receipt=review_requirements / "merge-receipt.json",
                     host_review_chunk_size=host_review_chunk_size,
                 ),
                 label=f"[{case['id']}] full deterministic DOCX + declaration resources",
@@ -463,7 +500,17 @@ def run_case(base: Path, source: Path, case: dict[str, Any], *, prepare_host_rev
     result["stages"] = stages
     result["case_id"] = case["id"]
     result["analysis_mode"] = case["analysis_mode"]
-    result["fresh_run"] = extraction_report(work)
+    result["stage_paths"] = {
+        "review_requirements": str(review_requirements.resolve()) if host_review else None,
+        "execution_requirements": str(execution_requirements.resolve()),
+    }
+    result["fresh_run"] = extraction_report(
+        work,
+        requirements_dir=(execution_requirements if llm_case and auto_host_agent and
+                           stages.get("host_agent", {}).get("returncode") == 0
+                           else review_requirements if host_review else execution_requirements),
+        host_review_dir=review_requirements if host_review else None,
+    )
     result["extraction_thesis_profile"] = canonical_profile_report(work)
     return result
 
@@ -670,8 +717,14 @@ def main(argv: list[str] | None = None) -> int:
             global_stop_reason = fatal_reason
             write_batch_results()
             break
+        if result["acceptance"].get("accepted") is not True:
+            terminal_status = "stopped_case_failure"
+            blockers = result["acceptance"].get("blockers") or ["acceptance_failed"]
+            global_stop_reason = f"{case['id']}: {', '.join(str(item) for item in blockers[:8])}"
+            write_batch_results()
+            break
 
-    if terminal_status == "stopped_global_fatal":
+    if terminal_status != "completed":
         print(f"\nBATCH STOPPED ({global_stop_reason}) -> {base}")
     else:
         print(f"\nALL DONE -> {base}")

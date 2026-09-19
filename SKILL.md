@@ -36,8 +36,10 @@ automatically by a deterministic local converter (LibreOffice `soffice`, with
 macOS `textutil` as a fallback) into a new isolated per-invocation DOCX. The
 original is never overwritten, and no normalized artifact is reused silently.
 
-The audit trail is written to
-`<work-dir>/requirements/requirements-input-manifest.json`. It records the
+The audit trail is written to the stage-specific requirements directory:
+`<work-dir>/review/requirements/requirements-input-manifest.json` for the
+prepare/review stage and `<work-dir>/execution/requirements/` for the final
+deterministic stage. It records the
 original path/kind/size/SHA-256, converter command/tool/version, normalized
 path/size/SHA-256, validation result, and conversion status. Missing converters,
 converter failures, and invalid DOCX output fail closed with no semantic work
@@ -166,16 +168,16 @@ For a DOCX input, replace `input.tex` with the source DOCX. The preparation
 manifest is:
 
 ```text
-build/host-review/requirements/host-agent-review-manifest.json
+build/host-review/review/requirements/host-agent-review-manifest.json
 ```
 
 Read the manifest and every request in
-`build/host-review/requirements/llm-request-chunks.json`. Process **all**
+`build/host-review/review/requirements/llm-request-chunks.json`. Process **all**
 chunks with the current host Agent model. For each chunk, write the exact JSON
 contract to the filename in `batch.response_filename`, normally:
 
 ```text
-build/host-review/requirements/llm-response-chunk-0001.json
+build/host-review/review/requirements/llm-response-chunk-0001.json
 ```
 
 Each response must satisfy the request's `response_schema` and must:
@@ -200,8 +202,8 @@ After every chunk response exists, merge them with deterministic local code:
 
 ```bash
 python3 scripts/merge_host_agent_review.py \
-  build/host-review/requirements \
-  --response-out build/host-review/llm-response.json
+  build/host-review/review/requirements \
+  --response-out build/host-review/review/host-agent-response.json
 ```
 
 The merge step validates each chunk's contract and provenance, checks complete
@@ -213,12 +215,14 @@ Then run the final formatting stage:
 ```bash
 python3 scripts/thesis_format.py \
   requirements.doc input.tex output.docx \
-  --work-dir build/final \
-  --llm-response build/host-review/llm-response.json
+  --work-dir build/host-review \
+  --llm-response build/host-review/review/host-agent-response.json
 ```
 
-The final stage re-extracts the requirements, verifies the response against
-the new extraction, applies the format specification, and runs the configured
+The final stage writes fresh deterministic artifacts under
+`build/host-review/execution/requirements/`, re-extracts the requirements,
+verifies the response and the review/merge receipts against the new extraction,
+applies the format specification, and runs the configured
 DOCX/official-template/release audits. A response from another document,
 another run, or another chunk set must be rejected.
 

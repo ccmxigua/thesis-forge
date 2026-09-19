@@ -30,7 +30,13 @@ find_tool() {
   local requested="$1"
   local name="$2"
   if [ -n "$requested" ]; then
-    printf '%s\n' "$requested"
+    # Accept both an executable path and a command name.  Makefile variables
+    # such as PYTHON=python3 are names, not filesystem paths; resolving them
+    # here keeps the later -x check and the conversion manifest consistent.
+    case "$requested" in
+      */*) printf '%s\n' "$requested" ;;
+      *) command -v "$requested" 2>/dev/null || true ;;
+    esac
   else
     command -v "$name" 2>/dev/null || true
   fi

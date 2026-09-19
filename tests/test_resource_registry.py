@@ -71,6 +71,25 @@ class RunScopedResourceRegistryTest(unittest.TestCase):
         self.assertNotEqual(fixed_text_sha256("研究 成果"), fixed_text_sha256("研究成果"))
         self.assertNotEqual(fixed_text_sha256("第一段\n第二段"), fixed_text_sha256("第一段第二段"))
 
+    def test_materialization_can_require_exact_cited_source_text(self) -> None:
+        spec = self._spec()
+        spec["declarations"]["items"][0]["source_evidence_ids"] = [
+            "E-heading", "E-body-1", "E-body-2", "E-signature",
+        ]
+        evidence = {"evidence": [
+            {"id": "E-heading", "text": "本次输入的声明标题"},
+            {"id": "E-body-1", "text": "本次输入的第一段固定正文。"},
+            {"id": "E-body-2", "text": "本次输入的第二段固定正文。"},
+            {"id": "E-signature", "text": "作者签名"},
+        ]}
+        materialize_declaration_resources(spec, "run-evidence", evidence=evidence)
+
+        broken = self._spec()
+        broken["declarations"]["items"][0]["source_evidence_ids"] = ["E-heading"]
+        broken_evidence = {"evidence": [{"id": "E-heading", "text": "其他声明标题"}]}
+        with self.assertRaisesRegex(ValueError, "not present verbatim"):
+            materialize_declaration_resources(broken, "run-evidence", evidence=broken_evidence)
+
 
 if __name__ == "__main__":
     unittest.main()

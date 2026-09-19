@@ -34,7 +34,10 @@ from host_runtime import (  # noqa: E402
 
 
 def pipeline_command(args: argparse.Namespace, *, prepare_host_review: bool = False,
-                     llm_response: Path | None = None, run_id: str | None = None) -> list[str]:
+                     llm_response: Path | None = None, run_id: str | None = None,
+                     requirements_dir: Path | None = None,
+                     host_agent_audit: Path | None = None,
+                     merge_receipt: Path | None = None) -> list[str]:
     command = [
         sys.executable, str(ROOT / "scripts" / "thesis_format_pipeline.py"),
         str(args.requirements), str(args.input), str(args.output or (args.work_dir / "not-generated.docx")),
@@ -42,12 +45,18 @@ def pipeline_command(args: argparse.Namespace, *, prepare_host_review: bool = Fa
         "--analysis-mode", "llm_primary", "--compliance-mode", "full",
         "--host-review-chunk-size", str(args.host_review_chunk_size),
     ]
+    if requirements_dir:
+        command += ["--requirements-dir", str(requirements_dir)]
     if prepare_host_review:
         command.append("--prepare-host-review")
     elif llm_response:
         command += ["--llm-response", str(llm_response)]
     if run_id:
         command += ["--run-id", run_id]
+    if host_agent_audit:
+        command += ["--host-agent-audit", str(host_agent_audit)]
+    if merge_receipt:
+        command += ["--merge-receipt", str(merge_receipt)]
     for option, value in (("--style-template", args.style_template),
                           ("--thesis-profile", args.thesis_profile),
                           ("--render-report", args.render_report)):
@@ -160,21 +169,24 @@ def main(argv: list[str]) -> int:
         p.error("--strict-release requires --thesis-profile, --render-report, and --require-submission-ready")
 
     if args.auto_host_agent:
-        prepare = pipeline_command(args, prepare_host_review=True)
+        review_requirements = args.work_dir.resolve() / "review" / "requirements"
+        execution_requirements = args.work_dir.resolve() / "execution" / "requirements"
+        prepare = pipeline_command(args, prepare_host_review=True,
+                                   requirements_dir=review_requirements)
         code = run_stage(prepare, "fresh extraction + Host Agent packet")
         if code:
             return code
-        extraction_manifest = args.work_dir.resolve() / "requirements" / "extraction-manifest.json"
+        extraction_manifest = review_requirements / "extraction-manifest.json"
         try:
             payload = json.loads(extraction_manifest.read_text(encoding="utf-8"))
             run_id = payload["run_id"]
         except (OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
             print(f"auto Host Agent failed: cannot read fresh run_id: {exc}", file=sys.stderr)
             return 2
-        response_out = args.work_dir.resolve() / "host-agent-response.json"
+        response_out = args.work_dir.resolve() / "review" / "host-agent-response.json"
         bridge = [
             sys.executable, str(ROOT / "scripts" / "host_agent_bridge.py"),
-            str(args.work_dir.resolve() / "requirements"),
+            str(review_requirements),
             "--response-out", str(response_out),
             "--run-id", str(run_id),
             "--timeout", str(args.host_agent_timeout),
@@ -204,13 +216,29 @@ def main(argv: list[str]) -> int:
         code = run_stage(bridge, label)
         if code:
             return code
-        final = pipeline_command(args, llm_response=response_out, run_id=str(run_id))
+        final = pipeline_command(
+            args, llm_response=response_out, run_id=str(run_id),
+            requirements_dir=execution_requirements,
+            host_agent_audit=review_requirements / "host-agent-run.json",
+            merge_receipt=review_requirements / "merge-receipt.json",
+        )
         return run_stage(final, "full deterministic format + declaration resources + DOCX audits")
 
     if args.prepare_agent_review:
-        command = pipeline_command(args, prepare_host_review=True)
+        command = pipeline_command(
+            args, prepare_host_review=True,
+            requirements_dir=args.work_dir.resolve() / "review" / "requirements",
+        )
     elif args.llm_response:
-        command = pipeline_command(args, llm_response=args.llm_response)
+        review_requirements = args.work_dir.resolve() / "review" / "requirements"
+        audit = review_requirements / "host-agent-run.json"
+        receipt = review_requirements / "merge-receipt.json"
+        command = pipeline_command(
+            args, llm_response=args.llm_response,
+            requirements_dir=args.work_dir.resolve() / "execution" / "requirements",
+            host_agent_audit=audit if audit.is_file() and receipt.is_file() else None,
+            merge_receipt=receipt if audit.is_file() and receipt.is_file() else None,
+        )
     else:
         p.error("final formatting requires --llm-response, or use --auto-host-agent for one-command execution")
     return subprocess.run(command, cwd=ROOT).returncode

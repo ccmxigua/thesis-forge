@@ -111,6 +111,22 @@ class BatchAcceptanceTests(unittest.TestCase):
         )
         self.assertNotIn("--style-template", command)
 
+    def test_pipeline_command_can_bind_review_and_execution_stages(self) -> None:
+        command = batch.pipeline_command(
+            {"id": "bsu", "requirements": Path("requirements.docx"),
+             "analysis_mode": "llm_primary"},
+            Path("source.tex"), Path("work"), Path("output.docx"),
+            compliance_mode="full", prepare_host_review=False,
+            requirements_dir=Path("work/execution/requirements"),
+            llm_response=Path("work/review/host-agent-response.json"),
+            run_id="run-1",
+            host_agent_audit=Path("work/review/requirements/host-agent-run.json"),
+            merge_receipt=Path("work/review/requirements/merge-receipt.json"),
+        )
+        self.assertIn("--requirements-dir", command)
+        self.assertIn("--host-agent-audit", command)
+        self.assertIn("--merge-receipt", command)
+
 
 if __name__ == "__main__":
     unittest.main()

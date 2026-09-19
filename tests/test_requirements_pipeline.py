@@ -1183,6 +1183,56 @@ b&=2\notag
         self.assertTrue(any("inline placement" in e for e in errors))
         self.assertTrue(any("duplicate" in e for e in errors))
 
+        body_spec = {"schema_version": "1.0", "source_document": "x", "status": "rule_resolved",
+                     "roles": {"body_text": {"position": "inline"}}, "requirements": []}
+        body_errors = load_and_validate(body_spec, ROOT / "schema" / "format-spec.schema.json")
+        self.assertFalse(any("inline placement" in e for e in body_errors), body_errors)
+
+    def test_direct_line_spacing_is_parsed_without_fixed_value_keyword(self) -> None:
+        from scripts.requirements_engine import parse_properties
+        properties = parse_properties("论文题目仿宋14磅，行距16磅，段前段后0磅")
+        self.assertEqual(properties["paragraph"]["line_spacing"],
+                         {"type": "exact", "value": 16.0, "unit": "pt"})
+
+    def test_fresh_extraction_refuses_to_rebuild_over_host_review_artifacts(self) -> None:
+        from scripts.requirements_engine import prepare_fresh_extraction
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            source = td / "requirements.docx"
+            source.write_bytes(b"source")
+            out = td / "requirements"
+            out.mkdir()
+            (out / "merge-receipt.json").write_text("{}", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "immutable Host Agent review artifacts"):
+                prepare_fresh_extraction(source, out)
+
+    def test_alternate_textbox_is_not_duplicated_in_outer_paragraph_evidence(self) -> None:
+        from scripts.requirements_engine import extract_document_evidence
+        document_xml = """<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+ xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006" mc:Ignorable="wps">
+  <w:body>
+    <w:p>
+      <w:r><w:t>外层文字</w:t></w:r>
+      <mc:AlternateContent>
+        <mc:Choice Requires="wps"><w:drawing><w:txbxContent><w:p><w:r><w:t>论文题目仿宋14磅，行距16磅</w:t></w:r></w:p></w:txbxContent></w:drawing></mc:Choice>
+        <mc:Fallback><w:pict><w:txbxContent><w:p><w:r><w:t>论文题目仿宋14磅，行距16磅</w:t></w:r></w:p></w:txbxContent></w:pict></mc:Fallback>
+      </mc:AlternateContent>
+    </w:p>
+    <w:sectPr/>
+  </w:body>
+</w:document>"""
+        with tempfile.TemporaryDirectory() as td:
+            docx = Path(td) / "alternate.docx"
+            with zipfile.ZipFile(docx, "w") as archive:
+                archive.writestr("word/document.xml", document_xml)
+            evidence = extract_document_evidence(docx)["evidence"]
+        outer = [item for item in evidence if item["kind"] == "paragraph"]
+        textboxes = [item for item in evidence if item["kind"] == "textbox"]
+        self.assertEqual([item["text"] for item in outer], ["外层文字"])
+        self.assertEqual(len(textboxes), 1)
+        self.assertEqual(textboxes[0]["location"]["alternate_branch"], "Choice")
+
     def test_zero_line_spacing_does_not_require_line_height(self) -> None:
         from scripts.format_spec_validation import load_and_validate
         spec = {"schema_version": "1.0", "source_document": "x", "status": "rule_resolved",
@@ -1373,7 +1423,10 @@ b&=2\notag
             self.assertEqual(second.returncode, 0, second.stderr + second.stdout)
             second_extraction = json.loads((work / "requirements" / "extraction-manifest.json").read_text())
             manifest = json.loads((work / "pipeline-manifest.json").read_text())
-            self.assertFalse(stale.exists(), "the requirements directory must be rebuilt, not reused")
+            # Fresh extraction invalidates only known generated artifacts.  An
+            # unrelated file is preserved so rebuilding a stage cannot erase a
+            # user's evidence or an immutable host-review artifact by accident.
+            self.assertTrue(stale.exists(), "unrelated stage files must be preserved")
             self.assertNotEqual(first_extraction["run_id"], second_extraction["run_id"])
             self.assertNotEqual(first_extraction["source_sha256"], second_extraction["source_sha256"])
             self.assertEqual(manifest["requirements_extraction"]["policy"],
@@ -1793,13 +1846,22 @@ b&=2\notag
             td = Path(td); req = td / "requirements.docx"; preview = td / "preview"
             response = td / "response.json"; out = td / "out"
             d = Document()
-            d.add_paragraph("原创性声明固定标题和正文。")
-            d.add_paragraph("授权声明固定标题和正文。")
+            d.add_paragraph("独创性声明")
+            d.add_paragraph("本人声明本论文为本人在导师指导下完成的研究成果。")
+            d.add_paragraph("使用授权说明")
+            d.add_paragraph("本人同意按照学校规定保存和使用本学位论文。")
             d.save(req)
             run("scripts/requirements_engine.py", str(req), "--out", str(preview),
                 "--analysis-mode", "llm_primary")
             clauses = json.loads((preview / "requirement-clauses.json").read_text())
-            self.assertEqual(len(clauses), 2)
+            self.assertEqual(len(clauses), 4)
+            originality_heading, originality_body, authorization_heading, authorization_body = clauses
+            evidence_items = {
+                item["id"]: item["text"]
+                for item in json.loads((preview / "document-evidence.json").read_text())["evidence"]
+            }
+            source_text = lambda clause: evidence_items[clause["evidence_ids"][0]]
+            authorization_evidence = authorization_heading["evidence_ids"] + authorization_body["evidence_ids"]
             response.write_text(json.dumps({
                 "contract_version": "2.1",
                 "requirements": [
@@ -1808,13 +1870,13 @@ b&=2\notag
                         "properties": {
                             "before_role": "abstract_title_zh",
                             "items": [{
-                                "id": "originality", "heading": "独创性声明",
-                                "source_evidence_ids": clauses[0]["evidence_ids"],
+                                "id": "originality", "heading": source_text(originality_heading),
+                                "source_evidence_ids": originality_heading["evidence_ids"],
                                 "signature_placeholders": [],
                             }],
                         },
-                        "clause_ids": [clauses[0]["id"]],
-                        "evidence_ids": clauses[0]["evidence_ids"],
+                        "clause_ids": [originality_heading["id"]],
+                        "evidence_ids": originality_heading["evidence_ids"],
                         "confidence": .98, "reason": "保留原文固定声明标题",
                     },
                     {
@@ -1823,26 +1885,29 @@ b&=2\notag
                             "before_role": "abstract_title_zh",
                             "items": [{
                                 "id": "originality",
-                                "body_parts": ["本人声明本论文为本人在导师指导下完成的研究成果。"],
-                                "source_evidence_ids": clauses[0]["evidence_ids"],
+                                "body_parts": [source_text(originality_body)],
+                                "source_evidence_ids": originality_body["evidence_ids"],
                                 "signature_placeholders": [],
                             }, {
-                                "id": "authorization",
-                                "heading": "使用授权说明",
-                                "body_parts": ["本人同意按照学校规定保存和使用本学位论文。"],
-                                "source_evidence_ids": clauses[1]["evidence_ids"],
+                                "id": "authorization", "heading": source_text(authorization_heading),
+                                "body_parts": [source_text(authorization_body)],
+                                "source_evidence_ids": authorization_evidence,
                                 "signature_placeholders": [],
                             }],
                         },
-                        "clause_ids": [clauses[1]["id"]],
-                        "evidence_ids": clauses[1]["evidence_ids"],
+                        "clause_ids": [originality_body["id"], authorization_heading["id"], authorization_body["id"]],
+                        "evidence_ids": originality_body["evidence_ids"] + authorization_evidence,
                         "confidence": .98, "reason": "保留原文授权声明",
                     },
                 ],
                 "clause_reviews": [
-                    {"clause_id": clauses[0]["id"], "classification": "covered",
+                    {"clause_id": originality_heading["id"], "classification": "covered",
                      "requirement_indexes": [0], "reason": "由声明需求0覆盖"},
-                    {"clause_id": clauses[1]["id"], "classification": "covered",
+                    {"clause_id": originality_body["id"], "classification": "covered",
+                     "requirement_indexes": [1], "reason": "由声明需求1覆盖"},
+                    {"clause_id": authorization_heading["id"], "classification": "covered",
+                     "requirement_indexes": [1], "reason": "由声明需求1覆盖"},
+                    {"clause_id": authorization_body["id"], "classification": "covered",
                      "requirement_indexes": [1], "reason": "由声明需求1覆盖"},
                 ],
                 "unsupported_items": [], "reported_conflicts": [],
@@ -2134,6 +2199,60 @@ b&=2\notag
         self.assertEqual(by_clause["C1"]["applicability"]["status"], "conditional")
         self.assertEqual(by_clause["C1"]["input_prerequisites"][0]["key"], "thesis_profile.degree_level")
         self.assertEqual(by_clause["C2"]["properties"]["ordered_roles"], ["cover", "body_text"])
+
+    def test_llm_primary_unions_scoped_cover_object_and_order_fragments(self) -> None:
+        clauses = [
+            {"id": "C1", "text": "封面应包含中文题目。", "evidence_ids": ["E1"]},
+            {"id": "C2", "text": "封面应包含英文题目。", "evidence_ids": ["E2"]},
+            {"id": "C3", "text": "图形前应有正文说明。", "evidence_ids": ["E3"]},
+            {"id": "C4", "text": "表格前应有正文说明。", "evidence_ids": ["E4"]},
+            {"id": "C5", "text": "正文后接附录。", "evidence_ids": ["E5"]},
+            {"id": "C6", "text": "参考文献和致谢单独成组。", "evidence_ids": ["E6"]},
+        ]
+        field = lambda field_id, label, order: {
+            "id": field_id,
+            "label": label,
+            "value_from": f"thesis_profile.cover_metadata.{field_id}",
+            "display_policy": "required",
+            "order": order,
+        }
+        requirements = [
+            {"role": "cover", "properties": {"institution": "——", "fields": [field("title_zh", "论文题目：", 1)]},
+             "clause_ids": ["C1"], "evidence_ids": ["E1"], "confidence": .99, "reason": "中文题目是封面字段。"},
+            {"role": "cover", "properties": {"institution": "测试大学", "fields": [field("title_en", "English title", 2)]},
+             "clause_ids": ["C2"], "evidence_ids": ["E2"], "confidence": .99, "reason": "英文题目是封面字段。"},
+            {"role": "objects", "properties": {"order_constraints": [{"object_type": "figure", "preceding_prose_required": True}]},
+             "clause_ids": ["C3"], "evidence_ids": ["E3"], "confidence": .99, "reason": "图形需要前置正文。"},
+            {"role": "objects", "properties": {"order_constraints": [{"object_type": "table", "preceding_prose_required": True}]},
+             "clause_ids": ["C4"], "evidence_ids": ["E4"], "confidence": .99, "reason": "表格需要前置正文。"},
+            {"role": "document_structure", "properties": {"ordered_roles": ["body_text", "appendices"]},
+             "clause_ids": ["C5"], "evidence_ids": ["E5"], "confidence": .99, "reason": "正文和附录保持顺序。"},
+            {"role": "document_structure", "properties": {"ordered_roles": ["heading_references", "heading_acknowledgments"]},
+             "clause_ids": ["C6"], "evidence_ids": ["E6"], "confidence": .99, "reason": "后置部分保留独立顺序。"},
+        ]
+        response = {
+            "contract_version": "2.1", "requirements": requirements,
+            "clause_reviews": [
+                {"clause_id": clause["id"], "classification": "executable",
+                 "requirement_indexes": [index], "reason": "有明确的结构性约束。"}
+                for index, clause in enumerate(clauses)
+            ],
+            "unsupported_items": [], "reported_conflicts": [],
+        }
+        spec, conflicts, audit = requirements_engine.merge_llm_primary(
+            Path("synthetic-source"),
+            {"schema_version": "1.0", "roles": {}, "page": {}, "requirements": [], "content_instances": []},
+            clauses, response, {f"E{index}" for index in range(1, 7)},
+        )
+        self.assertEqual(sum(1 for item in audit if item.get("accepted")), 6)
+        self.assertFalse(any(item.get("type") in {"llm_contract", "llm_internal_conflict", "completeness"}
+                             for item in conflicts), conflicts)
+        self.assertEqual({item["id"] for item in spec["cover"]["fields"]}, {"title_zh", "title_en"})
+        self.assertEqual(spec["cover"]["institution"], "测试大学")
+        self.assertEqual({item["object_type"] for item in spec["objects"]["order_constraints"]}, {"figure", "table"})
+        self.assertEqual(spec["document_structure"]["ordered_roles"], ["body_text", "appendices"])
+        self.assertEqual(spec["document_structure"]["ordered_role_groups"],
+                         [["heading_references", "heading_acknowledgments"]])
 
     def test_full_compliance_blocks_applicable_backend_gap(self) -> None:
         with tempfile.TemporaryDirectory() as td:

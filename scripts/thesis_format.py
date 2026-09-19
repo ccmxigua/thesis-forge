@@ -240,13 +240,25 @@ def main(argv: list[str]) -> int:
         )
     elif args.llm_response:
         review_requirements = args.work_dir.resolve() / "review" / "requirements"
+        extraction_manifest = review_requirements / "extraction-manifest.json"
         audit = review_requirements / "host-agent-run.json"
         receipt = review_requirements / "merge-receipt.json"
+        if not extraction_manifest.is_file() or not audit.is_file() or not receipt.is_file():
+            p.error(
+                "manual --llm-response requires the fresh review extraction manifest, "
+                "host-agent-run.json, and merge-receipt.json under --work-dir/review/requirements"
+            )
+        try:
+            extraction = json.loads(extraction_manifest.read_text(encoding="utf-8"))
+            current_run_id = extraction["run_id"]
+        except (OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
+            p.error(f"cannot read fresh semantic-review run_id: {exc}")
         command = pipeline_command(
             args, llm_response=args.llm_response,
             requirements_dir=args.work_dir.resolve() / "execution" / "requirements",
-            host_agent_audit=audit if audit.is_file() and receipt.is_file() else None,
-            merge_receipt=receipt if audit.is_file() and receipt.is_file() else None,
+            run_id=str(current_run_id),
+            host_agent_audit=audit,
+            merge_receipt=receipt,
         )
     else:
         p.error("final formatting requires --llm-response, or use --auto-host-agent for one-command execution")

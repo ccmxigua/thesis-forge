@@ -33,8 +33,10 @@ NS = {"w": W_NS}
 W = f"{{{W_NS}}}"
 
 
-def repair_parallel_toc_targets(docx: Path) -> int:
-    """Repair a stale parallel TOC by reusing the valid TOC's targets.
+def repair_parallel_toc_targets(
+    docx: Path, *, target_map: dict[str, str] | None = None,
+) -> int:
+    """Repair stale TOC targets only from an explicit trusted target map.
 
     Some official bilingual templates contain two visually complete TOC
     caches, but the second cache was copied from another document and points
@@ -44,8 +46,10 @@ def repair_parallel_toc_targets(docx: Path) -> int:
     valid, and the second contains missing targets, bind the second sequence
     to the first sequence's target bookmarks by entry order.
 
-    The repair is deliberately narrow and fail-safe: ordinary single TOCs,
-    unequal TOCs, or a damaged primary TOC are left unchanged.
+    Entry order is not evidence that two TOC entries have the same semantic
+    target.  A caller must therefore supply a source-derived one-to-one map;
+    without it this function is deliberately a no-op and the normal render
+    validator remains responsible for failing closed on unresolved fields.
     """
     with ZipFile(docx) as archive:
         members = {name: archive.read(name) for name in archive.namelist()}
@@ -65,22 +69,24 @@ def repair_parallel_toc_targets(docx: Path) -> int:
             kind = "HYPERLINK" if match.group(1).upper().startswith("HYPERLINK") else "PAGEREF"
             fields[kind].append((node, match))
 
-    repaired = 0
+    if not target_map:
+        return 0
+    replacements: list[tuple[etree._Element, re.Match[str], str]] = []
     for entries in fields.values():
-        if not entries or len(entries) % 2:
-            return 0
-        half = len(entries) // 2
-        primary, parallel = entries[:half], entries[half:]
-        primary_targets = [match.group(2) for _, match in primary]
-        parallel_targets = [match.group(2) for _, match in parallel]
-        if not primary_targets or not all(target in bookmarks for target in primary_targets):
-            return 0
-        if not any(target not in bookmarks for target in parallel_targets):
-            continue
-        for (node, match), target in zip(parallel, primary_targets):
-            text = "".join(node.itertext())
-            node.text = text[:match.start(2)] + target + text[match.end(2):]
-            repaired += 1
+        for node, match in entries:
+            old_target = match.group(2)
+            if old_target in bookmarks:
+                continue
+            new_target = target_map.get(old_target)
+            if not new_target or new_target not in bookmarks:
+                return 0
+            replacements.append((node, match, new_target))
+
+    repaired = 0
+    for node, match, target in replacements:
+        text = "".join(node.itertext())
+        node.text = text[:match.start(2)] + target + text[match.end(2):]
+        repaired += 1
 
     if not repaired:
         return 0
@@ -121,8 +127,10 @@ def _complex_field_result_nodes(instruction: etree._Element) -> list[etree._Elem
     return []
 
 
-def repair_post_update_pageref_targets(docx: Path) -> int:
-    """Repair invalid PAGEREFs left between two Word-refreshed TOCs.
+def repair_post_update_pageref_targets(
+    docx: Path, *, target_map: dict[str, dict[str, str]] | None = None,
+) -> int:
+    """Repair invalid PAGEREFs only from an explicit trusted target map.
 
     Updating two TOCs can leave a manually translated TOC between Word's two
     regenerated caches.  Word creates fresh bookmarks for the regenerated
@@ -146,35 +154,31 @@ def repair_post_update_pageref_targets(docx: Path) -> int:
         if match:
             entries.append((node, match, _complex_field_result_nodes(node)))
 
-    missing = [match.group(1) not in bookmarks for _, match, _ in entries]
+    if not target_map:
+        return 0
+    replacements: list[tuple[etree._Element, re.Match[str], list[etree._Element], str, str]] = []
+    for node, match, results in entries:
+        old_target = match.group(1)
+        if old_target in bookmarks:
+            continue
+        mapping = target_map.get(old_target)
+        if not isinstance(mapping, dict):
+            return 0
+        target = mapping.get("target")
+        cached_text = mapping.get("cached_text")
+        if (not isinstance(target, str) or target not in bookmarks
+                or not isinstance(cached_text, str) or not results):
+            return 0
+        replacements.append((node, match, results, target, cached_text))
+
     repaired = 0
-    index = 0
-    while index < len(entries):
-        if not missing[index]:
-            index += 1
-            continue
-        end = index
-        while end < len(entries) and missing[end]:
-            end += 1
-        length = end - index
-        source_start = index - length
-        if source_start < 0 or not all(not flag for flag in missing[source_start:index]):
-            index = end
-            continue
-        for source, stale in zip(entries[source_start:index], entries[index:end]):
-            source_node, source_match, source_results = source
-            stale_node, stale_match, stale_results = stale
-            if not source_results or not stale_results:
-                continue
-            target = source_match.group(1)
-            text = "".join(stale_node.itertext())
-            stale_node.text = text[:stale_match.start(1)] + target + text[stale_match.end(1):]
-            source_text = "".join(node.text or "" for node in source_results)
-            stale_results[0].text = source_text
-            for extra in stale_results[1:]:
-                extra.text = ""
-            repaired += 1
-        index = end
+    for node, match, results, target, cached_text in replacements:
+        text = "".join(node.itertext())
+        node.text = text[:match.start(1)] + target + text[match.end(1):]
+        results[0].text = cached_text
+        for extra in results[1:]:
+            extra.text = ""
+        repaired += 1
 
     if not repaired:
         return 0
@@ -198,10 +202,12 @@ on run argv
   with timeout of 600 seconds
     tell application "Microsoft Word"
     set d to missing value
+    set ownsDocument to false
     try
       if (count documents) is 0 then error "No Word document is open."
       set d to active document
       if POSIX full name of d is not expectedPath then error "Unexpected active Word document path: " & (POSIX full name of d)
+      set ownsDocument to true
     set storyTypes to {}
     -- Do not update main-story fields one by one.  A generated TOC contains
     -- one PAGEREF field per entry; updating each field independently forces
@@ -284,7 +290,7 @@ on run argv
       close d saving no
       return "{" & quote & "story_count" & quote & ":" & (storyCount as text) & "," & quote & "field_count" & quote & ":" & (fieldCount as text) & "," & quote & "updated_count" & quote & ":" & (updatedCount as text) & "," & quote & "failed_count" & quote & ":" & (failedCount as text) & "," & quote & "toc_count" & quote & ":" & (tocCount as text) & "}"
     on error errText number errNumber
-      if d is not missing value then
+      if ownsDocument and d is not missing value then
         try
           close d saving no
         end try
@@ -318,15 +324,17 @@ on run argv
   with timeout of 600 seconds
     tell application "Microsoft Word"
       set d to missing value
+      set ownsDocument to false
       try
         if (count documents) is 0 then error "No Word document is open."
         set d to active document
         if POSIX full name of d is not expectedPath then error "Unexpected active Word document path: " & (POSIX full name of d)
+        set ownsDocument to true
         save as d file name outPdf file format format PDF
         close d saving no
         return "ok"
       on error errText number errNumber
-        if d is not missing value then
+        if ownsDocument and d is not missing value then
           try
             close d saving no
           end try

@@ -14,6 +14,7 @@ development and compatibility regression runs.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import subprocess
 import sys
@@ -21,6 +22,7 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from zipfile import BadZipFile, ZipFile
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = Path("inputs/ten-school-template-manifest.json")
@@ -159,6 +161,82 @@ def pipeline_command(case: dict[str, Any], source: Path, work_dir: Path, output_
     return command
 
 
+def post_render_command(
+    case: dict[str, Any], *, source_docx: Path, final_docx: Path, pdf: Path,
+    render_report: Path, pre_validation: Path, format_spec: Path,
+    official_template: Path, official_style_map: Path, generated_style_map: Path,
+    submission_audit: Path, format_comparison: Path,
+    format_comparison_markdown: Path, acceptance_out: Path,
+    thesis_profile: Path | None = None,
+    word_open_timeout: int = 45, word_timeout: int = 180,
+) -> list[str]:
+    """Build the explicit post-Word release command for one case.
+
+    The final DOCX is deliberately a different path from the deterministic
+    pre-render DOCX.  ``post_render_acceptance.py`` then binds Word's report,
+    the final submission audit, and the final format comparison to that final
+    path.
+    """
+    command = [
+        sys.executable, "scripts/post_render_acceptance.py",
+        str(source_docx), str(final_docx), str(pdf),
+        "--render-report", str(render_report),
+        "--format-spec", str(format_spec),
+        "--pre-validation", str(pre_validation),
+        "--submission-audit", str(submission_audit),
+        "--format-comparison", str(format_comparison),
+        "--format-comparison-markdown", str(format_comparison_markdown),
+        "--acceptance-out", str(acceptance_out),
+        "--official-template", str(official_template),
+        "--official-style-map", str(official_style_map),
+        "--generated-style-map", str(generated_style_map),
+        "--word-open-timeout", str(word_open_timeout),
+        "--word-timeout", str(word_timeout),
+    ]
+    if case.get("template_boundary") == "requirements_only":
+        command.append("--requirements-only")
+    if case.get("template_profile"):
+        command.extend(["--template-profile", str(case["template_profile"])])
+    if thesis_profile:
+        command.extend(["--thesis-profile", str(thesis_profile)])
+    return command
+
+
+def attach_post_render_manifest(
+    manifest_path: Path, *, pre_render_docx: Path, final_docx: Path, pdf: Path,
+    render_report: Path, submission_audit: Path, format_comparison: Path,
+    format_comparison_markdown: Path, acceptance_out: Path,
+    accepted: bool,
+) -> dict[str, Any]:
+    """Record the two-stage artifact chain without rewriting pre-render receipts."""
+    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    old_comparison = payload.get("format_comparison")
+    payload["pre_render_output"] = str(pre_render_docx.resolve())
+    payload["pre_render_format_comparison"] = old_comparison
+    payload["post_render_status"] = "accepted" if accepted else "blocked"
+    payload["post_render_acceptance"] = str(acceptance_out.resolve())
+    payload["post_word_render"] = {
+        "pre_render_docx": str(pre_render_docx.resolve()),
+        "final_docx": str(final_docx.resolve()),
+        "pdf": str(pdf.resolve()),
+        "render_report": str(render_report.resolve()),
+        "submission_audit": str(submission_audit.resolve()),
+        "format_comparison": str(format_comparison.resolve()),
+        "format_comparison_markdown": str(format_comparison_markdown.resolve()),
+        "pre_render_receipts_remain_bound_to_pre_render_docx": True,
+    }
+    if accepted:
+        payload["output"] = str(final_docx.resolve())
+        payload["format_comparison"] = str(format_comparison.resolve())
+        payload["format_comparison_markdown"] = str(format_comparison_markdown.resolve())
+        payload["submission_audit"] = str(submission_audit.resolve())
+        payload["render_report"] = str(render_report.resolve())
+        payload["rendered_pdf"] = str(pdf.resolve())
+        payload["submission_ready"] = True
+    manifest_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return payload
+
+
 def canonical_profile_report(work: Path) -> dict[str, Any] | None:
     path = work / "thesis-profile.json"
     if not path.exists():
@@ -230,13 +308,47 @@ def _read_artifact_json(value: Any, *, root: Path) -> tuple[Path | None, dict[st
     return path, payload if isinstance(payload, dict) else None
 
 
+def _inspect_docx_artifact(path: Path) -> dict[str, Any]:
+    """Independently verify the current output is a readable OPC DOCX package."""
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+        with ZipFile(path) as archive:
+            names = set(archive.namelist())
+            required = {"[Content_Types].xml", "word/document.xml"}
+            bad_member = archive.testzip()
+        missing = sorted(required - names)
+        return {
+            "path": str(path.resolve()),
+            "bytes": path.stat().st_size,
+            "sha256": digest.hexdigest(),
+            "opc_package_valid": not missing and bad_member is None,
+            "missing_members": missing,
+            "corrupt_member": bad_member,
+        }
+    except (OSError, BadZipFile, ValueError) as exc:
+        return {
+            "path": str(path.resolve()),
+            "bytes": path.stat().st_size if path.exists() else 0,
+            "sha256": digest.hexdigest() if path.exists() else None,
+            "opc_package_valid": False,
+            "missing_members": [],
+            "corrupt_member": None,
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+
+
 def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, Any]:
     """Apply one strict, artifact-bound acceptance gate to a batch case.
 
     A subprocess return code is only a stage signal.  The case is accepted only
     when the current run, current manifest, generated DOCX, schema validation,
-    capability gate, serialized-DOCX audit, render evidence, and post-generation
-    comparison all agree on the same artifact.
+    capability gate, serialized-DOCX audit, and final comparison all agree on
+    the same artifact.  When the post-Word stage is present, pre-render
+    receipts are checked against the pre-render DOCX and final submission
+    evidence is checked against the separate post-Word DOCX.
     """
     blockers: list[str] = []
     checks: dict[str, Any] = {}
@@ -281,10 +393,44 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
     if manifest.get("capability_preflight_status") in {None, "blocked", "failed"}:
         blockers.append("capability_preflight_not_passed")
 
+    post_acceptance_path, post_acceptance = _read_artifact_json(
+        manifest.get("post_render_acceptance"), root=root
+    )
+    post_render_active = post_acceptance is not None or manifest.get("post_render_status") is not None
+    checks["post_render_acceptance"] = str(post_acceptance_path) if post_acceptance_path else None
+    if post_render_active and (post_acceptance is None or post_acceptance.get("status") != "accepted"):
+        blockers.append("post_render_acceptance_not_passed")
+
     output_path = _artifact_path(manifest.get("output"), root=root)
     checks["output"] = str(output_path) if output_path else None
     if output_path is None or not output_path.is_file() or output_path.stat().st_size <= 0:
         blockers.append("generated_docx_missing")
+        output_artifact = None
+    else:
+        output_artifact = _inspect_docx_artifact(output_path)
+        checks["output_artifact"] = output_artifact
+        if not output_artifact.get("opc_package_valid"):
+            blockers.append("generated_docx_not_valid_opc")
+    if output_path is not None and manifest.get("output"):
+        manifest_output = _artifact_path(manifest.get("output"), root=root)
+        if manifest_output != output_path:
+            blockers.append("manifest_output_path_mismatch")
+
+    pre_render_output_path = _artifact_path(manifest.get("pre_render_output"), root=root)
+    if post_render_active:
+        if pre_render_output_path is None or not pre_render_output_path.is_file():
+            blockers.append("pre_render_docx_missing")
+        else:
+            pre_artifact = _inspect_docx_artifact(pre_render_output_path)
+            checks["pre_render_output_artifact"] = pre_artifact
+            if not pre_artifact.get("opc_package_valid"):
+                blockers.append("pre_render_docx_not_valid_opc")
+        if post_acceptance is not None:
+            if _artifact_path(post_acceptance.get("post_render_docx"), root=root) != output_path:
+                blockers.append("post_render_acceptance_output_path_mismatch")
+            if (output_artifact is not None
+                    and post_acceptance.get("post_render_docx_sha256") != output_artifact.get("sha256")):
+                blockers.append("post_render_acceptance_artifact_hash_mismatch")
 
     format_spec_path = _artifact_path(manifest.get("format_spec"), root=root)
     schema_path = format_spec_path.parent / "schema-validation.json" if format_spec_path else None
@@ -310,15 +456,44 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
     if validation is None:
         blockers.append("validation_report_missing_or_invalid")
     else:
+        reported_output = _artifact_path(validation.get("output_docx"), root=root)
+        expected_validation_output = pre_render_output_path if post_render_active else output_path
+        if reported_output is not None and reported_output != expected_validation_output:
+            blockers.append("validation_output_path_mismatch")
         if validation.get("valid") is not True or validation.get("format_ready") is not True:
             blockers.append("format_validation_not_passed")
         if validation.get("serialized_docx_valid") is not True:
             blockers.append("serialized_docx_not_verified")
+        receipt_audit = validation.get("property_receipt_audit")
+        if not isinstance(receipt_audit, dict) or receipt_audit.get("valid") is not True:
+            blockers.append("property_receipts_not_verified")
+        elif (output_artifact is not None or post_render_active):
+            receipts = receipt_audit.get("receipts", [])
+            if not isinstance(receipts, list):
+                blockers.append("property_receipts_malformed")
+            else:
+                receipt_hashes = {
+                    str(item.get("serialized_docx_sha256"))
+                    for item in receipts if isinstance(item, dict)
+                }
+                receipt_target = (
+                    checks.get("pre_render_output_artifact", {}).get("sha256")
+                    if post_render_active else output_artifact["sha256"]
+                )
+                if receipt_hashes and receipt_hashes != {receipt_target}:
+                    blockers.append("property_receipt_artifact_hash_mismatch")
         render = validation.get("render_validation")
-        if not isinstance(render, dict) or render.get("rendered_verified") is not True:
-            blockers.append("trusted_render_not_verified")
-        if validation.get("submission_ready") is not True:
-            blockers.append("submission_gate_not_ready")
+        if not post_render_active:
+            if not isinstance(render, dict) or render.get("rendered_verified") is not True:
+                blockers.append("trusted_render_not_verified")
+            elif output_artifact is not None:
+                render_source = ((render.get("evidence") or {}).get("source_docx")
+                                 if isinstance(render.get("evidence"), dict) else None)
+                if (not isinstance(render_source, dict)
+                        or render_source.get("sha256") != output_artifact["sha256"]):
+                    blockers.append("render_artifact_hash_mismatch")
+            if validation.get("submission_ready") is not True:
+                blockers.append("submission_gate_not_ready")
 
     comparison_path, comparison = _read_artifact_json(manifest.get("format_comparison"), root=root)
     checks["format_comparison"] = str(comparison_path) if comparison_path else None
@@ -391,7 +566,9 @@ def run_case(base: Path, source: Path, case: dict[str, Any], *, prepare_host_rev
              openclaw_config: Path | None = None,
              codex_bin: str | None = None,
              codex_model: str = codex_adapter.DEFAULT_MODEL,
-             neutral_reference_docx: Path | None = None) -> dict[str, Any]:
+             neutral_reference_docx: Path | None = None,
+             word_open_timeout: int = 45,
+             word_timeout: int = 180) -> dict[str, Any]:
     case_dir = base / str(case["id"])
     work = case_dir / "work"
     review_requirements = work / "review" / "requirements"
@@ -497,6 +674,75 @@ def run_case(base: Path, source: Path, case: dict[str, Any], *, prepare_host_rev
             )
             stages["full"] = full_result
             result = dict(full_result)
+
+    # A generated DOCX is not a release artifact until Microsoft Word has
+    # produced a separate final DOCX/PDF pair and both final outputs have been
+    # audited.  Preparation-only runs have no output and therefore stop before
+    # this stage.  The post-render helper keeps pre-render receipts immutable.
+    if result.get("returncode") == 0 and output.is_file():
+        post_dir = work / "application"
+        final_docx = case_dir / "final-word.docx"
+        pdf = case_dir / "final.pdf"
+        render_report = post_dir / "word-render-report.json"
+        submission_audit = post_dir / "final-submission-audit.json"
+        format_comparison = post_dir / "final-format-comparison.json"
+        format_comparison_markdown = post_dir / "FINAL-FORMAT-COMPARISON.md"
+        acceptance_out = post_dir / "post-render-acceptance.json"
+        manifest_path = work / "pipeline-manifest.json"
+        try:
+            pipeline_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            style_record = ((pipeline_manifest.get("inputs") or {}).get("style_template")
+                            if isinstance(pipeline_manifest, dict) else None)
+            official_template = Path(str(style_record.get("path"))) if isinstance(style_record, dict) else None
+            if official_template is None or not official_template.is_file():
+                raise ValueError("pipeline manifest does not contain a usable style-template path")
+            post_cmd = post_render_command(
+                case,
+                source_docx=output,
+                final_docx=final_docx,
+                pdf=pdf,
+                render_report=render_report,
+                pre_validation=work / "application" / "validation-report.json",
+                format_spec=execution_requirements / "format-spec.json",
+                official_template=official_template,
+                official_style_map=work / "style-map.json",
+                generated_style_map=work / "application" / "style-map.json",
+                submission_audit=submission_audit,
+                format_comparison=format_comparison,
+                format_comparison_markdown=format_comparison_markdown,
+                acceptance_out=acceptance_out,
+                thesis_profile=(work / "thesis-profile.json") if (work / "thesis-profile.json").is_file() else None,
+                word_open_timeout=word_open_timeout,
+                word_timeout=word_timeout,
+            )
+            post_result = run_command(post_cmd, label=f"[{case['id']}] Word render + final artifact acceptance")
+        except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            post_result = {
+                "returncode": 2,
+                "elapsed_s": 0.0,
+                "finished_at": datetime.now(timezone.utc).isoformat(),
+                "command": [],
+                "stdout_tail": "",
+                "stderr_tail": f"{type(exc).__name__}: {exc}",
+            }
+        stages["post_render"] = post_result
+        result = dict(post_result)
+        try:
+            acceptance_payload = json.loads(acceptance_out.read_text(encoding="utf-8")) if acceptance_out.is_file() else None
+        except (OSError, json.JSONDecodeError):
+            acceptance_payload = None
+        attach_post_render_manifest(
+            manifest_path,
+            pre_render_docx=output,
+            final_docx=final_docx,
+            pdf=pdf,
+            render_report=render_report,
+            submission_audit=submission_audit,
+            format_comparison=format_comparison,
+            format_comparison_markdown=format_comparison_markdown,
+            acceptance_out=acceptance_out,
+            accepted=bool(acceptance_payload and acceptance_payload.get("status") == "accepted"),
+        )
     result["stages"] = stages
     result["case_id"] = case["id"]
     result["analysis_mode"] = case["analysis_mode"]
@@ -568,6 +814,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="optional native codex executable used by --auto-host-agent")
     parser.add_argument("--codex-model", default=codex_adapter.DEFAULT_MODEL,
                         help=f"explicit native Codex model (default: {codex_adapter.DEFAULT_MODEL})")
+    parser.add_argument("--word-open-timeout", type=int, default=45,
+                        help="seconds to wait for Microsoft Word to activate the staged DOCX")
+    parser.add_argument("--word-timeout", type=int, default=180,
+                        help="maximum seconds for one Microsoft Word export")
     args = parser.parse_args(argv)
     try:
         source, cases, manifest_path = load_manifest(args.template_manifest)
@@ -598,6 +848,10 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--host-agent-max-attempts must be a positive integer")
     if args.host_review_chunk_size <= 0:
         parser.error("--host-review-chunk-size must be a positive integer")
+    if args.word_open_timeout <= 0:
+        parser.error("--word-open-timeout must be a positive integer")
+    if args.word_timeout <= 0:
+        parser.error("--word-timeout must be a positive integer")
     if any(case["analysis_mode"] == "llm_primary" for case in selected) and not (
         args.prepare_host_review or args.auto_host_agent
     ):
@@ -698,6 +952,8 @@ def main(argv: list[str] | None = None) -> int:
                 codex_bin=args.codex_bin,
                 codex_model=args.codex_model,
                 neutral_reference_docx=neutral_reference,
+                word_open_timeout=args.word_open_timeout,
+                word_timeout=args.word_timeout,
             )
         except Exception as exc:  # keep each school independently auditable
             result = {

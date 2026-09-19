@@ -231,6 +231,32 @@ applies the format specification, and runs the configured
 DOCX/official-template/release audits. A response from another document,
 another run, or another chunk set must be rejected.
 
+## Word/PDF release gate
+
+The DOCX produced by the deterministic application stage is a pre-render
+artifact, not yet a submission artifact. Microsoft Word may rewrite the DOCX
+while updating fields and exporting PDF, so the final file must be written to a
+separate path and audited again. The ten-school batch runner now performs this
+post-render stage automatically for every case that produced a DOCX:
+
+```text
+generated.docx
+  -> scripts/word_render_export.py
+  -> final-word.docx + final.pdf + word-render-report.json
+  -> scripts/submission_audit.py
+  -> scripts/post_generation_format_audit.py
+  -> post-render-acceptance.json
+```
+
+`scripts/post_render_acceptance.py` is the fail-closed coordinator for that
+chain. It records separate `pre_render_docx_sha256` and
+`post_render_docx_sha256` values. Property receipts remain bound to
+`generated.docx`; never replace their hash with the post-Word hash without
+re-extracting and re-verifying the properties. A case is submission-ready only
+when the post-render acceptance, final submission audit, and final format
+comparison all pass. A generated DOCX alone, or a self-authored render flag,
+is not sufficient evidence.
+
 ## Handling failures
 
 - Missing chunk response: stop and report the exact filename.

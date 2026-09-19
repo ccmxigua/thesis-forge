@@ -56,7 +56,7 @@ class WordRenderExportTest(unittest.TestCase):
             ), self.assertRaisesRegex(RuntimeError, "did not activate"):
                 word_render_export.wait_for_document(str(expected), 1)
 
-    def test_repairs_stale_parallel_toc_targets_by_entry_order(self) -> None:
+    def test_does_not_guess_parallel_toc_targets_by_entry_order(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             docx = Path(td) / "parallel-toc.docx"
             Document().save(docx)
@@ -88,16 +88,14 @@ class WordRenderExportTest(unittest.TestCase):
                 for name, payload in members.items():
                     archive.writestr(name, payload)
 
-            self.assertEqual(word_render_export.repair_parallel_toc_targets(docx), 4)
+            self.assertEqual(word_render_export.repair_parallel_toc_targets(docx), 0)
             with ZipFile(docx) as archive:
                 repaired = etree.fromstring(archive.read("word/document.xml"))
             instructions = ["".join(node.itertext()) for node in repaired.xpath(
                 ".//w:instrText", namespaces={"w": ns}
             )]
-            self.assertNotIn("_StaleA", " ".join(instructions))
-            self.assertNotIn("_StaleB", " ".join(instructions))
-            self.assertEqual(sum("_TocA" in item for item in instructions), 4)
-            self.assertEqual(sum("_TocB" in item for item in instructions), 4)
+            self.assertIn("_StaleA", " ".join(instructions))
+            self.assertIn("_StaleB", " ".join(instructions))
 
     def test_cli_refuses_hard_link_aliases(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -150,6 +148,8 @@ class WordRenderExportTest(unittest.TestCase):
     def test_word_script_uses_absolute_path_bounded_story_ranges_and_fail_closed_counts(self) -> None:
         script = word_render_export.APPLE_SCRIPT
         self.assertIn("POSIX full name of d is not expectedPath", script)
+        self.assertIn("set ownsDocument to false", script)
+        self.assertIn("if ownsDocument and d is not missing value", script)
         # Main-story TOC/PAGEREF fields are deliberately updated once through
         # Word's native TOC API; updating each of them separately repeatedly
         # repaginates a thesis and can make automation appear to hang.
@@ -210,7 +210,7 @@ class WordRenderExportTest(unittest.TestCase):
             self.assertEqual(raised.exception.code, 2)
             run_mock.assert_not_called()
 
-    def test_post_update_pageref_repair_copies_target_and_cached_page(self) -> None:
+    def test_does_not_guess_post_update_pageref_target_and_cached_page(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             docx = Path(td) / "post-update.docx"
             Document().save(docx)
@@ -246,15 +246,13 @@ class WordRenderExportTest(unittest.TestCase):
                 for name, payload in members.items():
                     archive.writestr(name, payload)
 
-            self.assertEqual(word_render_export.repair_post_update_pageref_targets(docx), 2)
+            self.assertEqual(word_render_export.repair_post_update_pageref_targets(docx), 0)
             with ZipFile(docx) as archive:
                 repaired = etree.fromstring(archive.read("word/document.xml"))
             text = " ".join(repaired.xpath(".//w:instrText/text() | .//w:t/text()", namespaces={"w": ns}))
-            self.assertNotIn("_OldA", text)
-            self.assertNotIn("_OldB", text)
-            self.assertNotIn("错误!未定义书签", text)
-            self.assertEqual(text.count("7"), 2)
-            self.assertEqual(text.count("9"), 2)
+            self.assertIn("_OldA", text)
+            self.assertIn("_OldB", text)
+            self.assertIn("错误!未定义书签", text)
 
     def test_generic_validator_has_no_attestation_cli_switch(self) -> None:
         with tempfile.TemporaryDirectory() as td:

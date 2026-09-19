@@ -6,6 +6,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from docx import Document
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
@@ -20,7 +22,9 @@ class BatchAcceptanceTests(unittest.TestCase):
         requirements.mkdir(parents=True)
         apply_dir.mkdir(parents=True)
         output = root / "case" / "generated.docx"
-        output.write_bytes(b"current-docx")
+        Document().save(output)
+        import hashlib
+        output_sha256 = hashlib.sha256(output.read_bytes()).hexdigest()
         format_spec = requirements / "format-spec.json"
         format_spec.write_text("{}\n", encoding="utf-8")
         (requirements / "schema-validation.json").write_text(
@@ -33,8 +37,16 @@ class BatchAcceptanceTests(unittest.TestCase):
             "valid": True,
             "format_ready": True,
             "serialized_docx_valid": True,
-            "render_validation": {"rendered_verified": render},
+            "render_validation": {
+                "rendered_verified": render,
+                "evidence": {"source_docx": {"sha256": output_sha256}},
+            },
             "submission_ready": render,
+            "output_docx": str(output),
+            "property_receipt_audit": {
+                "valid": True,
+                "receipts": [{"serialized_docx_sha256": output_sha256}],
+            },
         }), encoding="utf-8")
         comparison = apply_dir / "format-comparison.json"
         comparison.write_text(json.dumps({"status": "passed"}), encoding="utf-8")

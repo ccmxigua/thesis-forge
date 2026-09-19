@@ -303,7 +303,7 @@ def compact_model_packet(chunk: dict[str, Any]) -> dict[str, Any]:
         "eligible_existing_requirements": existing_requirements,
         "response_contract": {
             "required": [
-                "contract_version", "provenance", "requirements", "clause_reviews",
+                "contract_version", "requirements", "clause_reviews",
                 "unsupported_items", "reported_conflicts",
             ],
             "allowed_classifications": [
@@ -765,7 +765,7 @@ def run_host_agent_chunk(
                 str(key) for key in set(expected_provenance) | set(observed_provenance)
                 if observed_provenance.get(key) != expected_provenance.get(key)
             })
-        else:
+        elif observed_provenance is not None:
             provenance_mismatch_fields = sorted(str(key) for key in expected_provenance)
     raw_response_path = response_path.with_name(
         f"{response_path.stem}.raw{response_path.suffix}"
@@ -775,30 +775,30 @@ def run_host_agent_chunk(
     raw_response_path.write_text(
         json.dumps(response, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
-    provenance_binding = "model_echo_verified"
+    # The model-facing packet deliberately omits trusted identity fields.  A
+    # native bridge may therefore bind a response that omits ``provenance``
+    # after semantic validation.  It must never, however, overwrite a
+    # provenance object that the model did emit: an old or foreign envelope
+    # with a plausible payload is an invocation-integrity failure, not a value
+    # to repair with the current hash.
     if provenance_mismatch_fields:
-        # The automatic bridge is the trusted invocation boundary.  It has
-        # already captured this process's raw stdout, prompt, and model packet,
-        # so a model must not be charged with copying a 64-character identity
-        # block exactly.  Validate the semantic response first, retain the raw
-        # response above, then bind the accepted response to this invocation's
-        # current chunk.  The offline/manual merger remains strict and still
-        # requires the response file to carry the exact provenance itself.
-        if adapter_id not in {"openclaw", "codex"}:
-            raise HostAgentProvenanceMismatch(
-                "Host Agent response provenance mismatch: "
-                + ", ".join(provenance_mismatch_fields)
-            )
-        contract_errors = validate_host_agent_response(response, chunk)
-        if contract_errors:
-            raise ValueError(
-                "local response contract validation failed before provenance binding: "
-                + _summarize_contract_errors(contract_errors)
-            )
-        if not isinstance(expected_provenance, dict):
-            raise ValueError("current Host Agent chunk has no bindable provenance")
-        response["provenance"] = copy.deepcopy(expected_provenance)
-        provenance_binding = "bridge_current_invocation"
+        raise HostAgentProvenanceMismatch(
+            "Host Agent response provenance conflict: "
+            + ", ".join(provenance_mismatch_fields)
+        )
+    contract_errors = validate_host_agent_response(response, chunk)
+    if contract_errors:
+        raise ValueError(
+            "local response contract validation failed before provenance binding: "
+            + _summarize_contract_errors(contract_errors)
+        )
+    if not isinstance(expected_provenance, dict):
+        raise ValueError("current Host Agent chunk has no bindable provenance")
+    response["provenance"] = copy.deepcopy(expected_provenance)
+    provenance_binding = (
+        "model_echo_verified" if isinstance(observed_provenance, dict)
+        else "bridge_generated"
+    )
     if controller is not None:
         controller.check()
     response_path.write_text(

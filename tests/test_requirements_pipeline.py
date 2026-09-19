@@ -2842,7 +2842,7 @@ b&=2\notag
             self.assertIn("synthetic cover drawing is prohibited", result.stderr)
             self.assertFalse(output.exists())
 
-    def test_pipeline_recovers_explicit_tjufe_cover_contract_for_placeholder_generation(self) -> None:
+    def test_pipeline_does_not_infer_cover_contract_from_requirement_keywords(self) -> None:
         module_spec = importlib.util.spec_from_file_location(
             "thesis_format_pipeline_cover_fallback", ROOT / "scripts" / "thesis_format_pipeline.py")
         pipeline = importlib.util.module_from_spec(module_spec)
@@ -2859,14 +2859,11 @@ b&=2\notag
             {"text": "封面上方为论文题目，下方依次为专业名称、作者学号、论文作者、指导教师，最末为提交论文日期"},
             {"text": "扉页上方为论文题目（中英文对照）"},
         ]
+        self.assertFalse(pipeline.ensure_declared_cover(spec, clauses))
+        self.assertNotIn("cover", spec)
+        spec["cover"] = {"before_role": "abstract_title_zh"}
         self.assertTrue(pipeline.ensure_declared_cover(spec, clauses))
-        self.assertEqual(spec["cover"]["institution"], "学校名称待确认")
-        self.assertEqual(spec["cover"]["missing_value_placeholder"], "——")
-        self.assertEqual(
-            [field["id"] for field in spec["cover"]["fields"]],
-            ["title_zh", "title_en", "program_name", "student_id", "author_name", "supervisor_name", "completion_date"],
-        )
-        self.assertTrue(all(field["display_policy"] == "required" for field in spec["cover"]["fields"]))
+        self.assertEqual(spec["cover"]["before_role"], "document_start")
         self.assertFalse(pipeline.ensure_declared_cover(spec, clauses), "an existing cover must not be overwritten")
 
     def test_fixed_text_schema_rejects_untrusted_missing_or_conflicting_cover_metadata(self) -> None:

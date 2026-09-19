@@ -18,6 +18,7 @@ from pipeline_finding import evidence, finding
 from region_graph import compile_region_graph
 from section_model import compile_section_plan
 from semantic_contract import sha256_json
+from artifact_io import paths_alias
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -59,6 +60,11 @@ def validate_semantic_review_configuration(args: argparse.Namespace, parser: arg
             parser.error("--strict-release requires --require-submission-ready")
         if args.allow_unresolved or args.preview_placeholders:
             parser.error("--strict-release cannot use unresolved or preview bypasses")
+        if not args.prepare_host_review and not (args.host_agent_audit and args.merge_receipt):
+            parser.error(
+                "--strict-release requires host-agent-run.json and merge-receipt.json "
+                "bound to the supplied response"
+            )
     if args.llm_response:
         if not args.llm_response.is_file():
             parser.error(f"LLM response does not exist: {args.llm_response}")
@@ -337,67 +343,21 @@ def merge_official_page_baseline(spec: dict[str, Any], official_docx: Path) -> l
 
 
 def ensure_declared_cover(spec: dict[str, Any], clauses: list[dict[str, Any]]) -> bool:
-    """Materialize an explicit school cover contract when extraction omitted it.
+    """Normalize an already explicit cover contract without inferring one.
 
-    Cover structure and thesis-instance metadata are deliberately independent.
-    A complete clause review can correctly describe cover typography as role
-    requirements yet omit the top-level ``cover`` object.  Without that object
-    the downstream placeholder policy never runs.  Recover only from explicit
-    cover clauses, and never infer personal data.
+    Natural-language keywords cannot establish that a cover exists, which
+    fields it contains, or where those fields belong.  Those decisions belong
+    to the host semantic review and its evidence-bound response.  This helper
+    therefore only normalizes the placement of a cover object that the
+    accepted contract already contains; an omitted cover remains omitted and
+    is handled by the normal completeness/capability gates.
     """
-    texts = [str(item.get("text") or item.get("source_text") or "").strip()
-             for item in clauses if isinstance(item, dict)]
-    cover_texts = [text for text in texts if text and ("封面" in text or "封面只要求" in text)]
-    if not cover_texts:
-        return False
-    corpus = "\n".join(texts)
-    # A school name found anywhere in requirement prose is not trusted
-    # instance metadata: it may be a sample, comparison, or quoted template
-    # text.  Institution identity must come from an explicitly bound template
-    # or user-confirmed profile; this fallback therefore stays neutral and
-    # lets the metadata gate keep the artifact non-submission-ready.
-    institution = "学校名称待确认"
-
-    # Written requirements can establish that a cover/title page exists, but
-    # cannot establish its OOXML geometry. Never translate prose into guessed
-    # tables, blank paragraphs, logos, or floating objects. Exact school cover
-    # preservation is activated only by an explicit template profile whose
-    # region graph is compiled against a hash-verified official DOCX.
     existing = spec.get("cover")
-    if isinstance(existing, dict):
-        changed = False
-        if existing.get("before_role") != "document_start":
-            existing["before_role"] = "document_start"; changed = True
-        return changed
-
-    candidates = [
-        ("title_zh", "论文题目", "required", ("论文题目", "中文题目")),
-        ("title_en", "英文题目", "required", ("英文题目", "英文主题目", "中英文对照")),
-        ("program_name", "专业名称", "required", ("专业名称",)),
-        ("student_id", "作者学号", "required", ("作者学号", "学号")),
-        ("author_name", "论文作者", "required", ("论文作者", "作者姓名")),
-        ("supervisor_name", "指导教师", "required", ("指导教师",)),
-        ("completion_date", "提交论文日期", "required", ("提交论文日期", "论文提交日期")),
-    ]
-    fields = []
-    for field_id, label, policy, markers in candidates:
-        if any(marker in corpus for marker in markers):
-            fields.append({
-                "id": field_id,
-                "label": label,
-                "value_from": f"thesis_profile.cover_metadata.{field_id}",
-                "display_policy": policy,
-                "order": len(fields) + 1,
-            })
-    if not fields:
+    if not isinstance(existing, dict):
         return False
-    spec["cover"] = {
-        "institution": institution,
-        "before_role": "document_start",
-        "missing_value_policy": "placeholder",
-        "missing_value_placeholder": "——",
-        "fields": fields,
-    }
+    if existing.get("before_role") == "document_start":
+        return False
+    existing["before_role"] = "document_start"
     return True
 
 
@@ -598,6 +558,11 @@ def main(argv: list[str]) -> int:
         p.error("input must be a .tex or .docx file")
     if args.tex_overlay and source_suffix != ".tex":
         p.error("--tex-overlay is valid only with a .tex input")
+    output_path = args.output.resolve()
+    if paths_alias((requirements_source, source_input, output_path)):
+        p.error("requirements, source input, and output DOCX must be filesystem-distinct paths")
+    if output_path.exists():
+        p.error(f"refusing to overwrite an existing output DOCX: {output_path}")
 
     steps: list[dict[str, Any]] = []
     manifest: dict[str, Any] = {

@@ -1,7 +1,7 @@
 """Codex-specific command and JSONL result adapter.
 
-The adapter invokes the native ``codex exec`` CLI only after the launcher has
-declared ``THESIS_FORGE_HOST_RUNTIME=codex``.  It deliberately does not infer
+    The adapter invokes the native ``codex exec`` CLI only after the launcher has
+    declared ``THESIS_FORGE_HOST_RUNTIME=codex``.  It deliberately does not infer
 or manufacture a provider/model route: the Codex CLI's installed binary is a
 host identity, not evidence of the model or provider used for a turn.
 """
@@ -42,6 +42,10 @@ def build_command(
 ) -> list[str]:
     """Build an isolated, read-only native Codex invocation.
 
+    ``--ignore-user-config`` keeps unrelated desktop MCP/plugin servers out of
+    this ephemeral subprocess.  The explicit model and normal Codex
+    authentication remain in force, while the subprocess can terminate after
+    its semantic response instead of hanging during an unrelated MCP shutdown.
     ``codex exec --json`` emits the auditable JSONL event stream while
     ``--output-last-message`` gives the bridge the exact semantic response
     text without attempting to scrape human-facing logs.
@@ -55,6 +59,7 @@ def build_command(
         binary,
         "exec",
         "--ephemeral",
+        "--ignore-user-config",
         "--model", model.strip(),
         "--sandbox", "read-only",
         "--json",

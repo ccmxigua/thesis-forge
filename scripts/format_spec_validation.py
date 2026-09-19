@@ -45,12 +45,69 @@ def _typename(value: Any) -> str:
     return type(value).__name__
 
 
+# The bundled validator intentionally implements a small, explicit subset of
+# JSON Schema.  Silently ignoring a newer keyword is unsafe: a schema can then
+# appear to pass while the executor never enforced its constraint.
+_SUPPORTED_SCHEMA_KEYWORDS = {
+    "$ref", "$defs", "$schema", "$id", "const", "enum", "type", "minProperties", "required",
+    "properties", "additionalProperties", "minItems", "uniqueItems", "items",
+    "maxItems", "minimum", "maximum", "exclusiveMinimum", "minLength", "pattern",
+    "description", "title", "default", "anyOf", "allOf", "oneOf", "not", "if", "then", "else",
+}
+_SCHEMA_ANNOTATION_KEYWORDS = {"$comment", "examples", "deprecated", "readOnly", "writeOnly"}
+
+
+def schema_support_errors(schema: Any, path: str = "$") -> list[str]:
+    """Return unsupported JSON-Schema keywords instead of silently ignoring them."""
+    errors: list[str] = []
+    if not isinstance(schema, dict):
+        return [f"{path}: schema must be an object"]
+    for key, value in schema.items():
+        if key not in _SUPPORTED_SCHEMA_KEYWORDS and key not in _SCHEMA_ANNOTATION_KEYWORDS:
+            errors.append(f"{path}: unsupported_schema_keyword:{key}")
+        if key == "properties" and isinstance(value, dict):
+            for name, child in value.items():
+                errors.extend(schema_support_errors(child, f"{path}.properties.{name}"))
+        elif key == "$defs" and isinstance(value, dict):
+            for name, child in value.items():
+                errors.extend(schema_support_errors(child, f"{path}.$defs.{name}"))
+        elif key == "items":
+            errors.extend(schema_support_errors(value, f"{path}.items"))
+        elif key == "additionalProperties" and isinstance(value, dict):
+            errors.extend(schema_support_errors(value, f"{path}.additionalProperties"))
+        elif key in {"anyOf", "allOf", "oneOf"} and isinstance(value, list):
+            for index, child in enumerate(value):
+                errors.extend(schema_support_errors(child, f"{path}.{key}[{index}]"))
+        elif key in {"not", "if", "then", "else"} and isinstance(value, dict):
+            errors.extend(schema_support_errors(value, f"{path}.{key}"))
+    return errors
+
+
 def validate_instance(instance: Any, schema: dict[str, Any], root: dict[str, Any] | None = None,
                       path: str = "$") -> list[str]:
-    root = root or schema
+    root_was_none = root is None
+    root = schema if root is None else root
+    support_errors = schema_support_errors(schema) if root_was_none else []
     if "$ref" in schema:
-        return validate_instance(instance, _resolve(root, schema["$ref"]), root, path)
-    errors: list[str] = []
+        return support_errors + validate_instance(instance, _resolve(root, schema["$ref"]), root, path)
+    errors: list[str] = list(support_errors)
+    if "allOf" in schema:
+        for child in schema["allOf"]:
+            errors.extend(validate_instance(instance, child, root, path))
+    if "anyOf" in schema:
+        if not any(not validate_instance(instance, child, root, path) for child in schema["anyOf"]):
+            errors.append(f"{path}: must match at least one schema in anyOf")
+    if "oneOf" in schema:
+        matches = sum(not validate_instance(instance, child, root, path) for child in schema["oneOf"])
+        if matches != 1:
+            errors.append(f"{path}: must match exactly one schema in oneOf (matched {matches})")
+    if "not" in schema and not validate_instance(instance, schema["not"], root, path):
+        errors.append(f"{path}: must not match schema in not")
+    if "if" in schema:
+        condition_matches = not validate_instance(instance, schema["if"], root, path)
+        branch = schema.get("then") if condition_matches else schema.get("else")
+        if isinstance(branch, dict):
+            errors.extend(validate_instance(instance, branch, root, path))
     if "const" in schema and instance != schema["const"]: errors.append(f"{path}: must equal {schema['const']!r}")
     if "enum" in schema and instance not in schema["enum"]: errors.append(f"{path}: {instance!r} is not in {schema['enum']!r}")
     typ = schema.get("type")
@@ -76,6 +133,8 @@ def validate_instance(instance: Any, schema: dict[str, Any], root: dict[str, Any
                 errors.extend(validate_instance(value, schema["additionalProperties"], root, f"{path}.{key}"))
     if isinstance(instance, list):
         if len(instance) < schema.get("minItems", 0): errors.append(f"{path}: requires at least {schema['minItems']} items")
+        if "maxItems" in schema and len(instance) > schema["maxItems"]:
+            errors.append(f"{path}: requires at most {schema['maxItems']} items")
         if schema.get("uniqueItems"):
             seen = set()
             for value in instance:

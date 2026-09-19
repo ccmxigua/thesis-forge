@@ -23,7 +23,14 @@ import xml.etree.ElementTree as ET
 
 from artifact_io import atomic_write_text
 from format_spec_validation import load_and_validate, validate_instance
-from host_review_contract import validate_response as validate_host_review_response
+from host_review_contract import (
+    HOST_REVIEW_CONTRACT_V2,
+    HOST_REVIEW_CONTRACT_V3,
+    SUPPORTED_HOST_REVIEW_CONTRACTS,
+    derived_requirement_indexes,
+    project_compatibility_indexes,
+    validate_response as validate_host_review_response,
+)
 from compliance import (
     ALLOWED_REVIEW_CLASSIFICATIONS,
     build_clause_records,
@@ -49,6 +56,7 @@ from evidence_context_guards import (
 )
 from requirements_input import RequirementsInputError, normalize_requirements_input
 from resource_registry import materialize_declaration_resources
+from semantic_review_ledger import build_semantic_review_ledger
 from template_reconciliation import (
     extract_template_evidence,
     not_supplied_report,
@@ -1368,8 +1376,11 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
                       evidence_doc: dict[str, Any] | None = None,
                       rule_spec: dict[str, Any] | None = None,
                       mode: str = "questions",
-                      runtime_context: dict[str, Any] | None = None) -> dict[str, Any]:
+                      runtime_context: dict[str, Any] | None = None,
+                      contract_version: str = HOST_REVIEW_CONTRACT_V2) -> dict[str, Any]:
     if mode == "full":
+        if contract_version not in SUPPORTED_HOST_REVIEW_CONTRACTS:
+            raise ValueError(f"unsupported host review contract version: {contract_version}")
         # Clause records retain rich context for deterministic auditing, but
         # embedding that context into every clause duplicates the same DOCX
         # runs/location payload many times.  The LLM receives a compact clause
@@ -1413,7 +1424,7 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
             request_rule_spec.pop("content_instances", None)
             request_rule_spec.pop("cover_field_instances", None)
         request = {
-            "contract_version": "2.1",
+            "contract_version": contract_version,
             "task": "extract_and_review_complete_thesis_format_spec",
             "instructions": [
                 "Treat every supplied clause as in scope for completeness review.",
@@ -1488,9 +1499,9 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
             "rule_spec": request_rule_spec,
             "response_schema": {
                 "type": "object",
-        "required": ["contract_version", "requirements", "clause_reviews", "unsupported_items", "reported_conflicts"],
+                "required": ["contract_version", "requirements", "clause_reviews", "unsupported_items", "reported_conflicts"],
                 "properties": {
-                    "contract_version": {"const": "2.1"},
+                    "contract_version": {"const": contract_version},
                     "provenance": {"type": "object", "required": [
                         "version", "origin", "source_sha256", "evidence_sha256",
                         "clause_sha256", "request_sha256",
@@ -1499,7 +1510,8 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
                         "type": "object", "required": ["role", "properties", "clause_ids", "evidence_ids", "confidence", "reason"],
                         "properties": {
                             "existing_requirement_id": {"type": "string", "minLength": 1},
-                            "role": {"type": "string"},
+                            "role": {"enum": sorted(ALLOWED_REQUIREMENT_ROLES)},
+                            "field_key": {"type": "string", "minLength": 1},
                             "properties": {"type": "object", "minProperties": 1},
                             "clause_ids": {"type": "array", "items": {"type": "string"}},
                             "evidence_ids": {"type": "array", "items": {"type": "string"}},
@@ -1507,13 +1519,15 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
                             "applicability": {"$ref": "#/$defs/applicabilitySpec"},
                             "input_prerequisites": {"type": "array", "items": {"$ref": "#/$defs/inputPrerequisiteSpec"}},
                             "verification": {"$ref": "#/$defs/verificationSpec"}
-                        }}},
+                        }, "additionalProperties": False}},
                     "clause_reviews": {"type": "array", "items": {
-                        "type": "object", "required": ["clause_id", "classification", "requirement_indexes", "reason"],
+                        "type": "object",
+                        "required": (["clause_id", "classification", "reason"]
+                                     if contract_version == HOST_REVIEW_CONTRACT_V3
+                                     else ["clause_id", "classification", "requirement_indexes", "reason"]),
                         "properties": {
                             "clause_id": {"type": "string"},
                             "classification": {"enum": sorted(ALLOWED_REVIEW_CLASSIFICATIONS)},
-                            "requirement_indexes": {"type": "array", "items": {"type": "integer", "minimum": 0}, "uniqueItems": True},
                             "reason": {"type": "string", "minLength": 1},
                             "obligations": {"type": "array", "items": {
                                 "type": "object", "required": ["id", "status", "reason"],
@@ -1563,6 +1577,25 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
                 }, "additionalProperties": False
             }
         }
+        review_properties = request["response_schema"]["properties"]["clause_reviews"]["items"]["properties"]
+        if contract_version == HOST_REVIEW_CONTRACT_V2:
+            review_properties["requirement_indexes"] = {
+                "type": "array", "items": {"type": "integer", "minimum": 0},
+                "uniqueItems": True,
+            }
+        else:
+            # The reverse relation is a derived compatibility view produced by
+            # the code after validation.  It is deliberately absent from the
+            # model-facing schema so the model cannot maintain two indexes.
+            request["instructions"] = [
+                line for line in request["instructions"]
+                if "requirement_indexes" not in line
+            ]
+            request["instructions"].extend([
+                "Contract 3.0 has one authoritative relation: requirements[].clause_ids. Do not emit clause_reviews[].requirement_indexes; the bridge derives that reverse view after validation.",
+                "For a covered, executable, or verify_existing clause, emit at least one requirement whose clause_ids contains that exact clause_id. For every non-executable classification, emit no requirement for that clause.",
+                "The bridge will reject any clause_reviews[].requirement_indexes property. Never repair a relation by editing clause_ids without semantic evidence.",
+            ])
         if runtime_context:
             # Frozen non-model inputs belong to the semantic request body. A
             # changed confirmed profile or executable fingerprint therefore
@@ -1615,21 +1648,50 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
     clause_map = {c["id"]: c for c in clauses}
     all_clause_ids = set(clause_map)
     audit: list[dict[str, Any]] = []
+    audit.append({
+        "type": "merge_transformation_policy",
+        "policy_version": "host-review-merge-1",
+        "input": "validated_host_review_response",
+        "semantic_inference": "disabled",
+        "allowed_transformations": [
+            "derive_contract_3_reverse_relation",
+            "normalize_registered_content_instances",
+            "record_non_normative_sample_guard",
+            "record_manual_or_external_verification_boundary",
+        ],
+        "unauthorized_change_action": "blocking_conflict",
+        "post_merge_gate": "validate_spec_and_compliance_summary",
+    })
     reported_conflicts = response.get("reported_conflicts") if isinstance(response, dict) else []
     unsupported_items = response.get("unsupported_items") if isinstance(response, dict) else []
     conflicts: list[dict[str, Any]] = list(reported_conflicts or []) if isinstance(reported_conflicts, list) else []
     conflicts.extend({"type": "llm_contract", "reason": error}
                      for error in (contract_errors or []))
-    reviews = copy.deepcopy(response.get("clause_reviews") or []) if isinstance(response, dict) else []
-    requirements = response.get("requirements") or [] if isinstance(response, dict) else []
+    contract_version = response.get("contract_version") if isinstance(response, dict) else None
+    projected_response = (
+        project_compatibility_indexes(response, clauses)
+        if contract_version == HOST_REVIEW_CONTRACT_V3 else response
+    )
+    reviews = copy.deepcopy(projected_response.get("clause_reviews") or []) if isinstance(projected_response, dict) else []
+    requirements = projected_response.get("requirements") or [] if isinstance(projected_response, dict) else []
+    if contract_version == HOST_REVIEW_CONTRACT_V3:
+        audit.append({
+            "type": "relationship_projection",
+            "authoritative_relation": "requirements[].clause_ids",
+            "derived_view": "clause_reviews[].requirement_indexes",
+            "action": "derived_after_contract_validation_for_compatibility_only",
+        })
     manual_empty_indexes: set[int] = set()
     existing_requirement_map = {
         item.get("id"): item for item in rule_spec.get("requirements", [])
         if isinstance(item, dict) and item.get("id")
     }
     review_map: dict[str, dict[str, Any]] = {}
-    if not isinstance(response, dict) or response.get("contract_version") != "2.1":
-        conflicts.append({"type": "llm_contract", "reason": "contract_version_must_be_2.1"})
+    if not isinstance(response, dict) or contract_version not in SUPPORTED_HOST_REVIEW_CONTRACTS:
+        conflicts.append({
+            "type": "llm_contract",
+            "reason": f"contract_version_must_be_one_of_{sorted(SUPPORTED_HOST_REVIEW_CONTRACTS)}",
+        })
     if require_provenance:
         provenance_errors = validate_response_provenance(
             response, expected_provenance or {}, require_fresh_origin=True,
@@ -2312,6 +2374,15 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
         spec["blocking_errors"] = copy.deepcopy(blocking_conflicts)
     if unresolved or missing or blocking_conflicts:
         spec["status"] = "needs_clarification"
+    audit.append({
+        "type": "post_merge_gate",
+        "status": "blocked" if (unresolved or missing or blocking_conflicts) else "accepted",
+        "unresolved_clause_ids": sorted(unresolved),
+        "missing_clause_ids": sorted(missing),
+        "blocking_conflict_count": len(blocking_conflicts),
+        "accepted_requirement_count": len(spec.get("requirements", [])),
+        "semantic_review_required": bool(unresolved or missing or blocking_conflicts),
+    })
     return spec, conflicts, audit
 
 
@@ -2562,7 +2633,10 @@ def _build_host_review_chunks(
         chunk_evidence = copy.deepcopy(evidence_doc)
         chunk_evidence["evidence"] = [item for eid, item in all_evidence.items() if eid in chunk_ids]
         chunk_rule_spec = _narrow_rule_spec_for_chunk(full_request.get("rule_spec", {}), chunk)
-        chunk_request = build_llm_request([], chunk, chunk_evidence, chunk_rule_spec, "full")
+        chunk_request = build_llm_request(
+            [], chunk, chunk_evidence, chunk_rule_spec, "full",
+            contract_version=str(full_request.get("contract_version") or HOST_REVIEW_CONTRACT_V2),
+        )
         if isinstance(full_request.get("runtime_context"), dict):
             chunk_request["runtime_context"] = copy.deepcopy(full_request["runtime_context"])
         chunk_request["source_continuity_context"] = _source_continuity_context(
@@ -2623,7 +2697,7 @@ def prepare_host_agent_review_packets(
     manifest = {
         "schema_version": "1.0",
         "protocol": "host_agent_semantic_review",
-        "contract_version": "2.1",
+        "contract_version": full_request.get("contract_version", HOST_REVIEW_CONTRACT_V2),
         "origin": full_request.get("provenance", {}).get("origin"),
         "request_body_sha256": request_body_sha256(full_request),
         "request_envelope_sha256": request_envelope_sha256(full_request),
@@ -2641,6 +2715,7 @@ def prepare_host_agent_review_packets(
             "Automatic native bridge runs bind provenance from the current invocation; the model must not author or copy long hashes.",
             "Offline/manual response files must include the exact chunk provenance before deterministic merge.",
             "Every supplied clause must appear exactly once in that chunk's clause_reviews.",
+            "For contract 3.0, requirements[].clause_ids is authoritative; reverse requirement indexes are derived by code after validation.",
             "Run merge_host_agent_review.py only after every response file exists.",
         ],
     }
@@ -2857,8 +2932,11 @@ def merge_host_agent_review_packets(
         response = strict_json_loads(response_path.read_text(encoding="utf-8"))
         if not isinstance(response, dict):
             raise ValueError(f"host-agent response {index}/{len(request_chunks)} is not an object")
-        if response.get("contract_version") != "2.1":
-            raise ValueError(f"host-agent response {index}/{len(request_chunks)} is not contract 2.1")
+        contract_version = str(full_request.get("contract_version") or HOST_REVIEW_CONTRACT_V2)
+        if response.get("contract_version") != contract_version:
+            raise ValueError(
+                f"host-agent response {index}/{len(request_chunks)} is not contract {contract_version}"
+            )
         contract_errors = validate_host_review_response(response, chunk_request)
         if contract_errors:
             raise ValueError(
@@ -2891,9 +2969,10 @@ def merge_host_agent_review_packets(
         aggregate_requirements.extend(copy.deepcopy(requirements))
         for review in reviews:
             shifted = copy.deepcopy(review)
-            shifted["requirement_indexes"] = [
-                item + offset for item in (review.get("requirement_indexes") or [])
-            ]
+            if contract_version == HOST_REVIEW_CONTRACT_V2:
+                shifted["requirement_indexes"] = [
+                    item + offset for item in (review.get("requirement_indexes") or [])
+                ]
             aggregate_reviews.append(shifted)
         for item in response.get("unsupported_items", []):
             if item not in aggregate_unsupported:
@@ -2910,7 +2989,7 @@ def merge_host_agent_review_packets(
         )
 
     aggregate = {
-        "contract_version": "2.1",
+        "contract_version": contract_version,
         "provenance": copy.deepcopy(full_request["provenance"]),
         "requirements": aggregate_requirements,
         "clause_reviews": aggregate_reviews,
@@ -2923,6 +3002,8 @@ def merge_host_agent_review_packets(
             "merged host-agent response contract failed: "
             + "; ".join(aggregate_errors[:12])
         )
+    ledger = build_semantic_review_ledger(aggregate, full_clauses)
+    ledger_path = review_dir.resolve() / "semantic-review-ledger.json"
     metadata = {
         "protocol": "host_agent_semantic_review",
         "chunked": len(request_chunks) > 1,
@@ -2941,6 +3022,12 @@ def merge_host_agent_review_packets(
             _manifest_path(review_dir, str(manifest.get("request_path", "llm-request.json")))
         ),
         "runtime_context": copy.deepcopy(full_request.get("runtime_context")),
+        "relationship_projection": (
+            "model_authoritative_v2_1" if contract_version == HOST_REVIEW_CONTRACT_V2
+            else "code_derived_v3_0"
+        ),
+        "semantic_review_ledger_path": str(ledger_path.resolve()),
+        "semantic_review_ledger_sha256": sha256_json(ledger),
     }
     receipt = {
         "schema_version": "1.0",
@@ -2950,7 +3037,7 @@ def merge_host_agent_review_packets(
         "request_sha256": full_request.get("provenance", {}).get("request_sha256"),
         **metadata,
     }
-    artifacts = [(merge_receipt_path, receipt)]
+    artifacts = [(merge_receipt_path, receipt), (ledger_path, ledger)]
     if response_out_path:
         artifacts.insert(0, (response_out_path, aggregate))
     _write_json_artifacts_atomic(artifacts)
@@ -2961,7 +3048,7 @@ def response_contract_kind(response: Any) -> str:
     """Identify a semantic-response contract without consulting school mode."""
     if not isinstance(response, dict):
         return "unknown"
-    if (response.get("contract_version") == "2.1"
+    if (response.get("contract_version") in SUPPORTED_HOST_REVIEW_CONTRACTS
             and isinstance(response.get("requirements"), list)
             and isinstance(response.get("clause_reviews"), list)):
         return "complete_clause_review"
@@ -3057,6 +3144,7 @@ GENERATED_REQUIREMENT_ARTIFACTS = {
     "questions.json", "conflicts.json", "schema-validation.json", "llm-request.json",
     "llm-request-chunks.json", "llm-response.raw.json", "llm-response-chunks.json",
     "host-agent-review-manifest.json", "llm-batch-manifest.json", "llm-merge-audit.json",
+    "semantic-review-ledger.json",
     "extraction-manifest.json",
     "evidence-context.json",
     "requirements-input-manifest.json",
@@ -3305,13 +3393,16 @@ def analyse(args: argparse.Namespace) -> int:
     supplied_contract_kind = response_contract_kind(supplied_response) if args.llm_response else "none"
     if args.llm_response and supplied_contract_kind == "unknown":
         raise ValueError(
-            "supplied --llm-response was not consumed: expected a complete contract-2.1 "
+            "supplied --llm-response was not consumed: expected a complete host review "
             "clause review or a legacy resolutions response"
         )
     if args.analysis_mode == "llm_primary" and supplied_contract_kind == "legacy_question_resolutions":
-        raise ValueError("llm_primary requires a complete contract-2.1 clause review")
+        raise ValueError(
+            "llm_primary requires a complete host review clause contract "
+            f"({', '.join(sorted(SUPPORTED_HOST_REVIEW_CONTRACTS))})"
+        )
     complete_review_supplied = supplied_contract_kind == "complete_clause_review"
-    # Contract 2.1 is a complete, clause-by-clause semantic review.  Its
+    # A complete host contract is a clause-by-clause semantic review.  Its
     # applicability must not depend on how the deterministic baseline was
     # produced: rule_only and known_template are baseline strategies, not
     # reasons to discard a complete review.  This also keeps full-compliance
@@ -3321,9 +3412,16 @@ def analyse(args: argparse.Namespace) -> int:
         # post-merge cross-check, but expose only exact, evidence-eligible
         # existing requirements to the LLM request.
         llm_rule_spec = _narrow_rule_spec_for_chunk(rule_spec, clauses)
+        request_contract_version = (
+            str(supplied_response.get("contract_version"))
+            if isinstance(supplied_response, dict)
+            and supplied_response.get("contract_version") in SUPPORTED_HOST_REVIEW_CONTRACTS
+            else HOST_REVIEW_CONTRACT_V3
+        )
         llm_request = build_llm_request(
             rule_questions, clauses, evidence, llm_rule_spec, "full",
             runtime_context=runtime_context or None,
+            contract_version=request_contract_version,
         )
         llm_request["execution_policy"] = "fresh_run_no_cache"
         llm_request = attach_request_provenance(
@@ -3522,8 +3620,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                    help="target/source thesis DOCX whose structure informs semantic review; never official-template evidence")
     p.add_argument("--official-template-evidence-docx", type=Path,
                    help="internal official DOCX evidence source, distinct from --structure-docx")
-    p.add_argument("--llm-response", type=Path,
-                   help="offline complete contract-2.1 response produced by the host Agent")
+    p.add_argument(
+        "--llm-response", type=Path,
+        help="offline complete host-review response produced by the native Host Agent",
+    )
     p.add_argument("--prepare-host-review", action="store_true",
                    help="write evidence-bound packets for the current host Agent; never calls a provider")
     p.add_argument("--host-review-chunk-size", type=int, default=20,

@@ -203,7 +203,7 @@ class RequirementsInputAdapterTest(unittest.TestCase):
             self.assertEqual(evidence["source_document"], str(source.resolve()))
             self.assertEqual(evidence["source_input_kind"], "doc")
             self.assertEqual(request["provenance"]["source_sha256"], sha256(source))
-            self.assertEqual(review["contract_version"], "2.1")
+            self.assertEqual(review["contract_version"], "3.0")
             self.assertEqual(review["clause_count"], extraction["clause_count"])
             self.assertEqual(spec["analysis_mode"], "llm_primary")
             self.assertEqual(spec["status"], "needs_clarification")

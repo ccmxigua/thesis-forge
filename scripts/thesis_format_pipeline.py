@@ -14,6 +14,7 @@ from typing import Any
 from compliance import report as compliance_report
 from docx import Document
 from format_spec_validation import load_and_validate
+from host_review_contract import SUPPORTED_HOST_REVIEW_CONTRACTS, HOST_REVIEW_CONTRACT_V3
 from pipeline_finding import evidence, finding
 from region_graph import compile_region_graph
 from section_model import compile_section_plan
@@ -136,12 +137,15 @@ def validate_semantic_review_configuration(args: argparse.Namespace, parser: arg
             parser.error(f"cannot read LLM response JSON: {exc}")
         complete = (
             isinstance(response, dict)
-            and response.get("contract_version") == "2.1"
+            and response.get("contract_version") in SUPPORTED_HOST_REVIEW_CONTRACTS
             and isinstance(response.get("requirements"), list)
             and isinstance(response.get("clause_reviews"), list)
         )
         if args.compliance_mode == "full" and not complete:
-            parser.error("full compliance requires a complete contract-2.1 LLM clause review")
+            parser.error(
+                "full compliance requires a complete host review contract "
+                f"({', '.join(sorted(SUPPORTED_HOST_REVIEW_CONTRACTS))})"
+            )
 
 
 def read_json(path: Path) -> Any:
@@ -219,6 +223,12 @@ def validate_host_review_receipts(
     response = read_json(response_path)
     audit = read_json(audit_path)
     receipt = read_json(receipt_path)
+    response_contract_version = response.get("contract_version") if isinstance(response, dict) else None
+    if response_contract_version not in SUPPORTED_HOST_REVIEW_CONTRACTS:
+        raise ValueError(
+            "host response has unsupported contract_version: "
+            f"{response_contract_version!r}"
+        )
     expected_run_id = extraction_manifest.get("run_id")
     # ``llm_request_sha256`` is the legacy name for the semantic request-body
     # hash. Prefer the explicit field, but retain a read-only compatibility
@@ -253,6 +263,12 @@ def validate_host_review_receipts(
         raise ValueError("merge receipt response path does not match --llm-response")
     if audit.get("status") != "merged" or audit.get("run_id") != expected_run_id:
         raise ValueError("host-agent audit is not a successful record for the fresh run")
+    if audit.get("response_contract_version") != response_contract_version:
+        raise ValueError("host-agent audit response contract does not match the response")
+    if audit.get("adapter_id") == "codex" and audit.get("structured_output_mode") != "native_schema":
+        raise ValueError(
+            "release host-agent audit must prove native Codex structured output"
+        )
     if expected_runtime_context is not None and audit.get("runtime_context") != expected_runtime_context:
         raise ValueError("host-agent audit runtime context does not match the fresh request")
     if audit.get("response_path") and Path(str(audit["response_path"])).resolve() != response_path:
@@ -270,6 +286,23 @@ def validate_host_review_receipts(
         raise ValueError("host-agent merge runtime context does not match the fresh request")
     if merge.get("merge_receipt_path") and Path(str(merge["merge_receipt_path"])).resolve() != receipt_path:
         raise ValueError("host-agent audit receipt path does not match the supplied receipt")
+    ledger_path_value = receipt.get("semantic_review_ledger_path")
+    ledger_sha = receipt.get("semantic_review_ledger_sha256")
+    if response_contract_version == HOST_REVIEW_CONTRACT_V3:
+        if not ledger_path_value or not ledger_sha:
+            raise ValueError("contract 3.0 receipt must include the semantic review ledger")
+        ledger_path = _path_under(
+            Path(str(ledger_path_value)), work, label="semantic review ledger"
+        )
+        if not ledger_path.is_file():
+            raise ValueError("semantic review ledger does not exist")
+        ledger = read_json(ledger_path)
+        if sha256_json(ledger) != ledger_sha:
+            raise ValueError("semantic review ledger hash does not match the receipt")
+        if ledger.get("response_sha256") != receipt.get("aggregate_sha256"):
+            raise ValueError("semantic review ledger is not bound to the merged response")
+        if merge.get("semantic_review_ledger_sha256") != ledger_sha:
+            raise ValueError("host-agent audit ledger hash does not match the receipt")
     return {
         "response": file_record(response_path),
         "host_agent_audit": file_record(audit_path),
@@ -281,6 +314,11 @@ def validate_host_review_receipts(
         "request_file_sha256": expected_request_file_sha,
         "run_id": expected_run_id,
         "runtime_context": expected_runtime_context,
+        "contract_version": response_contract_version,
+        "semantic_review_ledger": (
+            {"path": str(ledger_path), "sha256": ledger_sha}
+            if response_contract_version == HOST_REVIEW_CONTRACT_V3 else None
+        ),
     }
 
 
@@ -602,7 +640,10 @@ def _main(argv: list[str]) -> int:
                    help="prepare evidence-bound packets for the current host Agent; never calls a provider")
     p.add_argument("--host-review-chunk-size", type=int, default=20,
                    help="number of clauses per host-Agent packet (default: 20)")
-    p.add_argument("--llm-response", type=Path, help="offline contract-2.1 response produced by the host Agent")
+    p.add_argument(
+        "--llm-response", type=Path,
+        help="offline complete host-review response produced by the native Host Agent",
+    )
     p.add_argument("--host-agent-audit", type=Path,
                    help="immutable host-agent-run.json bound to --llm-response")
     p.add_argument("--merge-receipt", type=Path,
@@ -1020,7 +1061,9 @@ def _main(argv: list[str]) -> int:
         review_manifest_path = requirements_dir / "host-agent-review-manifest.json"
         manifest.update(
             status="host_review_required",
-            reason="host Agent must generate the contract-2.1 response with its current runtime model",
+            reason=(
+                "host Agent must generate the contract-3.0 response with its current runtime model"
+            ),
             host_agent_review_manifest=str(review_manifest_path),
             host_agent_review_request=str(requirements_dir / "llm-request.json"),
         )

@@ -842,6 +842,7 @@ def run_case(base: Path, source: Path, case: dict[str, Any], *, prepare_host_rev
              openclaw_config: Path | None = None,
              codex_bin: str | None = None,
              codex_model: str | None = None,
+             allow_prompt_only: bool = False,
              neutral_reference_docx: Path | None = None,
              word_open_timeout: int = 45,
              word_timeout: int = 180,
@@ -912,6 +913,8 @@ def run_case(base: Path, source: Path, case: dict[str, Any], *, prepare_host_rev
                     bridge_command.extend(["--codex-bin", codex_bin])
                 if codex_model:
                     bridge_command.extend(["--codex-model", codex_model])
+                if allow_prompt_only:
+                    bridge_command.append("--allow-prompt-only")
             else:
                 bridge_command.extend(["--agent-id", host_agent_id])
                 if host_agent_auth_env_only:
@@ -1120,6 +1123,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="optional native codex executable used by --auto-host-agent")
     parser.add_argument("--codex-model",
                         help="optional explicit native Codex model; omitted means the current Codex CLI configuration")
+    parser.add_argument(
+        "--allow-prompt-only", action="store_true",
+        help="explicit non-release override when native Codex lacks --output-schema",
+    )
     parser.add_argument("--word-open-timeout", type=int, default=45,
                         help="seconds to wait for Microsoft Word to activate the staged DOCX")
     parser.add_argument("--word-timeout", type=int, default=180,
@@ -1262,6 +1269,7 @@ def main(argv: list[str] | None = None) -> int:
                 openclaw_config=args.openclaw_config,
                 codex_bin=args.codex_bin,
                 codex_model=args.codex_model,
+                allow_prompt_only=args.allow_prompt_only,
                 neutral_reference_docx=neutral_reference,
                 word_open_timeout=args.word_open_timeout,
                 word_timeout=args.word_timeout,

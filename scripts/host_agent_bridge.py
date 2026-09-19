@@ -177,6 +177,11 @@ if str(SCRIPTS) not in sys.path:
 from host_adapters import codex as codex_adapter  # noqa: E402
 from host_adapters import openclaw as openclaw_adapter  # noqa: E402
 from host_review_contract import (  # noqa: E402
+    HOST_REVIEW_CONTRACT_V2,
+    HOST_REVIEW_CONTRACT_V3,
+    SUPPORTED_HOST_REVIEW_CONTRACTS,
+    contract_error_records,
+    _response_sha256,
     summarize_contract_errors as _shared_summarize_contract_errors,
     validate_response as _shared_validate_response,
 )
@@ -299,6 +304,7 @@ def compact_model_packet(chunk: dict[str, Any]) -> dict[str, Any]:
         "source_continuity_context": copy.deepcopy(
             chunk.get("source_continuity_context", {})
         ),
+        "runtime_context": _compact_runtime_context(chunk.get("runtime_context")),
         "declaration_anchor_candidates": copy.deepcopy(
             chunk.get("declaration_anchor_candidates", [])
         ),
@@ -330,6 +336,32 @@ def compact_model_packet(chunk: dict[str, Any]) -> dict[str, Any]:
             ],
         },
     }
+
+
+def _compact_runtime_context(value: Any) -> dict[str, Any] | None:
+    """Expose bounded semantic inputs without giving the model identity fields."""
+    if not isinstance(value, dict):
+        return None
+    result: dict[str, Any] = {}
+    profile = value.get("confirmed_thesis_profile")
+    if isinstance(profile, dict):
+        result["confirmed_thesis_profile"] = {
+            key: copy.deepcopy(profile[key])
+            for key in ("schema_version", "profile_id", "degree_category", "security_level", "cover_metadata")
+            if key in profile
+        }
+        result["confirmed_thesis_profile_status"] = "confirmed_source_bound"
+    inventory = value.get("runtime_inventory")
+    if isinstance(inventory, dict):
+        result["runtime_inventory"] = {
+            key: copy.deepcopy(inventory[key])
+            for key in ("status", "declaration_anchor_status", "anchor_inventory")
+            if key in inventory
+        }
+    if isinstance(value.get("case_id"), str):
+        result["case_id"] = value["case_id"]
+    result["policy"] = "read_only_semantic_inputs; trusted hashes and provenance omitted"
+    return result
 
 
 def _summarize_contract_errors(errors: list[str], *, limit: int = 12) -> str:
@@ -447,6 +479,153 @@ def _contract_repair_guidance(
     if targeted:
         rules.extend(targeted)
     return "\n".join(f"- {rule}" for rule in rules) or "- Re-read the current chunk contract and regenerate the complete JSON object."
+
+
+def _structured_contract_repair_guidance(
+    records: list[dict[str, Any]], *, contract_version: str,
+) -> str:
+    """Build retry guidance from structured validator facts, not error parsing."""
+    lines: list[str] = []
+    seen: set[str] = set()
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        code = str(record.get("code") or "contract_validation_error")
+        pointer = str(record.get("json_pointer") or "the indicated field")
+        matching = record.get("matching_requirement_indexes")
+        if code == "normative_basis_invalid":
+            rule = (
+                f"At {pointer}, omit the invalid normative_basis field rather than replacing it with a guessed value; "
+                "keep classification and cited evidence unchanged unless the current evidence independently requires a semantic re-review."
+            )
+        elif code == "requirement_relation_mismatch":
+            rule = (
+                f"At {pointer}, do not copy or repair a neighboring relation. The deterministic matching requirement indexes are "
+                f"{matching if isinstance(matching, list) else 'unknown'}; regenerate the complete relation from the current chunk."
+            )
+        elif code == "partial_clause_coverage":
+            rule = (
+                f"At {pointer}, preserve every obligation and do not promote partial coverage. "
+                "Use a non-executable classification when the supplied evidence does not resolve all obligations."
+            )
+        elif code == "unknown_property":
+            rule = (
+                f"At {pointer}, remove only the unsupported property named by the schema error; "
+                "do not move it, rename it, or invent a replacement."
+            )
+        elif code == "schema_contract_violation":
+            rule = (
+                f"At {pointer}, conform to the supplied response_schema and regenerate the complete object; "
+                "do not change unrelated semantic fields."
+            )
+        else:
+            rule = (
+                f"At {pointer}, resolve validator code {code} using only the supplied schema and evidence; "
+                "do not guess or reuse a prior response."
+            )
+        if contract_version == HOST_REVIEW_CONTRACT_V3 and "requirement indexes" in rule:
+            rule = rule.replace("requirement indexes", "code-derived reverse relation")
+        if rule not in seen:
+            seen.add(rule)
+            lines.append(f"- {rule}")
+    return "\n".join(lines) or "- Re-read the current chunk contract and regenerate the complete JSON object."
+
+
+def _semantic_retry_view(response: Any) -> dict[str, Any] | None:
+    """Project the fields whose change is semantic rather than diagnostic."""
+    if not isinstance(response, dict):
+        return None
+    requirements: list[dict[str, Any]] = []
+    for item in response.get("requirements", []) if isinstance(response.get("requirements"), list) else []:
+        if not isinstance(item, dict):
+            requirements.append({"invalid": item})
+            continue
+        requirements.append({
+            key: copy.deepcopy(item.get(key))
+            for key in (
+                "role", "properties", "clause_ids", "evidence_ids", "existing_requirement_id",
+                "applicability", "input_prerequisites", "verification",
+            )
+            if key in item
+        })
+    requirements.sort(key=lambda item: json.dumps(item, ensure_ascii=False, sort_keys=True))
+    reviews: list[dict[str, Any]] = []
+    for item in response.get("clause_reviews", []) if isinstance(response.get("clause_reviews"), list) else []:
+        if not isinstance(item, dict):
+            reviews.append({"invalid": item})
+            continue
+        reviews.append({
+            key: copy.deepcopy(item.get(key))
+            for key in (
+                "clause_id", "classification", "normative_basis", "obligations",
+                "requirement_indexes",
+            )
+            if key in item
+        })
+    reviews.sort(key=lambda item: str(item.get("clause_id") or ""))
+    return {
+        "contract_version": response.get("contract_version"),
+        "requirements": requirements,
+        "clause_reviews": reviews,
+        "unsupported_items": sorted(response.get("unsupported_items") or [])
+        if isinstance(response.get("unsupported_items"), list) else response.get("unsupported_items"),
+    }
+
+
+def _retry_change_paths(previous: Any, current: Any) -> list[str]:
+    before = _semantic_retry_view(previous)
+    after = _semantic_retry_view(current)
+    if before is None or after is None:
+        return ["$"]
+    if before == after:
+        return []
+    changed: list[str] = []
+
+    def visit(left: Any, right: Any, path: str) -> None:
+        if type(left) is not type(right):
+            changed.append(path)
+            return
+        if isinstance(left, dict):
+            for key in sorted(set(left) | set(right)):
+                if key not in left or key not in right:
+                    changed.append(f"{path}.{key}")
+                else:
+                    visit(left[key], right[key], f"{path}.{key}")
+            return
+        if isinstance(left, list):
+            if len(left) != len(right):
+                changed.append(path)
+                return
+            for index, (item_left, item_right) in enumerate(zip(left, right)):
+                visit(item_left, item_right, f"{path}[{index}]")
+            return
+        if left != right:
+            changed.append(path)
+
+    visit(before, after, "$")
+    return changed
+
+
+def _retry_changes_allowed(
+    records: list[dict[str, Any]], changed_paths: list[str], *, contract_version: str,
+) -> bool:
+    """Allow only explicitly mechanical contract corrections on a retry."""
+    if not changed_paths:
+        return True
+    codes = {str(item.get("code")) for item in records if isinstance(item, dict)}
+    for path in changed_paths:
+        if path.endswith(".normative_basis") and "normative_basis_invalid" in codes:
+            continue
+        if path.endswith(".verification") and "schema_contract_violation" in codes:
+            if any("verification" in str(item.get("json_pointer") or "") for item in records):
+                continue
+        if path.endswith(".requirement_indexes") and contract_version == HOST_REVIEW_CONTRACT_V2:
+            if "requirement_relation_mismatch" in codes:
+                continue
+        # Semantic fields, requirement properties, obligations, and
+        # classifications are never silently changed by a mechanical retry.
+        return False
+    return True
 
 
 # Compatibility name for callers that imported the bridge directly.  The
@@ -569,11 +748,38 @@ def _host_prompt(*, request_path: Path, chunk_path: Path,
                  response_path: Path, run_id: str, chunk_index: int,
                  chunk_count: int, attempt: int = 1,
                  retry_hint: str | None = None,
+                 retry_parent_response_sha256: str | None = None,
+                 retry_error_records: list[dict[str, Any]] | None = None,
                  provenance: dict[str, Any] | None = None) -> str:
-    retry_text = ""
+    contract_version = HOST_REVIEW_CONTRACT_V2
+    try:
+        packet = json.loads(chunk_path.read_text(encoding="utf-8"))
+        if isinstance(packet, dict) and packet.get("contract_version") in SUPPORTED_HOST_REVIEW_CONTRACTS:
+            contract_version = str(packet["contract_version"])
+    except (OSError, ValueError, json.JSONDecodeError):
+        pass
     repair_guidance = _contract_repair_guidance("")
+    retry_text = ""
+    if contract_version == HOST_REVIEW_CONTRACT_V3:
+        # The v3 packet removes the reverse relation from the model-facing
+        # schema.  Do not leave v2 repair prose in the prompt, because a retry
+        # must not reintroduce the duplicate model-maintained index.
+        repair_guidance = "\n".join(
+            line for line in repair_guidance.splitlines()
+            if "requirement_indexes" not in line
+        )
     if retry_hint:
-        retry_guidance = _contract_repair_guidance(retry_hint, include_base=False)
+        retry_guidance = (
+            _structured_contract_repair_guidance(
+                retry_error_records, contract_version=contract_version,
+            )
+            if retry_error_records else _contract_repair_guidance(retry_hint, include_base=False)
+        )
+        if contract_version == HOST_REVIEW_CONTRACT_V3:
+            retry_guidance = "\n".join(
+                line for line in retry_guidance.splitlines()
+                if "requirement_indexes" not in line
+            )
         retry_text = (
             "\nThis is a retry after the previous attempt was rejected locally. "
             "Do not discuss the failure; return a newly generated valid JSON object. "
@@ -581,6 +787,15 @@ def _host_prompt(*, request_path: Path, chunk_path: Path,
             "Apply the following targeted contract repair rules:\n"
             f"{retry_guidance}\n"
         )
+    relation_text = (
+        "Do not emit clause_reviews.requirement_indexes; requirements[].clause_ids is the sole authoritative relation and the bridge derives the reverse view."
+        if contract_version == HOST_REVIEW_CONTRACT_V3 else
+        "Maintain requirement_indexes exactly as required by the contract and verify every index against requirements[index].clause_ids."
+    )
+    parent_text = (
+        f"The rejected parent response sha256 was {retry_parent_response_sha256}; do not copy it or make an unrelated semantic change."
+        if retry_parent_response_sha256 else "There is no prior response to reuse."
+    )
     return f"""You are the current Host Agent for one fresh thesis-format semantic-review run.
 
 Return exactly ONE JSON object and nothing else. Do not use Markdown fences,
@@ -605,7 +820,7 @@ Do not read the full llm-request-chunks.json file, because it contains other
 chunks that are outside this subtask.
 
 This is chunk {chunk_index} of {chunk_count}, attempt {attempt}, run_id {run_id}. Read the chunk
-JSON and follow its contract_version 2.1 instructions literally. The local
+JSON and follow its contract_version {contract_version} instructions literally. The local
 bridge will bind the response to this current invocation and request; do not
 write, copy, abbreviate, or recompute a provenance/hash object in the response.
 The raw response is retained before binding for audit. Review every and only the
@@ -621,7 +836,9 @@ the only semantic source. Do not modify project files. The runner will save
 your JSON as:
 {response_path}
 
-Before answering, verify that the result is a complete contract-2.1 object
+{relation_text}
+{parent_text}
+Before answering, verify that the result is a complete contract-{contract_version} object
 with requirements, clause_reviews, unsupported_items, and reported_conflicts.
 Mechanical contract checklist (apply before returning JSON):
 {repair_guidance}
@@ -776,6 +993,9 @@ def run_host_agent_chunk(
     adapter_id: str = "openclaw",
     codex_bin: str | None = None,
     codex_model: str | None = None,
+    structured_output_mode: str = "prompt_only",
+    retry_parent_response_sha256: str | None = None,
+    retry_error_records: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if controller is not None:
         controller.check()
@@ -791,6 +1011,8 @@ def run_host_agent_chunk(
             chunk_count=chunk_count,
             attempt=attempt,
             retry_hint=retry_hint,
+            retry_parent_response_sha256=retry_parent_response_sha256,
+            retry_error_records=retry_error_records,
             provenance=chunk.get("provenance") if isinstance(chunk.get("provenance"), dict) else None,
         ),
         encoding="utf-8",
@@ -798,6 +1020,7 @@ def run_host_agent_chunk(
     session_key: str | None = None
     use_isolated_exec = False
     last_message_path: Path | None = None
+    output_schema_path: Path | None = None
     if adapter_id == "openclaw":
         if not openclaw_bin:
             raise ValueError("OpenClaw executable is missing")
@@ -833,12 +1056,24 @@ def run_host_agent_chunk(
             raise ValueError(
                 f"refusing to overwrite existing Codex final message: {last_message_path}"
             )
+        output_schema_path = prompt_path.with_name(
+            f"{prompt_path.stem}.response-schema.json"
+        )
+        if output_schema_path.exists():
+            raise ValueError(
+                f"refusing to overwrite existing Codex output schema: {output_schema_path}"
+            )
+        response_schema = chunk.get("response_schema")
+        if not isinstance(response_schema, dict) or not response_schema:
+            raise ValueError("current Host Agent chunk has no response schema")
+        _write_json(output_schema_path, response_schema)
         command = codex_adapter.build_command(
             binary=codex_bin,
             prompt_path=prompt_path,
             last_message_path=last_message_path,
             cwd=ROOT,
             model=codex_model,
+            output_schema_path=output_schema_path if structured_output_mode == "native_schema" else None,
         )
     else:
         raise ValueError(f"unsupported Host Agent adapter: {adapter_id}")
@@ -923,10 +1158,14 @@ def run_host_agent_chunk(
         )
     contract_errors = validate_host_agent_response(response, chunk)
     if contract_errors:
-        raise ValueError(
+        error = ValueError(
             "local response contract validation failed before provenance binding: "
             + _summarize_contract_errors(contract_errors)
         )
+        error.error_records = contract_error_records(  # type: ignore[attr-defined]
+            contract_errors, response=response, chunk=chunk,
+        )
+        raise error
     if not isinstance(expected_provenance, dict):
         raise ValueError("current Host Agent chunk has no bindable provenance")
     response["provenance"] = copy.deepcopy(expected_provenance)
@@ -953,6 +1192,9 @@ def run_host_agent_chunk(
         "codex_thread_id": envelope.get("thread_id") if adapter_id == "codex" else None,
         "codex_final_message_sha256": envelope.get("final_message_sha256") if adapter_id == "codex" else None,
         "codex_stream_warnings": envelope.get("stream_warnings") if adapter_id == "codex" else [],
+        "structured_output_mode": structured_output_mode if adapter_id == "codex" else None,
+        "codex_output_schema_path": str(output_schema_path.resolve()) if output_schema_path else None,
+        "codex_output_schema_sha256": sha256_file(output_schema_path) if output_schema_path else None,
         "status": envelope.get("status", "ok"),
         "returncode": result.returncode,
         "elapsed_s": elapsed,
@@ -975,6 +1217,7 @@ def run_host_agent_chunk(
         "raw_envelope_path": str(raw_envelope_path.resolve()),
         "raw_response_path": str(raw_response_path.resolve()),
         "finished_at": datetime.now(timezone.utc).isoformat(),
+        "retry_parent_response_sha256": retry_parent_response_sha256,
     }
     audit["provenance_observed"] = isinstance(observed_provenance, dict)
     audit["provenance_mismatch_fields"] = provenance_mismatch_fields
@@ -1003,6 +1246,7 @@ def run_bridge(
     runner: str = "exec",
     host_runtime: str | None = None,
     codex_model: str | None = None,
+    allow_prompt_only: bool = False,
 ) -> dict[str, Any]:
     host_context = require_host_runtime(host_runtime)
     adapter_id = automatic_adapter_id(host_context)
@@ -1045,8 +1289,12 @@ def run_bridge(
     manifest = _read_json(manifest_path, label="host-agent review manifest")
     if manifest.get("protocol") != "host_agent_semantic_review":
         raise ValueError("review manifest is not a host-agent semantic-review manifest")
-    if manifest.get("contract_version") != "2.1":
-        raise ValueError("host-agent review manifest is not contract 2.1")
+    contract_version = manifest.get("contract_version")
+    if contract_version not in SUPPORTED_HOST_REVIEW_CONTRACTS:
+        raise ValueError(
+            "host-agent review manifest has unsupported contract version: "
+            f"{contract_version!r}"
+        )
     request_path = _bound_path(
         review_dir, str(manifest.get("request_path", "llm-request.json")),
         label="host-agent request path",
@@ -1059,6 +1307,8 @@ def run_bridge(
     chunks = _read_json(chunks_path, label="host-agent request chunks")
     if not isinstance(full_request, dict) or not isinstance(full_request.get("provenance"), dict):
         raise ValueError("host-agent full request is missing an object provenance")
+    if full_request.get("contract_version") != contract_version:
+        raise ValueError("host-agent manifest contract version does not match full request")
     response_files = manifest.get("response_files")
     if not isinstance(chunks, list) or not chunks:
         raise ValueError("host-agent request chunks are missing or empty")
@@ -1114,6 +1364,16 @@ def run_bridge(
     else:
         codex_binary = _resolve_codex(codex_bin)
         openclaw_config = None
+    codex_capabilities: dict[str, Any] | None = None
+    structured_output_mode = "prompt_only"
+    if adapter_id == "codex":
+        codex_capabilities = codex_adapter.probe_capabilities(codex_binary)
+        if not codex_capabilities.get("output_schema_supported") and not allow_prompt_only:
+            raise HostRuntimeError(
+                "native Codex CLI does not advertise --output-schema; refusing prompt-only "
+                "semantic review (use --allow-prompt-only only for an explicit non-release run)"
+            )
+        structured_output_mode = str(codex_capabilities.get("structured_output_mode") or "prompt_only")
     resolution: dict[str, Any] = {
         "model": model if adapter_id == "openclaw" else codex_model,
         "source": (
@@ -1181,6 +1441,8 @@ def run_bridge(
             "max_concurrency": max_concurrency,
             "max_attempts": max_attempts,
             "model": effective_model,
+            "codex_capabilities": copy.deepcopy(codex_capabilities),
+            "structured_output_mode": structured_output_mode,
             "runtime_context": copy.deepcopy(runtime_context),
             **_route_audit_fields(
                 effective_model if adapter_id == "openclaw" else None,
@@ -1230,6 +1492,20 @@ def run_bridge(
                 if isinstance(item, int)
             }),
             "chunk_runs": chunk_runs,
+            "structured_error_records": [
+                record
+                for item in (chunk_lifecycle or {}).values()
+                for record in (item.get("structured_error_records") or [])
+                if isinstance(record, dict)
+            ],
+            "failure_chain": [
+                {
+                    "chunk_index": item.get("chunk_index"),
+                    "attempts": copy.deepcopy(item.get("attempts", [])),
+                    "terminal_error": item.get("error"),
+                }
+                for item in (chunk_lifecycle or {}).values()
+            ],
             "chunk_lifecycle": [
                 (chunk_lifecycle or {})[index]
                 for index in sorted(chunk_lifecycle or {})
@@ -1261,6 +1537,7 @@ def run_bridge(
             chunk_count=chunk_count,
         )
         failures: list[str] = []
+        retry_error_records: list[dict[str, Any]] = []
         for attempt in range(1, max_attempts + 1):
             attempt_response_path = response_path.with_name(
                 f"{response_path.stem}.attempt-{attempt:02d}{response_path.suffix}"
@@ -1301,18 +1578,70 @@ def run_bridge(
                     controller=controller,
                     adapter_id=adapter_id,
                     codex_model=codex_model,
+                    structured_output_mode=structured_output_mode,
+                    retry_parent_response_sha256=(
+                        chunk_lifecycle[index].get("retry_parent_response_sha256")
+                    ),
+                    retry_error_records=copy.deepcopy(retry_error_records),
                     retry_hint=(
                         "local contract validation failed; repair the response: "
                         + failures[-1]
                         if failures else None
                     ),
                 )
+                if attempt > 1:
+                    previous_raw_path = response_path.with_name(
+                        f"{response_path.stem}.attempt-{attempt - 1:02d}.raw{response_path.suffix}"
+                    )
+                    if previous_raw_path.is_file():
+                        previous_response = _read_json(
+                            previous_raw_path,
+                            label=f"Host Agent previous raw response {index} attempt {attempt - 1}",
+                        )
+                        current_response = _read_json(
+                            attempt_response_path,
+                            label=f"Host Agent response {index} attempt {attempt}",
+                        )
+                        semantic_changes = _retry_change_paths(
+                            previous_response, current_response,
+                        )
+                        if semantic_changes and not _retry_changes_allowed(
+                            retry_error_records,
+                            semantic_changes,
+                            contract_version=contract_version,
+                        ):
+                            change_error = ValueError(
+                                "retry changed semantic fields and requires explicit semantic re-review: "
+                                + ", ".join(semantic_changes[:12])
+                            )
+                            change_error.error_records = [{  # type: ignore[attr-defined]
+                                "code": "semantic_retry_change",
+                                "json_pointer": path,
+                                "schema_pointer": path,
+                                "clause_id": None,
+                                "raw_error": str(change_error),
+                                "response_sha256": _response_sha256(current_response),
+                                "allowed_values": None,
+                                "matching_requirement_indexes": None,
+                                "requirement_count": len(current_response.get("requirements", []))
+                                if isinstance(current_response, dict) and isinstance(current_response.get("requirements"), list)
+                                else None,
+                                "semantic_review_required": True,
+                            } for path in semantic_changes]
+                            with lifecycle_lock:
+                                chunk_lifecycle[index].setdefault("semantic_retry_changes", []).extend(
+                                    semantic_changes
+                                )
+                            raise change_error
+                        if semantic_changes:
+                            audit["semantic_retry_changes"] = semantic_changes
+                            audit["semantic_retry_change_policy"] = "mechanical_only"
                 response = _read_json(
                     attempt_response_path,
                     label=f"Host Agent response {index} attempt {attempt}",
                 )
-                if response.get("contract_version") != "2.1":
-                    raise ValueError("response is not contract 2.1")
+                if response.get("contract_version") != contract_version:
+                    raise ValueError(f"response is not contract {contract_version}")
                 provenance_errors = validate_response_provenance(
                     response, provenance, require_fresh_origin=True,
                 )
@@ -1355,12 +1684,34 @@ def run_bridge(
             except (OSError, ValueError, RuntimeError) as exc:
                 controller.check()
                 failures.append(str(exc))
+                error_records = getattr(exc, "error_records", None)
+                if isinstance(error_records, list):
+                    with lifecycle_lock:
+                        chunk_lifecycle[index].setdefault("structured_error_records", []).extend(
+                            copy.deepcopy(error_records)
+                        )
+                    retry_error_records = copy.deepcopy(error_records)
+                parent_response_path = attempt_response_path
+                if not parent_response_path.exists():
+                    raw_candidate = attempt_response_path.with_name(
+                        f"{attempt_response_path.stem}.raw{attempt_response_path.suffix}"
+                    )
+                    if raw_candidate.exists():
+                        parent_response_path = raw_candidate
+                if parent_response_path.exists():
+                    try:
+                        parent_sha = sha256_file(parent_response_path)
+                        with lifecycle_lock:
+                            chunk_lifecycle[index]["retry_parent_response_sha256"] = parent_sha
+                    except OSError:
+                        pass
                 with lifecycle_lock:
                     if chunk_lifecycle[index].get("attempts"):
                         chunk_lifecycle[index]["attempts"][-1].update(
                             status="failed" if attempt >= max_attempts else "retrying",
                             finished_at=datetime.now(timezone.utc).isoformat(),
                             error=str(exc),
+                            error_records=copy.deepcopy(error_records) if isinstance(error_records, list) else [],
                         )
                 if attempt >= max_attempts:
                     update_chunk_lifecycle(
@@ -1456,6 +1807,8 @@ def run_bridge(
         "max_concurrency": max_concurrency,
         "max_attempts": max_attempts,
         "model": effective_model,
+        "codex_capabilities": copy.deepcopy(codex_capabilities),
+        "structured_output_mode": structured_output_mode,
         "runtime_context": copy.deepcopy(runtime_context),
         **_route_audit_fields(
             effective_model if adapter_id == "openclaw" else None,
@@ -1541,6 +1894,10 @@ def main(argv: list[str] | None = None) -> int:
                         help="optional path to the native codex executable")
     parser.add_argument("--codex-model",
                         help="optional explicit native Codex model; omitted means the current Codex CLI configuration")
+    parser.add_argument(
+        "--allow-prompt-only", action="store_true",
+        help="explicit non-release override when native Codex lacks --output-schema",
+    )
     args = parser.parse_args(argv)
     if args.inherit_parent_model is False and not args.model:
         parser.error("--no-inherit-parent-model requires an explicit --model route")
@@ -1570,6 +1927,7 @@ def main(argv: list[str] | None = None) -> int:
             auth_env_only=args.auth_env_only,
             runner=args.runner,
             host_runtime=args.host_runtime,
+            allow_prompt_only=args.allow_prompt_only,
         )
     except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
         print(f"host-agent bridge failed: {exc}", file=sys.stderr)

@@ -2135,7 +2135,10 @@ b&=2\notag
         hard_types = {"llm_contract", "llm_internal_conflict", "completeness"}
         self.assertFalse(any(item.get("type") in hard_types for item in conflicts), conflicts)
         self.assertEqual(spec["status"], "semantic_resolved")
-        self.assertEqual([item.get("accepted") for item in audit], [True])
+        self.assertEqual(
+            [item.get("accepted") for item in audit if "accepted" in item],
+            [True],
+        )
         self.assertEqual(spec["requirements"][0]["clause_ids"], ["C1", "C2"])
         records = {item["clause_id"]: item for item in spec["clause_compliance"]}
         self.assertEqual(records["C1"]["status"], "pending_execution")

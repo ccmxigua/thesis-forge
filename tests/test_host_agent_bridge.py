@@ -373,6 +373,36 @@ class HostAgentBridgeTests(unittest.TestCase):
             ).read_text(encoding="utf-8")
             self.assertIn("local contract validation failed", second_prompt)
 
+    def test_retry_cannot_hide_a_semantic_classification_change(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            review_dir, chunk = self._packet(Path(td) / "requirements")
+            invalid = self._executable_response(chunk, invalid_verification=True)
+            semantic_change = self._response(chunk)
+            envelopes = [
+                {"runId": "openclaw-run-semantic-retry-1", "status": "ok",
+                 "provider": "openai", "model": "gpt-5.6-luna",
+                 "result": {"payloads": [{"text": json.dumps(invalid)}]}},
+                {"runId": "openclaw-run-semantic-retry-2", "status": "ok",
+                 "provider": "openai", "model": "gpt-5.6-luna",
+                 "result": {"payloads": [{"text": json.dumps(semantic_change)}]}},
+            ]
+            response_out = Path(td) / "host-agent-response.json"
+            fake_results = [
+                subprocess.CompletedProcess(["openclaw"], 0, json.dumps(envelopes[0]), ""),
+                subprocess.CompletedProcess(["openclaw"], 0, json.dumps(envelopes[1]), ""),
+            ]
+            with patch.object(bridge, "_run_command", side_effect=fake_results):
+                with self.assertRaisesRegex(ValueError, "semantic re-review"):
+                    bridge.run_bridge(
+                        review_dir, response_out=response_out,
+                        agent_id="main", timeout=1, max_attempts=2,
+                        openclaw_bin="openclaw", model="openai/gpt-5.6-luna",
+                    )
+            failure = json.loads((review_dir / "host-agent-run.json").read_text(encoding="utf-8"))
+            self.assertFalse(failure["merged_response_written"])
+            self.assertTrue(failure["structured_error_records"])
+            self.assertEqual(failure["structured_error_records"][-1]["code"], "semantic_retry_change")
+
     def test_bridge_binds_missing_native_provenance_and_preserves_raw_response(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             review_dir, chunk = self._packet(Path(td) / "requirements")
@@ -566,6 +596,7 @@ class HostAgentBridgeTests(unittest.TestCase):
                         review_dir, response_out=response_out,
                         timeout=1, max_attempts=1,
                         codex_bin=sys.executable,
+                        allow_prompt_only=True,
                     )
             command = run.call_args.args[0]
             self.assertEqual(command[1], "exec")
@@ -579,6 +610,22 @@ class HostAgentBridgeTests(unittest.TestCase):
             self.assertEqual(audit["observed_routes"], ["unobservable"])
             self.assertEqual(audit["chunk_runs"][0]["actual_route"], "unobservable")
             self.assertEqual(json.loads(response_out.read_text(encoding="utf-8"))["contract_version"], "2.1")
+
+    def test_bridge_refuses_prompt_only_codex_by_default(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            review_dir, _chunk = self._packet(Path(td) / "requirements")
+            with patch.dict(os.environ, {"THESIS_FORGE_HOST_RUNTIME": "codex"}):
+                with patch.object(bridge.codex_adapter, "probe_capabilities", return_value={
+                    "output_schema_supported": False,
+                    "structured_output_mode": "prompt_only",
+                }):
+                    with self.assertRaisesRegex(RuntimeError, "refusing prompt-only"):
+                        bridge.run_bridge(
+                            review_dir,
+                            host_runtime="codex",
+                            codex_bin=sys.executable,
+                            max_attempts=1,
+                        )
 
     def test_cli_does_not_inject_parent_inheritance_for_codex(self) -> None:
         with tempfile.TemporaryDirectory() as td:

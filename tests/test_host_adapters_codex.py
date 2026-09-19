@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 import sys
@@ -49,6 +51,37 @@ class CodexAdapterTests(unittest.TestCase):
                 cwd=root,
             )
         self.assertNotIn("--model", command)
+
+    def test_build_command_binds_native_output_schema_when_requested(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            prompt = root / "prompt.txt"
+            output = root / "last-message.txt"
+            schema = root / "response-schema.json"
+            prompt.write_text("Return one JSON object.", encoding="utf-8")
+            schema.write_text('{"type":"object"}', encoding="utf-8")
+            command = codex.build_command(
+                binary="/opt/homebrew/bin/codex",
+                prompt_path=prompt,
+                last_message_path=output,
+                cwd=root,
+                output_schema_path=schema,
+            )
+        self.assertEqual(command[command.index("--output-schema") + 1], str(schema.resolve()))
+        self.assertLess(command.index("--output-schema"), command.index("-C"))
+
+    def test_probe_capabilities_records_native_schema_support(self) -> None:
+        version = subprocess.CompletedProcess(["codex", "--version"], 0, "codex 0.149.0\n", "")
+        help_text = subprocess.CompletedProcess(
+            ["codex", "exec", "--help"], 0,
+            "Usage: codex exec [OPTIONS]\n--output-schema <FILE>\n", "",
+        )
+        with patch.object(codex.subprocess, "run", side_effect=[version, help_text]) as run:
+            capabilities = codex.probe_capabilities(sys.executable)
+        self.assertEqual(capabilities["version"], "codex 0.149.0")
+        self.assertTrue(capabilities["output_schema_supported"])
+        self.assertEqual(capabilities["structured_output_mode"], "native_schema")
+        self.assertEqual(run.call_count, 2)
 
     def test_parse_result_requires_completed_turn_and_uses_final_message(self) -> None:
         response = {"contract_version": "2.1", "provenance": {}}

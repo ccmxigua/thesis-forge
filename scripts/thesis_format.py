@@ -100,7 +100,7 @@ def main(argv: list[str]) -> int:
     p.add_argument("--host-runtime",
                    help="expected native host runtime; must match THESIS_FORGE_HOST_RUNTIME")
     p.add_argument("--llm-response", type=Path,
-                   help="offline complete contract-2.1 response produced by the current host Agent")
+                   help="offline complete contract-3.0 response, or an explicitly bound legacy 2.1 response, produced by the current host Agent")
     p.add_argument("--host-review-chunk-size", type=int, default=20,
                    help="clauses per fresh Host Agent packet (default: 20)")
     p.add_argument("--host-agent-timeout", type=int, default=900,
@@ -125,6 +125,8 @@ def main(argv: list[str]) -> int:
                    help="optional native codex executable used by --auto-host-agent")
     p.add_argument("--codex-model",
                    help="optional explicit native Codex model; omitted means the current Codex CLI configuration")
+    p.add_argument("--allow-prompt-only", action="store_true",
+                   help="explicit non-release override when native Codex lacks --output-schema")
     p.add_argument("--render-report", type=Path)
     p.add_argument("--require-submission-ready", action="store_true")
     p.add_argument("--strict-release", action="store_true",
@@ -217,6 +219,8 @@ def main(argv: list[str]) -> int:
                 bridge += ["--codex-bin", args.codex_bin]
             if args.codex_model:
                 bridge += ["--codex-model", args.codex_model]
+            if args.allow_prompt_only:
+                bridge.append("--allow-prompt-only")
             label = "explicit Codex native adapter review + provenance merge"
         else:
             bridge += ["--agent-id", args.host_agent_id]

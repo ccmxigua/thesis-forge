@@ -12,6 +12,8 @@ import hashlib
 import os
 from pathlib import Path
 import shutil
+import subprocess
+from datetime import datetime, timezone
 from typing import Any
 
 from semantic_contract import strict_json_loads
@@ -41,6 +43,7 @@ def build_command(
     last_message_path: Path,
     cwd: Path,
     model: str | None = None,
+    output_schema_path: Path | None = None,
 ) -> list[str]:
     """Build an isolated, read-only native Codex invocation.
 
@@ -67,11 +70,51 @@ def build_command(
         "-C", str(cwd),
         prompt,
     ]
+    if output_schema_path is not None:
+        schema_path = output_schema_path.expanduser().resolve()
+        if not schema_path.is_file():
+            raise ValueError(f"Codex output schema does not exist: {schema_path}")
+        if not os.access(schema_path, os.R_OK):
+            raise ValueError(f"Codex output schema is not readable: {schema_path}")
+        command[command.index("-C"):command.index("-C")] = [
+            "--output-schema", str(schema_path),
+        ]
     if model is not None:
         if not isinstance(model, str) or not model.strip():
             raise ValueError("Codex model must be a non-empty string when supplied")
         command[4:4] = ["--model", model.strip()]
     return command
+
+
+def probe_capabilities(binary: str, *, timeout: float = 10.0) -> dict[str, Any]:
+    """Probe the native CLI before a run and record the exact structured mode.
+
+    A prompt that merely asks for JSON is not equivalent to native structured
+    output.  The bridge therefore has to observe the installed CLI's help
+    surface and fail closed when ``--output-schema`` is unavailable.
+    """
+    resolved = resolve_binary(binary)
+    version_result = subprocess.run(
+        [resolved, "--version"], capture_output=True, text=True,
+        timeout=timeout, check=False,
+    )
+    help_result = subprocess.run(
+        [resolved, "exec", "--help"], capture_output=True, text=True,
+        timeout=timeout, check=False,
+    )
+    version_text = (version_result.stdout or version_result.stderr or "").strip()
+    help_text = (help_result.stdout or "") + ("\n" + help_result.stderr if help_result.stderr else "")
+    schema_supported = "--output-schema" in help_text
+    return {
+        "binary": resolved,
+        "version": version_text,
+        "version_returncode": version_result.returncode,
+        "exec_help_returncode": help_result.returncode,
+        "exec_help_sha256": hashlib.sha256(help_text.encode("utf-8")).hexdigest(),
+        "output_schema_supported": schema_supported,
+        "structured_output_mode": "native_schema" if schema_supported else "prompt_only",
+        "probed_at": datetime.now(timezone.utc).isoformat(),
+    }
 
 
 def _strip_json_wrapper(text: str) -> dict[str, Any]:

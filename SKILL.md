@@ -15,7 +15,9 @@ OpenAI, Grok, Claude, or any other specific vendor.
 - Preserve the current Agent model for every semantic review decision.
 - Treat every user-supplied requirements/template `.doc` or `.docx` as a fresh full-review
   input: extract it again and send the resulting evidence-bound clauses to the
-  current Host Agent for contract-2.1 semantic review. Existing files, template
+  current Host Agent for contract-3.0 semantic review. Contract-2.1 remains a
+  read-only compatibility path for already-bound legacy responses; new native
+  runs must use 3.0. Existing files, template
   profiles, or prior responses must never silently disable this path.
 - Do not set `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `THESIS_FORMAT_LLM_*`, or a
   provider/model override for this skill. The bridge may copy the current
@@ -58,7 +60,7 @@ or document formatting performed.
 
 Normalization is byte/file handling only. Every freshly extracted clause from
 the normalized DOCX still goes to the current Host Agent for the complete
-contract-2.1 review. The original `.doc` identity and SHA-256 remain the source
+contract-3.0 review. The original `.doc` identity and SHA-256 remain the source
 provenance anchor; `rule_only` and `known_template` are not fallback paths.
 
 ## Host-native workflow (default)
@@ -204,12 +206,16 @@ and must:
 1. include that chunk's `provenance` object unchanged; automatic native
    bridge responses are bound by the bridge instead and retain the pre-binding
    raw response for audit;
-2. include `contract_version: "2.1"`;
+2. include the packet's `contract_version` (`"3.0"` for a fresh run; `"2.1"`
+   only for an explicitly bound legacy packet);
 3. include every supplied clause exactly once in `clause_reviews`;
 4. use a non-empty `reason` on every clause review and requirement;
 5. cite only supplied clause/evidence IDs and allowed roles/properties;
-6. use zero-based `requirement_indexes`, with an empty list for non-executable
-   classifications;
+6. for contract 3.0, put the authoritative relation only in
+   `requirements[].clause_ids`; do not emit `clause_reviews[].requirement_indexes`.
+   The bridge derives that reverse view deterministically. Contract 2.1 keeps
+   zero-based `requirement_indexes` only for legacy compatibility, with an empty
+   list for non-executable classifications;
 7. report uncertainty as `unresolved`, `requires_metadata`,
    `requires_source_content`, `unsupported_backend`, `unverifiable`, or another
    contract classification rather than inventing a requirement.
@@ -221,7 +227,10 @@ The packet manifest also records request/body/envelope/file hashes, runtime
 context, and the complete chunk list. Native runs record a lifecycle entry for
 every chunk and attempt, including not-started, retrying, terminated, and
 remote-unobservable states. A failure never produces a partial merged response,
-and an existing response, audit, or attempt file is never reused.
+and an existing response, audit, or attempt file is never reused. Contract 3.0
+also writes a deterministic `semantic-review-ledger.json`; it records only
+accepted requirement edges and explicit model-supplied obligations, never
+guessing a missing semantic relation.
 
 ### 2. Merge and format locally
 

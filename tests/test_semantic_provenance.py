@@ -70,7 +70,7 @@ class SemanticProvenanceTests(unittest.TestCase):
             self.assertNotIn("evidence_context", request["clauses"][0])
             self.assertIn(clauses[0]["evidence_ids"][0], request["evidence_context"])
             response.write_text(json.dumps({
-                "contract_version": "2.1",
+                "contract_version": "3.0",
                 "provenance": request["provenance"],
                 "requirements": [{
                     "role": "body_text",
@@ -83,7 +83,6 @@ class SemanticProvenanceTests(unittest.TestCase):
                 "clause_reviews": [{
                     "clause_id": clauses[0]["id"],
                     "classification": "executable",
-                    "requirement_indexes": [0],
                     "reason": "fresh bound response",
                 }],
                 "unsupported_items": [],

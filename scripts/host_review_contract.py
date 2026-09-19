@@ -1,12 +1,14 @@
-"""Shared, host-independent validation for contract-2.1 review responses."""
+"""Shared, host-independent validation for host review contracts 2.1 and 3.0."""
 from __future__ import annotations
 
 import re
+import hashlib
+import json
 from typing import Any
 
 from compliance import classification_requires_requirement
 from evidence_context_guards import sample_content_guard
-from format_spec_validation import validate_instance
+from format_spec_validation import schema_support_errors, validate_instance
 from format_contract_guards import cover_binding_errors
 
 
@@ -15,6 +17,121 @@ _GENERIC_SIGNATURE_LINE_PATTERNS = (
     re.compile(r"^日期$"),
     re.compile(r"^年.{0,12}月.{0,12}日(?:于.*)?$"),
 )
+
+HOST_REVIEW_CONTRACT_V2 = "2.1"
+HOST_REVIEW_CONTRACT_V3 = "3.0"
+SUPPORTED_HOST_REVIEW_CONTRACTS = {
+    HOST_REVIEW_CONTRACT_V2, HOST_REVIEW_CONTRACT_V3,
+}
+
+
+def _response_sha256(response: Any) -> str:
+    return hashlib.sha256(
+        json.dumps(response, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
+
+
+def derived_requirement_indexes(
+    response: dict[str, Any], clauses: list[dict[str, Any]],
+) -> dict[str, list[int]]:
+    """Derive the reverse relation from the authoritative requirement edges.
+
+    ``requirements[].clause_ids`` is the only relation the model may author in
+    contract 3.0.  This helper is deterministic and intentionally does not
+    guess an edge when the clause id is missing or unknown.
+    """
+    requirements = response.get("requirements") if isinstance(response, dict) else []
+    if not isinstance(requirements, list):
+        return {}
+    clause_ids = [
+        str(item.get("id")) for item in clauses
+        if isinstance(item, dict) and item.get("id")
+    ]
+    result: dict[str, list[int]] = {clause_id: [] for clause_id in clause_ids}
+    for index, requirement in enumerate(requirements):
+        if not isinstance(requirement, dict) or not isinstance(requirement.get("clause_ids"), list):
+            continue
+        for value in requirement["clause_ids"]:
+            clause_id = str(value)
+            if clause_id in result:
+                result[clause_id].append(index)
+    return result
+
+
+def project_compatibility_indexes(
+    response: dict[str, Any], clauses: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Return a local compatibility view without changing the model response."""
+    projected = json.loads(json.dumps(response, ensure_ascii=False))
+    mapping = derived_requirement_indexes(projected, clauses)
+    for review in projected.get("clause_reviews", []) if isinstance(projected.get("clause_reviews"), list) else []:
+        if not isinstance(review, dict):
+            continue
+        clause_id = str(review.get("clause_id"))
+        if classification_requires_requirement(str(review.get("classification"))):
+            review["requirement_indexes"] = list(mapping.get(clause_id, []))
+        else:
+            review["requirement_indexes"] = []
+    return projected
+
+
+def contract_error_records(
+    errors: list[str], *, response: Any = None, chunk: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Convert validator strings into bounded, machine-readable failure facts."""
+    records: list[dict[str, Any]] = []
+    requirements = response.get("requirements", []) if isinstance(response, dict) else []
+    clauses = chunk.get("clauses", []) if isinstance(chunk, dict) else []
+    relation_facts: dict[str, list[int]] = {}
+    if isinstance(response, dict) and isinstance(clauses, list):
+        relation_facts = derived_requirement_indexes(response, clauses)
+    for raw in errors:
+        text = str(raw)
+        lowered = text.lower()
+        if "normative_basis" in lowered:
+            code = "normative_basis_invalid"
+        elif "requirement_index_not_backed_by_clause" in lowered:
+            code = "requirement_relation_mismatch"
+        elif "partial_clause_coverage" in lowered:
+            code = "partial_clause_coverage"
+        elif "unknown property" in lowered:
+            code = "unknown_property"
+        elif "unsupported_schema_keyword" in lowered:
+            code = "validator_capability_gap"
+        elif (
+            "missing required" in lowered
+            or "must_be" in lowered
+            or "expected " in lowered
+            or "type" in lowered
+        ):
+            code = "schema_contract_violation"
+        else:
+            code = "contract_validation_error"
+        pointer_match = re.match(r"(\$[^:]+)", text)
+        clause_match = re.search(r"clause_id=([^:;]+)", text)
+        records.append({
+            "code": code,
+            "json_pointer": pointer_match.group(1) if pointer_match else None,
+            "schema_pointer": pointer_match.group(1) if pointer_match else None,
+            "clause_id": clause_match.group(1) if clause_match else None,
+            "raw_error": text,
+            "response_sha256": _response_sha256(response) if response is not None else None,
+            "allowed_values": (
+                [
+                    "explicit_normative_text", "template_structure", "fixed_statement",
+                    "sample_content", "source_content", "external_duty", "insufficient",
+                ] if "normative_basis" in lowered else None
+            ),
+            "matching_requirement_indexes": (
+                relation_facts.get(clause_match.group(1), [])
+                if clause_match else None
+            ),
+            "requirement_count": len(requirements) if isinstance(requirements, list) else None,
+            "semantic_review_required": code in {
+                "partial_clause_coverage", "requirement_relation_mismatch",
+            },
+        })
+    return records
 
 
 def _normalized_fixed_text(value: Any) -> str:
@@ -184,10 +301,14 @@ def validate_response(response: Any, chunk: dict[str, Any]) -> list[str]:
         return ["response_must_be_object"]
 
     errors: list[str] = []
+    contract_version = response.get("contract_version")
+    if contract_version not in SUPPORTED_HOST_REVIEW_CONTRACTS:
+        errors.append(f"contract_version_unsupported:{contract_version!r}")
     response_schema = chunk.get("response_schema")
     if not isinstance(response_schema, dict) or not response_schema:
         errors.append("response_schema_missing")
     else:
+        errors.extend(schema_support_errors(response_schema))
         errors.extend(validate_instance(response, response_schema, response_schema))
 
     contract = chunk.get("requirement_contract")
@@ -388,6 +509,27 @@ def validate_response(response: Any, chunk: dict[str, Any]) -> list[str]:
                     f"$.clause_reviews[{review_index}]:"
                     f"sample_content_cannot_be_executable:{guard['kind']}"
                 )
+        if contract_version == HOST_REVIEW_CONTRACT_V3:
+            if "requirement_indexes" in review:
+                errors.append(
+                    f"$.clause_reviews[{review_index}].requirement_indexes: forbidden_in_contract_3.0"
+                )
+            valid_indexes = matching_requirement_indexes.get(clause_id, [])
+            if isinstance(classification, str) and classification_requires_requirement(classification):
+                referenced_indexes.update(valid_indexes)
+                if not valid_indexes:
+                    errors.append(
+                        f"$.clause_reviews[{review_index}]: executable_review_requires_derived_requirement"
+                    )
+                if valid_indexes:
+                    gaps = _abstract_obligation_gaps(clause or {}, requirements, valid_indexes)
+                    gaps.extend(_keyword_obligation_gaps(clause or {}, requirements, valid_indexes))
+                    if gaps:
+                        errors.append(
+                            f"$.clause_reviews[{review_index}]: partial_clause_coverage:"
+                            + ",".join(gaps)
+                        )
+            continue
         if not isinstance(indexes, list):
             errors.append(
                 f"$.clause_reviews[{review_index}].requirement_indexes: must_be_array"

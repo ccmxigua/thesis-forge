@@ -344,6 +344,9 @@ _BASE_CONTRACT_REPAIR_RULES = (
     "Every executable/covered/verify_existing requirement reference must be a zero-based index of a semantically matching emitted requirement whose clause_ids contains that exact review clause_id; check every review/index pair independently. Never carry an adjacent clause's index, change clause_ids to make validation pass, or emit an unused requirement.",
     "Do not move nested properties to a top-level requirement role: a nested key such as require_after_role is legal only where the supplied role schema places it.",
     "Do not fabricate evidence or guess a semantic classification. Make only the mechanical schema corrections required by the supplied error, then regenerate the complete response from the current chunk.",
+    "Administrative approval/marking tables belong under cover.non_public_administration, must be conditional on thesis_profile.security_level, and must be blank for public theses. Bind approval-number and approval-date labels to approval_number and approval_date; never substitute classification_number or completion_date.",
+    "A clause can be executable only when every independently verifiable obligation is represented. Preserve language targets, units, limits, exceptions, and prohibited-content requirements; a partial requirement must be classified non-executable with requirement_indexes: [] rather than promoted to full coverage.",
+    "Use only a verified runtime_context.runtime_inventory anchor. A zero-match, multi-match, or blocked anchor is not executable; never infer a nearby heading or use the declarations role as an insertion anchor.",
 )
 
 
@@ -428,6 +431,18 @@ def _contract_repair_guidance(
     if "not valid json" in text or "jsondecodeerror" in text:
         targeted.append(
             "Return raw JSON only: no Markdown fences, comments, trailing commas, duplicate keys, or explanatory text; parse the complete object before sending it."
+        )
+    if "partial_clause_coverage" in text or "abstract_target_or_translation_ambiguous" in text:
+        targeted.append(
+            "The rejected clause contains residual abstract obligations or an ambiguous language target. "
+            "Do not add a guessed min/max/semantic property or change Chinese abstract to English abstract; "
+            "return unresolved or another non-executable classification with requirement_indexes: [] until "
+            "the cited evidence resolves the target, unit, exception, and all independent obligations."
+        )
+    if "item_length_metric:cjk_characters" in text:
+        targeted.append(
+            "Preserve the source wording 'Chinese characters' as the explicit cjk_characters metric. "
+            "Do not convert it into an English-word or English-letter limit, and do not truncate keywords."
         )
     if targeted:
         rules.extend(targeted)

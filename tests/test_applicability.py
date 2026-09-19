@@ -49,6 +49,24 @@ class ApplicabilityTests(unittest.TestCase):
         self.assertEqual(len(result["evaluated"]), 2)
         self.assertEqual(result["evaluated"][1]["actual"], 2)
 
+    def test_present_preserves_explicit_false_and_zero(self) -> None:
+        false_result = evaluate_applicability(
+            {
+                "status": "conditional",
+                "conditions": [{"fact": "thesis_profile.has_appendices", "operator": "present"}],
+            },
+            thesis_profile={"has_appendices": False},
+        )
+        zero_result = evaluate_applicability(
+            {
+                "status": "conditional",
+                "conditions": [{"fact": "source_inventory.figures", "operator": "present"}],
+            },
+            source_inventory={"figures": 0},
+        )
+        self.assertEqual(false_result["result"], "true")
+        self.assertEqual(zero_result["result"], "true")
+
     def test_false_condition_is_recorded_with_observed_value(self) -> None:
         result = evaluate_applicability(
             {

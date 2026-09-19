@@ -649,9 +649,57 @@
             "required": {
               "type": "boolean"
             },
+            "min_chars": {
+              "type": "integer",
+              "minimum": 1
+            },
             "max_chars": {
               "type": "integer",
               "minimum": 1
+            },
+            "length_metric": {
+              "enum": [
+                "unicode_codepoints",
+                "cjk_characters",
+                "words"
+              ]
+            },
+            "require_third_person": {
+              "type": "boolean"
+            },
+            "required_sections": {
+              "type": "array",
+              "items": {
+                "enum": [
+                  "purpose",
+                  "methods",
+                  "results",
+                  "conclusions",
+                  "innovation"
+                ]
+              },
+              "uniqueItems": true
+            },
+            "prohibit_comments": {
+              "type": "boolean"
+            },
+            "prohibited_objects": {
+              "type": "array",
+              "items": {
+                "enum": [
+                  "figures",
+                  "tables",
+                  "chemical_equations",
+                  "nonpublic_symbols_and_terminology"
+                ]
+              },
+              "uniqueItems": true
+            },
+            "exception_policy": {
+              "enum": [
+                "none",
+                "user_confirmed_special_need"
+              ]
             }
           },
           "additionalProperties": false
@@ -661,6 +709,27 @@
           "properties": {
             "required": {
               "type": "boolean"
+            },
+            "min_words": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "max_words": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "length_metric": {
+              "enum": [
+                "words",
+                "unicode_codepoints"
+              ]
+            },
+            "target": {
+              "enum": [
+                "abstract_en",
+                "abstract_zh",
+                "unresolved"
+              ]
             }
           },
           "additionalProperties": false
@@ -739,6 +808,17 @@
         },
         "match_other_language_count": {
           "type": "boolean"
+        },
+        "max_item_chars": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "item_length_metric": {
+          "enum": [
+            "unicode_codepoints",
+            "cjk_characters",
+            "words"
+          ]
         }
       },
       "additionalProperties": false
@@ -979,6 +1059,39 @@
         "reason": {
           "type": "string"
         },
+        "obligations": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "id",
+              "status",
+              "reason"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "status": {
+                "enum": [
+                  "covered",
+                  "requires_metadata",
+                  "requires_source_content",
+                  "unsupported_backend",
+                  "unverifiable",
+                  "unresolved"
+                ]
+              },
+              "reason": {
+                "type": "string",
+                "minLength": 1
+              }
+            },
+            "additionalProperties": false
+          },
+          "uniqueItems": true
+        },
         "enforcement": {
           "enum": [
             "generate_or_repair",
@@ -1017,7 +1130,7 @@
               "fact": {
                 "type": "string",
                 "minLength": 1,
-                "pattern": "^(thesis_profile|source_inventory|template_profile)\\."
+                "pattern": "^(thesis_profile|source_inventory|template_profile|runtime)\\."
               },
               "operator": {
                 "enum": [
@@ -1098,6 +1211,15 @@
             "type": "string",
             "minLength": 1
           }
+        },
+        "checker_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Optional registered deterministic/manual checker identifiers; checks remains human-readable explanation only."
         }
       },
       "additionalProperties": false
@@ -1429,8 +1551,20 @@
           "type": "string",
           "pattern": "^\\d{4}-(?:0[1-9]|1[0-2])(?:-(?:0[1-9]|[12]\\d|3[01]))?$"
         },
+        "approval_number": {
+          "type": "string",
+          "minLength": 1
+        },
+        "approval_date": {
+          "type": "string",
+          "pattern": "^\\d{4}-(?:0[1-9]|1[0-2])(?:-(?:0[1-9]|[12]\\d|3[01]))?$"
+        },
         "security_marking": {
           "type": "string"
+        },
+        "embargo_start": {
+          "type": "string",
+          "pattern": "^\\d{4}-(?:0[1-9]|1[0-2])(?:-(?:0[1-9]|[12]\\d|3[01]))?$"
         },
         "embargo_until": {
           "type": "string",
@@ -1563,7 +1697,10 @@
             "supervisor_name",
             "co_supervisors",
             "completion_date",
+            "approval_number",
+            "approval_date",
             "security_marking",
+            "embargo_start",
             "embargo_until"
           ]
         },
@@ -1590,7 +1727,10 @@
             "thesis_profile.cover_metadata.supervisor_name",
             "thesis_profile.cover_metadata.co_supervisors",
             "thesis_profile.cover_metadata.completion_date",
+            "thesis_profile.cover_metadata.approval_number",
+            "thesis_profile.cover_metadata.approval_date",
             "thesis_profile.cover_metadata.security_marking",
+            "thesis_profile.cover_metadata.embargo_start",
             "thesis_profile.cover_metadata.embargo_until"
           ]
         },
@@ -1625,6 +1765,9 @@
             "$ref": "#/$defs/coverField"
           }
         },
+        "non_public_administration": {
+          "$ref": "#/$defs/nonPublicAdministrationSpec"
+        },
         "before_role": {
           "enum": [
             "document_start",
@@ -1644,6 +1787,81 @@
         "layout_id": {
           "enum": ["linear", "official_template_regions"],
           "description": "Cover execution mode. linear is the generic paragraph fallback. official_template_regions requires a verified official DOCX resource and fixed-region assembly; core code must not redraw a school's cover from guessed geometry."
+        }
+      },
+      "additionalProperties": false
+    },
+    "adminField": {
+      "type": "object",
+      "required": [
+        "id",
+        "label",
+        "value_from",
+        "display_policy",
+        "order"
+      ],
+      "properties": {
+        "id": {
+          "enum": [
+            "security_marking",
+            "embargo_start",
+            "embargo_until",
+            "approval_number",
+            "approval_date"
+          ]
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1
+        },
+        "value_from": {
+          "enum": [
+            "thesis_profile.cover_metadata.security_marking",
+            "thesis_profile.cover_metadata.embargo_start",
+            "thesis_profile.cover_metadata.embargo_until",
+            "thesis_profile.cover_metadata.approval_number",
+            "thesis_profile.cover_metadata.approval_date"
+          ]
+        },
+        "display_policy": {
+          "enum": [
+            "required",
+            "if_present",
+            "blank_when_public"
+          ]
+        },
+        "order": {
+          "type": "integer",
+          "minimum": 1
+        }
+      },
+      "additionalProperties": false
+    },
+    "nonPublicAdministrationSpec": {
+      "type": "object",
+      "required": [
+        "applicability",
+        "fields",
+        "public_policy",
+        "source_region"
+      ],
+      "properties": {
+        "applicability": {
+          "$ref": "#/$defs/applicabilitySpec"
+        },
+        "fields": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/adminField"
+          }
+        },
+        "public_policy": {
+          "const": "blank"
+        },
+        "source_region": {
+          "type": "string",
+          "minLength": 1
         }
       },
       "additionalProperties": false

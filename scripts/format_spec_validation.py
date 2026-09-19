@@ -15,8 +15,14 @@ from typing import Any
 
 try:
     from .resource_registry import fixed_text_sha256
+    from .format_contract_guards import (
+        cover_binding_errors, input_prerequisite_errors, verification_checker_errors,
+    )
 except ImportError:  # direct script execution
     from resource_registry import fixed_text_sha256
+    from format_contract_guards import (
+        cover_binding_errors, input_prerequisite_errors, verification_checker_errors,
+    )
 
 
 def _resolve(root: dict[str, Any], ref: str) -> dict[str, Any]:
@@ -219,10 +225,15 @@ def load_and_validate(instance: Any, schema_path: Path) -> list[str]:
         count = profile.get("co_supervisor_count")
         if count is not None and count != len(metadata.get("co_supervisors", [])):
             errors.append("$.thesis_profile.co_supervisor_count: must equal cover_metadata.co_supervisors length")
-        if profile.get("security_level") == "public" and (metadata.get("security_marking") or metadata.get("embargo_until")):
+        if profile.get("security_level") == "public" and (
+                metadata.get("security_marking") or metadata.get("embargo_start")
+                or metadata.get("embargo_until")):
             errors.append("$.thesis_profile.cover_metadata: public theses must not request a security/embargo marking")
         if profile.get("security_level") in {"restricted", "classified"} and not metadata.get("administrative_verification"):
             errors.append("$.thesis_profile.cover_metadata.administrative_verification: required for restricted/classified metadata")
+        if (metadata.get("embargo_start") and metadata.get("embargo_until")
+                and str(metadata["embargo_start"]) > str(metadata["embargo_until"])):
+            errors.append("$.thesis_profile.cover_metadata: embargo_start must not be after embargo_until")
     declarations = instance.get("declarations") if isinstance(instance, dict) else None
     if isinstance(declarations, dict):
         items = [item for item in declarations.get("items", []) if isinstance(item, dict)]
@@ -280,6 +291,13 @@ def load_and_validate(instance: Any, schema_path: Path) -> list[str]:
                             "must use the canonical blank placeholder set and must not claim an actual signature"
                         )
     errors.extend(validate_clause_contract(instance))
+    # JSON Schema can prove that a field id and value_from are well-typed,
+    # but it cannot prove that a model mapped an administrative label to the
+    # semantically correct trusted field.  Keep these guards in the canonical
+    # loader so CLI and library callers share the same fail-closed boundary.
+    errors.extend(cover_binding_errors(instance if isinstance(instance, dict) else {}))
+    errors.extend(input_prerequisite_errors(instance if isinstance(instance, dict) else {}))
+    errors.extend(verification_checker_errors(instance if isinstance(instance, dict) else {}))
     return errors
 
 

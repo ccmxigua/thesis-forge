@@ -343,6 +343,38 @@ def _cover_field_value(cover: dict[str, Any], metadata: dict[str, Any], field: d
     return "", False
 
 
+def _compile_non_public_administration(cover: dict[str, Any], profile: dict[str, Any],
+                                       metadata: dict[str, Any], trusted: bool) -> dict[str, Any] | None:
+    administration = cover.get("non_public_administration")
+    if not isinstance(administration, dict):
+        return None
+    security_level = profile.get("security_level")
+    fields: list[dict[str, Any]] = []
+    for field in sorted(administration.get("fields", []), key=lambda item: item.get("order", 0)):
+        value = _metadata_value(metadata, field.get("id", "")) if trusted else ""
+        fields.append({
+            "id": field.get("id"), "label": field.get("label"), "order": field.get("order"),
+            "value": value if value.strip() else "",
+            "value_kind": "trusted" if value.strip() else "omitted",
+            "source": field.get("value_from"),
+            "display_policy": field.get("display_policy"),
+        })
+    if security_level == "public":
+        status = "blank_public"
+    elif security_level in {"restricted", "classified"} and all(item["value_kind"] == "trusted" for item in fields):
+        status = "provided_unverified"
+    else:
+        status = "pending_external_approval"
+    return {
+        "applicability": administration.get("applicability"),
+        "public_policy": administration.get("public_policy"),
+        "source_region": administration.get("source_region"),
+        "security_level": security_level,
+        "status": status,
+        "fields": fields,
+    }
+
+
 def compile_cover_contract(cover: dict[str, Any], profile: dict[str, Any]) -> dict[str, Any]:
     """Compile written requirements and trusted instance data into an executable contract."""
     metadata, trusted = _trusted_cover_metadata(profile)
@@ -356,7 +388,7 @@ def compile_cover_contract(cover: dict[str, Any], profile: dict[str, Any]) -> di
             "source": field.get("value_from"),
             "style_role": field["id"] if field["id"] in {"title_zh", "title_en"} else "cover_field_value",
         })
-    return {
+    contract = {
         "schema_version": "1.0", "institution": cover.get("institution"),
         # Normalize the legacy abstract-relative declaration to the actual
         # executable contract: every generated cover starts the document.
@@ -367,6 +399,10 @@ def compile_cover_contract(cover: dict[str, Any], profile: dict[str, Any]) -> di
         "layout_id": cover.get("layout_id", "linear"),
         "fields": fields,
     }
+    administration = _compile_non_public_administration(cover, profile, metadata, trusted)
+    if administration is not None:
+        contract["non_public_administration"] = administration
+    return contract
 
 
 def apply_cover(doc: Document, cover: dict[str, Any], profile: dict[str, Any],
@@ -426,6 +462,17 @@ def apply_cover(doc: Document, cover: dict[str, Any], profile: dict[str, Any],
         anchor._element.getparent().remove(anchor._element)
     counts["placement"] = "document_start"
     counts["page_break_written"] = 1
+    administration = contract.get("non_public_administration")
+    if isinstance(administration, dict):
+        counts["non_public_administration_status"] = administration.get("status")
+        counts["non_public_administration_pending_fields"] = [
+            item.get("id") for item in administration.get("fields", [])
+            if isinstance(item, dict) and item.get("value_kind") != "trusted"
+        ]
+        # Public theses deliberately keep this region blank.  Non-public
+        # administration is not drawn into a generic linear cover: without a
+        # verified official region, writing it here would recreate the
+        # original R00138 semantic/layout error.
     return counts
 
 
@@ -542,6 +589,21 @@ def audit_cover(doc: Document, cover: dict[str, Any], profile: dict[str, Any],
         if len(matches) != 1:
             requirement = "exactly one neutral placeholder on the generated cover" if placeholder else "exactly one trusted metadata value on the generated cover"
             findings.append({"role": "cover", "property": f"fields.{field['id']}", "template_value": len(matches), "required_value": requirement})
+    administration = compile_cover_contract(cover, profile).get("non_public_administration")
+    if isinstance(administration, dict):
+        if administration.get("status") == "blank_public":
+            # A public thesis must not receive approval placeholders or
+            # ordinary-cover substitutions.  The generated cover compiler
+            # never writes this region; its explicit status is the evidence.
+            pass
+        else:
+            findings.append({
+                "role": "cover",
+                "property": "non_public_administration",
+                "template_value": administration.get("status"),
+                "required_value": "verified_official_region_and_external_approval",
+                "failure_type": "external_or_official_region_required",
+            })
     return findings
 
 
@@ -1907,6 +1969,48 @@ def _section_paragraphs(doc: Document, heading_role: str, mappings: dict[str, An
     return result
 
 
+def _content_metric(text: str, metric: str | None, language: str) -> int:
+    """Count content with the explicitly declared unit.
+
+    The old checker silently treated every ``max_chars`` value as a
+    whitespace-stripped code-point count.  That made a Chinese ``字`` rule,
+    an English ``words`` rule, and a mixed-language Unicode rule appear
+    interchangeable.  The contract now names the metric and this helper is
+    the single implementation used by output audits and receipts.
+    """
+    normalized = re.sub(r"\s+", "", str(text or ""))
+    if metric == "words":
+        return len(re.findall(r"[A-Za-z0-9]+(?:['’\-][A-Za-z0-9]+)*", str(text or "")))
+    if metric == "cjk_characters":
+        return len(re.findall(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]", normalized))
+    return len(normalized)
+
+
+def _abstract_has_embedded_object(paragraphs: list[Paragraph], object_kind: str) -> bool:
+    """Detect objects physically embedded in the selected abstract paragraphs."""
+    if object_kind == "figures":
+        return any(p._p.xpath(".//w:drawing | .//wp:inline | .//wp:anchor") for p in paragraphs)
+    if object_kind == "tables":
+        return any(p._p.xpath("ancestor::w:tbl") for p in paragraphs)
+    return False
+
+
+def _document_has_comments(doc: Document) -> bool:
+    """Return whether the package contains a Word comments part."""
+    return any(str(getattr(part, "partname", "")).endswith("comments.xml")
+               for part in getattr(doc.part.package, "parts", []))
+
+
+def _manual_semantic_finding(key: str, property_name: str, reason: str) -> dict[str, Any]:
+    return {
+        "role": "content_constraints",
+        "property": f"{key}.{property_name}",
+        "template_value": "manual_verification_required",
+        "required_value": reason,
+        "verification": "manual",
+    }
+
+
 def audit_content_constraints(doc: Document, constraints: dict[str, Any], mappings: dict[str, Any]) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
     positions = {p._p: i for i, p in enumerate(doc.paragraphs)}
@@ -1916,8 +2020,42 @@ def audit_content_constraints(doc: Document, constraints: dict[str, Any], mappin
         text = "".join(p.text.strip() for p in paragraphs)
         if rule.get("required") and not text:
             findings.append({"role": "content_constraints", "property": f"{key}.required", "template_value": False, "required_value": True})
-        if rule.get("max_chars") is not None and len(re.sub(r"\s+", "", text)) > int(rule["max_chars"]):
-            findings.append({"role": "content_constraints", "property": f"{key}.max_chars", "template_value": len(re.sub(r'\s+', '', text)), "required_value": rule["max_chars"]})
+        default_metric = "words" if key == "abstract_en" else "unicode_codepoints"
+        metric = rule.get("length_metric", default_metric)
+        actual_length = _content_metric(text, metric, language)
+        if rule.get("min_chars") is not None and actual_length < int(rule["min_chars"]):
+            findings.append({"role": "content_constraints", "property": f"{key}.min_chars", "template_value": actual_length, "required_value": rule["min_chars"], "metric": metric})
+        if rule.get("max_chars") is not None and actual_length > int(rule["max_chars"]):
+            findings.append({"role": "content_constraints", "property": f"{key}.max_chars", "template_value": actual_length, "required_value": rule["max_chars"], "metric": metric})
+        if rule.get("min_words") is not None:
+            actual_words = _content_metric(text, rule.get("length_metric", "words"), language)
+            if actual_words < int(rule["min_words"]):
+                findings.append({"role": "content_constraints", "property": f"{key}.min_words", "template_value": actual_words, "required_value": rule["min_words"], "metric": rule.get("length_metric", "words")})
+        if rule.get("max_words") is not None:
+            actual_words = _content_metric(text, rule.get("length_metric", "words"), language)
+            if actual_words > int(rule["max_words"]):
+                findings.append({"role": "content_constraints", "property": f"{key}.max_words", "template_value": actual_words, "required_value": rule["max_words"], "metric": rule.get("length_metric", "words")})
+        if rule.get("target") and rule.get("target") != key:
+            findings.append({"role": "content_constraints", "property": f"{key}.target", "template_value": key, "required_value": rule["target"]})
+        if key == "abstract_en" and rule.get("target") == "unresolved":
+            findings.append(_manual_semantic_finding(key, "target", "abstract language target is unresolved"))
+        for property_name in ("require_third_person", "required_sections", "exception_policy"):
+            if rule.get(property_name):
+                findings.append(_manual_semantic_finding(
+                    key, property_name,
+                    "semantic abstract content cannot be proven by deterministic DOCX formatting alone",
+                ))
+        if rule.get("prohibit_comments"):
+            if _document_has_comments(doc):
+                findings.append({"role": "content_constraints", "property": f"{key}.prohibit_comments", "template_value": True, "required_value": False})
+        for object_kind in rule.get("prohibited_objects", []) if isinstance(rule.get("prohibited_objects"), list) else []:
+            if object_kind in {"figures", "tables"} and _abstract_has_embedded_object(paragraphs, object_kind):
+                findings.append({"role": "content_constraints", "property": f"{key}.prohibited_objects.{object_kind}", "template_value": True, "required_value": False})
+            elif object_kind in {"chemical_equations", "nonpublic_symbols_and_terminology"}:
+                findings.append(_manual_semantic_finding(
+                    key, f"prohibited_objects.{object_kind}",
+                    "requires semantic/manual review; deterministic text scanning must not guess domain meaning",
+                ))
     acknowledgments = constraints.get("acknowledgments", {})
     if isinstance(acknowledgments, dict) and acknowledgments.get("max_chars") is not None:
         section = _section_paragraphs(doc, "heading_acknowledgments", mappings)
@@ -1945,6 +2083,19 @@ def audit_content_constraints(doc: Document, constraints: dict[str, Any], mappin
                   or (expected_sep == "english_comma" and "," in payload and "，" not in payload)
                   or (expected_sep == "semicolon" and ("；" in payload or ";" in payload)))
             if not ok: findings.append({"role": "content_constraints", "property": f"{key}.separator", "template_value": text, "required_value": expected_sep})
+        if rule.get("max_item_chars") is not None:
+            metric = rule.get("item_length_metric", "cjk_characters" if language == "zh" else "words")
+            for item_index, item in enumerate(values):
+                actual_item_length = _content_metric(item, metric, language)
+                if actual_item_length > int(rule["max_item_chars"]):
+                    findings.append({
+                        "role": "content_constraints",
+                        "property": f"{key}.max_item_chars[{item_index}]",
+                        "template_value": actual_item_length,
+                        "required_value": rule["max_item_chars"],
+                        "metric": metric,
+                        "item": item,
+                    })
         after_role = rule.get("require_after_role")
         if after_role and paragraphs:
             before = _role_paragraphs(doc, after_role, mappings)
@@ -2217,6 +2368,10 @@ def _receipt_semantic_actuals(
         paragraphs = _role_paragraphs(doc, role, mappings)
         text = "".join(paragraph.text.strip() for paragraph in paragraphs)
         put("content_constraints", f"{key}.required", bool(text))
+        rule = constraints.get(key, {}) if isinstance(constraints.get(key), dict) else {}
+        metric = rule.get("length_metric", "words" if key == "abstract_en" else "unicode_codepoints")
+        measured = _content_metric(text, metric, language)
+        put("content_constraints", f"{key}.length", measured, metric)
     for key, role, language in (("keywords_zh", "keywords_zh", "zh"), ("keywords_en", "keywords_en", "en")):
         paragraphs = _role_paragraphs(doc, role, mappings)
         text = " ".join(paragraph.text.strip() for paragraph in paragraphs)
@@ -2227,6 +2382,11 @@ def _receipt_semantic_actuals(
         separator = _receipt_keyword_separator(text, language, values)
         if separator is not None:
             put("content_constraints", f"{key}.separator", separator)
+        rule = constraints.get(key, {}) if isinstance(constraints.get(key), dict) else {}
+        if rule.get("max_item_chars") is not None:
+            metric = rule.get("item_length_metric", "cjk_characters" if language == "zh" else "words")
+            lengths = [_content_metric(item, metric, language) for item in values]
+            put("content_constraints", f"{key}.max_item_chars", max(lengths, default=0), metric)
         after_role = constraints.get(key, {}).get("require_after_role")
         if after_role:
             before = _role_paragraphs(doc, after_role, mappings)

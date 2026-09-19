@@ -123,6 +123,9 @@ def build_clause_records(
                 )
             ).strip(),
         }
+        obligations = review.get("obligations")
+        if isinstance(obligations, list):
+            record["obligations"] = [dict(item) for item in obligations if isinstance(item, dict)]
         if mapping_blocked:
             # No executable requirement ID is retained for an unresolved
             # mapping; the schema and downstream gates must see a blocker.

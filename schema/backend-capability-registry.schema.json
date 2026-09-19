@@ -19,7 +19,7 @@
             "type": "array", "minItems": 1, "uniqueItems": true,
             "items": {"type": "string", "minLength": 1}
           },
-          "disposition": {"enum": ["supported", "unsupported"]},
+          "disposition": {"enum": ["supported", "unknown", "unsupported"]},
           "requires_source_inventory": {
             "type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}
           },

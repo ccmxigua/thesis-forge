@@ -388,7 +388,12 @@ def capability_gate_blocked(report: dict[str, Any], compliance_mode: str) -> boo
 
 
 def record_capability_summary(manifest: dict[str, Any], summary: dict[str, Any]) -> None:
-    """Expose clause counts while preserving the legacy mixed gap aggregate."""
+    """Expose separate issue, clause, and requirement counts.
+
+    ``capability_input_prerequisites`` historically meant clause-level gaps,
+    so retain that field and add explicit totals rather than silently changing
+    its meaning in old manifests.
+    """
     manifest["capability_gaps"] = summary.get("gaps", 0)
     manifest["capability_backend_gaps"] = summary.get(
         "clause_backend_capability_gaps", summary.get("backend_capability_gaps", 0))
@@ -400,6 +405,12 @@ def record_capability_summary(manifest: dict[str, Any], summary: dict[str, Any])
         "clause_external_not_applicable", summary.get("external_not_applicable", 0))
     manifest["capability_clause_gaps"] = summary.get("clause_gaps", summary.get("gaps", 0))
     manifest["capability_requirement_gaps"] = summary.get("requirement_gaps", 0)
+    manifest["capability_input_prerequisites_total"] = summary.get(
+        "input_prerequisites", 0)
+    manifest["capability_clause_input_prerequisites"] = summary.get(
+        "clause_input_prerequisites", 0)
+    manifest["capability_requirement_input_prerequisites"] = summary.get(
+        "requirement_input_prerequisites", 0)
 
 
 def official_template_from_profile(profile_path: Path) -> Path | None:
@@ -1041,6 +1052,16 @@ def _main(argv: list[str]) -> int:
     # Capability preflight, assembly metadata input, and official-template
     # audit all consume this exact validated work artifact.  Raw semantic JSON
     # remains available solely as provenance for .tex extraction.
+    runtime_inventory_path = work / "runtime-input-inventory.json"
+    runtime_context = extraction_manifest.get("runtime_context")
+    runtime_inventory = (
+        runtime_context.get("runtime_inventory")
+        if isinstance(runtime_context, dict)
+        else None
+    )
+    if isinstance(runtime_inventory, dict):
+        write_json(runtime_inventory_path, runtime_inventory)
+        manifest["inputs"]["runtime_inventory"] = file_record(runtime_inventory_path)
     capability_cmd = [
         sys.executable, str(ROOT / "scripts" / "capability_planner.py"),
         str(requirements_dir / "format-spec.json"), "--out", str(capability_report_path),
@@ -1064,11 +1085,14 @@ def _main(argv: list[str]) -> int:
         manifest["inputs"]["template_school"] = args.template_school
     if canonical_profile is not None:
         capability_cmd += ["--metadata", str(canonical_profile_path)]
+    if isinstance(runtime_inventory, dict):
+        capability_cmd += ["--runtime-inventory", str(runtime_inventory_path)]
     capability_result = run_step("capability_preflight", capability_cmd, steps)
     capability_report = read_json(capability_report_path) if capability_report_path.exists() else None
     manifest["capability_preflight"] = str(capability_report_path)
     if capability_report:
         manifest["capability_preflight_status"] = capability_report.get("status")
+        manifest["capability_preflight_provenance"] = capability_report.get("provenance")
         capability_summary = capability_report.get("summary", {})
         record_capability_summary(manifest, capability_summary)
     if not capability_report or capability_result.returncode not in {0, 3}:

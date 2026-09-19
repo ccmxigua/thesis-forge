@@ -7,6 +7,7 @@ from typing import Any
 from compliance import classification_requires_requirement
 from evidence_context_guards import sample_content_guard
 from format_spec_validation import validate_instance
+from format_contract_guards import cover_binding_errors
 
 
 _GENERIC_SIGNATURE_LINE_PATTERNS = (
@@ -55,6 +56,120 @@ def summarize_contract_errors(errors: list[str], *, limit: int = 12) -> str:
             unique.append(error)
     suffix = f"; ... ({len(unique) - limit} more)" if len(unique) > limit else ""
     return "; ".join(unique[:limit]) + suffix
+
+
+def _flatten_property_paths(value: Any, prefix: str = "") -> dict[str, Any]:
+    if isinstance(value, dict):
+        result: dict[str, Any] = {}
+        for key, child in value.items():
+            path = f"{prefix}.{key}" if prefix else str(key)
+            result.update(_flatten_property_paths(child, path))
+        return result
+    if isinstance(value, list):
+        return {prefix: value}
+    return {prefix: value}
+
+
+def _abstract_obligation_gaps(
+    clause: dict[str, Any], requirements: list[dict[str, Any]], indexes: list[int],
+) -> list[str]:
+    """Reject a known partial abstract contract before it becomes executable.
+
+    This is intentionally a narrow fail-closed detector for obligations that
+    have an unambiguous lexical signal in the source clause.  It does not
+    rewrite a response or decide whether prose is semantically good; it only
+    prevents a short property projection from claiming to cover an entire
+    clause that explicitly contains additional independent constraints.
+    """
+    text = re.sub(r"\s+", "", str(clause.get("text") or clause.get("source_text_full") or ""))
+    if not re.search(r"中文摘要|摘要|chineseabstract|englishabstract|abstract", text, re.I):
+        return []
+    properties: dict[str, Any] = {}
+    for index in indexes:
+        if 0 <= index < len(requirements):
+            item = requirements[index]
+            if item.get("role") == "content_constraints":
+                properties.update(_flatten_property_paths(item.get("properties") or {}))
+    gaps: list[str] = []
+    if re.search(r"thefollowingenglishisnotcorrect|thechineseabstract|英文.{0,20}中文摘要", text, re.I):
+        gaps.append("abstract_target_or_translation_ambiguous")
+    if re.search(r"300(?:字|字符).{0,24}1000(?:字|字符)|300.{0,24}1000(?:字|字符)", text):
+        if "abstract_zh.min_chars" not in properties:
+            gaps.append("abstract_zh.min_chars")
+        if "abstract_zh.max_chars" not in properties:
+            gaps.append("abstract_zh.max_chars")
+    if "第三人称" in text and properties.get("abstract_zh.require_third_person") is not True:
+        gaps.append("abstract_zh.require_third_person")
+    if re.search(r"目的|方法|成果|结论|创新性", text):
+        required_sections = properties.get("abstract_zh.required_sections")
+        section_text = set(required_sections) if isinstance(required_sections, list) else set()
+        expected_sections = {
+            "目的": "purpose", "方法": "methods", "成果": "results",
+            "结论": "conclusions", "创新性": "innovation",
+        }
+        for marker, section in expected_sections.items():
+            if marker in text and section not in section_text:
+                gaps.append(f"abstract_zh.required_sections:{section}")
+    if re.search(r"不得?加评论|不应?加评论|不含评论", text) and properties.get("abstract_zh.prohibit_comments") is not True:
+        gaps.append("abstract_zh.prohibit_comments")
+    if "图表" in text and "abstract_zh.prohibited_objects" not in properties:
+        gaps.append("abstract_zh.prohibited_objects:figures_or_tables")
+    if "方程式" in text and "abstract_zh.prohibited_objects" not in properties:
+        gaps.append("abstract_zh.prohibited_objects:chemical_equations")
+    if re.search(r"非公知|非公开.*术语|公知.*符号", text) and "abstract_zh.prohibited_objects" not in properties:
+        gaps.append("abstract_zh.prohibited_objects:nonpublic_symbols_and_terminology")
+    return gaps
+
+
+def _keyword_obligation_gaps(
+    clause: dict[str, Any], requirements: list[dict[str, Any]], indexes: list[int],
+) -> list[str]:
+    text = re.sub(r"\s+", "", str(clause.get("text") or clause.get("source_text_full") or ""))
+    if not re.search(r"关键词|keywords?", text, re.I):
+        return []
+    if not re.search(r"Chinesecharacters|汉字|中文字符", text, re.I):
+        return []
+    properties: dict[str, Any] = {}
+    for index in indexes:
+        if 0 <= index < len(requirements) and requirements[index].get("role") == "content_constraints":
+            properties.update(_flatten_property_paths(requirements[index].get("properties") or {}))
+    key = "keywords_en" if re.search(r"英文关键词|englishkeywords|english.*keywords", text, re.I) else "keywords_zh"
+    gaps: list[str] = []
+    if f"{key}.max_item_chars" not in properties:
+        gaps.append(f"{key}.max_item_chars")
+    elif properties.get(f"{key}.item_length_metric") != "cjk_characters":
+        gaps.append(f"{key}.item_length_metric:cjk_characters")
+    return gaps
+
+
+def _validate_obligations(review: dict[str, Any], review_index: int) -> list[str]:
+    obligations = review.get("obligations")
+    if obligations is None:
+        return []
+    if not isinstance(obligations, list):
+        return [f"$.clause_reviews[{review_index}].obligations: must_be_array"]
+    errors: list[str] = []
+    seen: set[str] = set()
+    for index, obligation in enumerate(obligations):
+        if not isinstance(obligation, dict):
+            errors.append(f"$.clause_reviews[{review_index}].obligations[{index}]: must_be_object")
+            continue
+        identifier = obligation.get("id")
+        if not isinstance(identifier, str) or not identifier.strip():
+            errors.append(f"$.clause_reviews[{review_index}].obligations[{index}].id: must_be_non_empty")
+        elif identifier in seen:
+            errors.append(f"$.clause_reviews[{review_index}].obligations[{index}].id: duplicate")
+        else:
+            seen.add(identifier)
+        if not isinstance(obligation.get("reason"), str) or not obligation["reason"].strip():
+            errors.append(f"$.clause_reviews[{review_index}].obligations[{index}].reason: must_be_non_empty")
+    if classification_requires_requirement(str(review.get("classification"))) and any(
+        isinstance(item, dict) and item.get("status") != "covered" for item in obligations
+    ):
+        errors.append(
+            f"$.clause_reviews[{review_index}].obligations: executable_review_requires_all_obligations_covered"
+        )
+    return errors
 
 
 def validate_response(response: Any, chunk: dict[str, Any]) -> list[str]:
@@ -119,6 +234,11 @@ def validate_response(response: Any, chunk: dict[str, Any]) -> list[str]:
             except (KeyError, ValueError) as exc:
                 errors.append(
                     f"$.requirements[{index}].properties: role_schema_resolution_failed:{exc}"
+                )
+        if role == "cover":
+            for guard_error in cover_binding_errors({"cover": item.get("properties")}):
+                errors.append(
+                    f"$.requirements[{index}].properties{guard_error.removeprefix('$.cover')}"
                 )
         if role == "declarations":
             properties = item.get("properties")
@@ -255,6 +375,7 @@ def validate_response(response: Any, chunk: dict[str, Any]) -> list[str]:
                 "must be a declared evidence basis, not a classification"
             )
         indexes = review.get("requirement_indexes")
+        errors.extend(_validate_obligations(review, review_index))
         clause = clause_map.get(clause_id)
         if (
             isinstance(classification, str)
@@ -308,6 +429,14 @@ def validate_response(response: Any, chunk: dict[str, Any]) -> list[str]:
                 errors.append(
                     f"$.clause_reviews[{review_index}]: nonexecutable_review_must_not_reference_requirement"
                 )
+            if classification_requires_requirement(classification) and valid_indexes:
+                gaps = _abstract_obligation_gaps(clause or {}, requirements, valid_indexes)
+                gaps.extend(_keyword_obligation_gaps(clause or {}, requirements, valid_indexes))
+                if gaps:
+                    errors.append(
+                        f"$.clause_reviews[{review_index}]: partial_clause_coverage:"
+                        + ",".join(gaps)
+                    )
 
     unused_indexes = sorted(set(range(len(requirements))) - referenced_indexes)
     if unused_indexes:

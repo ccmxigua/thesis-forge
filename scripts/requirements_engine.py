@@ -1299,6 +1299,71 @@ def _declaration_anchor_preference(structure: dict[str, Any] | None) -> str:
     return "abstract_title_zh" if "abstract_title_zh" in candidates else "document_start"
 
 
+def build_runtime_anchor_inventory(docx: Path, evidence_doc: dict[str, Any]) -> dict[str, Any]:
+    """Build a source-bound, read-only declaration-anchor inventory.
+
+    The semantic request may name a preferred anchor, but capability preflight
+    needs an independently observed locator and match count.  A zero or
+    multiple-match result is deliberately blocked; this helper never chooses a
+    nearby paragraph by similarity.
+    """
+    evidence = evidence_doc.get("evidence", []) if isinstance(evidence_doc, dict) else []
+    matches: list[dict[str, Any]] = []
+    for item in evidence if isinstance(evidence, list) else []:
+        if not isinstance(item, dict):
+            continue
+        text = re.sub(r"\s+", "", str(item.get("text") or ""))
+        style = re.sub(r"[\s_\-]+", "", str(item.get("style_name") or item.get("style_id") or "")).casefold()
+        if text == "摘要" or "abstracttitlecn" in style:
+            matches.append({
+                "evidence_id": item.get("id"),
+                "text": item.get("text"),
+                "style_name": item.get("style_name"),
+                "locator": copy.deepcopy(item.get("xml_locator") or item.get("location") or {}),
+            })
+    anchor = {
+        "anchor_type": "semantic_role",
+        "match_count": len(matches),
+        "matches": matches,
+        "binding_status": "verified" if len(matches) == 1 else "blocked",
+    }
+    if len(matches) == 1:
+        selected_name = "abstract_title_zh"
+        selected_status = "verified"
+    elif len(matches) == 0:
+        # Keep the virtual fallback visible for diagnostics, but do not let a
+        # zero-match source observation satisfy a runtime prerequisite.  The
+        # caller must provide an explicitly verified document-start binding
+        # if that placement is truly intended by the authoritative template.
+        selected_name = "document_start"
+        selected_status = "blocked"
+    else:
+        selected_name = "abstract_title_zh"
+        selected_status = "blocked"
+    selected = {
+        "name": selected_name,
+        "anchor_type": "virtual_document_start" if selected_name == "document_start" else "semantic_role",
+        "binding_status": selected_status,
+    }
+    return {
+        "schema_version": "1.0",
+        "parser_version": "requirements_engine.anchor_inventory.v1",
+        "source": {
+            "path": str(docx.resolve()),
+            "bytes": docx.stat().st_size,
+            "sha256": _sha256(docx),
+        },
+        "anchors": {"abstract_title_zh": anchor, "document_start": {
+            "anchor_type": "virtual_document_start",
+            "match_count": 1,
+            "matches": [{"locator": {"part": "document", "child_index": 0}}],
+            "binding_status": "verified",
+        }},
+        "selected": selected,
+        "status": "verified" if selected["binding_status"] == "verified" else "blocked",
+    }
+
+
 def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, Any]],
                       evidence_doc: dict[str, Any] | None = None,
                       rule_spec: dict[str, Any] | None = None,
@@ -1371,6 +1436,11 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
                 "Generic author-name, date, signature, or location lines (for example 作者姓名 or 年 月 日于某校) are metadata/signature material, not an executable declarations requirement by themselves. Keep them non-executable unless current evidence contains an explicit fixed declaration heading/body that they complete.",
                 "For declarations.properties.before_role use exactly declaration_anchor_preference, which is the deterministic placement selected from the current target structure; it must also be one of declaration_anchor_candidates. The value declarations is a requirement role, not an insertion anchor. If the current chunk is a continuation and the earlier heading evidence is outside this chunk, omit heading rather than shortening a body paragraph into a guessed heading; the deterministic merger will combine it with the same semantic item from the earlier chunk.",
                 "A cover requirement declares document structure independently of instance metadata. Bind fields deterministically to thesis_profile.cover_metadata; when the complete confirmed metadata record is absent, preserve required cover fields with the neutral placeholder configured by cover.missing_value_placeholder (default ——). Never infer identity, degree, supervisor, security approval, physical cover color, or spine compliance.",
+                "Administrative approval/marking tables are not ordinary cover fields. Represent them under cover.non_public_administration with an explicit conditional applicability on thesis_profile.security_level, public_policy:'blank', and source_region. Bind 审批表编号 only to approval_number and 批准日期 only to approval_date; never substitute classification_number or completion_date. For public theses keep this administrative region blank/conditional and do not require absent approval data.",
+                "Atomic coverage gate: split each clause into independently verifiable obligations. A covered, executable, or verify_existing review is valid only when every obligation in the cited clause is represented by the referenced requirement properties and its verification contract. If any length bound, language target, exception, prohibited-content, semantic, or placement obligation remains unresolved, classify the clause as unresolved, requires_source_content, requires_metadata, unsupported_backend, or unverifiable with requirement_indexes: []; never mark a partial requirement as full clause coverage.",
+                "Do not replace one field with a merely similar field (for example approval date with completion date, classification number with approval number, or Chinese abstract with English abstract). Preserve the original target language, unit, modal words, exceptions, and scope. A value that is not present in the current chunk is not evidence that it is absent from the whole run; use the supplied evidence_context and runtime context, and defer when still unknown.",
+                "If an English source block says the English is incorrect, or refers to 'the Chinese abstract' while using a words range, preserve that clause as unresolved until an authoritative user/template clarification fixes the target and metric. Likewise, do not reinterpret 'Chinese characters' in a keyword rule as an English-letter limit.",
+                "For runtime placement, use only the verified runtime_context.runtime_inventory.anchor_inventory.selected binding. Do not infer an insertion anchor from a role name, nearby heading, school name, or chunk-local context. A blocked, zero-match, or multiple-match anchor must remain non-executable.",
                 "The rule_spec is advisory evidence, not authoritative; report disagreements in conflicts.",
                 "For page numbering, identify the body start with first_heading_1, heading_text, or section_index.",
                 "LLM output is declarative only and must never contain OOXML edits or executable code.",
@@ -1386,11 +1456,12 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
                 "Mechanical response gate: requirement_indexes MUST be [] for every non-executable classification, including informational, requires_metadata, requires_source_content, external_compliance, not_applicable, unsupported_backend, unsupported, unverifiable, unresolved, and ignored.",
                 "Mechanical response gate: require_after_role and keyword constraints must remain at the exact nested path declared by the selected role_properties_schema. Do not create a top-level keywords_zh/keywords_en role or move nested properties into a different role.",
                 "Mechanical response gate: on retry after local rejection, regenerate the complete object from this chunk. Never auto-correct an invalid enum, invent missing evidence, change a semantic classification without evidence, or reuse a prior response. Apply only mechanical schema corrections explicitly required by the validator, such as omitting an invalid optional field or using [] for a non-executable classification.",
+                "Mechanical response gate: if a clause contains several obligations, include an obligations array with one object per obligation (id, status, reason). Status covered is allowed only when that obligation is fully represented; any residual obligation makes the parent review non-executable.",
                 "Use only the allowed requirement roles and the corresponding properties schema in requirement_contract. Never invent role names such as cover_metadata, declaration_originality, authorization_statement, or other role names absent from that contract; use cover, declarations, document_structure, or a registered text role instead.",
                 "For an existing requirement, the request-only field _eligible_clause_ids lists the exact clause occurrences whose evidence may be reused. Do not use that existing_requirement_id for any other clause_id; never copy an existing requirement from a different evidence occurrence.",
                 "When reusing an existing requirement, do not combine unrelated clauses or repeated occurrences with different evidence. Every clause_id listed in that requirement must be exactly represented by its source text and cited evidence.",
                 "Do not author, copy, abbreviate, or recompute provenance/hash fields; an automatic native bridge binds the accepted response to the current invocation. Offline/manual merger inputs must carry the exact chunk provenance before merge.",
-                "runtime_context.confirmed_thesis_profile and runtime_context.code_fingerprint_sha256 are read-only inputs for this run. Do not alter, reinterpret, or replace confirmed metadata; if a required value is absent, mark the clause unresolved or requires_metadata.",
+                "runtime_context.confirmed_thesis_profile, runtime_context.runtime_inventory, and runtime_context.code_fingerprint_sha256 are read-only inputs for this run. Do not alter, reinterpret, or replace confirmed metadata; if a required value is absent or the runtime binding is not verified, mark the clause unresolved or requires_metadata. If verification needs a machine checker, use only a registered verification.checker_ids value; checks is explanation text, not proof that a checker exists.",
             ],
             "clauses": clause_packets,
             "evidence_context": evidence_context,
@@ -1444,6 +1515,14 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
                             "classification": {"enum": sorted(ALLOWED_REVIEW_CLASSIFICATIONS)},
                             "requirement_indexes": {"type": "array", "items": {"type": "integer", "minimum": 0}, "uniqueItems": True},
                             "reason": {"type": "string", "minLength": 1},
+                            "obligations": {"type": "array", "items": {
+                                "type": "object", "required": ["id", "status", "reason"],
+                                "properties": {
+                                    "id": {"type": "string", "minLength": 1},
+                                    "status": {"enum": ["covered", "requires_metadata", "requires_source_content", "unsupported_backend", "unverifiable", "unresolved"]},
+                                    "reason": {"type": "string", "minLength": 1}
+                                }, "additionalProperties": False
+                            }, "uniqueItems": True},
                             "normative_basis": {"enum": [
                                 "explicit_normative_text", "template_structure", "fixed_statement",
                                 "sample_content", "source_content", "external_duty", "insufficient"
@@ -1478,7 +1557,8 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
                         "type": "object", "required": ["mode", "checks"],
                         "properties": {
                             "mode": {"enum": ["static_docx", "word_render", "pdf_render", "manual", "external"]},
-                            "checks": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}
+                            "checks": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+                            "checker_ids": {"type": "array", "uniqueItems": True, "items": {"type": "string", "minLength": 1}}
                         }, "additionalProperties": False}
                 }, "additionalProperties": False
             }
@@ -1524,7 +1604,8 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
 def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dict[str, Any]],
                       response: dict[str, Any], evidence_ids: set[str], *,
                       expected_provenance: dict[str, Any] | None = None,
-                      require_provenance: bool = False) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+                      require_provenance: bool = False,
+                      contract_errors: list[str] | None = None) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
     """Validate and merge a complete LLM interpretation with deterministic evidence.
 
     The LLM owns semantic interpretation for an unseen template.  Deterministic
@@ -1537,6 +1618,8 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
     reported_conflicts = response.get("reported_conflicts") if isinstance(response, dict) else []
     unsupported_items = response.get("unsupported_items") if isinstance(response, dict) else []
     conflicts: list[dict[str, Any]] = list(reported_conflicts or []) if isinstance(reported_conflicts, list) else []
+    conflicts.extend({"type": "llm_contract", "reason": error}
+                     for error in (contract_errors or []))
     reviews = copy.deepcopy(response.get("clause_reviews") or []) if isinstance(response, dict) else []
     requirements = response.get("requirements") or [] if isinstance(response, dict) else []
     manual_empty_indexes: set[int] = set()
@@ -3136,6 +3219,7 @@ def analyse(args: argparse.Namespace) -> int:
         return 2
     clauses = split_clauses(evidence)
     structure_source_record: dict[str, Any] | None = None
+    runtime_anchor_inventory: dict[str, Any] | None = None
     if args.structure_docx:
         structure_source = args.structure_docx.resolve()
         structure_evidence = extract_document_evidence(structure_source)
@@ -3146,6 +3230,7 @@ def analyse(args: argparse.Namespace) -> int:
             "kind": "target_thesis_structure_docx", "path": str(structure_source),
             "bytes": structure_source.stat().st_size, "sha256": _sha256(structure_source),
         }
+        runtime_anchor_inventory = build_runtime_anchor_inventory(structure_source, structure_evidence)
     official_template_evidence: dict[str, Any] | None = None
     if args.official_template_evidence_docx:
         official_path = args.official_template_evidence_docx.resolve()
@@ -3174,6 +3259,20 @@ def analyse(args: argparse.Namespace) -> int:
     supplied_response = None
     expected_provenance = None
     runtime_context: dict[str, Any] = {}
+    if runtime_anchor_inventory is not None:
+        selected = runtime_anchor_inventory["selected"]
+        runtime_context["runtime_inventory"] = {
+            # A blocked inventory may retain the ambiguous candidate name for
+            # diagnostics, but it must not satisfy a required runtime input.
+            # Only a verified selection is a usable binding.
+            "declaration_anchor": (
+                selected["name"]
+                if runtime_anchor_inventory.get("status") == "verified"
+                else None
+            ),
+            "declaration_anchor_status": runtime_anchor_inventory["status"],
+            "anchor_inventory": copy.deepcopy(runtime_anchor_inventory),
+        }
     if args.case_id is not None:
         case_id = str(args.case_id).strip()
         if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", case_id):
@@ -3262,10 +3361,12 @@ def analyse(args: argparse.Namespace) -> int:
             spec["semantic_review_provenance_valid"] = False
         else:
             write_json(out / "llm-response.raw.json", response)
+            supplied_contract_errors = validate_host_review_response(response, llm_request)
             spec, conflicts, audit = merge_llm_primary(source, rule_spec, clauses, response,
                                                        {e["id"] for e in evidence["evidence"]},
                                                        expected_provenance=expected_provenance,
-                                                       require_provenance=args.strict_provenance)
+                                                       require_provenance=args.strict_provenance,
+                                                       contract_errors=supplied_contract_errors)
             questions = [{"id": f"Q{i+1:04d}", "question": "该条款证据不足，需要人工确认",
                           "clause_id": cid, "source_text": next((c["text"] for c in clauses if c["id"] == cid), ""),
                           "candidate_roles": ["unknown"],

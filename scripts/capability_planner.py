@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import fnmatch
+import hashlib
 import json
 import re
 import sys
@@ -15,6 +16,17 @@ from format_spec_validation import load_and_validate
 from applicability import evaluate_applicability
 from pipeline_finding import evidence, finding
 from role_registry import role_config, role_names
+from input_resolver import (
+    input_conflicts,
+    resolve_dotted,
+    resolve_input,
+    resolve_metadata,
+    input_value_type_valid,
+    value_present,
+)
+from format_contract_guards import (
+    cover_binding_errors, input_prerequisite_errors, verification_checker_errors,
+)
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_REGISTRY = ROOT / "resources" / "backend-capabilities.default.json"
@@ -167,6 +179,20 @@ def read_json(path: Path) -> Any:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def artifact_record(path: Path) -> dict[str, Any]:
+    """Record the exact artifact consumed by this diagnostic stage."""
+    resolved = path.resolve()
+    digest = hashlib.sha256()
+    with resolved.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return {
+        "path": str(resolved),
+        "bytes": resolved.stat().st_size,
+        "sha256": digest.hexdigest(),
+    }
+
+
 def write_json(path: Path, value: Any) -> None:
     atomic_write_text(
         path,
@@ -184,67 +210,42 @@ def leaf_paths(value: Any, prefix: str = "") -> list[str]:
 
 
 def _inventory_has(inventory: dict[str, Any] | None, dotted: str) -> bool:
-    current: Any = inventory
-    for part in dotted.split("."):
-        if not isinstance(current, dict) or part not in current:
-            return False
-        current = current[part]
-    return bool(current)
+    return value_present(resolve_dotted(inventory, dotted))
 
 
 def _contract_input_has(key: str, source_inventory: dict[str, Any] | None,
-                        template_profile: dict[str, Any] | None) -> bool:
+                        template_profile: dict[str, Any] | None,
+                        metadata: dict[str, Any] | None = None,
+                        runtime_inventory: dict[str, Any] | None = None) -> bool:
     """Resolve a declarative prerequisite against the inputs supplied to the run."""
-    if key.startswith("source_inventory."):
-        return _inventory_has(source_inventory, key.removeprefix("source_inventory."))
-    if key.startswith("template_profile."):
-        return _inventory_has(template_profile, key.removeprefix("template_profile."))
-    if key.startswith("thesis_profile."):
-        return (_inventory_has(source_inventory, key)
-                or _inventory_has(source_inventory, key.removeprefix("thesis_profile.")))
-    if key.startswith("runtime."):
-        return _inventory_has(source_inventory, key)
-    return False
+    return resolve_input(
+        key,
+        source_inventory=source_inventory,
+        template_profile=template_profile,
+        metadata=metadata,
+        runtime_inventory=runtime_inventory,
+    )[0]
+
+
+def _contract_input_type_error(
+        key: str, source_inventory: dict[str, Any] | None,
+        template_profile: dict[str, Any] | None, metadata: dict[str, Any] | None,
+        runtime_inventory: dict[str, Any] | None) -> str | None:
+    present, namespace, value = resolve_input(
+        key,
+        source_inventory=source_inventory,
+        template_profile=template_profile,
+        metadata=metadata,
+        runtime_inventory=runtime_inventory,
+    )
+    if present and not input_value_type_valid(key, value):
+        return f"{key} supplied by {namespace} has an invalid type ({type(value).__name__})"
+    return None
 
 
 def _metadata_value(metadata: dict[str, Any] | None, key: str) -> Any:
-    def present(value: Any) -> bool:
-        if value is None:
-            return False
-        if isinstance(value, str):
-            return bool(value.strip())
-        if isinstance(value, (list, tuple, dict, set)):
-            return bool(value)
-        return bool(str(value).strip())
-
-    if not isinstance(metadata, dict):
-        return None
-    def resolve(container: dict[str, Any], dotted: str) -> Any:
-        if dotted == "co_supervisors.enterprise":
-            values = container.get("co_supervisors")
-            if isinstance(values, list):
-                matches = [item for item in values if isinstance(item, dict)
-                           and item.get("kind") == "enterprise" and present(item.get("name"))]
-                return matches or None
-            return None
-        current: Any = container
-        for part in dotted.split("."):
-            if not isinstance(current, dict) or part not in current:
-                return None
-            current = current[part]
-        return current
-
-    value = resolve(metadata, key)
-    if present(value):
-        return value
-    # Accept the canonical nested profile used by the format-spec contract.
-    for container_key in ("cover_metadata", "metadata"):
-        container = metadata.get(container_key)
-        if isinstance(container, dict):
-            value = resolve(container, key)
-            if present(value):
-                return value
-    return None
+    value = resolve_metadata(metadata, key)
+    return value if value_present(value) else None
 
 
 def _normalize_metadata_label(value: Any) -> str:
@@ -378,6 +379,27 @@ def _template_fixed_satisfies_clause(
     return True, ["template_fixed.school_code"]
 
 
+def _clause_source_binding(clause: dict[str, Any]) -> dict[str, Any]:
+    """Create bounded provenance for the source evidence used by a clause.
+
+    This is evidence binding only.  It never upgrades a semantic review or
+    claims that the final DOCX has been checked.
+    """
+    text = str(clause.get("source_text_full") or clause.get("text") or "")
+    context = clause.get("evidence_context") if isinstance(clause.get("evidence_context"), dict) else {}
+    locator = context.get("xml_locator") or context.get("location") or clause.get("location") or {}
+    complete = bool(text.strip()) and bool(locator or clause.get("evidence_ids"))
+    return {
+        "evidence_ids": [str(value) for value in clause.get("evidence_ids", []) if value is not None],
+        "source_kind": clause.get("source_kind"),
+        "complete_extraction": complete,
+        "content_sha256": hashlib.sha256(text.encode("utf-8")).hexdigest() if text else None,
+        "locator": locator,
+        "input_status": "bound_unverified" if complete else "missing_or_incomplete",
+        "verification_status": "not_verified",
+    }
+
+
 def classify_property(role: str, path: str, registry: dict[str, Any],
                       source_inventory: dict[str, Any] | None,
                       template_profile: dict[str, Any] | None) -> dict[str, Any]:
@@ -430,6 +452,9 @@ def _requirement_finding(item: dict[str, Any], mode: str) -> dict[str, Any] | No
         f"Requirement {item['requirement_id']} ({item['role']}) is not execution-ready: {category}.",
         [evidence("requirement_id", item["requirement_id"]), evidence("role", item["role"]),
          evidence("category", category),
+         evidence("missing_declared_inputs", item.get("missing_declared_inputs", [])),
+         evidence("input_type_errors", item.get("input_type_errors", [])),
+         evidence("input_conflicts", item.get("input_conflicts", [])),
          evidence("property_paths", [p["path"] for p in item["properties"] if p["disposition"] == disposition])],
     )
 
@@ -440,7 +465,8 @@ def _requirement_category(item: dict[str, Any]) -> str:
     if disposition == "supported":
         return "supported"
     if disposition == "unknown":
-        if item.get("missing_declared_inputs"):
+        if (item.get("missing_declared_inputs") or item.get("input_conflicts")
+                or item.get("input_type_errors")):
             return "input_prerequisite"
         decisive = [prop for prop in item["properties"] if prop["disposition"] == "unknown"]
         if decisive and all(prop.get("missing_inputs") for prop in decisive):
@@ -541,10 +567,24 @@ def plan_capabilities(spec: dict[str, Any], registry: dict[str, Any], compliance
                       template_profile: dict[str, Any] | None = None,
                       extracted_clauses: list[dict[str, Any]] | None = None,
                       metadata: dict[str, Any] | None = None,
-                      template_fixed_values: dict[str, Any] | None = None) -> dict[str, Any]:
+                      template_fixed_values: dict[str, Any] | None = None,
+                      runtime_inventory: dict[str, Any] | None = None) -> dict[str, Any]:
     requirements = []
     findings = []
     by_id: dict[str, dict[str, Any]] = {}
+    # The planner is also called directly by tests and by recovery tooling,
+    # so it must not rely on the outer format-spec loader having run first.
+    # Reject deterministic contract violations here as well, without trying
+    # to repair or reinterpret the model's mapping.
+    for error in (
+        *cover_binding_errors(spec), *input_prerequisite_errors(spec),
+        *verification_checker_errors(spec),
+    ):
+        findings.append(finding(
+            "capability.contract_binding_error", "capability_preflight",
+            "error", compliance_mode == "full", error,
+            [evidence("source", "format_contract_guards")],
+        ))
     for index, requirement in enumerate(spec.get("requirements", []), 1):
         rid = requirement.get("id") or f"requirement-{index}"
         role = requirement.get("role") or ""
@@ -574,7 +614,24 @@ def plan_capabilities(spec: dict[str, Any], registry: dict[str, Any], compliance
         missing_declared_inputs = [item.get("key") for item in declared_prerequisites
                                    if isinstance(item, dict) and item.get("required") is True
                                    and not _contract_input_has(str(item.get("key", "")), source_inventory,
-                                                               template_profile)]
+                                                               template_profile, metadata,
+                                                               runtime_inventory)]
+        input_type_errors = [error for item in declared_prerequisites
+                             if isinstance(item, dict) and item.get("required") is True
+                             for error in [_contract_input_type_error(
+                                 str(item.get("key", "")), source_inventory,
+                                 template_profile, metadata, runtime_inventory)]
+                             if error]
+        prerequisite_conflicts = [conflict
+                                  for item in declared_prerequisites
+                                  if isinstance(item, dict) and item.get("required") is True
+                                  for conflict in input_conflicts(
+                                      str(item.get("key", "")),
+                                      source_inventory=source_inventory,
+                                      template_profile=template_profile,
+                                      metadata=metadata,
+                                      runtime_inventory=runtime_inventory,
+                                  )]
         if applicability.get("result") == "false":
             disposition = "supported"
         elif applicability.get("result") == "unknown":
@@ -582,11 +639,14 @@ def plan_capabilities(spec: dict[str, Any], registry: dict[str, Any], compliance
         else:
             dispositions = [item["disposition"] for item in properties] or ["unknown"]
             disposition = max(dispositions, key=DISPOSITION_PRIORITY.get)
-            if disposition == "supported" and missing_declared_inputs:
+            if disposition == "supported" and (
+                    missing_declared_inputs or input_type_errors or prerequisite_conflicts):
                 disposition = "unknown"
         item = {"requirement_id": rid, "role": role, "clause_ids": requirement.get("clause_ids", []),
                 "disposition": disposition, "properties": properties, "findings": [],
                 "missing_declared_inputs": missing_declared_inputs,
+                "input_type_errors": input_type_errors,
+                "input_conflicts": prerequisite_conflicts,
                 "verification": requirement.get("verification"),
                 "applicability": requirement.get("applicability"),
                 "applicability_evaluation": applicability}
@@ -648,10 +708,12 @@ def plan_capabilities(spec: dict[str, Any], registry: dict[str, Any], compliance
         profile_fixed_values = ((template_profile or {}).get("fixed_values")
                                 if isinstance(template_profile, dict) else None)
         effective_fixed_values = profile_fixed_values or template_fixed_values
+        clause_source = next((item for item in (extracted_clauses or [])
+                              if isinstance(item, dict)
+                              and str(item.get("id")) == str(record.get("clause_id"))), record)
+        source_binding = _clause_source_binding(clause_source)
         if category == "input_prerequisite" and status in {
                 "requires_metadata", "requires_source_content"}:
-            clause_source = next((item for item in (extracted_clauses or [])
-                                  if str(item.get("id")) == str(record.get("clause_id"))), record)
             metadata_satisfied, metadata_fields = _metadata_satisfies_clause(clause_source, metadata)
             if not metadata_satisfied and status == "requires_source_content":
                 metadata_satisfied, metadata_fields = _semantic_metadata_satisfies_clause(
@@ -665,8 +727,6 @@ def plan_capabilities(spec: dict[str, Any], registry: dict[str, Any], compliance
                 reason = "模板字段已由输入元数据合同提供，但指定输出位置尚未逐条验证：" + ", ".join(metadata_fields)
         if category == "input_prerequisite" and status in {
                 "requires_metadata", "requires_source_content"}:
-            clause_source = next((item for item in (extracted_clauses or [])
-                                  if str(item.get("id")) == str(record.get("clause_id"))), record)
             template_fixed_satisfied, template_fixed_fields = _template_fixed_satisfies_clause(
                 clause_source, effective_fixed_values)
             if template_fixed_satisfied:
@@ -682,6 +742,19 @@ def plan_capabilities(spec: dict[str, Any], registry: dict[str, Any], compliance
             explicit_clause_category = True
         if template_fixed_satisfied:
             explicit_clause_category = True
+        if category == "input_prerequisite" and status == "requires_source_content":
+            input_diagnosis = (
+                "source_bound_unverified" if source_binding.get("complete_extraction")
+                else "source_content_missing_or_incomplete"
+            )
+        elif metadata_satisfied or template_fixed_satisfied:
+            input_diagnosis = "provided_unverified"
+        elif status == "requires_runtime":
+            input_diagnosis = "runtime_evidence_missing"
+        elif category == "input_prerequisite":
+            input_diagnosis = "source_or_metadata_missing"
+        else:
+            input_diagnosis = "not_applicable"
         clause = {"clause_id": record.get("clause_id"), "requirement_ids": record.get("requirement_ids", []),
                   "evidence_ids": record.get("evidence_ids", []), "scope": record.get("scope"),
                   "source_status": status, "reason": reason, "disposition": disposition,
@@ -692,6 +765,8 @@ def plan_capabilities(spec: dict[str, Any], registry: dict[str, Any], compliance
                                      else ("unbound" if category == "input_prerequisite" else "not_applicable")),
                   "output_status": ("unverified" if (metadata_satisfied or template_fixed_satisfied)
                                     else ("pending_input" if category == "input_prerequisite" else "not_applicable")),
+                  "input_diagnosis": input_diagnosis,
+                  "source_binding": source_binding,
                   "category_source": "clause" if explicit_clause_category else "requirement",
                   "findings": [],
                   **({"metadata_fields": metadata_fields} if metadata_fields else {}),
@@ -762,7 +837,9 @@ def plan_capabilities(spec: dict[str, Any], registry: dict[str, Any], compliance
             "status": "blocked" if blocking_findings else ("gaps_present" if unique_gaps else "ready"),
         "execution_ready": not blocking_findings,
         "inputs": {"source_inventory_provided": source_inventory is not None,
-                   "template_profile_provided": template_profile is not None},
+                   "template_profile_provided": template_profile is not None,
+                   "metadata_provided": metadata is not None,
+                   "runtime_inventory_provided": runtime_inventory is not None},
         "summary": {"requirements": len(requirements), "clauses": len(clauses),
                     "extracted_clauses": len(expected_clause_ids),
                     "reviewed_extracted_clauses": len(reviewed_clause_ids & expected_clause_ids),
@@ -801,6 +878,8 @@ def main(argv: list[str]) -> int:
                         help="extracted requirement-clauses.json used to verify full review coverage")
     parser.add_argument("--metadata", type=Path,
                         help="normalized thesis metadata used to satisfy explicit metadata-only cover fields")
+    parser.add_argument("--runtime-inventory", type=Path,
+                        help="deterministic runtime/source anchor inventory for runtime prerequisites")
     parser.add_argument("--template-fixed-values", type=Path,
                         help="validated school/template fixed-value contract")
     parser.add_argument("--template-school",
@@ -825,12 +904,29 @@ def main(argv: list[str]) -> int:
         fixed_contract.get("schools", {}).get(args.template_school, {})
         if fixed_contract and args.template_school else None
     )
-    report = plan_capabilities(read_json(args.format_spec), registry, args.compliance_mode,
+    format_spec = read_json(args.format_spec)
+    report = plan_capabilities(format_spec, registry, args.compliance_mode,
                                read_json(args.source_inventory) if args.source_inventory else None,
                                read_json(args.template_profile) if args.template_profile else None,
                                read_json(args.clauses) if args.clauses else None,
                                read_json(args.metadata) if args.metadata else None,
-                               selected_fixed_values)
+                               selected_fixed_values,
+                               read_json(args.runtime_inventory) if args.runtime_inventory else None)
+    # Keep the diagnostic self-describing when it is copied out of a work
+    # directory.  The manifest remains the stage authority, but this report
+    # must not be mistaken for a preparation-stage spec or another run's
+    # capability result.
+    report["provenance"] = {
+        "stage": "capability_preflight",
+        "run_id": format_spec.get("run_id"),
+        "format_spec": artifact_record(args.format_spec),
+        "clauses": artifact_record(args.clauses) if args.clauses else None,
+        "registry": artifact_record(args.registry),
+        "metadata": artifact_record(args.metadata) if args.metadata else None,
+        "runtime_inventory": (
+            artifact_record(args.runtime_inventory) if args.runtime_inventory else None
+        ),
+    }
     write_json(args.out, report)
     print(json.dumps({"status": report["status"], "report": str(args.out)}, ensure_ascii=False))
     return 3 if not report["execution_ready"] else 0

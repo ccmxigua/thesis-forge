@@ -1,0 +1,224 @@
+from __future__ import annotations
+
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+
+from format_spec_validation import load_and_validate  # noqa: E402
+from host_review_contract import validate_response  # noqa: E402
+from apply_format_spec import compile_cover_contract  # noqa: E402
+import requirements_engine as engine  # noqa: E402
+
+
+def _request(clause_text: str, evidence_id: str = "E1") -> dict:
+    clause = {"id": "C1", "text": clause_text, "evidence_ids": [evidence_id]}
+    evidence = {"evidence": [{"id": evidence_id, "text": clause_text, "kind": "paragraph"}]}
+    return engine.build_llm_request([], [clause], evidence, {}, "full")
+
+
+class RootCauseGuardTests(unittest.TestCase):
+    def test_partial_chinese_abstract_cannot_claim_full_coverage(self) -> None:
+        request = _request("中文摘要一般300～1000字，使用第三人称，包含目的、方法、成果、结论和创新性，不加评论。")
+        response = {
+            "contract_version": "2.1",
+            "requirements": [{
+                "role": "content_constraints",
+                "properties": {"abstract_zh": {"required": True, "max_chars": 1000}},
+                "clause_ids": ["C1"], "evidence_ids": ["E1"],
+                "confidence": 0.9, "reason": "摘要存在且有上限",
+            }],
+            "clause_reviews": [{
+                "clause_id": "C1", "classification": "executable",
+                "requirement_indexes": [0], "reason": "已覆盖",
+            }],
+            "unsupported_items": [], "reported_conflicts": [],
+        }
+        errors = validate_response(response, request)
+        self.assertTrue(any("partial_clause_coverage" in error for error in errors), errors)
+        self.assertTrue(any("abstract_zh.min_chars" in error for error in errors), errors)
+
+    def test_ambiguous_english_translation_cannot_be_executable(self) -> None:
+        request = _request("The following English is not correct. The Chinese abstract should be 300 to 1,000 words.")
+        response = {
+            "contract_version": "2.1",
+            "requirements": [{
+                "role": "content_constraints",
+                "properties": {"abstract_en": {"required": True, "min_words": 300, "max_words": 1000}},
+                "clause_ids": ["C1"], "evidence_ids": ["E1"],
+                "confidence": 0.9, "reason": "英文摘要限制",
+            }],
+            "clause_reviews": [{
+                "clause_id": "C1", "classification": "executable",
+                "requirement_indexes": [0], "reason": "已覆盖",
+            }],
+            "unsupported_items": [], "reported_conflicts": [],
+        }
+        errors = validate_response(response, request)
+        self.assertTrue(any("abstract_target_or_translation_ambiguous" in error for error in errors), errors)
+
+    def test_english_keyword_chinese_character_metric_must_be_explicit(self) -> None:
+        request = _request("English keywords: each item is up to 7 Chinese characters.")
+        response = {
+            "contract_version": "2.1",
+            "requirements": [{
+                "role": "content_constraints",
+                "properties": {"keywords_en": {"max_item_chars": 7, "item_length_metric": "words"}},
+                "clause_ids": ["C1"], "evidence_ids": ["E1"],
+                "confidence": 0.9, "reason": "保留原文计量对象",
+            }],
+            "clause_reviews": [{
+                "clause_id": "C1", "classification": "executable",
+                "requirement_indexes": [0], "reason": "已覆盖",
+            }],
+            "unsupported_items": [], "reported_conflicts": [],
+        }
+        errors = validate_response(response, request)
+        self.assertTrue(any("item_length_metric:cjk_characters" in error for error in errors), errors)
+
+    def test_approval_fields_cannot_be_mapped_to_classification_or_completion(self) -> None:
+        request = _request("非公开学位论文审批表编号和批准日期")
+        response = {
+            "contract_version": "2.1",
+            "requirements": [{
+                "role": "cover",
+                "properties": {
+                    "institution": "Example",
+                    "fields": [
+                        {"id": "classification_number", "label": "审批表编号",
+                         "value_from": "thesis_profile.cover_metadata.classification_number",
+                         "display_policy": "if_present", "order": 1},
+                        {"id": "completion_date", "label": "批准日期",
+                         "value_from": "thesis_profile.cover_metadata.completion_date",
+                         "display_policy": "if_present", "order": 2},
+                    ],
+                },
+                "clause_ids": ["C1"], "evidence_ids": ["E1"],
+                "confidence": 0.9, "reason": "表格字段",
+            }],
+            "clause_reviews": [{
+                "clause_id": "C1", "classification": "executable",
+                "requirement_indexes": [0], "reason": "已覆盖",
+            }],
+            "unsupported_items": [], "reported_conflicts": [],
+        }
+        errors = validate_response(response, request)
+        self.assertTrue(any("must bind to 'approval_number'" in error for error in errors), errors)
+        self.assertTrue(any("must bind to 'approval_date'" in error for error in errors), errors)
+
+    def test_administrative_labels_cannot_stay_in_ordinary_cover(self) -> None:
+        request = _request("非公开学位论文保密期限、审批表编号和批准日期")
+        response = {
+            "contract_version": "2.1",
+            "requirements": [{
+                "role": "cover",
+                "properties": {
+                    "institution": "Example",
+                    "fields": [
+                        {"id": "approval_number", "label": "审批表编号",
+                         "value_from": "thesis_profile.cover_metadata.approval_number",
+                         "display_policy": "if_present", "order": 1},
+                        {"id": "embargo_until", "label": "保密期限",
+                         "value_from": "thesis_profile.cover_metadata.embargo_until",
+                         "display_policy": "if_present", "order": 2},
+                    ],
+                    "non_public_administration": {
+                        "applicability": {"status": "conditional", "conditions": [
+                            {"fact": "thesis_profile.security_level", "operator": "in",
+                             "value": ["restricted", "classified"]},
+                        ]},
+                        "fields": [{"id": "embargo_until", "label": "保密期限",
+                                     "value_from": "thesis_profile.cover_metadata.embargo_until",
+                                     "display_policy": "if_present", "order": 1}],
+                        "public_policy": "blank", "source_region": "official_admin_table",
+                    },
+                },
+                "clause_ids": ["C1"], "evidence_ids": ["E1"],
+                "confidence": 0.9, "reason": "表格字段",
+            }],
+            "clause_reviews": [{
+                "clause_id": "C1", "classification": "executable",
+                "requirement_indexes": [0], "reason": "已覆盖",
+            }],
+            "unsupported_items": [], "reported_conflicts": [],
+        }
+        errors = validate_response(response, request)
+        self.assertTrue(any("ordinary cover.fields" in error for error in errors), errors)
+        self.assertTrue(any("embargo range" in error for error in errors), errors)
+
+    def test_unknown_input_key_is_rejected_by_format_loader(self) -> None:
+        spec = {
+            "schema_version": "1.0",
+            "requirements": [{
+                "id": "R1", "role": "body_text", "properties": {"font": {"size_pt": 12}},
+                "clause_ids": ["C1"], "input_prerequisites": [{
+                    "kind": "runtime", "key": "runtime.model_guess", "required": True,
+                    "reason": "not a registered runtime producer",
+                }],
+            }],
+        }
+        errors = load_and_validate(spec, ROOT / "schema" / "format-spec.schema.json")
+        self.assertTrue(any("unregistered input path" in error for error in errors), errors)
+
+    def test_unknown_checker_id_is_rejected_but_explanation_text_remains_free_form(self) -> None:
+        spec = {
+            "schema_version": "1.0",
+            "requirements": [{
+                "id": "R1", "role": "body_text", "properties": {"font": {"size_pt": 12}},
+                "clause_ids": ["C1"],
+                "verification": {
+                    "mode": "static_docx", "checks": ["学校要求的自然语言检查说明"],
+                    "checker_ids": ["docx.does_not_exist"],
+                },
+            }],
+        }
+        errors = load_and_validate(spec, ROOT / "schema" / "format-spec.schema.json")
+        self.assertTrue(any("unregistered checker id" in error for error in errors), errors)
+
+    def test_runtime_anchor_inventory_requires_one_unique_source_match(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "target.docx"
+            path.write_bytes(b"fixture")
+            none = engine.build_runtime_anchor_inventory(path, {"evidence": []})
+            one = engine.build_runtime_anchor_inventory(path, {"evidence": [{"id": "E1", "text": "摘要"}]})
+            two = engine.build_runtime_anchor_inventory(path, {"evidence": [
+                {"id": "E1", "text": "摘要"}, {"id": "E2", "text": "摘要"},
+            ]})
+        self.assertEqual(none["status"], "blocked")
+        self.assertEqual(one["status"], "verified")
+        self.assertEqual(one["selected"]["name"], "abstract_title_zh")
+        self.assertEqual(two["status"], "blocked")
+
+    def test_public_non_public_admin_region_stays_blank_without_placeholder(self) -> None:
+        cover = {
+            "institution": "Example",
+            "fields": [{"id": "title_zh", "label": "论文题目",
+                         "value_from": "thesis_profile.cover_metadata.title_zh",
+                         "display_policy": "required", "order": 1}],
+            "non_public_administration": {
+                "applicability": {"status": "conditional", "conditions": [
+                    {"fact": "thesis_profile.security_level", "operator": "in",
+                     "value": ["restricted", "classified"]},
+                ]},
+                "fields": [{"id": "approval_number", "label": "审批表编号",
+                             "value_from": "thesis_profile.cover_metadata.approval_number",
+                             "display_policy": "blank_when_public", "order": 1}],
+                "public_policy": "blank", "source_region": "official_admin_table",
+            },
+        }
+        profile = {"security_level": "public", "cover_metadata": {
+            "trust": {"source": "user_confirmed", "confirmed": True},
+            "title_zh": "测试", "author_name": "作者", "title_en": "Test",
+            "student_id": "1", "supervisor_name": "导师", "completion_date": "2026-01",
+        }}
+        contract = compile_cover_contract(cover, profile)
+        administration = contract["non_public_administration"]
+        self.assertEqual(administration["status"], "blank_public")
+        self.assertEqual(administration["fields"][0]["value_kind"], "omitted")
+
+
+if __name__ == "__main__":
+    unittest.main()

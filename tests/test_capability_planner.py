@@ -216,6 +216,80 @@ class CapabilityPlannerTest(unittest.TestCase):
         self.assertEqual(present["requirements"][0]["disposition"], "supported")
         self.assertEqual(present["requirements"][0]["category"], "supported")
 
+    def test_metadata_only_profile_satisfies_declared_prerequisite(self) -> None:
+        spec = {"requirements": [{
+            "id": "R-profile", "role": "body_text",
+            "properties": {"font": {"size_pt": 12}}, "clause_ids": ["C-profile"],
+            "input_prerequisites": [{
+                "kind": "metadata", "key": "thesis_profile.degree_level",
+                "required": True, "reason": "degree-specific rule"
+            }],
+        }], "clause_compliance": [{
+            "clause_id": "C-profile", "scope": "docx", "status": "pending_execution",
+            "requirement_ids": ["R-profile"], "evidence_ids": ["E-profile"],
+        }]}
+        report = self.planner.plan_capabilities(
+            spec, self.registry, "full", metadata={"degree_level": "doctor"})
+        item = report["requirements"][0]
+        self.assertEqual(item["missing_declared_inputs"], [])
+        self.assertEqual(item["category"], "supported")
+        self.assertTrue(report["execution_ready"])
+        self.assertTrue(report["inputs"]["metadata_provided"])
+
+    def test_runtime_anchor_inventory_satisfies_runtime_prerequisite(self) -> None:
+        spec = {"requirements": [{
+            "id": "R-anchor", "role": "declarations",
+            "properties": {"before_role": "abstract_title_zh", "items": [{
+                "id": "authorization", "signature_placeholders": []
+            }]}, "clause_ids": ["C-anchor"],
+            "input_prerequisites": [{
+                "kind": "runtime", "key": "runtime.declaration_anchor",
+                "required": True, "reason": "anchor must be observed"
+            }],
+        }], "clause_compliance": [{
+            "clause_id": "C-anchor", "scope": "docx", "status": "pending_execution",
+            "requirement_ids": ["R-anchor"], "evidence_ids": ["E-anchor"],
+        }]}
+        report = self.planner.plan_capabilities(
+            spec, self.registry, "full",
+            runtime_inventory={"declaration_anchor": "abstract_title_zh"})
+        self.assertEqual(report["requirements"][0]["missing_declared_inputs"], [])
+        self.assertEqual(report["requirements"][0]["category"], "supported")
+
+    def test_conflicting_profile_namespaces_block_instead_of_picking_one(self) -> None:
+        spec = {"requirements": [{
+            "id": "R-conflict", "role": "body_text",
+            "properties": {"font": {"size_pt": 12}}, "clause_ids": ["C-conflict"],
+            "input_prerequisites": [{
+                "kind": "metadata", "key": "thesis_profile.cover_metadata.title_zh",
+                "required": True, "reason": "title required"
+            }],
+        }], "clause_compliance": [{
+            "clause_id": "C-conflict", "scope": "docx", "status": "pending_execution",
+            "requirement_ids": ["R-conflict"], "evidence_ids": ["E-conflict"],
+        }]}
+        report = self.planner.plan_capabilities(
+            spec, self.registry, "full",
+            metadata={"cover_metadata": {"title_zh": "甲"}},
+            source_inventory={"thesis_profile": {"cover_metadata": {"title_zh": "乙"}}})
+        item = report["requirements"][0]
+        self.assertEqual(item["category"], "input_prerequisite")
+        self.assertEqual(len(item["input_conflicts"]), 1)
+        self.assertFalse(report["execution_ready"])
+
+    def test_zero_is_a_supplied_inventory_value(self) -> None:
+        registry = {"schema_version": "1.0", "backend": "test", "capabilities": [{
+            "id": "figures", "role_pattern": "^objects$",
+            "property_patterns": ["keep_figure_with_caption"], "disposition": "supported",
+            "requires_source_inventory": ["inventory.figures"],
+        }]}
+        spec = {"requirements": [{"id": "R-zero", "role": "objects",
+                                  "properties": {"keep_figure_with_caption": True}}],
+                "clause_compliance": []}
+        report = self.planner.plan_capabilities(
+            spec, registry, source_inventory={"inventory": {"figures": 0}})
+        self.assertEqual(report["requirements"][0]["disposition"], "supported")
+
     def test_content_instance_missing_inventory_is_input_gap_not_backend_gap(self) -> None:
         spec = {"requirements": [{
             "id": "R00677", "role": "heading_publications",

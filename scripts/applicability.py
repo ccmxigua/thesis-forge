@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from typing import Any
 
+from input_resolver import value_present
+
 
 def _resolve(container: Any, dotted: str) -> tuple[bool, Any]:
     current = container
@@ -63,7 +65,11 @@ def evaluate_applicability(
             if not exists:
                 return {"status": "conditional", "result": "unknown", "evaluated": evaluated,
                         "reason": f"condition_{index}_fact_missing"}
-            result = exists and actual not in (None, "", [], {}, False)
+            # Presence is about an explicitly supplied typed value, not
+            # Python truthiness: False and 0 are valid observed values. An
+            # empty string/container remains absent by the shared input
+            # contract.
+            result = value_present(actual)
             if operator == "absent":
                 result = not result
         elif not exists:

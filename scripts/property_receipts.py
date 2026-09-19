@@ -32,6 +32,33 @@ def satisfies(property_path: str, actual: Any, expected: Any) -> bool:
     return equal(actual, expected)
 
 
+def expected_receipt_ids(
+    requirements: list[dict[str, Any]],
+    *,
+    applicable_roles: set[str] | None = None,
+) -> set[str]:
+    """Derive the exact receipt key set from the executable requirement IR."""
+    result: set[str] = set()
+    for requirement in requirements:
+        requirement_id = str(requirement.get("id") or "")
+        role = str(requirement.get("role") or "")
+        properties = requirement.get("properties")
+        if not requirement_id or not role or not isinstance(properties, dict):
+            continue
+        expected = flatten(properties)
+        if not expected and requirement.get("field_instance_ids"):
+            continue
+        if applicable_roles is not None and role not in applicable_roles:
+            continue
+        if not expected:
+            expected = {"__requirement__": True}
+        result.update(
+            f"PR-{requirement_id}-{index:04d}"
+            for index, _item in enumerate(sorted(expected.items()), start=1)
+        )
+    return result
+
+
 def build_property_receipts(
     requirements: list[dict[str, Any]],
     mappings: dict[str, dict[str, Any]],
@@ -108,15 +135,61 @@ def build_property_receipts(
     return receipts
 
 
-def audit_property_receipts(receipts: list[dict[str, Any]]) -> dict[str, Any]:
+def audit_property_receipts(
+    receipts: list[dict[str, Any]],
+    *,
+    expected_receipt_ids: set[str] | None = None,
+) -> dict[str, Any]:
     failures = [item for item in receipts if item.get("status") != "verified"]
+    actual_ids = {
+        str(item.get("receipt_id"))
+        for item in receipts
+        if isinstance(item, dict) and item.get("receipt_id")
+    }
+    actual_id_list = [
+        str(item.get("receipt_id"))
+        for item in receipts
+        if isinstance(item, dict) and item.get("receipt_id")
+    ]
+    duplicate_ids = sorted({
+        receipt_id for receipt_id in actual_id_list
+        if actual_id_list.count(receipt_id) > 1
+    })
+    missing_ids = sorted(
+        (expected_receipt_ids or set()) - actual_ids
+    ) if expected_receipt_ids is not None else []
+    unexpected_ids = sorted(
+        actual_ids - expected_receipt_ids
+    ) if expected_receipt_ids is not None else []
+    failures.extend({
+        "receipt_id": receipt_id,
+        "status": "missing",
+        "failure_type": "expected_receipt_missing",
+    } for receipt_id in missing_ids)
+    failures.extend({
+        "receipt_id": receipt_id,
+        "status": "unexpected",
+        "failure_type": "unexpected_receipt",
+    } for receipt_id in unexpected_ids)
+    failures.extend({
+        "receipt_id": receipt_id,
+        "status": "duplicate",
+        "failure_type": "duplicate_receipt",
+    } for receipt_id in duplicate_ids)
     return {
         "schema_version": "1.0",
-        "valid": not failures,
+        "valid": not failures and not missing_ids,
         "receipt_count": len(receipts),
         "verified_count": sum(item.get("status") == "verified" for item in receipts),
         "failed_count": sum(item.get("status") == "failed" for item in receipts),
         "unverified_count": sum(item.get("status") == "unverified" for item in receipts),
+        "missing_count": len(missing_ids),
+        "unexpected_count": len(unexpected_ids),
+        "duplicate_count": len(duplicate_ids),
+        "expected_receipt_ids": (
+            sorted(expected_receipt_ids)
+            if expected_receipt_ids is not None else None
+        ),
         "failures": failures,
         "receipts": receipts,
     }

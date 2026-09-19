@@ -93,12 +93,14 @@ unknown or currently unsupported host stops with an actionable error instead
 of calling an installed program from another environment.
 
 The Codex adapter uses an ephemeral, read-only `codex exec --json` invocation
-per chunk, validates the JSONL terminal event and final message, then applies
-the same provenance, contract, merge, and deterministic DOCX gates as the
-packet workflow.  It does not read OpenClaw sessions or accept OpenClaw route
-parameters.  The Codex CLI's provider/model identity is not inferred from the
-binary name; when it is not exposed, the run audit records route visibility as
-`unobservable`.
+per chunk, validates the JSONL terminal event and binds the terminal message to
+the captured invocation, then applies the same contract, merge, and
+deterministic DOCX gates as the packet workflow.  The automatic bridge stores
+the raw response and binds the current request provenance itself; the model is
+not asked to copy long hashes.  It does not read OpenClaw sessions or accept
+OpenClaw route parameters.  The Codex CLI's provider/model identity is not
+inferred from the binary name; when it is not exposed, the run audit records
+route visibility as `unobservable`.
 
 For a Codex host, use the current Codex CLI and its configured native account:
 
@@ -180,9 +182,12 @@ contract to the filename in `batch.response_filename`, normally:
 build/host-review/review/requirements/llm-response-chunk-0001.json
 ```
 
-Each response must satisfy the request's `response_schema` and must:
+Each manually supplied response must satisfy the request's `response_schema`
+and must:
 
-1. copy that chunk's `provenance` object unchanged;
+1. include that chunk's `provenance` object unchanged; automatic native
+   bridge responses are bound by the bridge instead and retain the pre-binding
+   raw response for audit;
 2. include `contract_version: "2.1"`;
 3. include every supplied clause exactly once in `clause_reviews`;
 4. use a non-empty `reason` on every clause review and requirement;

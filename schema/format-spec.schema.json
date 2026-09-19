@@ -919,7 +919,7 @@
           "items": {
             "type": "string"
           },
-          "description": "Clauses understood but not executable by this backend. They are preserved for audit and do not by themselves block supported requirements."
+          "description": "Clauses understood but not executable by this backend. They are preserved for audit; supported_subset may continue with an explicit limitation, while full compliance must fail closed."
         }
       },
       "additionalProperties": false

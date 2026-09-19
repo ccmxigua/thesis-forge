@@ -2029,6 +2029,18 @@ b&=2\notag
             self.assertEqual(report["unsupported_items"], spec["completeness"]["unsupported_items"])
             self.assertTrue((td / "formatted.docx").exists())
 
+    def test_unsupported_items_block_full_format_spec_but_not_supported_subset(self) -> None:
+        spec = {
+            "status": "semantic_resolved",
+            "completeness": {"unsupported_items": ["实体防伪纸张"]},
+            "clause_compliance": [],
+        }
+        self.assertIn("unsupported_items", apply_format_spec.format_spec_blockers(spec, "full"))
+        self.assertNotIn(
+            "unsupported_items",
+            apply_format_spec.format_spec_blockers(spec, "supported_subset"),
+        )
+
     def test_llm_cannot_claim_physical_cover_or_actual_signature_as_docx_execution(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             td = Path(td); req = td / "requirements.docx"; preview = td / "preview"; response = td / "response.json"
@@ -2848,7 +2860,7 @@ b&=2\notag
             {"text": "扉页上方为论文题目（中英文对照）"},
         ]
         self.assertTrue(pipeline.ensure_declared_cover(spec, clauses))
-        self.assertEqual(spec["cover"]["institution"], "天津财经大学")
+        self.assertEqual(spec["cover"]["institution"], "学校名称待确认")
         self.assertEqual(spec["cover"]["missing_value_placeholder"], "——")
         self.assertEqual(
             [field["id"] for field in spec["cover"]["fields"]],

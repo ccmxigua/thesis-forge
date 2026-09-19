@@ -60,7 +60,9 @@ def _resource_sha256(heading: str, body_parts: list[str]) -> str:
     return fixed_text_sha256("\n".join([heading, *body_parts]))
 
 
-def _validate_existing_registry(spec: dict[str, Any], run_id: str) -> None:
+def _validate_existing_registry(
+    spec: dict[str, Any], run_id: str, *, evidence: dict[str, Any] | None = None,
+) -> None:
     """Re-validate an already materialized registry before reusing it.
 
     Same-run idempotency is useful, but returning an unchecked registry would
@@ -110,6 +112,18 @@ def _validate_existing_registry(spec: dict[str, Any], run_id: str) -> None:
             raise ValueError(f"resource {resource_id!r} has invalid body_parts")
         if resource.get("sha256") != _resource_sha256(heading.strip(), [part.strip() for part in body_parts]):
             raise ValueError(f"resource {resource_id!r} sha256 does not match its fixed text")
+        source_evidence_ids = resource.get("source_evidence_ids")
+        if (not isinstance(source_evidence_ids, list)
+                or any(not isinstance(value, str) or not value.strip()
+                       for value in source_evidence_ids)):
+            raise ValueError(f"resource {resource_id!r} has invalid source_evidence_ids")
+        if evidence is not None:
+            _verify_source_texts(
+                resource_id,
+                resource,
+                [str(value) for value in source_evidence_ids],
+                evidence,
+            )
         if item.get("version") != resource.get("version") or item.get("sha256") != resource.get("sha256"):
             raise ValueError(f"declaration {item_id!r} binding does not match its resource")
         seen_ids.add(item_id)
@@ -165,7 +179,7 @@ def materialize_declaration_resources(
 
     existing_registry = spec.get("resource_registry")
     if isinstance(existing_registry, dict):
-        _validate_existing_registry(spec, run_id)
+        _validate_existing_registry(spec, run_id, evidence=evidence)
         return spec
 
     raw_items = declarations.get("items")

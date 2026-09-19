@@ -28,12 +28,55 @@ def canonical_json(value: Any) -> bytes:
     ).encode("utf-8")
 
 
+def strict_json_loads(text: str) -> Any:
+    """Parse a JSON boundary without duplicate keys or non-finite numbers."""
+    def reject_duplicates(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"duplicate JSON object key: {key}")
+            result[key] = value
+        return result
+
+    def reject_constant(value: str) -> Any:
+        raise ValueError(f"non-finite JSON number is not allowed: {value}")
+
+    return json.loads(
+        text,
+        object_pairs_hook=reject_duplicates,
+        parse_constant=reject_constant,
+    )
+
+
 def sha256_bytes(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
 
 def sha256_json(value: Any) -> str:
     return sha256_bytes(canonical_json(value))
+
+
+def request_without_provenance(request: dict[str, Any]) -> dict[str, Any]:
+    """Return the canonical semantic request body without its identity block.
+
+    The response contract historically called this value ``request_sha256``.
+    Keep that field as a compatibility alias, but expose the domain explicitly
+    so callers cannot accidentally compare it with a hash of the full request
+    envelope.
+    """
+    result = copy.deepcopy(request)
+    result.pop("provenance", None)
+    return result
+
+
+def request_body_sha256(request: dict[str, Any]) -> str:
+    """Hash the semantic request body, excluding non-semantic provenance."""
+    return sha256_json(request_without_provenance(request))
+
+
+def request_envelope_sha256(request: dict[str, Any]) -> str:
+    """Hash the complete request envelope, including its provenance block."""
+    return sha256_json(request)
 
 
 def sha256_file(path: Path) -> str:
@@ -70,15 +113,16 @@ def build_provenance(
     origin: str = HOST_AGENT_ORIGIN,
 ) -> dict[str, Any]:
     """Build the non-circular identity fields embedded in an LLM request."""
-    request_base = copy.deepcopy(request_without_provenance)
-    request_base.pop("provenance", None)
     result = {
         "version": PROVENANCE_VERSION,
         "origin": origin,
         "source_sha256": source_sha256,
         "evidence_sha256": sha256_json(evidence_payload(evidence_doc)),
         "clause_sha256": sha256_json(clauses),
-        "request_sha256": sha256_json(request_base),
+        # ``request_sha256`` remains the contract-2.1 compatibility name.
+        # New manifests and receipts additionally label this domain as
+        # ``request_body_sha256``.
+        "request_sha256": request_body_sha256(request_without_provenance),
     }
     if run_id is not None:
         result["run_id"] = run_id

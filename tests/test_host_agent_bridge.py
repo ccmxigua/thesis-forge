@@ -96,6 +96,7 @@ class HostAgentBridgeTests(unittest.TestCase):
             self.assertIn("roleSpec", contract["$defs"])
             self.assertIn("verificationSpec", packet["response_schema"]["$defs"])
             self.assertIn("inputPrerequisiteSpec", packet["response_schema"]["$defs"])
+            self.assertNotIn("provenance", packet)
 
     def test_preflight_rejects_response_schema_drift(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -153,7 +154,7 @@ class HostAgentBridgeTests(unittest.TestCase):
             ).read_text(encoding="utf-8")
             self.assertIn("local contract validation failed", second_prompt)
 
-    def test_bridge_rejects_truncated_provenance_and_preserves_raw_response(self) -> None:
+    def test_bridge_binds_truncated_native_provenance_and_preserves_raw_response(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             review_dir, chunk = self._packet(Path(td) / "requirements")
             response = self._response(chunk)
@@ -170,19 +171,31 @@ class HostAgentBridgeTests(unittest.TestCase):
                 ["openclaw"], 0, json.dumps(envelope), "",
             )
             with patch.object(bridge, "_run_command", return_value=fake):
-                with self.assertRaises(bridge.HostAgentProvenanceMismatch):
-                    bridge.run_bridge(
-                        review_dir, response_out=response_out,
-                        agent_id="main", timeout=1, max_attempts=1,
-                        openclaw_bin="openclaw", model="openai/gpt-5.6-luna",
-                    )
-            self.assertFalse(response_out.exists())
+                audit = bridge.run_bridge(
+                    review_dir, response_out=response_out,
+                    agent_id="main", timeout=1, max_attempts=1,
+                    openclaw_bin="openclaw", model="openai/gpt-5.6-luna",
+                )
+            self.assertTrue(response_out.exists())
             raw_responses = list(review_dir.glob("*.raw.json"))
             self.assertEqual(len(raw_responses), 1)
             raw = json.loads(raw_responses[0].read_text(encoding="utf-8"))
             self.assertEqual(
                 raw["provenance"]["request_sha256"],
                 chunk["provenance"]["request_sha256"][:48],
+            )
+            merged = json.loads(response_out.read_text(encoding="utf-8"))
+            full_request = json.loads(
+                (review_dir / "llm-request.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(merged["provenance"], full_request["provenance"])
+            self.assertEqual(
+                audit["chunk_runs"][0]["provenance_binding"],
+                "bridge_current_invocation",
+            )
+            self.assertEqual(
+                audit["chunk_runs"][0]["provenance_mismatch_fields"],
+                ["request_sha256"],
             )
 
     def test_bridge_requires_declared_host_runtime(self) -> None:

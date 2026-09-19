@@ -51,7 +51,12 @@ from section_executor import (
     unlink_story_preserving_content,
 )
 from section_model import audit_plan_against_docx, compile_section_plan
-from property_receipts import audit_property_receipts, build_property_receipts, flatten
+from property_receipts import (
+    audit_property_receipts,
+    build_property_receipts,
+    expected_receipt_ids,
+    flatten,
+)
 
 ROLE_STYLES = {role: style_aliases(role) for role in role_names()}
 ALIGN = {"left": WD_ALIGN_PARAGRAPH.LEFT, "center": WD_ALIGN_PARAGRAPH.CENTER,
@@ -107,6 +112,8 @@ def format_spec_blockers(spec: dict[str, Any], compliance_mode: str = "full") ->
     if completeness.get("unresolved_clause_ids"): blockers.append("unresolved_clauses")
     if completeness.get("missing_clause_ids"): blockers.append("missing_clauses")
     if spec.get("blocking_errors"): blockers.append("blocking_errors")
+    if compliance_mode == "full" and completeness.get("unsupported_items"):
+        blockers.append("unsupported_items")
     records = spec.get("clause_compliance") if isinstance(spec.get("clause_compliance"), list) else []
     if compliance_mode == "full":
         if not records: blockers.append("missing_clause_compliance")
@@ -2854,7 +2861,16 @@ def main(argv: list[str]) -> int:
             if item.get("status") == "present" or item.get("expectation") == "required"
         } | set(role_results),
     )
-    property_receipt_audit = audit_property_receipts(property_receipts)
+    property_receipt_audit = audit_property_receipts(
+        property_receipts,
+        expected_receipt_ids=expected_receipt_ids(
+            receipt_requirements,
+            applicable_roles={
+                item["role"] for item in coverage
+                if item.get("status") == "present" or item.get("expectation") == "required"
+            } | set(role_results),
+        ),
+    )
     write("property-receipts.json", {
         "schema_version": "1.0", "receipts": property_receipts,
     })

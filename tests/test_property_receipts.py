@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import unittest
 
-from scripts.property_receipts import audit_property_receipts, build_property_receipts
+from scripts.property_receipts import (
+    audit_property_receipts,
+    build_property_receipts,
+    expected_receipt_ids,
+)
 
 
 class PropertyReceiptTests(unittest.TestCase):
@@ -52,6 +56,15 @@ class PropertyReceiptTests(unittest.TestCase):
             serialized_docx_sha256="d" * 64,
         )
         self.assertEqual({item["status"] for item in receipts}, {"verified"})
+
+    def test_expected_receipt_set_rejects_silent_missing_receipt(self) -> None:
+        expected = expected_receipt_ids([{
+            "id": "R5", "role": "body_text", "properties": {"font": {"cjk": "SimSun"}},
+        }])
+        audit = audit_property_receipts([], expected_receipt_ids=expected)
+        self.assertFalse(audit["valid"])
+        self.assertEqual(audit["missing_count"], 1)
+        self.assertEqual(audit["failures"][0]["status"], "missing")
 
 
 if __name__ == "__main__":

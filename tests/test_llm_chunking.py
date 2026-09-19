@@ -126,6 +126,36 @@ class HostAgentReviewTests(unittest.TestCase):
             self.assertEqual(merged["clause_reviews"][1]["requirement_indexes"], [1])
             self.assertEqual(merged["provenance"], request["provenance"])
             self.assertEqual(merged["provenance"]["origin"], HOST_AGENT_ORIGIN)
+            self.assertEqual(metadata["request_body_sha256"], request["provenance"]["request_sha256"])
+            self.assertEqual(metadata["request_envelope_sha256"], engine.request_envelope_sha256(request))
+            self.assertEqual(
+                json.loads((review_dir / "merge-receipt.json").read_text())["request_body_sha256"],
+                request["provenance"]["request_sha256"],
+            )
+
+    def test_merge_rejects_chunk_provenance_hash_domain_mismatch(self) -> None:
+        clauses = [{
+            "id": "C1", "text": "正文使用宋体", "evidence_ids": ["E1"],
+            "source_kind": "paragraph", "location": {}, "part_index": 0,
+        }]
+        evidence = {"evidence": [{"id": "E1", "text": "正文使用宋体", "kind": "paragraph"}]}
+        request = self._request(clauses, evidence)
+        with tempfile.TemporaryDirectory() as td:
+            review_dir = Path(td)
+            engine.prepare_host_agent_review_packets(
+                request, clauses, evidence, "a" * 64, review_dir, chunk_size=1,
+            )
+            chunks_path = review_dir / "llm-request-chunks.json"
+            chunks = json.loads(chunks_path.read_text(encoding="utf-8"))
+            chunks[0]["provenance"]["evidence_sha256"] = "0" * 64
+            chunks_path.write_text(json.dumps(chunks, ensure_ascii=False), encoding="utf-8")
+            response = self._response_for_chunk(chunks[0])
+            (review_dir / chunks[0]["batch"]["response_filename"]).write_text(
+                json.dumps(response, ensure_ascii=False), encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "provenance evidence_sha256"):
+                engine.merge_host_agent_review_packets(review_dir)
+            self.assertFalse((review_dir / "merge-receipt.json").exists())
 
     def test_merge_rejects_a_response_from_another_model_protocol(self) -> None:
         clauses = [{

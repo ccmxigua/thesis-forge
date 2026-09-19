@@ -115,15 +115,29 @@ def validate_host_review_receipts(
     audit = read_json(audit_path)
     receipt = read_json(receipt_path)
     expected_run_id = extraction_manifest.get("run_id")
-    expected_request_sha = extraction_manifest.get("llm_request_sha256")
-    if not expected_run_id or not expected_request_sha:
-        raise ValueError("fresh extraction manifest is missing run_id or llm_request_sha256")
+    # ``llm_request_sha256`` is the legacy name for the semantic request-body
+    # hash. Prefer the explicit field, but retain a read-only compatibility
+    # fallback for manifests produced before the hash domains were separated.
+    expected_request_body_sha = (
+        extraction_manifest.get("llm_request_body_sha256")
+        or extraction_manifest.get("llm_request_sha256")
+    )
+    expected_request_envelope_sha = extraction_manifest.get(
+        "llm_request_envelope_sha256"
+    )
+    expected_request_file_sha = extraction_manifest.get("llm_request_file_sha256")
+    if not expected_run_id or not expected_request_body_sha:
+        raise ValueError("fresh extraction manifest is missing run_id or request body hash")
     if receipt.get("status") != "merged" or receipt.get("protocol") != "host_agent_semantic_review":
         raise ValueError("merge receipt is not a successful host-agent semantic-review receipt")
     if receipt.get("run_id") != expected_run_id:
         raise ValueError("merge receipt run_id does not match the fresh extraction")
-    if receipt.get("request_sha256") != expected_request_sha:
-        raise ValueError("merge receipt request_sha256 does not match the fresh request")
+    if receipt.get("request_body_sha256", receipt.get("request_sha256")) != expected_request_body_sha:
+        raise ValueError("merge receipt request body hash does not match the fresh request")
+    if expected_request_envelope_sha and receipt.get("request_envelope_sha256") != expected_request_envelope_sha:
+        raise ValueError("merge receipt request envelope hash does not match the fresh request")
+    if expected_request_file_sha and receipt.get("request_file_sha256") != expected_request_file_sha:
+        raise ValueError("merge receipt request file hash does not match the fresh request")
     if receipt.get("aggregate_sha256") != sha256_json(response):
         raise ValueError("merge receipt aggregate_sha256 does not match the response")
     merged_response_path = receipt.get("merged_response_path")
@@ -136,8 +150,12 @@ def validate_host_review_receipts(
     merge = audit.get("merge") if isinstance(audit.get("merge"), dict) else {}
     if merge.get("aggregate_sha256") != receipt.get("aggregate_sha256"):
         raise ValueError("host-agent audit merge hash does not match the merge receipt")
-    if merge.get("request_sha256") != expected_request_sha:
-        raise ValueError("host-agent audit request hash does not match the fresh request")
+    if merge.get("request_body_sha256", merge.get("request_sha256")) != expected_request_body_sha:
+        raise ValueError("host-agent audit request body hash does not match the fresh request")
+    if expected_request_envelope_sha and merge.get("request_envelope_sha256") != expected_request_envelope_sha:
+        raise ValueError("host-agent audit request envelope hash does not match the fresh request")
+    if expected_request_file_sha and merge.get("request_file_sha256") != expected_request_file_sha:
+        raise ValueError("host-agent audit request file hash does not match the fresh request")
     if merge.get("merge_receipt_path") and Path(str(merge["merge_receipt_path"])).resolve() != receipt_path:
         raise ValueError("host-agent audit receipt path does not match the supplied receipt")
     return {
@@ -145,7 +163,10 @@ def validate_host_review_receipts(
         "host_agent_audit": file_record(audit_path),
         "merge_receipt": file_record(receipt_path),
         "aggregate_sha256": receipt.get("aggregate_sha256"),
-        "request_sha256": expected_request_sha,
+        "request_sha256": expected_request_body_sha,
+        "request_body_sha256": expected_request_body_sha,
+        "request_envelope_sha256": expected_request_envelope_sha,
+        "request_file_sha256": expected_request_file_sha,
         "run_id": expected_run_id,
     }
 
@@ -330,15 +351,12 @@ def ensure_declared_cover(spec: dict[str, Any], clauses: list[dict[str, Any]]) -
     if not cover_texts:
         return False
     corpus = "\n".join(texts)
-    institution = ""
-    for text in texts:
-        import re
-        match = re.search(r"([\u4e00-\u9fff]{2,20}大学)", text)
-        if match:
-            institution = match.group(1)
-            break
-    if not institution:
-        institution = "学校名称待确认"
+    # A school name found anywhere in requirement prose is not trusted
+    # instance metadata: it may be a sample, comparison, or quoted template
+    # text.  Institution identity must come from an explicitly bound template
+    # or user-confirmed profile; this fallback therefore stays neutral and
+    # lets the metadata gate keep the artifact non-submission-ready.
+    institution = "学校名称待确认"
 
     # Written requirements can establish that a cover/title page exists, but
     # cannot establish its OOXML geometry. Never translate prose into guessed

@@ -11,6 +11,8 @@ from pathlib import Path
 import shutil
 from typing import Any
 
+from semantic_contract import strict_json_loads
+
 
 def resolve_binary(binary: str | None) -> str:
     return binary or shutil.which("openclaw") or "openclaw"
@@ -75,15 +77,15 @@ def _strip_json_wrapper(text: str) -> dict[str, Any]:
             raise ValueError("OpenClaw returned an empty JSON fence")
         value = "\n".join(lines[1:-1]).strip()
     try:
-        parsed = json.loads(value)
-    except json.JSONDecodeError:
+        parsed = strict_json_loads(value)
+    except (ValueError, json.JSONDecodeError):
         start = value.find("{")
         end = value.rfind("}")
         if start < 0 or end <= start:
             raise ValueError("OpenClaw did not return a JSON object") from None
         try:
-            parsed = json.loads(value[start:end + 1])
-        except json.JSONDecodeError as exc:
+            parsed = strict_json_loads(value[start:end + 1])
+        except (ValueError, json.JSONDecodeError) as exc:
             raise ValueError(f"OpenClaw returned invalid JSON: {exc}") from exc
     if not isinstance(parsed, dict):
         raise ValueError("OpenClaw response must be one JSON object")
@@ -93,8 +95,8 @@ def _strip_json_wrapper(text: str) -> dict[str, Any]:
 def parse_result(stdout: str) -> tuple[dict[str, Any], dict[str, Any]]:
     """Extract the semantic payload from either OpenClaw JSON envelope shape."""
     try:
-        envelope = json.loads(stdout)
-    except json.JSONDecodeError as exc:
+        envelope = strict_json_loads(stdout)
+    except (ValueError, json.JSONDecodeError) as exc:
         raise ValueError(f"OpenClaw agent did not return JSON: {exc}") from exc
     if not isinstance(envelope, dict):
         raise ValueError("OpenClaw agent JSON envelope must be an object")

@@ -59,6 +59,7 @@ def pipeline_command(args: argparse.Namespace, *, prepare_host_review: bool = Fa
         command += ["--merge-receipt", str(merge_receipt)]
     for option, value in (("--style-template", args.style_template),
                           ("--thesis-profile", args.thesis_profile),
+                          ("--template-profile", args.template_profile),
                           ("--render-report", args.render_report)):
         if value:
             command += [option, str(value)]
@@ -86,6 +87,8 @@ def main(argv: list[str]) -> int:
     p.add_argument("--work-dir", type=Path, required=True)
     p.add_argument("--style-template", type=Path)
     p.add_argument("--thesis-profile", type=Path)
+    p.add_argument("--template-profile", type=Path,
+                   help="official template profile required by strict release")
     p.add_argument("--prepare-agent-review", action="store_true",
                    help="prepare packets for the current host Agent and stop before DOCX generation")
     p.add_argument("--auto-host-agent", action="store_true",
@@ -165,8 +168,14 @@ def main(argv: list[str]) -> int:
             p.error("--auto-host-agent requires a new empty --work-dir; refusing to reuse prior run artifacts")
         if output and output.exists():
             p.error("--auto-host-agent refuses to overwrite an existing output DOCX")
-    if args.strict_release and (not args.thesis_profile or not args.render_report or not args.require_submission_ready):
-        p.error("--strict-release requires --thesis-profile, --render-report, and --require-submission-ready")
+    if args.strict_release and (
+        not args.thesis_profile or not args.template_profile
+        or not args.render_report or not args.require_submission_ready
+    ):
+        p.error(
+            "--strict-release requires --thesis-profile, --template-profile, "
+            "--render-report, and --require-submission-ready"
+        )
 
     if args.auto_host_agent:
         review_requirements = args.work_dir.resolve() / "review" / "requirements"

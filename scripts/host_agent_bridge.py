@@ -185,13 +185,17 @@ from host_runtime import (  # noqa: E402
     require_parent_session,
 )
 from requirements_engine import merge_host_agent_review_packets  # noqa: E402
-from semantic_contract import validate_response_provenance  # noqa: E402
+from semantic_contract import (  # noqa: E402
+    sha256_file,
+    strict_json_loads,
+    validate_response_provenance,
+)
 
 
 def _read_json(path: Path, *, label: str) -> Any:
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        return strict_json_loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
         raise ValueError(f"cannot read {label}: {path}: {exc}") from exc
 
 
@@ -282,7 +286,6 @@ def compact_model_packet(chunk: dict[str, Any]) -> dict[str, Any]:
         "contract_version": chunk.get("contract_version"),
         "task": chunk.get("task"),
         "instructions": chunk.get("instructions", []),
-        "provenance": chunk.get("provenance"),
         "batch": chunk.get("batch"),
         "clauses": chunk.get("clauses", []),
         "evidence_context": compact_evidence,
@@ -444,10 +447,6 @@ def _host_prompt(*, request_path: Path, chunk_path: Path,
             "Do not discuss the failure; return a newly generated valid JSON object. "
             f"Reason category: {retry_hint}.\n"
         )
-    provenance_text = json.dumps(
-        provenance or {}, ensure_ascii=False, sort_keys=True,
-        separators=(",", ":"),
-    )
     return f"""You are the current Host Agent for one fresh thesis-format semantic-review run.
 
 Return exactly ONE JSON object and nothing else. Do not use Markdown fences,
@@ -471,11 +470,10 @@ chunks that are outside this subtask.
 
 This is chunk {chunk_index} of {chunk_count}, attempt {attempt}, run_id {run_id}. Read the chunk
 JSON and follow its contract_version 2.1 instructions literally. The local
-merger will validate the complete on-disk schema after the response. Review every
-and only the supplied clause IDs exactly once. Copy the chunk's provenance
-object unchanged. The exact provenance object to return is shown below; copy it
-without recomputing, abbreviating, or changing any character:
-{provenance_text}
+bridge will bind the response to this current invocation and request; do not
+write, copy, abbreviate, or recompute a provenance/hash object in the response.
+The raw response is retained before binding for audit. Review every and only the
+supplied clause IDs exactly once.
 Cite only evidence and clause IDs present in this chunk.
 For declaration clauses, copy fixed headings/body paragraphs exactly from the
 cited evidence, use a run-local semantic item id, and use blank signature
@@ -488,8 +486,7 @@ your JSON as:
 {response_path}
 
 Before answering, verify that the result is a complete contract-2.1 object
-with requirements, clause_reviews, unsupported_items, reported_conflicts, and
-the unchanged provenance object requested by the chunk.
+with requirements, clause_reviews, unsupported_items, and reported_conflicts.
 {retry_text}
 """
 
@@ -531,8 +528,8 @@ def _load_session_records(
             f"cannot inspect OpenClaw parent sessions (returncode {result.returncode}): {detail}"
         )
     try:
-        payload = json.loads(result.stdout)
-    except json.JSONDecodeError as exc:
+        payload = strict_json_loads(result.stdout)
+    except (ValueError, json.JSONDecodeError) as exc:
         raise RuntimeError(f"OpenClaw sessions returned invalid JSON: {exc}") from exc
     records = payload.get("sessions") if isinstance(payload, dict) else None
     if not isinstance(records, list):
@@ -778,11 +775,30 @@ def run_host_agent_chunk(
     raw_response_path.write_text(
         json.dumps(response, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
     )
+    provenance_binding = "model_echo_verified"
     if provenance_mismatch_fields:
-        raise HostAgentProvenanceMismatch(
-            "Host Agent response provenance mismatch: "
-            + ", ".join(provenance_mismatch_fields)
-        )
+        # The automatic bridge is the trusted invocation boundary.  It has
+        # already captured this process's raw stdout, prompt, and model packet,
+        # so a model must not be charged with copying a 64-character identity
+        # block exactly.  Validate the semantic response first, retain the raw
+        # response above, then bind the accepted response to this invocation's
+        # current chunk.  The offline/manual merger remains strict and still
+        # requires the response file to carry the exact provenance itself.
+        if adapter_id not in {"openclaw", "codex"}:
+            raise HostAgentProvenanceMismatch(
+                "Host Agent response provenance mismatch: "
+                + ", ".join(provenance_mismatch_fields)
+            )
+        contract_errors = validate_host_agent_response(response, chunk)
+        if contract_errors:
+            raise ValueError(
+                "local response contract validation failed before provenance binding: "
+                + _summarize_contract_errors(contract_errors)
+            )
+        if not isinstance(expected_provenance, dict):
+            raise ValueError("current Host Agent chunk has no bindable provenance")
+        response["provenance"] = copy.deepcopy(expected_provenance)
+        provenance_binding = "bridge_current_invocation"
     if controller is not None:
         controller.check()
     response_path.write_text(
@@ -797,6 +813,9 @@ def run_host_agent_chunk(
         "openclaw_run_id": envelope.get("runId") if adapter_id == "openclaw" else None,
         "codex_event_count": envelope.get("event_count") if adapter_id == "codex" else None,
         "codex_event_types": envelope.get("event_types") if adapter_id == "codex" else None,
+        "codex_terminal_event_index": envelope.get("terminal_event_index") if adapter_id == "codex" else None,
+        "codex_thread_id": envelope.get("thread_id") if adapter_id == "codex" else None,
+        "codex_final_message_sha256": envelope.get("final_message_sha256") if adapter_id == "codex" else None,
         "codex_stream_warnings": envelope.get("stream_warnings") if adapter_id == "codex" else [],
         "status": envelope.get("status", "ok"),
         "returncode": result.returncode,
@@ -815,12 +834,15 @@ def run_host_agent_chunk(
         "local_process_state": "completed",
         "remote_operation_state": "remote_operation_completed",
         "response_path": str(response_path.resolve()),
+        "prompt_sha256": sha256_file(prompt_path),
+        "model_packet_sha256": sha256_file(model_packet_path),
         "raw_envelope_path": str(raw_envelope_path.resolve()),
         "raw_response_path": str(raw_response_path.resolve()),
         "finished_at": datetime.now(timezone.utc).isoformat(),
     }
     audit["provenance_observed"] = isinstance(observed_provenance, dict)
     audit["provenance_mismatch_fields"] = provenance_mismatch_fields
+    audit["provenance_binding"] = provenance_binding
     if raw_stderr_path is not None:
         audit["raw_stderr_path"] = str(raw_stderr_path.resolve())
     return audit

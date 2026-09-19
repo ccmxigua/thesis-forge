@@ -67,6 +67,25 @@ class RunScopedResourceRegistryTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "sha256 does not match"):
             materialize_declaration_resources(broken, "run-recheck")
 
+    def test_same_run_reuse_revalidates_current_source_evidence(self) -> None:
+        evidence = {"evidence": [
+            {"id": "E-current-1", "text": "本次输入的声明标题"},
+            {"id": "E-current-2", "text": "本次输入的第一段固定正文。"},
+            {"id": "E-current-3", "text": "本次输入的第二段固定正文。"},
+            {"id": "E-current-4", "text": "作者签名"},
+        ]}
+        spec = self._spec()
+        spec["declarations"]["items"][0]["source_evidence_ids"] = [
+            "E-current-1", "E-current-2", "E-current-3", "E-current-4",
+        ]
+        materialized = materialize_declaration_resources(spec, "run-source", evidence=evidence)
+        changed = copy.deepcopy(materialized)
+        changed["resource_registry"]["items"][
+            changed["declarations"]["items"][0]["resource_id"]
+        ]["source_evidence_ids"] = ["E-current-1"]
+        with self.assertRaisesRegex(ValueError, "not present verbatim"):
+            materialize_declaration_resources(changed, "run-source", evidence=evidence)
+
     def test_fixed_text_digest_preserves_spaces_and_paragraph_boundaries(self) -> None:
         self.assertNotEqual(fixed_text_sha256("研究 成果"), fixed_text_sha256("研究成果"))
         self.assertNotEqual(fixed_text_sha256("第一段\n第二段"), fixed_text_sha256("第一段第二段"))

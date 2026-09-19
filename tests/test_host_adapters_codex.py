@@ -67,6 +67,39 @@ class CodexAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "without a final assistant message"):
             codex.parse_result(stdout)
 
+    def test_parse_result_rejects_terminal_message_mismatch(self) -> None:
+        stdout = "\n".join([
+            json.dumps({"type": "thread.started", "thread_id": "thread-1"}),
+            json.dumps({
+                "type": "item.completed",
+                "item": {"type": "agent_message", "text": '{"value": 1}'},
+            }),
+            json.dumps({"type": "turn.completed"}),
+        ])
+        with self.assertRaisesRegex(ValueError, "does not match"):
+            codex.parse_result(stdout, last_message='{"value": 2}')
+
+    def test_parse_result_rejects_duplicate_keys_in_final_json(self) -> None:
+        stdout = "\n".join([
+            json.dumps({"type": "thread.started", "thread_id": "thread-1"}),
+            json.dumps({
+                "type": "item.completed",
+                "item": {"type": "agent_message", "text": '{"value": 1, "value": 2}'},
+            }),
+            json.dumps({"type": "turn.completed"}),
+        ])
+        with self.assertRaisesRegex(ValueError, "not valid JSON"):
+            codex.parse_result(stdout)
+
+    def test_parse_result_rejects_failed_turn_even_after_completed_event(self) -> None:
+        stdout = "\n".join([
+            json.dumps({"type": "thread.started", "thread_id": "thread-1"}),
+            json.dumps({"type": "turn.completed"}),
+            json.dumps({"type": "turn.failed", "message": "late failure"}),
+        ])
+        with self.assertRaisesRegex(ValueError, "turn failed"):
+            codex.parse_result(stdout, last_message='{"value": 1}')
+
 
 if __name__ == "__main__":
     unittest.main()

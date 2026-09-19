@@ -33,7 +33,11 @@ from semantic_contract import (
     HOST_AGENT_ORIGIN,
     attach_request_provenance,
     evidence_payload,
+    request_body_sha256,
+    request_envelope_sha256,
+    sha256_file,
     sha256_json,
+    strict_json_loads,
     validate_response_provenance,
 )
 from evidence_context_guards import (
@@ -1339,7 +1343,7 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
                 "Use only the allowed requirement roles and the corresponding properties schema in requirement_contract. Never invent role names such as cover_metadata, declaration_originality, authorization_statement, or other role names absent from that contract; use cover, declarations, document_structure, or a registered text role instead.",
                 "For an existing requirement, the request-only field _eligible_clause_ids lists the exact clause occurrences whose evidence may be reused. Do not use that existing_requirement_id for any other clause_id; never copy an existing requirement from a different evidence occurrence.",
                 "When reusing an existing requirement, do not combine unrelated clauses or repeated occurrences with different evidence. Every clause_id listed in that requirement must be exactly represented by its source text and cited evidence.",
-                "Copy the supplied provenance object into the response unchanged. Do not alter its hashes or origin.",
+                "Do not author, copy, abbreviate, or recompute provenance/hash fields; an automatic native bridge binds the accepted response to the current invocation. Offline/manual merger inputs must carry the exact chunk provenance before merge.",
             ],
             "clauses": clause_packets,
             "evidence_context": evidence_context,
@@ -2262,6 +2266,24 @@ def _build_host_review_chunks(
             run_id=full_request.get("provenance", {}).get("run_id"),
             origin=HOST_AGENT_ORIGIN,
         )
+        # Chunk hashes must describe the exact packet visible to the host,
+        # rather than rich extraction fields intentionally omitted from the
+        # compact request.  The full request keeps its own rich evidence
+        # identity; the chunk carries a separately verifiable projection.
+        chunk_request["provenance"]["evidence_sha256"] = sha256_json(
+            evidence_payload({
+                "evidence": list(chunk_request.get("evidence_context", {}).values()),
+                "page_evidence": chunk_request.get("page_evidence", {}),
+                "structure_evidence": chunk_request.get("document_structure", {}),
+                "structure_page_evidence": {},
+            })
+        )
+        chunk_request["provenance"]["clause_sha256"] = sha256_json(
+            chunk_request.get("clauses", [])
+        )
+        chunk_request["provenance"]["request_sha256"] = request_body_sha256(
+            chunk_request
+        )
         request_chunks.append(chunk_request)
     return request_chunks
 
@@ -2287,6 +2309,8 @@ def prepare_host_agent_review_packets(
         "protocol": "host_agent_semantic_review",
         "contract_version": "2.1",
         "origin": full_request.get("provenance", {}).get("origin"),
+        "request_body_sha256": request_body_sha256(full_request),
+        "request_envelope_sha256": request_envelope_sha256(full_request),
         "request_path": "llm-request.json",
         "request_chunks_path": "llm-request-chunks.json",
         "response_files": response_files,
@@ -2296,7 +2320,8 @@ def prepare_host_agent_review_packets(
         "instructions": [
             "The host Agent must generate each response with its current runtime model.",
             "The project performs no provider/API call and must not receive an API key.",
-            "Each response must copy its chunk provenance object byte-for-byte in meaning.",
+            "Automatic native bridge runs bind provenance from the current invocation; the model must not author or copy long hashes.",
+            "Offline/manual response files must include the exact chunk provenance before deterministic merge.",
             "Every supplied clause must appear exactly once in that chunk's clause_reviews.",
             "Run merge_host_agent_review.py only after every response file exists.",
         ],
@@ -2374,15 +2399,15 @@ def merge_host_agent_review_packets(
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Validate and deterministically merge host-Agent chunk responses."""
     manifest_path = review_dir / "host-agent-review-manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest = strict_json_loads(manifest_path.read_text(encoding="utf-8"))
     if manifest.get("protocol") != "host_agent_semantic_review":
         raise ValueError("review manifest is not a host-agent semantic-review manifest")
-    full_request = json.loads(
+    full_request = strict_json_loads(
         _manifest_path(review_dir, str(manifest.get("request_path", "llm-request.json"))).read_text(encoding="utf-8")
     )
     if not isinstance(full_request, dict) or not isinstance(full_request.get("provenance"), dict):
         raise ValueError("host-agent full request is missing an object provenance")
-    request_chunks = json.loads(
+    request_chunks = strict_json_loads(
         _manifest_path(review_dir, str(manifest.get("request_chunks_path", "llm-request-chunks.json"))).read_text(encoding="utf-8")
     )
     response_files = manifest.get("response_files")
@@ -2423,6 +2448,12 @@ def merge_host_agent_review_packets(
         raise ValueError("host-agent full request contains duplicate or invalid clause ids")
     full_clause_id_set = set(full_clause_ids)
     full_provenance = full_request["provenance"]
+    expected_manifest_body_sha = manifest.get("request_body_sha256")
+    expected_manifest_envelope_sha = manifest.get("request_envelope_sha256")
+    if expected_manifest_body_sha and expected_manifest_body_sha != request_body_sha256(full_request):
+        raise ValueError("host-agent manifest request body hash does not match full request")
+    if expected_manifest_envelope_sha and expected_manifest_envelope_sha != request_envelope_sha256(full_request):
+        raise ValueError("host-agent manifest request envelope hash does not match full request")
     seen_chunk_indexes: set[int] = set()
     seen_chunk_clause_ids: set[str] = set()
 
@@ -2470,11 +2501,28 @@ def merge_host_agent_review_packets(
                 raise ValueError(f"host-agent request chunk {index}/{len(request_chunks)} provenance {key} does not match full request")
         if "run_id" in full_provenance and chunk_provenance.get("run_id") != full_provenance.get("run_id"):
             raise ValueError(f"host-agent request chunk {index}/{len(request_chunks)} provenance run_id does not match full request")
+        visible_evidence_payload = evidence_payload({
+            "evidence": list(chunk_request.get("evidence_context", {}).values()),
+            "page_evidence": chunk_request.get("page_evidence", {}),
+            "structure_evidence": chunk_request.get("document_structure", {}),
+            "structure_page_evidence": {},
+        })
+        expected_chunk_hashes = {
+            "evidence_sha256": sha256_json(visible_evidence_payload),
+            "clause_sha256": sha256_json(chunk_request.get("clauses", [])),
+            "request_sha256": request_body_sha256(chunk_request),
+        }
+        for key, expected_value in expected_chunk_hashes.items():
+            if chunk_provenance.get(key) != expected_value:
+                raise ValueError(
+                    f"host-agent request chunk {index}/{len(request_chunks)} "
+                    f"provenance {key} does not match its packet"
+                )
         seen_chunk_indexes.add(batch_index)
         seen_chunk_clause_ids.update(chunk_clause_ids)
         if not response_path.is_file():
             raise ValueError(f"missing host-agent response {index}/{len(request_chunks)}: {response_path}")
-        response = json.loads(response_path.read_text(encoding="utf-8"))
+        response = strict_json_loads(response_path.read_text(encoding="utf-8"))
         if not isinstance(response, dict):
             raise ValueError(f"host-agent response {index}/{len(request_chunks)} is not an object")
         if response.get("contract_version") != "2.1":
@@ -2552,6 +2600,14 @@ def merge_host_agent_review_packets(
         "merged_response_path": str(response_out_path) if response_out_path else None,
         "merge_receipt_path": str(merge_receipt_path.resolve()),
         "aggregate_sha256": sha256_json(aggregate),
+        # Keep the legacy name in the receipt for contract-2.1 consumers, but
+        # make the two hash domains explicit for new gates.
+        "request_sha256": full_provenance.get("request_sha256"),
+        "request_body_sha256": request_body_sha256(full_request),
+        "request_envelope_sha256": request_envelope_sha256(full_request),
+        "request_file_sha256": sha256_file(
+            _manifest_path(review_dir, str(manifest.get("request_path", "llm-request.json")))
+        ),
     }
     receipt = {
         "schema_version": "1.0",
@@ -2865,7 +2921,7 @@ def analyse(args: argparse.Namespace) -> int:
     supplied_response = None
     expected_provenance = None
     if args.llm_response:
-        supplied_response = json.loads(args.llm_response.read_text(encoding="utf-8"))
+        supplied_response = strict_json_loads(args.llm_response.read_text(encoding="utf-8"))
     supplied_contract_kind = response_contract_kind(supplied_response) if args.llm_response else "none"
     if args.llm_response and supplied_contract_kind == "unknown":
         raise ValueError(
@@ -3025,9 +3081,24 @@ def analyse(args: argparse.Namespace) -> int:
         "format_spec_sha256": _sha256(out / "format-spec.json"),
         "requirement_clauses_sha256": _sha256(out / "requirement-clauses.json"),
         "evidence_sha256": _sha256(out / "evidence-context.json"),
+        # The old field is retained as a compatibility alias for the semantic
+        # request body hash.  The explicit domains prevent a full-envelope
+        # hash from being compared with the provenance body hash by accident.
         "llm_request_sha256": (
-            sha256_json(llm_request)
+            request_body_sha256(llm_request)
             if llm_request else None
+        ),
+        "llm_request_body_sha256": (
+            request_body_sha256(llm_request)
+            if llm_request else None
+        ),
+        "llm_request_envelope_sha256": (
+            request_envelope_sha256(llm_request)
+            if llm_request else None
+        ),
+        "llm_request_file_sha256": (
+            _sha256(out / "llm-request.json")
+            if llm_request and (out / "llm-request.json").is_file() else None
         ),
         "semantic_review_provenance": expected_provenance,
         "llm_batch": llm_batch,

@@ -11,6 +11,13 @@ from docx import Document
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
+
+from semantic_contract import (  # noqa: E402
+    attach_request_provenance,
+    request_body_sha256,
+    request_envelope_sha256,
+)
 
 
 def run_engine(source: Path, out: Path, *extra: str) -> subprocess.CompletedProcess[str]:
@@ -21,6 +28,25 @@ def run_engine(source: Path, out: Path, *extra: str) -> subprocess.CompletedProc
 
 
 class SemanticProvenanceTests(unittest.TestCase):
+    def test_request_hash_domains_are_explicit_and_stable(self) -> None:
+        clauses = [{"id": "C1"}]
+        request = {"contract_version": "2.1", "clauses": clauses}
+        bound = attach_request_provenance(
+            request,
+            source_sha256="a" * 64,
+            evidence_doc={"evidence": []},
+            clauses=clauses,
+            run_id="run-1",
+        )
+        self.assertEqual(
+            bound["provenance"]["request_sha256"], request_body_sha256(bound)
+        )
+        self.assertNotEqual(request_body_sha256(bound), request_envelope_sha256(bound))
+        self.assertNotEqual(
+            request_envelope_sha256(bound),
+            request_envelope_sha256({**bound, "execution_policy": "fresh_run_no_cache"}),
+        )
+
     def test_fresh_bound_response_is_accepted_and_evidence_context_is_rich(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

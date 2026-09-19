@@ -8,10 +8,13 @@ host identity, not evidence of the model or provider used for a turn.
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 from pathlib import Path
 import shutil
 from typing import Any
+
+from semantic_contract import strict_json_loads
 
 DEFAULT_MODEL = "gpt-5.6-luna"
 
@@ -70,8 +73,8 @@ def _strip_json_wrapper(text: str) -> dict[str, Any]:
             raise ValueError("Codex returned an empty JSON fence")
         value = "\n".join(lines[1:-1]).strip()
     try:
-        parsed = json.loads(value)
-    except json.JSONDecodeError as exc:
+        parsed = strict_json_loads(value)
+    except (ValueError, json.JSONDecodeError) as exc:
         raise ValueError(f"Codex final message is not valid JSON: {exc}") from exc
     if not isinstance(parsed, dict):
         raise ValueError("Codex final message must be one JSON object")
@@ -94,12 +97,13 @@ def parse_result(
     event_types: list[str] = []
     stream_errors: list[str] = []
     agent_messages: list[str] = []
+    thread_id: str | None = None
     for line_number, line in enumerate(stdout.splitlines(), start=1):
         if not line.strip():
             continue
         try:
-            event = json.loads(line)
-        except json.JSONDecodeError as exc:
+            event = strict_json_loads(line)
+        except (ValueError, json.JSONDecodeError) as exc:
             raise ValueError(
                 f"Codex returned invalid JSONL at line {line_number}: {exc}"
             ) from exc
@@ -109,6 +113,8 @@ def parse_result(
         event_type = event.get("type")
         if isinstance(event_type, str):
             event_types.append(event_type)
+        if event_type == "thread.started" and isinstance(event.get("thread_id"), str):
+            thread_id = event["thread_id"]
         if event_type in {"error", "turn.failed"}:
             detail = event.get("message") or event.get("error") or event_type
             stream_errors.append(str(detail))
@@ -125,6 +131,9 @@ def parse_result(
     if not events:
         raise ValueError("Codex returned no JSONL events")
     turn_completed = "turn.completed" in event_types
+    if "turn.failed" in event_types:
+        detail = "; ".join(stream_errors[-3:]) or "turn.failed"
+        raise ValueError(f"Codex turn failed: {detail}")
     if not turn_completed:
         detail = "; ".join(stream_errors[-3:]) or "missing turn.completed"
         raise ValueError(f"Codex turn did not complete: {detail}")
@@ -138,10 +147,25 @@ def parse_result(
         raise ValueError("Codex turn completed without a final assistant message")
 
     response = _strip_json_wrapper(final_text)
+    if last_message and agent_messages:
+        event_response = _strip_json_wrapper(agent_messages[-1].strip())
+        if event_response != response:
+            raise ValueError(
+                "Codex final message does not match the terminal agent-message event"
+            )
+    terminal_event_index = max(
+        index for index, event in enumerate(events)
+        if event.get("type") in {"turn.completed", "turn.failed"}
+    )
     return response, {
         "event_count": len(events),
         "event_types": event_types,
         "turn_completed": True,
+        "terminal_event_index": terminal_event_index,
+        "thread_id": thread_id,
         "stream_warnings": stream_errors,
         "final_message_source": source,
+        "final_message_sha256": hashlib.sha256(
+            final_text.encode("utf-8")
+        ).hexdigest(),
     }

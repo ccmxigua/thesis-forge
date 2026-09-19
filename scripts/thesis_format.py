@@ -17,7 +17,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import subprocess
 import sys
 from pathlib import Path
 
@@ -31,6 +30,7 @@ from host_runtime import (  # noqa: E402
     automatic_adapter_id,
     require_host_runtime,
 )
+from process_runner import run_process  # noqa: E402
 
 
 def pipeline_command(args: argparse.Namespace, *, prepare_host_review: bool = False,
@@ -70,9 +70,13 @@ def pipeline_command(args: argparse.Namespace, *, prepare_host_review: bool = Fa
     return command
 
 
-def run_stage(command: list[str], label: str) -> int:
+def run_stage(command: list[str], label: str, *, timeout: int) -> int:
     print(f"\n{'=' * 70}\n{label}\n{'=' * 70}", flush=True)
-    result = subprocess.run(command, cwd=ROOT)
+    result = run_process(command, cwd=ROOT, timeout=timeout)
+    if result.stdout:
+        print(result.stdout[-1200:], end="" if result.stdout.endswith("\n") else "\n")
+    if result.stderr:
+        print("STDERR:", result.stderr[-1200:])
     return result.returncode
 
 
@@ -105,6 +109,8 @@ def main(argv: list[str]) -> int:
                    help="maximum number of independent Host Agent chunks in flight (default: 4)")
     p.add_argument("--host-agent-max-attempts", type=int, default=2,
                    help="maximum attempts per Host Agent chunk before failing closed (default: 2)")
+    p.add_argument("--stage-timeout", type=int, default=1800,
+                   help="hard timeout for each preparation, bridge, or formatting subprocess")
     p.add_argument("--host-agent-model",
                    help="explicit OpenClaw route for the OpenClaw adapter; omitted means copy the bound parent route")
     p.add_argument("--host-agent-parent-session-key",
@@ -117,8 +123,8 @@ def main(argv: list[str]) -> int:
                    help="optional openclaw executable used by --auto-host-agent")
     p.add_argument("--codex-bin",
                    help="optional native codex executable used by --auto-host-agent")
-    p.add_argument("--codex-model", default=codex_adapter.DEFAULT_MODEL,
-                   help=f"explicit native Codex model (default: {codex_adapter.DEFAULT_MODEL})")
+    p.add_argument("--codex-model",
+                   help="optional explicit native Codex model; omitted means the current Codex CLI configuration")
     p.add_argument("--render-report", type=Path)
     p.add_argument("--require-submission-ready", action="store_true")
     p.add_argument("--strict-release", action="store_true",
@@ -136,6 +142,8 @@ def main(argv: list[str]) -> int:
         p.error("--host-agent-max-concurrency must be a positive integer")
     if args.host_agent_max_attempts <= 0:
         p.error("--host-agent-max-attempts must be a positive integer")
+    if args.stage_timeout <= 0:
+        p.error("--stage-timeout must be a positive integer")
     adapter_id: str | None = None
     if args.auto_host_agent:
         if args.no_host_agent_model_inheritance and not args.host_agent_model:
@@ -182,7 +190,7 @@ def main(argv: list[str]) -> int:
         execution_requirements = args.work_dir.resolve() / "execution" / "requirements"
         prepare = pipeline_command(args, prepare_host_review=True,
                                    requirements_dir=review_requirements)
-        code = run_stage(prepare, "fresh extraction + Host Agent packet")
+        code = run_stage(prepare, "fresh extraction + Host Agent packet", timeout=args.stage_timeout)
         if code:
             return code
         extraction_manifest = review_requirements / "extraction-manifest.json"
@@ -207,7 +215,8 @@ def main(argv: list[str]) -> int:
         if adapter_id == "codex":
             if args.codex_bin:
                 bridge += ["--codex-bin", args.codex_bin]
-            bridge += ["--codex-model", args.codex_model]
+            if args.codex_model:
+                bridge += ["--codex-model", args.codex_model]
             label = "explicit Codex native adapter review + provenance merge"
         else:
             bridge += ["--agent-id", args.host_agent_id]
@@ -222,7 +231,7 @@ def main(argv: list[str]) -> int:
             if args.openclaw_bin:
                 bridge += ["--openclaw-bin", args.openclaw_bin]
             label = "explicit OpenClaw adapter review + provenance merge"
-        code = run_stage(bridge, label)
+        code = run_stage(bridge, label, timeout=args.stage_timeout)
         if code:
             return code
         final = pipeline_command(
@@ -231,7 +240,11 @@ def main(argv: list[str]) -> int:
             host_agent_audit=review_requirements / "host-agent-run.json",
             merge_receipt=review_requirements / "merge-receipt.json",
         )
-        return run_stage(final, "full deterministic format + declaration resources + DOCX audits")
+        return run_stage(
+            final,
+            "full deterministic format + declaration resources + DOCX audits",
+            timeout=args.stage_timeout,
+        )
 
     if args.prepare_agent_review:
         command = pipeline_command(
@@ -262,7 +275,7 @@ def main(argv: list[str]) -> int:
         )
     else:
         p.error("final formatting requires --llm-response, or use --auto-host-agent for one-command execution")
-    return subprocess.run(command, cwd=ROOT).returncode
+    return run_stage(command, "thesis-format stage", timeout=args.stage_timeout)
 
 
 if __name__ == "__main__":

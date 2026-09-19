@@ -15,6 +15,7 @@ import copy
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 import json
 import os
+import re
 import signal
 import subprocess
 import sys
@@ -23,6 +24,8 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from artifact_io import atomic_write_text
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
@@ -212,8 +215,10 @@ def _bound_path(root: Path, value: str | Path, *, label: str) -> Path:
 
 
 def _write_json(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    atomic_write_text(
+        path,
+        json.dumps(value, ensure_ascii=False, indent=2) + "\n",
+    )
 
 
 def compact_model_packet(chunk: dict[str, Any]) -> dict[str, Any]:
@@ -288,6 +293,15 @@ def compact_model_packet(chunk: dict[str, Any]) -> dict[str, Any]:
         "instructions": chunk.get("instructions", []),
         "batch": chunk.get("batch"),
         "clauses": chunk.get("clauses", []),
+        "source_continuity_context": copy.deepcopy(
+            chunk.get("source_continuity_context", {})
+        ),
+        "declaration_anchor_candidates": copy.deepcopy(
+            chunk.get("declaration_anchor_candidates", [])
+        ),
+        "declaration_anchor_preference": chunk.get(
+            "declaration_anchor_preference"
+        ),
         "evidence_context": compact_evidence,
         "document_structure": compact_structure,
         "page_evidence": chunk.get("page_evidence", {}),
@@ -317,6 +331,76 @@ def compact_model_packet(chunk: dict[str, Any]) -> dict[str, Any]:
 
 def _summarize_contract_errors(errors: list[str], *, limit: int = 12) -> str:
     return _shared_summarize_contract_errors(errors, limit=limit)
+
+
+_BASE_CONTRACT_REPAIR_RULES = (
+    "Never add unknown properties or invent role names; emit only fields and nested properties present in response_schema and requirement_contract.",
+    "classification and normative_basis are different fields: classification is a review status; normative_basis must be one of the declared enum values and must never be the word informational.",
+    "If classification is informational, use requirement_indexes: [] and omit normative_basis unless a declared normative basis is explicitly supported by the cited evidence; never copy classification into normative_basis.",
+    "Only covered, executable, and verify_existing clause reviews may contain requirement_indexes; every other classification must use an empty array.",
+    "Every executable/covered/verify_existing requirement reference must be a zero-based index of a semantically matching emitted requirement, and every emitted requirement must be referenced at least once.",
+    "Do not move nested properties to a top-level requirement role: a nested key such as require_after_role is legal only where the supplied role schema places it.",
+    "Do not fabricate evidence or guess a semantic classification. Make only the mechanical schema corrections required by the supplied error, then regenerate the complete response from the current chunk.",
+)
+
+
+def _contract_repair_guidance(
+    error_text: str,
+    *,
+    include_base: bool = True,
+) -> str:
+    """Return deterministic, narrow repair instructions for a rejected reply.
+
+    A raw validator error is useful to a human but is too easy for a model to
+    misread as permission to coerce the payload.  These rules describe the
+    contract boundary without suggesting a semantic value or silently
+    changing the rejected response.
+    """
+    text = str(error_text or "").lower()
+    rules = list(_BASE_CONTRACT_REPAIR_RULES) if include_base else []
+    targeted: list[str] = []
+    clause_match = re.search(r"\$\.clause_reviews\[(\d+)\]\.normative_basis", text)
+    if clause_match:
+        clause_index = clause_match.group(1)
+        targeted.append(
+            f"At clause_reviews[{clause_index}], remove the entire normative_basis property if the value is informational or otherwise not supported by the cited evidence; never replace it with another guessed value. Keep that review's classification unchanged unless the current chunk evidence independently requires a different semantic classification."
+        )
+    elif "normative_basis" in text or "informational" in text:
+        targeted.append(
+            "For every clause_review, scan normative_basis separately from classification. Remove normative_basis when no declared evidence basis is supported; never replace it with another guessed value, and never use informational or any classification string as its value."
+        )
+    if "requirement_index" in text or "nonexecutable" in text:
+        targeted.append(
+            "Re-check every clause_review classification against its requirement_indexes before returning; non-executable reviews must have [] even when the rejected response had an index."
+        )
+    if "require_after_role" in text or "unknown_or_disallowed_role" in text or "additionalproperties" in text:
+        targeted.append(
+            "Re-read the exact role_properties_schema for each requirement and place each property only at its declared nesting level; do not create a keywords_zh/keywords_en role when the schema expects content_constraints.properties.keywords_zh/keywords_en."
+        )
+    if "before_role" in text or "declarations" in text and "enum" in text:
+        targeted.append(
+            "For a declarations requirement, before_role must equal the supplied declaration_anchor_preference and must be one of the supplied declaration_anchor_candidates. The word declarations is a requirement role, not an insertion anchor; do not substitute another role or invent an anchor."
+        )
+    if "signature" in text or "author-name" in text or "author name" in text or "date" in text:
+        targeted.append(
+            "Do not emit a declarations requirement consisting only of generic author/name/date/signature/location lines. Reclassify those clauses as requires_metadata, external_compliance, or unresolved with requirement_indexes: [] unless the current evidence explicitly proves they are fixed declaration text completing an identified declaration."
+        )
+    if "complete cited source" in text or "shorten a source paragraph" in text or "paraphrase" in text:
+        targeted.append(
+            "Every declaration heading and body_parts entry must equal a complete cited source-evidence text. Do not paraphrase or shorten fixed prose; omit heading for a continuation and preserve the complete source paragraph in body_parts."
+        )
+    unknown_property = re.search(r"unknown property ['\"]([^'\"]+)['\"]", text)
+    if unknown_property:
+        targeted.append(
+            f"Delete only the unknown property {unknown_property.group(1)!r} from the indicated object; do not rename it, move it to another object, or invent a replacement field."
+        )
+    if "not valid json" in text or "jsondecodeerror" in text:
+        targeted.append(
+            "Return raw JSON only: no Markdown fences, comments, trailing commas, duplicate keys, or explanatory text; parse the complete object before sending it."
+        )
+    if targeted:
+        rules.extend(targeted)
+    return "\n".join(f"- {rule}" for rule in rules) or "- Re-read the current chunk contract and regenerate the complete JSON object."
 
 
 # Compatibility name for callers that imported the bridge directly.  The
@@ -441,11 +525,15 @@ def _host_prompt(*, request_path: Path, chunk_path: Path,
                  retry_hint: str | None = None,
                  provenance: dict[str, Any] | None = None) -> str:
     retry_text = ""
+    repair_guidance = _contract_repair_guidance("")
     if retry_hint:
+        retry_guidance = _contract_repair_guidance(retry_hint, include_base=False)
         retry_text = (
             "\nThis is a retry after the previous attempt was rejected locally. "
             "Do not discuss the failure; return a newly generated valid JSON object. "
             f"Reason category: {retry_hint}.\n"
+            "Apply the following targeted contract repair rules:\n"
+            f"{retry_guidance}\n"
         )
     return f"""You are the current Host Agent for one fresh thesis-format semantic-review run.
 
@@ -487,6 +575,8 @@ your JSON as:
 
 Before answering, verify that the result is a complete contract-2.1 object
 with requirements, clause_reviews, unsupported_items, and reported_conflicts.
+Mechanical contract checklist (apply before returning JSON):
+{repair_guidance}
 {retry_text}
 """
 
@@ -704,7 +794,7 @@ def run_host_agent_chunk(
             prompt_path=prompt_path,
             last_message_path=last_message_path,
             cwd=ROOT,
-            model=codex_model or codex_adapter.DEFAULT_MODEL,
+            model=codex_model,
         )
     else:
         raise ValueError(f"unsupported Host Agent adapter: {adapter_id}")
@@ -772,8 +862,9 @@ def run_host_agent_chunk(
     )
     if raw_response_path.exists():
         raise ValueError(f"refusing to overwrite existing raw Host Agent response: {raw_response_path}")
-    raw_response_path.write_text(
-        json.dumps(response, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    atomic_write_text(
+        raw_response_path,
+        json.dumps(response, ensure_ascii=False, indent=2) + "\n",
     )
     # The model-facing packet deliberately omits trusted identity fields.  A
     # native bridge may therefore bind a response that omits ``provenance``
@@ -801,8 +892,9 @@ def run_host_agent_chunk(
     )
     if controller is not None:
         controller.check()
-    response_path.write_text(
-        json.dumps(response, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+    atomic_write_text(
+        response_path,
+        json.dumps(response, ensure_ascii=False, indent=2) + "\n",
     )
     audit = {
         "adapter_id": adapter_id,
@@ -871,9 +963,10 @@ def run_bridge(
     host_context = require_host_runtime(host_runtime)
     adapter_id = automatic_adapter_id(host_context)
     if adapter_id == "codex":
-        codex_model = (codex_model or codex_adapter.DEFAULT_MODEL).strip()
-        if not codex_model:
-            raise HostRuntimeError("Codex native adapter requires a non-empty explicit model")
+        if codex_model is not None:
+            codex_model = codex_model.strip()
+            if not codex_model:
+                raise HostRuntimeError("Codex model must be non-empty when explicitly supplied")
     if adapter_id == "openclaw" and model is None and not inherit_parent_model and not host_context.parent_session_id:
         raise HostRuntimeError(
             "automatic OpenClaw execution requires an explicit model route or a bound parent session; refusing the gateway default"
@@ -974,7 +1067,10 @@ def run_bridge(
         "model": model if adapter_id == "openclaw" else codex_model,
         "source": (
             "explicit-model" if model else "gateway-default"
-        ) if adapter_id == "openclaw" else "explicit-native-codex-model",
+        ) if adapter_id == "openclaw" else (
+            "explicit-native-codex-model" if codex_model
+            else "native-codex-cli-current-config"
+        ),
         "parent_session_key": None,
         "parent_model_override": None,
         "parent_provider_override": None,
@@ -996,7 +1092,12 @@ def run_bridge(
     if effective_model and adapter_id == "openclaw":
         _split_model_route(str(effective_model))
 
-    def persist_failure_audit(error: BaseException, chunk_runs: list[dict[str, Any]]) -> None:
+    def persist_failure_audit(
+        error: BaseException,
+        chunk_runs: list[dict[str, Any]],
+        *,
+        in_flight_chunk_indexes: list[int] | None = None,
+    ) -> None:
         """Persist a terminal failure without manufacturing a merged response."""
         _write_json(audit_path, {
             "schema_version": "1.0",
@@ -1022,7 +1123,10 @@ def run_bridge(
             "codex_bin": codex_binary,
             "route_policy": (
                 "parent-effective-route-snapshot"
-                if adapter_id == "openclaw" else "explicit-native-codex-model"
+                if adapter_id == "openclaw" else (
+                    "explicit-native-codex-model" if codex_model
+                    else "native-codex-cli-current-config"
+                )
             ),
             "route_verification": (
                 "child-winner-must-match; fallback-must-be-false"
@@ -1037,12 +1141,23 @@ def run_bridge(
                 "stopped" if isinstance(error, HostAgentCancelled)
                 else "failed_or_not_started"
             ),
-            "remote_operation_state": (
-                "remote_operation_completed"
-                if any(item.get("remote_operation_state") == "remote_operation_completed"
-                       for item in chunk_runs)
-                else "remote_operation_state_unknown"
+            # A completed local child is not proof that the whole remote
+            # operation completed.  In particular, a sibling failure can
+            # terminate the local CLI while a gateway-side request remains
+            # unobservable.  Never report overall completion from a partial
+            # chunk list.
+            "remote_operation_state": "remote_operation_state_unknown",
+            "remote_operation_observation": (
+                "local_processes_terminated_or_failed; remote_completion_not_proven"
             ),
+            "completed_chunk_indexes": sorted({
+                int(item.get("chunk_index")) for item in chunk_runs
+                if isinstance(item, dict) and isinstance(item.get("chunk_index"), int)
+            }),
+            "in_flight_chunk_indexes": sorted({
+                int(item) for item in (in_flight_chunk_indexes or [])
+                if isinstance(item, int)
+            }),
             "chunk_runs": chunk_runs,
             "merged_response_written": False,
         })
@@ -1165,6 +1280,10 @@ def run_bridge(
                 fill_slots()
         except Exception as exc:
             controller.request_stop(str(exc))
+            in_flight_chunk_indexes = sorted({
+                int(index) for index in futures.values()
+                if isinstance(index, int)
+            })
             controller.terminate_all()
             for future in futures:
                 future.cancel()
@@ -1172,6 +1291,7 @@ def run_bridge(
                 exc,
                 [chunk_audits_by_index[index]
                  for index in sorted(chunk_audits_by_index)],
+                in_flight_chunk_indexes=in_flight_chunk_indexes,
             )
             raise
 
@@ -1215,7 +1335,10 @@ def run_bridge(
         "parent_effective_model": resolution.get("parent_effective_model"),
         "route_policy": (
             "parent-effective-route-snapshot"
-            if adapter_id == "openclaw" else "explicit-native-codex-model"
+            if adapter_id == "openclaw" else (
+                "explicit-native-codex-model" if codex_model
+                else "native-codex-cli-current-config"
+            )
         ),
         "route_verification": (
             "child-winner-must-match; fallback-must-be-false"
@@ -1275,8 +1398,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="optional config file passed explicitly to `openclaw agent exec`")
     parser.add_argument("--codex-bin",
                         help="optional path to the native codex executable")
-    parser.add_argument("--codex-model", default=codex_adapter.DEFAULT_MODEL,
-                        help=f"explicit native Codex model (default: {codex_adapter.DEFAULT_MODEL})")
+    parser.add_argument("--codex-model",
+                        help="optional explicit native Codex model; omitted means the current Codex CLI configuration")
     args = parser.parse_args(argv)
     if args.inherit_parent_model is False and not args.model:
         parser.error("--no-inherit-parent-model requires an explicit --model route")

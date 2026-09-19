@@ -86,6 +86,11 @@ class HostAgentBridgeTests(unittest.TestCase):
     def test_compact_model_packet_preserves_the_machine_readable_contract(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             _review_dir, chunk = self._packet(Path(td) / "requirements")
+            chunk["source_continuity_context"] = {
+                "policy": "orientation_only_not_for_review",
+                "preceding_clauses": [{"id": "C0", "text": "前一段"}],
+                "following_clauses": [{"id": "C2", "text": "后一段"}],
+            }
             packet = bridge.compact_model_packet(chunk)
             contract = packet["requirement_contract"]
             self.assertEqual(contract["allowed_roles"], chunk["requirement_contract"]["allowed_roles"])
@@ -97,6 +102,100 @@ class HostAgentBridgeTests(unittest.TestCase):
             self.assertIn("verificationSpec", packet["response_schema"]["$defs"])
             self.assertIn("inputPrerequisiteSpec", packet["response_schema"]["$defs"])
             self.assertNotIn("provenance", packet)
+            self.assertEqual(
+                packet["source_continuity_context"]["following_clauses"][0]["id"],
+                "C2",
+            )
+
+    def test_chunk_packets_expose_bounded_continuity_without_expanding_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            directory = Path(td) / "requirements"
+            clauses = [
+                {"id": f"C{i}", "text": f"段落{i}", "evidence_ids": [f"E{i}"],
+                 "source_kind": "paragraph", "location": {"order": i}, "part_index": 0}
+                for i in range(1, 5)
+            ]
+            evidence = {"evidence": [
+                {"id": f"E{i}", "text": f"段落{i}", "kind": "paragraph"}
+                for i in range(1, 5)
+            ]}
+            request = engine.build_llm_request([], clauses, evidence, {}, "full")
+            request = attach_request_provenance(
+                request, source_sha256="a" * 64, evidence_doc=evidence,
+                clauses=clauses, run_id="run-continuity-test",
+            )
+            engine.prepare_host_agent_review_packets(
+                request, clauses, evidence, "a" * 64, directory, chunk_size=2,
+            )
+            chunks = json.loads((directory / "llm-request-chunks.json").read_text())
+            self.assertEqual(
+                [item["id"] for item in chunks[0]["source_continuity_context"]["following_clauses"]],
+                ["C3", "C4"],
+            )
+            self.assertEqual(
+                [item["id"] for item in chunks[1]["source_continuity_context"]["preceding_clauses"]],
+                ["C1", "C2"],
+            )
+            self.assertEqual(chunks[0]["batch"]["clause_ids"], ["C1", "C2"])
+            self.assertEqual(chunks[1]["batch"]["clause_ids"], ["C3", "C4"])
+
+    def test_declaration_anchor_preference_is_bound_to_current_structure(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            directory = Path(td) / "requirements"
+            clauses = [{
+                "id": "C1", "text": "固定声明正文", "evidence_ids": ["E1"],
+                "source_kind": "paragraph", "location": {}, "part_index": 0,
+            }]
+            evidence = {
+                "evidence": [{"id": "E1", "text": "固定声明正文", "kind": "paragraph"}],
+                "structure_evidence": {"sections": [{
+                    "first_paragraphs": [{"text": "摘要", "style_name": "Abstract Title CN"}],
+                    "last_paragraphs": [],
+                }]},
+            }
+            request = engine.build_llm_request([], clauses, evidence, {}, "full")
+            self.assertEqual(request["declaration_anchor_candidates"], [
+                "document_start", "abstract_title_zh",
+            ])
+            self.assertEqual(request["declaration_anchor_preference"], "abstract_title_zh")
+            request = attach_request_provenance(
+                request, source_sha256="a" * 64, evidence_doc=evidence,
+                clauses=clauses, run_id="run-anchor-test",
+            )
+            engine.prepare_host_agent_review_packets(
+                request, clauses, evidence, "a" * 64, directory, chunk_size=1,
+            )
+            chunk = json.loads((directory / "llm-request-chunks.json").read_text())[0]
+            self.assertEqual(chunk["declaration_anchor_preference"], "abstract_title_zh")
+
+    def test_preflight_rejects_invalid_declaration_anchor_and_signature_only_block(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            _review_dir, chunk = self._packet(Path(td) / "requirements")
+            chunk["clauses"][0]["text"] = "作者姓名"
+            chunk["evidence_context"]["E1"]["text"] = "作者姓名"
+            response = self._response(chunk)
+            response["requirements"] = [{
+                "role": "declarations",
+                "properties": {
+                    "before_role": "declarations",
+                    "items": [{
+                        "id": "author_signature",
+                        "heading": "作者姓名",
+                        "body_parts": ["年 月 日于北体大"],
+                        "source_evidence_ids": ["E1"],
+                        "signature_placeholders": [],
+                    }],
+                },
+                "clause_ids": ["C1"], "evidence_ids": ["E1"],
+                "confidence": 0.9, "reason": "固定文本",
+            }]
+            response["clause_reviews"] = [{
+                "clause_id": "C1", "classification": "executable",
+                "requirement_indexes": [0], "reason": "声明结构",
+            }]
+            errors = bridge.validate_host_agent_response(response, chunk)
+            self.assertTrue(any("before_role" in error for error in errors), errors)
+            self.assertTrue(any("generic author/date/signature" in error for error in errors), errors)
 
     def test_preflight_rejects_response_schema_drift(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -128,6 +227,56 @@ class HostAgentBridgeTests(unittest.TestCase):
             response["clause_reviews"][0]["normative_basis"] = "informational"
             errors = bridge.validate_host_agent_response(response, chunk)
             self.assertTrue(any("normative_basis" in error for error in errors), errors)
+
+    def test_preflight_rejects_requirement_index_on_nonexecutable_review(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            _review_dir, chunk = self._packet(Path(td) / "requirements")
+            response = self._executable_response(chunk)
+            response["clause_reviews"][0]["classification"] = "informational"
+            response["clause_reviews"][0]["requirement_indexes"] = [0]
+            errors = bridge.validate_host_agent_response(response, chunk)
+            self.assertTrue(
+                any("nonexecutable_review_must_not_reference_requirement" in error for error in errors),
+                errors,
+            )
+
+    def test_host_prompt_exposes_mechanical_contract_rules(self) -> None:
+        prompt = bridge._host_prompt(
+            request_path=Path("request.json"),
+            chunk_path=Path("chunk.json"),
+            response_path=Path("response.json"),
+            run_id="run-1",
+            chunk_index=1,
+            chunk_count=1,
+        )
+        self.assertIn("classification and normative_basis are different fields", prompt)
+        self.assertIn("Only covered, executable, and verify_existing", prompt)
+        self.assertIn("require_after_role", prompt)
+        retry = bridge._host_prompt(
+            request_path=Path("request.json"),
+            chunk_path=Path("chunk.json"),
+            response_path=Path("response.json"),
+            run_id="run-1",
+            chunk_index=1,
+            chunk_count=1,
+            retry_hint="informational normative_basis nonexecutable_review_must_not_reference_requirement",
+        )
+        self.assertIn("targeted contract repair rules", retry)
+        self.assertIn("Remove normative_basis", retry)
+        self.assertIn("never replace it with another guessed value", retry)
+
+    def test_retry_guidance_targets_exact_invalid_property_without_contradiction(self) -> None:
+        retry = bridge._contract_repair_guidance(
+            "local response contract validation failed: "
+            "$.clause_reviews[12].normative_basis: 'informational' is not in "
+            "['explicit_normative_text']; "
+            "$.requirements[3].properties: unknown property 'style_hint'",
+            include_base=False,
+        )
+        self.assertIn("clause_reviews[12]", retry)
+        self.assertIn("remove the entire normative_basis property", retry)
+        self.assertIn("Delete only the unknown property 'style_hint'", retry)
+        self.assertNotIn("Do not repair by deleting evidence, clearing indexes", retry)
 
     def test_bridge_retries_locally_rejected_contract_in_a_new_session(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -341,7 +490,7 @@ class HostAgentBridgeTests(unittest.TestCase):
             self.assertEqual(command[1], "exec")
             self.assertIn("--json", command)
             self.assertIn("--sandbox", command)
-            self.assertEqual(command[command.index("--model") + 1], "gpt-5.6-luna")
+            self.assertNotIn("--model", command)
             self.assertNotIn("openclaw", " ".join(command).lower())
             self.assertNotIn("--session-key", command)
             self.assertEqual(audit["adapter_id"], "codex")
@@ -360,7 +509,7 @@ class HostAgentBridgeTests(unittest.TestCase):
                     ])
             self.assertEqual(code, 0)
             self.assertFalse(run.call_args.kwargs["inherit_parent_model"])
-            self.assertEqual(run.call_args.kwargs["codex_model"], "gpt-5.6-luna")
+            self.assertIsNone(run.call_args.kwargs["codex_model"])
 
     def test_resolve_parent_model_copies_provider_and_model_override(self) -> None:
         parent_key = "agent:main:telegram:direct:chat:thread:38479"

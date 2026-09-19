@@ -24,16 +24,31 @@ class CodexAdapterTests(unittest.TestCase):
                 prompt_path=prompt,
                 last_message_path=output,
                 cwd=root,
+                model="gpt-5.6-luna",
             )
         self.assertEqual(command[:2], ["/opt/homebrew/bin/codex", "exec"])
         self.assertIn("--ephemeral", command)
         self.assertIn("--ignore-user-config", command)
-        self.assertEqual(command[command.index("--model") + 1], codex.DEFAULT_MODEL)
+        self.assertEqual(command[command.index("--model") + 1], "gpt-5.6-luna")
         self.assertIn("--sandbox", command)
         self.assertIn("read-only", command)
         self.assertIn("--json", command)
         self.assertIn("--output-last-message", command)
         self.assertNotIn("openclaw", " ".join(command).lower())
+
+    def test_build_command_without_model_preserves_native_cli_configuration(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            prompt = root / "prompt.txt"
+            output = root / "last-message.txt"
+            prompt.write_text("Return one JSON object.", encoding="utf-8")
+            command = codex.build_command(
+                binary="/opt/homebrew/bin/codex",
+                prompt_path=prompt,
+                last_message_path=output,
+                cwd=root,
+            )
+        self.assertNotIn("--model", command)
 
     def test_parse_result_requires_completed_turn_and_uses_final_message(self) -> None:
         response = {"contract_version": "2.1", "provenance": {}}

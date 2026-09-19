@@ -1739,8 +1739,11 @@
       ],
       "properties": {
         "before_role": {
-          "type": "string",
-          "minLength": 1
+          "enum": [
+            "document_start",
+            "abstract_title_zh"
+          ],
+          "description": "Declarations may be inserted only at a verified document-start or Chinese-abstract anchor. Other roles are not deterministic insertion anchors."
         },
         "items": {
           "type": "array",

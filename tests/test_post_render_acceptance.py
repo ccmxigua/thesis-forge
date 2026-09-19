@@ -8,6 +8,7 @@ import unittest
 from pathlib import Path
 
 from docx import Document
+import fitz
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -18,6 +19,14 @@ import post_render_acceptance as post_render  # noqa: E402
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _write_valid_pdf(path: Path, text: str = "post-word") -> None:
+    document = fitz.open()
+    page = document.new_page()
+    page.insert_text((72, 72), text)
+    document.save(str(path))
+    document.close()
 
 
 class PostRenderAcceptanceTests(unittest.TestCase):
@@ -113,19 +122,56 @@ class PostRenderAcceptanceTests(unittest.TestCase):
             final_digest = _sha256(final)
             acceptance = final.parent / "post-render-acceptance.json"
             comparison = final.parent / "final-format-comparison.json"
+            pdf = final.parent / "final.pdf"
+            _write_valid_pdf(pdf)
+            render_report = final.parent / "word-render-report.json"
+            render_report.write_text(json.dumps({
+                "source_docx": {"path": str(final), "sha256": final_digest},
+                "rendered_pdf": {"path": str(pdf), "sha256": _sha256(pdf)},
+            }), encoding="utf-8")
+            submission_audit = final.parent / "final-submission-audit.json"
+            submission_audit.write_text(json.dumps({
+                "submission_ready": True,
+                "render_validation": {"rendered_verified": True},
+            }), encoding="utf-8")
+            markdown = final.parent / "FINAL-FORMAT-COMPARISON.md"
+            markdown.write_text("passed\n", encoding="utf-8")
+            visual_audit = final.parent / "pdf-visual-audit.json"
+            visual_audit.write_text(json.dumps({
+                "status": "passed",
+                "pdf": {"path": str(pdf), "sha256": _sha256(pdf)},
+            }), encoding="utf-8")
             comparison.write_text(json.dumps({
                 "status": "passed",
                 "inputs": {"generated_docx_sha256": final_digest},
             }), encoding="utf-8")
             acceptance.write_text(json.dumps({
                 "status": "accepted",
+                "blockers": [],
+                "pre_render_docx_sha256": _sha256(pre_render),
                 "post_render_docx": str(final),
                 "post_render_docx_sha256": final_digest,
+                "rendered_pdf": str(pdf),
+                "rendered_pdf_sha256": _sha256(pdf),
+                "render_report": str(render_report),
+                "visual_audit": str(visual_audit),
+                "submission_audit": str(submission_audit),
+                "format_comparison": str(comparison),
             }), encoding="utf-8")
             manifest.update({
                 "pre_render_output": str(pre_render),
                 "post_render_status": "accepted",
                 "post_render_acceptance": str(acceptance),
+                "post_word_render": {
+                    "pre_render_docx": str(pre_render),
+                    "final_docx": str(final),
+                    "pdf": str(pdf),
+                    "render_report": str(render_report),
+                    "visual_audit": str(visual_audit),
+                    "submission_audit": str(submission_audit),
+                    "format_comparison": str(comparison),
+                    "format_comparison_markdown": str(markdown),
+                },
                 "output": str(final),
                 "format_comparison": str(comparison),
             })
@@ -147,19 +193,56 @@ class PostRenderAcceptanceTests(unittest.TestCase):
             final_doc.save(final)
             acceptance = final.parent / "post-render-acceptance.json"
             comparison = final.parent / "final-format-comparison.json"
+            pdf = final.parent / "final.pdf"
+            _write_valid_pdf(pdf)
+            render_report = final.parent / "word-render-report.json"
+            render_report.write_text(json.dumps({
+                "source_docx": {"path": str(final), "sha256": _sha256(final)},
+                "rendered_pdf": {"path": str(pdf), "sha256": _sha256(pdf)},
+            }), encoding="utf-8")
+            submission_audit = final.parent / "final-submission-audit.json"
+            submission_audit.write_text(json.dumps({
+                "submission_ready": True,
+                "render_validation": {"rendered_verified": True},
+            }), encoding="utf-8")
+            markdown = final.parent / "FINAL-FORMAT-COMPARISON.md"
+            markdown.write_text("passed\n", encoding="utf-8")
+            visual_audit = final.parent / "pdf-visual-audit.json"
+            visual_audit.write_text(json.dumps({
+                "status": "passed",
+                "pdf": {"path": str(pdf), "sha256": _sha256(pdf)},
+            }), encoding="utf-8")
             comparison.write_text(json.dumps({
                 "status": "passed",
                 "inputs": {"generated_docx_sha256": _sha256(final)},
             }), encoding="utf-8")
             acceptance.write_text(json.dumps({
                 "status": "accepted",
+                "blockers": [],
+                "pre_render_docx_sha256": _sha256(pre_render),
                 "post_render_docx": str(final),
                 "post_render_docx_sha256": "0" * 64,
+                "rendered_pdf": str(pdf),
+                "rendered_pdf_sha256": _sha256(pdf),
+                "render_report": str(render_report),
+                "visual_audit": str(visual_audit),
+                "submission_audit": str(submission_audit),
+                "format_comparison": str(comparison),
             }), encoding="utf-8")
             manifest.update({
                 "pre_render_output": str(pre_render),
                 "post_render_status": "accepted",
                 "post_render_acceptance": str(acceptance),
+                "post_word_render": {
+                    "pre_render_docx": str(pre_render),
+                    "final_docx": str(final),
+                    "pdf": str(pdf),
+                    "render_report": str(render_report),
+                    "visual_audit": str(visual_audit),
+                    "submission_audit": str(submission_audit),
+                    "format_comparison": str(comparison),
+                    "format_comparison_markdown": str(markdown),
+                },
                 "output": str(final),
                 "format_comparison": str(comparison),
             })

@@ -45,6 +45,31 @@ class SatisfiedInputComplianceTests(unittest.TestCase):
 
         self.assertEqual(annotated[0]["status"], "requires_metadata")
 
+    def test_false_applicability_is_preserved_as_not_applicable(self) -> None:
+        records = [{
+            "clause_id": "C-conditional",
+            "scope": "docx",
+            "status": "pending_execution",
+            "requirement_ids": ["R-conditional"],
+            "evidence_ids": ["E1"],
+            "reason": "conditional formatting rule",
+        }]
+        capability = [{
+            "clause_id": "C-conditional",
+            "category": "external_not_applicable",
+            "disposition": "not_applicable",
+            "reason": "runtime host condition is false",
+        }]
+
+        annotated = annotate_satisfied_inputs(records, capability)
+
+        self.assertEqual(annotated[0]["status"], "not_applicable")
+        self.assertEqual(annotated[0]["applicability_status"], "false")
+        self.assertEqual(
+            summarize(annotated, "full", "validation")["docx_compliance"]["counts"],
+            {"not_applicable": 1},
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

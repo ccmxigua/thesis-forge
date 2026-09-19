@@ -15,7 +15,8 @@ import batch_rerun_ten_schools as batch  # noqa: E402
 
 
 class BatchAcceptanceTests(unittest.TestCase):
-    def _result(self, root: Path, *, returncode: int = 0, render: bool = True) -> dict:
+    def _result(self, root: Path, *, returncode: int = 0, render: bool = True,
+                compliance_mode: str = "full") -> dict:
         work = root / "case" / "work"
         requirements = work / "requirements"
         apply_dir = work / "application"
@@ -53,7 +54,7 @@ class BatchAcceptanceTests(unittest.TestCase):
         manifest = work / "pipeline-manifest.json"
         manifest.write_text(json.dumps({
             "status": "completed",
-            "compliance_mode": "full",
+            "compliance_mode": compliance_mode,
             "output": str(output),
             "format_spec": str(format_spec),
             "capability_preflight": str(capability),
@@ -89,13 +90,20 @@ class BatchAcceptanceTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             accepted = batch.case_acceptance(self._result(Path(td), render=False))
             self.assertFalse(accepted["accepted"])
-            self.assertIn("trusted_render_not_verified", accepted["blockers"])
+            self.assertIn("post_render_acceptance_required_missing", accepted["blockers"])
 
     def test_current_artifacts_can_pass_only_as_one_bound_set(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             accepted = batch.case_acceptance(self._result(Path(td)))
-            self.assertTrue(accepted["accepted"], accepted)
-            self.assertEqual(accepted["status"], "accepted")
+            self.assertFalse(accepted["accepted"])
+            self.assertIn("post_render_acceptance_required_missing", accepted["blockers"])
+
+    def test_full_compliance_requires_post_render_chain(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            accepted = batch.case_acceptance(self._result(Path(td)))
+            self.assertFalse(accepted["accepted"])
+            self.assertIn("post_render_acceptance_required_missing", accepted["blockers"])
+            self.assertIn("post_word_render_manifest_missing", accepted["blockers"])
 
     def test_host_binding_failure_is_global_batch_stop(self) -> None:
         result = {
@@ -136,6 +144,7 @@ class BatchAcceptanceTests(unittest.TestCase):
             merge_receipt=Path("work/review/requirements/merge-receipt.json"),
         )
         self.assertIn("--requirements-dir", command)
+        self.assertIn("--allow-existing-work", command)
         self.assertIn("--host-agent-audit", command)
         self.assertIn("--merge-receipt", command)
 

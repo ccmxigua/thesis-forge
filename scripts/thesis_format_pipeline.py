@@ -18,7 +18,8 @@ from pipeline_finding import evidence, finding
 from region_graph import compile_region_graph
 from section_model import compile_section_plan
 from semantic_contract import sha256_json
-from artifact_io import paths_alias
+from artifact_io import atomic_write_text, paths_alias
+from process_runner import run_process
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -37,6 +38,16 @@ def validate_semantic_review_configuration(args: argparse.Namespace, parser: arg
         parser.error("--host-agent-audit and --merge-receipt must be supplied together")
     if (args.host_agent_audit or args.merge_receipt) and not args.llm_response:
         parser.error("host-agent receipts require --llm-response")
+    if (
+        args.compliance_mode == "full"
+        and args.llm_response
+        and not (args.host_agent_audit and args.merge_receipt)
+        and not args.allow_offline_review
+    ):
+        parser.error(
+            "full compliance requires a host-agent audit and merge receipt bound to the "
+            "current response; use --allow-offline-review only for an explicit non-release test"
+        )
     if args.compliance_mode == "full" and args.analysis_mode != "llm_primary":
         parser.error(
             "--compliance-mode full requires --analysis-mode llm_primary; "
@@ -60,6 +71,8 @@ def validate_semantic_review_configuration(args: argparse.Namespace, parser: arg
             parser.error("--strict-release requires --require-submission-ready")
         if args.allow_unresolved or args.preview_placeholders:
             parser.error("--strict-release cannot use unresolved or preview bypasses")
+        if args.allow_offline_review:
+            parser.error("--strict-release cannot use --allow-offline-review")
         if not args.prepare_host_review and not (args.host_agent_audit and args.merge_receipt):
             parser.error(
                 "--strict-release requires host-agent-run.json and merge-receipt.json "
@@ -88,7 +101,10 @@ def read_json(path: Path) -> Any:
 
 def write_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    atomic_write_text(
+        path,
+        json.dumps(value, ensure_ascii=False, indent=2) + "\n",
+    )
 
 
 def file_record(path: Path) -> dict[str, Any]:
@@ -224,8 +240,14 @@ def requirements_normalization_errors(
     return errors
 
 
-def run_step(name: str, command: list[str], steps: list[dict[str, Any]]) -> subprocess.CompletedProcess[str]:
-    result = subprocess.run(command, cwd=ROOT, text=True, capture_output=True)
+def run_step(
+    name: str,
+    command: list[str],
+    steps: list[dict[str, Any]],
+    *,
+    timeout: int = 1800,
+) -> subprocess.CompletedProcess[str]:
+    result = run_process(command, cwd=ROOT, timeout=timeout)
     steps.append({"name": name, "command": command, "returncode": result.returncode,
                   "stdout": result.stdout.strip(), "stderr": result.stderr.strip()})
     return result
@@ -466,6 +488,8 @@ def main(argv: list[str]) -> int:
     p.add_argument("input", type=Path, help="target thesis source (.tex for end-to-end conversion, or .docx for DOCX-stage use)")
     p.add_argument("output", type=Path, help="formatted output DOCX")
     p.add_argument("--work-dir", type=Path, required=True, help="directory for all auditable JSON products")
+    p.add_argument("--allow-existing-work", action="store_true",
+                   help="explicit compatibility override; otherwise a non-empty work directory is rejected")
     p.add_argument("--requirements-dir", type=Path,
                    help="stage-specific requirements artifact directory below --work-dir")
     p.add_argument("--style-template", type=Path,
@@ -493,6 +517,8 @@ def main(argv: list[str]) -> int:
                    help="optional JSON source inventory used by conditional backend capabilities")
     p.add_argument("--allow-unresolved", action="store_true",
                    help="unsafe expert override: continue despite unresolved style-map questions; requirement questions still block")
+    p.add_argument("--allow-offline-review", action="store_true",
+                   help="explicit non-release test mode; permits full semantic compilation without a native call receipt")
     p.add_argument("--preview-placeholders", action="store_true",
                    help="opt-in supported-subset preview: continue past unresolved requirement semantics while keeping the artifact non-submission-ready")
     p.add_argument("--render-report", type=Path,
@@ -551,6 +577,17 @@ def main(argv: list[str]) -> int:
             "requirements input cannot be inside the stage requirements directory because that "
             "directory is rebuilt for every fresh extraction"
         )
+    if work.exists():
+        try:
+            existing_entries = sorted(item.name for item in work.iterdir())
+        except OSError as exc:
+            p.error(f"cannot inspect work directory: {work}: {exc}")
+        if existing_entries and not args.allow_existing_work:
+            p.error(
+                "refusing to reuse a non-empty work directory; start a fresh run directory "
+                "or pass --allow-existing-work for an explicit compatibility run: "
+                + ", ".join(existing_entries[:8])
+            )
     work.mkdir(parents=True, exist_ok=True)
     source_input = args.input.resolve()
     source_suffix = source_input.suffix.lower()
@@ -564,6 +601,27 @@ def main(argv: list[str]) -> int:
     if output_path.exists():
         p.error(f"refusing to overwrite an existing output DOCX: {output_path}")
 
+    prior_manifest: dict[str, Any] | None = None
+    if args.allow_existing_work and manifest_path.is_file():
+        try:
+            candidate = read_json(manifest_path)
+        except (OSError, json.JSONDecodeError) as exc:
+            p.error(f"cannot read existing pipeline manifest for a compatibility stage: {exc}")
+        if not isinstance(candidate, dict):
+            p.error("existing pipeline manifest is not a JSON object; start a fresh run directory")
+        prior_manifest = candidate
+        prior_source = (candidate.get("inputs") or {}).get("source")
+        current_source = file_record(source_input)
+        if (
+            not isinstance(prior_source, dict)
+            or prior_source.get("path") != current_source.get("path")
+            or prior_source.get("sha256") != current_source.get("sha256")
+        ):
+            p.error(
+                "existing work directory is bound to a different source input; "
+                "start a fresh run directory instead of mixing stages"
+            )
+
     steps: list[dict[str, Any]] = []
     manifest: dict[str, Any] = {
         "schema_version": "1.1", "started_at": datetime.now(timezone.utc).isoformat(), "status": "running",
@@ -575,6 +633,10 @@ def main(argv: list[str]) -> int:
             "source_kind": "latex" if source_suffix == ".tex" else "docx",
         },
         "output": str(args.output.resolve()), "work_dir": str(work), "steps": steps,
+        "work_reuse_policy": (
+            "explicit_allow_existing_work" if args.allow_existing_work
+            else "new_directory_required"
+        ),
         "preview_placeholders": bool(args.preview_placeholders),
         "preview_bypassed_requirement_blockers": [],
         "preview_bypassed_section_plan_findings": [],
@@ -586,15 +648,41 @@ def main(argv: list[str]) -> int:
         converted_dir = work / "source-conversion"
         converted_dir.mkdir(parents=True, exist_ok=True)
         effective_input = converted_dir / "source.docx"
-        convert_cmd = [str(ROOT / "convert.sh"), str(source_input), str(effective_input)]
-        if args.tex_overlay:
-            convert_cmd.append(str(args.tex_overlay.resolve()))
-            manifest["inputs"]["tex_overlay"] = file_record(args.tex_overlay)
-        convert_cmd.extend(args.pandoc_arg)
-        result = run_step("latex_to_docx", convert_cmd, steps)
-        if result.returncode or not effective_input.exists():
-            manifest.update(status="failed", reason="LaTeX to DOCX conversion failed")
-            write_json(manifest_path, manifest); print(json.dumps(manifest, ensure_ascii=False)); return result.returncode or 2
+        prior_intermediate = prior_manifest.get("intermediate_docx") if prior_manifest else None
+        reusable_intermediate = (
+            isinstance(prior_intermediate, dict)
+            and Path(str(prior_intermediate.get("path") or "")).resolve() == effective_input.resolve()
+            and effective_input.is_file()
+        )
+        if reusable_intermediate:
+            current_intermediate = file_record(effective_input)
+            reusable_intermediate = all(
+                current_intermediate.get(key) == prior_intermediate.get(key)
+                for key in ("path", "bytes", "sha256")
+            )
+        if args.allow_existing_work and effective_input.exists() and not reusable_intermediate:
+            p.error(
+                "existing intermediate DOCX is not provably bound to the current source; "
+                "start a fresh run directory instead of overwriting it"
+            )
+        if reusable_intermediate:
+            steps.append({
+                "name": "latex_to_docx_reuse",
+                "command": [],
+                "returncode": 0,
+                "reused": True,
+                "artifact": file_record(effective_input),
+            })
+        else:
+            convert_cmd = [str(ROOT / "convert.sh"), str(source_input), str(effective_input)]
+            if args.tex_overlay:
+                convert_cmd.append(str(args.tex_overlay.resolve()))
+                manifest["inputs"]["tex_overlay"] = file_record(args.tex_overlay)
+            convert_cmd.extend(args.pandoc_arg)
+            result = run_step("latex_to_docx", convert_cmd, steps)
+            if result.returncode or not effective_input.exists():
+                manifest.update(status="failed", reason="LaTeX to DOCX conversion failed")
+                write_json(manifest_path, manifest); print(json.dumps(manifest, ensure_ascii=False)); return result.returncode or 2
         manifest["intermediate_docx"] = file_record(effective_input)
 
     profile_official_template = official_template_from_profile(args.template_profile) if args.template_profile else None
@@ -621,6 +709,11 @@ def main(argv: list[str]) -> int:
         "formatting_baseline_source": ("neutral_reference_docx" if args.neutral_reference_docx else
                                        "official_template_evidence" if official_template_evidence else
                                        "target_input_fallback"),
+        "baseline_is_official": bool(official_template_evidence),
+        "baseline_authority": (
+            "official_template_evidence" if official_template_evidence
+            else "fallback_input_not_official"
+        ),
     })
     if args.neutral_reference_docx:
         manifest["validation_mode"] = "neutral_reference"

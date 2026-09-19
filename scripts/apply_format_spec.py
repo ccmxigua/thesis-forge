@@ -23,6 +23,7 @@ from docx.oxml.ns import qn
 from docx.shared import Mm, Pt
 from docx.text.paragraph import Paragraph
 
+from artifact_io import atomic_write_text, commit_files, sibling_temp
 from docx_semantics import (
     all_body_paragraphs,
     all_story_paragraphs,
@@ -2676,8 +2677,17 @@ def main(argv: list[str]) -> int:
             # serialization failure for a paragraph that was deliberately removed.
             receipt.update({"node_id": None, "xml_order": None, "superseded": True,
                             "superseded_by": "cover_compiler"})
-    args.output.parent.mkdir(parents=True, exist_ok=True); doc.save(args.output); canonicalize_docx_zip(args.output)
-    write = lambda name, data: (args.out_dir/name).write_text(json.dumps(data, ensure_ascii=False, indent=2)+"\n", encoding="utf-8")
+    staged_output = sibling_temp(args.output)
+    try:
+        doc.save(staged_output)
+        canonicalize_docx_zip(staged_output)
+        commit_files([(staged_output, args.output)])
+    finally:
+        staged_output.unlink(missing_ok=True)
+    write = lambda name, data: atomic_write_text(
+        args.out_dir / name,
+        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+    )
     write("style-map.json", mappings); write("conflicts.json", conflicts)
     write("section-plan-applied.json", applied_section_plan)
     write("section-execution.json", section_execution)

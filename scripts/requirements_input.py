@@ -18,6 +18,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+from artifact_io import atomic_write_text
 from uuid import uuid4
 import xml.etree.ElementTree as ET
 
@@ -75,10 +77,9 @@ def _file_record(path: Path, *, kind: str | None = None) -> dict[str, Any]:
 
 
 def _write_manifest(path: Path, manifest: dict[str, Any]) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(
+    atomic_write_text(
+        path,
         json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
     )
 
 

@@ -1419,7 +1419,8 @@ b&=2\notag
             doc.save(req)
             second = run_raw("scripts/thesis_format_pipeline.py", str(req), str(target), str(td / "second.docx"),
                              "--work-dir", str(work), "--analysis-mode", "rule_only",
-                             "--compliance-mode", "supported_subset")
+                             "--compliance-mode", "supported_subset",
+                             "--allow-existing-work")
             self.assertEqual(second.returncode, 0, second.stderr + second.stdout)
             second_extraction = json.loads((work / "requirements" / "extraction-manifest.json").read_text())
             manifest = json.loads((work / "pipeline-manifest.json").read_text())
@@ -1435,6 +1436,33 @@ b&=2\notag
             self.assertEqual(manifest["requirements_extraction"]["run_id"], second_extraction["run_id"])
             self.assertEqual(manifest["requirements_extraction"]["source_sha256"],
                              second_extraction["source_sha256"])
+
+    def test_latex_stage_reuses_source_docx_bound_to_same_existing_run(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            req = td / "requirements.docx"
+            work = td / "work"
+            make_requirements(req)
+            first = run_raw(
+                "scripts/thesis_format_pipeline.py", str(req), "tests/sample-thesis.tex",
+                str(td / "first.docx"), "--work-dir", str(work),
+                "--analysis-mode", "rule_only", "--compliance-mode", "supported_subset",
+            )
+            self.assertEqual(first.returncode, 0, first.stderr + first.stdout)
+            first_manifest = json.loads((work / "pipeline-manifest.json").read_text())
+            first_intermediate = first_manifest["intermediate_docx"]
+
+            second = run_raw(
+                "scripts/thesis_format_pipeline.py", str(req), "tests/sample-thesis.tex",
+                str(td / "second.docx"), "--work-dir", str(work),
+                "--analysis-mode", "rule_only", "--compliance-mode", "supported_subset",
+                "--allow-existing-work",
+            )
+            self.assertEqual(second.returncode, 0, second.stderr + second.stdout)
+            second_manifest = json.loads((work / "pipeline-manifest.json").read_text())
+            self.assertEqual(second_manifest["steps"][0]["name"], "latex_to_docx_reuse")
+            self.assertEqual(second_manifest["steps"][0]["reused"], True)
+            self.assertEqual(second_manifest["intermediate_docx"], first_intermediate)
 
     def test_unified_pipeline_accepts_tex_and_records_end_to_end_provenance(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -2300,7 +2328,8 @@ b&=2\notag
             result = run_raw("scripts/thesis_format_pipeline.py", str(req), str(target), str(td / "output.docx"),
                              "--work-dir", str(work), "--llm-response", str(response),
                              "--run-id", bound["provenance"]["run_id"],
-                             "--analysis-mode", "llm_primary", "--compliance-mode", "full")
+                             "--analysis-mode", "llm_primary", "--compliance-mode", "full",
+                             "--allow-offline-review")
             self.assertEqual(result.returncode, 3, result.stderr + result.stdout)
             manifest = json.loads((work / "pipeline-manifest.json").read_text())
             self.assertIn("full_compliance_analysis_failed", manifest["blocking_reasons"])
@@ -2344,7 +2373,8 @@ b&=2\notag
             result = run_raw("scripts/thesis_format_pipeline.py", str(req), str(target), str(td / "output.docx"),
                              "--work-dir", str(work), "--llm-response", str(response),
                              "--run-id", bound["provenance"]["run_id"],
-                             "--analysis-mode", "llm_primary", "--compliance-mode", "full")
+                             "--analysis-mode", "llm_primary", "--compliance-mode", "full",
+                             "--allow-offline-review")
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
             report = json.loads((work / "application" / "validation-report.json").read_text())
             self.assertTrue(report["docx_fully_compliant"])

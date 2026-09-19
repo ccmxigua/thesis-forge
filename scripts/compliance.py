@@ -247,21 +247,39 @@ def annotate_satisfied_inputs(
     by_id = {
         str(item.get("clause_id")): item
         for item in capability_clauses
-        if isinstance(item, dict) and item.get("category") in {
-            "supported", "input_prerequisite_satisfied"
-        }
-        and (item.get("metadata_fields") or item.get("template_fixed_fields") or item.get("input_evidence"))
+        if isinstance(item, dict) and item.get("clause_id")
     }
     output: list[dict[str, Any]] = []
     for original in records:
         record = dict(original)
+        capability = by_id.get(str(record.get("clause_id")))
+        # Applicability is a deterministic capability decision.  Carry the
+        # explicit external/not-applicable state into the final compliance
+        # report instead of allowing finalize_records to treat a conditional
+        # requirement as an executable DOCX obligation.
+        if (capability and capability.get("category") == "external_not_applicable"
+                and capability.get("disposition") == "not_applicable"):
+            record["status"] = "not_applicable"
+            record["scope"] = capability.get("scope") or record.get("scope")
+            record["applicability_status"] = "false"
+            record["applicability_reason"] = capability.get("reason") or (
+                "The declared applicability facts evaluated to false."
+            )
+            output.append(record)
+            continue
         if record.get("status") in INPUT_PENDING_STATES:
             # Keep the legacy clause state for downstream compatibility, but
             # expose the two release dimensions explicitly: the DOCX can be
             # format-ready while the final submission claim remains pending.
             record["format_status"] = "input_pending"
             record["submission_status"] = "input_pending"
-        evidence = by_id.get(str(record.get("clause_id")))
+        evidence = capability if (
+            capability
+            and capability.get("category") in {"supported", "input_prerequisite_satisfied"}
+            and (capability.get("metadata_fields")
+                 or capability.get("template_fixed_fields")
+                 or capability.get("input_evidence"))
+        ) else None
         if evidence and record.get("status") in {"requires_metadata", "requires_source_content"}:
             record["source_prerequisite_status"] = record["status"]
             record["status"] = "input_provided_unverified"

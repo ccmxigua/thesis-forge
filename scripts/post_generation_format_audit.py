@@ -13,6 +13,8 @@ import json
 import sys
 from collections import Counter
 from pathlib import Path
+
+from artifact_io import atomic_write_text
 from typing import Any
 
 from docx import Document
@@ -394,11 +396,9 @@ def main(argv: list[str]) -> int:
     report = build_report(args.generated_docx.resolve(), args.official_template.resolve(),
                           args.format_spec.resolve(), args.official_style_map.resolve(),
                           args.generated_style_map.resolve(), requirements_only=args.requirements_only)
-    args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(json.dumps(report, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    atomic_write_text(args.out, json.dumps(report, ensure_ascii=False, indent=2) + "\n")
     if args.markdown:
-        args.markdown.parent.mkdir(parents=True, exist_ok=True)
-        args.markdown.write_text(markdown(report), encoding="utf-8")
+        atomic_write_text(args.markdown, markdown(report))
     print(json.dumps({"status": report["status"], "summary": report["summary"], "output": str(args.out)}, ensure_ascii=False))
     return 1 if args.strict and report["status"] != "passed" else 0
 

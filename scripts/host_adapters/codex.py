@@ -16,7 +16,9 @@ from typing import Any
 
 from semantic_contract import strict_json_loads
 
-DEFAULT_MODEL = "gpt-5.6-luna"
+# ``None`` means use the model selected by the current native Codex account.
+# A reproducible route must be supplied explicitly by the caller.
+DEFAULT_MODEL: str | None = None
 
 
 def resolve_binary(binary: str | None) -> str:
@@ -38,13 +40,13 @@ def build_command(
     prompt_path: Path,
     last_message_path: Path,
     cwd: Path,
-    model: str = DEFAULT_MODEL,
+    model: str | None = None,
 ) -> list[str]:
     """Build an isolated, read-only native Codex invocation.
 
     ``--ignore-user-config`` keeps unrelated desktop MCP/plugin servers out of
-    this ephemeral subprocess.  The explicit model and normal Codex
-    authentication remain in force, while the subprocess can terminate after
+    this ephemeral subprocess.  An explicit model, when supplied, and normal
+    Codex authentication remain in force, while the subprocess can terminate after
     its semantic response instead of hanging during an unrelated MCP shutdown.
     ``codex exec --json`` emits the auditable JSONL event stream while
     ``--output-last-message`` gives the bridge the exact semantic response
@@ -53,14 +55,11 @@ def build_command(
     prompt = prompt_path.read_text(encoding="utf-8")
     if not prompt.strip():
         raise ValueError(f"Codex prompt is empty: {prompt_path}")
-    if not isinstance(model, str) or not model.strip():
-        raise ValueError("Codex model must be a non-empty string")
-    return [
+    command = [
         binary,
         "exec",
         "--ephemeral",
         "--ignore-user-config",
-        "--model", model.strip(),
         "--sandbox", "read-only",
         "--json",
         "--color", "never",
@@ -68,6 +67,11 @@ def build_command(
         "-C", str(cwd),
         prompt,
     ]
+    if model is not None:
+        if not isinstance(model, str) or not model.strip():
+            raise ValueError("Codex model must be a non-empty string when supplied")
+        command[4:4] = ["--model", model.strip()]
+    return command
 
 
 def _strip_json_wrapper(text: str) -> dict[str, Any]:

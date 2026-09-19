@@ -10,7 +10,9 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from artifact_io import atomic_write_text
 from format_spec_validation import load_and_validate
+from applicability import evaluate_applicability
 from pipeline_finding import evidence, finding
 from role_registry import role_config, role_names
 
@@ -166,8 +168,10 @@ def read_json(path: Path) -> Any:
 
 
 def write_json(path: Path, value: Any) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    atomic_write_text(
+        path,
+        json.dumps(value, ensure_ascii=False, indent=2) + "\n",
+    )
 
 
 def leaf_paths(value: Any, prefix: str = "") -> list[str]:
@@ -407,6 +411,8 @@ def classify_property(role: str, path: str, registry: dict[str, Any],
 
 
 def _requirement_finding(item: dict[str, Any], mode: str) -> dict[str, Any] | None:
+    if item.get("applicability_evaluation", {}).get("result") == "false":
+        return None
     disposition = item["disposition"]
     if disposition == "supported":
         return None
@@ -491,6 +497,8 @@ def _clause_classification(record: dict[str, Any], rid_items: list[dict[str, Any
         disposition = max((item["disposition"] for item in rid_items), key=DISPOSITION_PRIORITY.get)
         categories = [item.get("category", "backend_capability_gap") for item in rid_items]
         category = max(categories, key=lambda value: CATEGORY_PRIORITY.get(value, 0))
+        if "external_not_applicable" in categories:
+            return "not_applicable", "external_not_applicable"
         if category == "supported":
             return "supported", "supported"
         if category == "input_prerequisite":
@@ -540,6 +548,15 @@ def plan_capabilities(spec: dict[str, Any], registry: dict[str, Any], compliance
     for index, requirement in enumerate(spec.get("requirements", []), 1):
         rid = requirement.get("id") or f"requirement-{index}"
         role = requirement.get("role") or ""
+        applicability = evaluate_applicability(
+            requirement.get("applicability"),
+            thesis_profile=metadata,
+            source_inventory=source_inventory,
+            template_profile=template_profile,
+            runtime=(source_inventory.get("runtime")
+                     if isinstance(source_inventory, dict)
+                     and isinstance(source_inventory.get("runtime"), dict) else None),
+        )
         properties = [classify_property(role, path, registry, source_inventory, template_profile)
                       for path in leaf_paths(requirement.get("properties", {}))]
         # A content-instance requirement intentionally has no singleton role
@@ -558,16 +575,26 @@ def plan_capabilities(spec: dict[str, Any], registry: dict[str, Any], compliance
                                    if isinstance(item, dict) and item.get("required") is True
                                    and not _contract_input_has(str(item.get("key", "")), source_inventory,
                                                                template_profile)]
-        dispositions = [item["disposition"] for item in properties] or ["unknown"]
-        disposition = max(dispositions, key=DISPOSITION_PRIORITY.get)
-        if disposition == "supported" and missing_declared_inputs:
+        if applicability.get("result") == "false":
+            disposition = "supported"
+        elif applicability.get("result") == "unknown":
             disposition = "unknown"
+        else:
+            dispositions = [item["disposition"] for item in properties] or ["unknown"]
+            disposition = max(dispositions, key=DISPOSITION_PRIORITY.get)
+            if disposition == "supported" and missing_declared_inputs:
+                disposition = "unknown"
         item = {"requirement_id": rid, "role": role, "clause_ids": requirement.get("clause_ids", []),
                 "disposition": disposition, "properties": properties, "findings": [],
                 "missing_declared_inputs": missing_declared_inputs,
                 "verification": requirement.get("verification"),
-                "applicability": requirement.get("applicability")}
-        item["category"] = _requirement_category(item)
+                "applicability": requirement.get("applicability"),
+                "applicability_evaluation": applicability}
+        item["category"] = (
+            "external_not_applicable" if applicability.get("result") == "false"
+            else "runtime_manual_unverifiable" if applicability.get("result") == "unknown"
+            else _requirement_category(item)
+        )
         requirements.append(item); by_id[rid] = item
         issue = _requirement_finding(item, compliance_mode)
         if issue:
@@ -716,6 +743,19 @@ def plan_capabilities(spec: dict[str, Any], registry: dict[str, Any], compliance
     if missing_clause_ids:
         unique_category_counts["runtime_manual_unverifiable"] += 1
         unique_gaps += 1
+    applicability = {
+        "excluded_requirement_ids": [
+            str(item["requirement_id"])
+            for item in requirements
+            if item.get("applicability_evaluation", {}).get("result") == "false"
+        ],
+        "unknown_requirement_ids": [
+            str(item["requirement_id"])
+            for item in requirements
+            if item.get("applicability_evaluation", {}).get("result") == "unknown"
+        ],
+        "policy": "false_is_not_applicable; unknown_is_fail_closed",
+    }
     return {
         "schema_version": "1.0", "stage": "capability_preflight", "backend": registry["backend"],
         "compliance_mode": compliance_mode,
@@ -747,6 +787,7 @@ def plan_capabilities(spec: dict[str, Any], registry: dict[str, Any], compliance
                     "clause_runtime_manual_unverifiable": clause_counts["runtime_manual_unverifiable"],
                     "clause_external_not_applicable": clause_counts["external_not_applicable"]},
         "requirements": requirements, "clauses": clauses, "findings": findings,
+        "applicability": applicability,
     }
 
 

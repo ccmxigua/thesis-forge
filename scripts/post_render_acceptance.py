@@ -18,7 +18,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import subprocess
 import sys
 import zipfile
 from datetime import datetime, timezone
@@ -26,6 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from artifact_io import atomic_write_text, paths_alias
+from process_runner import run_process
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -75,12 +75,10 @@ def read_object(path: Path) -> dict[str, Any] | None:
     return value if isinstance(value, dict) else None
 
 
-def run_step(command: list[str]) -> dict[str, Any]:
+def run_step(command: list[str], *, timeout: int = 900) -> dict[str, Any]:
     started = datetime.now(timezone.utc)
     try:
-        result = subprocess.run(
-            command, cwd=ROOT, text=True, capture_output=True,
-        )
+        result = run_process(command, cwd=ROOT, timeout=timeout)
         return {
             "returncode": result.returncode,
             "started_at": started.isoformat(),
@@ -160,6 +158,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("final_docx", type=Path, help="post-Word final DOCX; must differ from source_docx")
     parser.add_argument("pdf", type=Path)
     parser.add_argument("--render-report", type=Path, required=True)
+    parser.add_argument("--visual-audit", type=Path, required=True,
+                        help="independent raster visual-sanity report for the final PDF")
     parser.add_argument("--format-spec", type=Path, required=True)
     parser.add_argument("--pre-validation", type=Path, required=True)
     parser.add_argument("--submission-audit", type=Path, required=True)
@@ -180,6 +180,7 @@ def main(argv: list[str] | None = None) -> int:
     final = _path(args.final_docx)
     pdf = _path(args.pdf)
     render_report = _path(args.render_report)
+    visual_audit = _path(args.visual_audit)
     pre_validation = _path(args.pre_validation)
     submission_audit = _path(args.submission_audit)
     comparison = _path(args.format_comparison)
@@ -189,6 +190,20 @@ def main(argv: list[str] | None = None) -> int:
     official_template = _path(args.official_template)
     official_style_map = _path(args.official_style_map)
     generated_style_map = _path(args.generated_style_map)
+
+    case_root = source.parent.resolve()
+    output_scope = {
+        "final_docx": final,
+        "pdf": pdf,
+        "render_report": render_report,
+        "visual_audit": visual_audit,
+        "submission_audit": submission_audit,
+        "format_comparison": comparison,
+        "acceptance_out": acceptance_out,
+    }
+    for label, path in output_scope.items():
+        if path == case_root or case_root not in path.parents:
+            parser.error(f"{label} must remain inside the case output directory: {path}")
 
     if not source.is_file():
         parser.error(f"pre-Word DOCX does not exist: {source}")
@@ -239,6 +254,16 @@ def main(argv: list[str] | None = None) -> int:
         blockers.append("word_render_failed")
 
     if render_step["returncode"] == 0:
+        visual_cmd = [
+            sys.executable, str(ROOT / "scripts" / "pdf_visual_audit.py"),
+            str(pdf), "--out", str(visual_audit),
+        ]
+        visual_step = run_step(visual_cmd)
+        checks["pdf_visual_audit_step"] = visual_step
+        if visual_step["returncode"] != 0:
+            blockers.append("pdf_visual_audit_failed")
+
+    if render_step["returncode"] == 0:
         audit_cmd = [
             sys.executable, str(ROOT / "scripts" / "submission_audit.py"), str(final),
             "--format-spec", str(format_spec), "--render-report", str(render_report),
@@ -275,6 +300,12 @@ def main(argv: list[str] | None = None) -> int:
     checks["post_render_artifact"] = final_artifact
     if not final_artifact.get("opc_package_valid"):
         blockers.append("post_render_docx_not_valid_opc")
+    pdf_artifact = file_record(pdf) if pdf.is_file() else {
+        "path": str(pdf), "bytes": 0, "sha256": None,
+    }
+    checks["post_render_pdf"] = pdf_artifact
+    if not pdf.is_file() or pdf.stat().st_size <= 0:
+        blockers.append("post_render_pdf_missing")
 
     render = read_object(render_report)
     checks["render_report"] = str(render_report)
@@ -287,6 +318,17 @@ def main(argv: list[str] | None = None) -> int:
             blockers.append("render_report_final_docx_hash_mismatch")
         if rendered_record.get("sha256") != (sha256(pdf) if pdf.is_file() else None):
             blockers.append("render_report_pdf_hash_mismatch")
+
+    visual = read_object(visual_audit)
+    checks["pdf_visual_audit"] = str(visual_audit)
+    if not isinstance(visual, dict):
+        blockers.append("pdf_visual_audit_missing_or_invalid")
+    else:
+        if visual.get("status") != "passed":
+            blockers.append("pdf_visual_audit_not_passed")
+        visual_pdf = visual.get("pdf") if isinstance(visual.get("pdf"), dict) else {}
+        if visual_pdf.get("sha256") != (sha256(pdf) if pdf.is_file() else None):
+            blockers.append("pdf_visual_audit_hash_mismatch")
 
     audit = read_object(submission_audit)
     checks["post_render_submission_audit"] = str(submission_audit)
@@ -320,7 +362,9 @@ def main(argv: list[str] | None = None) -> int:
         "post_render_docx": str(final),
         "post_render_docx_sha256": final_artifact.get("sha256"),
         "rendered_pdf": str(pdf),
+        "rendered_pdf_sha256": pdf_artifact.get("sha256"),
         "render_report": str(render_report),
+        "visual_audit": str(visual_audit),
         "submission_audit": str(submission_audit),
         "format_comparison": str(comparison),
         "blockers": sorted(set(blockers)),

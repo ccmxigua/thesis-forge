@@ -533,8 +533,15 @@ def main() -> int:
         evidence["rendered_pdf"]["path"] = str(pdf)
         evidence["word_export"] = word_update
         evidence["pre_render_repairs"] = {
-            "parallel_toc_targets": toc_target_repairs,
-            "post_update_pageref_targets": post_update_repairs,
+            "parallel_toc_targets": {
+                "count": toc_target_repairs,
+                "status": "applied" if toc_target_repairs else "not_attempted_no_trusted_target_map",
+            },
+            "post_update_pageref_targets": {
+                "count": post_update_repairs,
+                "status": "applied" if post_update_repairs else "not_attempted_no_trusted_target_map",
+            },
+            "policy": "no_semantic_target_guessing",
         }
         evidence["attestation"] = {"algorithm": "HMAC-SHA256", "scope": "local_word_export_v1"}
         evidence["attestation"]["signature"] = sign(evidence, load_key(create=True))

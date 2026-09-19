@@ -140,6 +140,57 @@ class CapabilityPlannerTest(unittest.TestCase):
         self.assertEqual(missing["requirements"][0]["properties"][0]["missing_inputs"], ["inventory.figures"])
         self.assertEqual(present["requirements"][0]["disposition"], "supported")
 
+    def test_false_applicability_is_not_applicable_and_not_executable(self) -> None:
+        spec = {
+            "requirements": [{
+                "id": "R-conditional",
+                "role": "body_text",
+                "properties": {"font": {"size_pt": 12}},
+                "clause_ids": ["C-conditional"],
+                "applicability": {
+                    "status": "conditional",
+                    "conditions": [{
+                        "fact": "runtime.host", "operator": "equals", "value": "codex",
+                    }],
+                },
+            }],
+            "clause_compliance": [{
+                "clause_id": "C-conditional", "scope": "docx",
+                "status": "pending_execution", "requirement_ids": ["R-conditional"],
+            }],
+        }
+        report = self.planner.plan_capabilities(
+            spec, self.registry, "full", source_inventory={"runtime": {"host": "openclaw"}}
+        )
+        requirement = report["requirements"][0]
+        clause = report["clauses"][0]
+        self.assertEqual(requirement["applicability_evaluation"]["result"], "false")
+        self.assertEqual(requirement["category"], "external_not_applicable")
+        self.assertEqual(requirement["findings"], [])
+        self.assertEqual(clause["category"], "external_not_applicable")
+        self.assertEqual(clause["disposition"], "not_applicable")
+        self.assertEqual(report["applicability"]["excluded_requirement_ids"], ["R-conditional"])
+
+    def test_unknown_applicability_blocks_full_execution(self) -> None:
+        spec = {
+            "requirements": [{
+                "id": "R-unknown",
+                "role": "body_text",
+                "properties": {"font": {"size_pt": 12}},
+                "applicability": {
+                    "status": "conditional",
+                    "conditions": [{
+                        "fact": "runtime.host", "operator": "equals", "value": "codex",
+                    }],
+                },
+            }],
+            "clause_compliance": [],
+        }
+        report = self.planner.plan_capabilities(spec, self.registry, "full")
+        self.assertEqual(report["applicability"]["unknown_requirement_ids"], ["R-unknown"])
+        self.assertEqual(report["status"], "blocked")
+        self.assertFalse(report["execution_ready"])
+
     def test_declared_requirement_prerequisite_is_classified_as_input_gap(self) -> None:
         spec = {"requirements": [{
             "id": "R-input", "role": "body_text",

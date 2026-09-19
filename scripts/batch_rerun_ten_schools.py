@@ -16,7 +16,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -28,12 +27,15 @@ ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = Path("inputs/ten-school-template-manifest.json")
 if str(ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(ROOT / "scripts"))
+from artifact_io import atomic_write_text  # noqa: E402
 from host_adapters import codex as codex_adapter  # noqa: E402
 from host_runtime import (  # noqa: E402
     HostRuntimeError,
     automatic_adapter_id,
     require_host_runtime,
 )
+from pdf_visual_audit import audit_pdf  # noqa: E402
+from process_runner import run_process  # noqa: E402
 
 
 def resolve_project_path(value: str | Path, *, label: str) -> Path:
@@ -103,10 +105,10 @@ def load_manifest(path: Path) -> tuple[Path, list[dict[str, Any]], Path]:
     return source, cases, manifest_path
 
 
-def run_command(cmd: list[str], *, label: str) -> dict[str, Any]:
+def run_command(cmd: list[str], *, label: str, timeout: int = 1800) -> dict[str, Any]:
     print(f"\n{'=' * 70}\n{label}\n{'=' * 70}", flush=True)
     started = time.time()
-    result = subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True)
+    result = run_process(cmd, cwd=ROOT, timeout=timeout)
     elapsed = round(time.time() - started, 1)
     print(f"returncode={result.returncode} ({elapsed:.1f}s)")
     if result.stdout:
@@ -118,6 +120,8 @@ def run_command(cmd: list[str], *, label: str) -> dict[str, Any]:
         "elapsed_s": elapsed,
         "finished_at": datetime.now(timezone.utc).isoformat(),
         "command": cmd,
+        "timeout_s": timeout,
+        "timed_out": result.returncode == 124 and "[process-timeout]" in (result.stderr or ""),
         "stdout_tail": result.stdout[-3000:],
         "stderr_tail": result.stderr[-3000:],
     }
@@ -149,6 +153,13 @@ def pipeline_command(case: dict[str, Any], source: Path, work_dir: Path, output_
     if prepare_host_review:
         command.append("--prepare-host-review")
     if llm_response:
+        # The full stage is the second half of one fresh run: preparation has
+        # already created source-conversion/review artifacts in this work
+        # directory.  The pipeline still performs its own run-id, request,
+        # receipt, and input-hash checks; this flag only authorizes that
+        # explicitly bound stage transition and must not be used for a
+        # standalone compatibility run.
+        command.append("--allow-existing-work")
         command.extend(["--llm-response", str(llm_response)])
     if run_id:
         command.extend(["--run-id", str(run_id)])
@@ -163,7 +174,7 @@ def pipeline_command(case: dict[str, Any], source: Path, work_dir: Path, output_
 
 def post_render_command(
     case: dict[str, Any], *, source_docx: Path, final_docx: Path, pdf: Path,
-    render_report: Path, pre_validation: Path, format_spec: Path,
+    render_report: Path, visual_audit: Path, pre_validation: Path, format_spec: Path,
     official_template: Path, official_style_map: Path, generated_style_map: Path,
     submission_audit: Path, format_comparison: Path,
     format_comparison_markdown: Path, acceptance_out: Path,
@@ -181,6 +192,7 @@ def post_render_command(
         sys.executable, "scripts/post_render_acceptance.py",
         str(source_docx), str(final_docx), str(pdf),
         "--render-report", str(render_report),
+        "--visual-audit", str(visual_audit),
         "--format-spec", str(format_spec),
         "--pre-validation", str(pre_validation),
         "--submission-audit", str(submission_audit),
@@ -204,7 +216,7 @@ def post_render_command(
 
 def attach_post_render_manifest(
     manifest_path: Path, *, pre_render_docx: Path, final_docx: Path, pdf: Path,
-    render_report: Path, submission_audit: Path, format_comparison: Path,
+    render_report: Path, visual_audit: Path, submission_audit: Path, format_comparison: Path,
     format_comparison_markdown: Path, acceptance_out: Path,
     accepted: bool,
 ) -> dict[str, Any]:
@@ -220,6 +232,7 @@ def attach_post_render_manifest(
         "final_docx": str(final_docx.resolve()),
         "pdf": str(pdf.resolve()),
         "render_report": str(render_report.resolve()),
+        "visual_audit": str(visual_audit.resolve()),
         "submission_audit": str(submission_audit.resolve()),
         "format_comparison": str(format_comparison.resolve()),
         "format_comparison_markdown": str(format_comparison_markdown.resolve()),
@@ -233,7 +246,10 @@ def attach_post_render_manifest(
         payload["render_report"] = str(render_report.resolve())
         payload["rendered_pdf"] = str(pdf.resolve())
         payload["submission_ready"] = True
-    manifest_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    atomic_write_text(
+        manifest_path,
+        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+    )
     return payload
 
 
@@ -295,6 +311,15 @@ def _artifact_path(value: Any, *, root: Path) -> Path | None:
         return None
     path = Path(value)
     return path.resolve() if path.is_absolute() else (root / path).resolve()
+
+
+def _path_within(path: Path | None, root: Path) -> bool:
+    """Return whether an artifact is physically inside the current case."""
+    if path is None:
+        return False
+    resolved_root = root.resolve()
+    resolved = path.resolve()
+    return resolved != resolved_root and resolved_root in resolved.parents
 
 
 def _read_artifact_json(value: Any, *, root: Path) -> tuple[Path | None, dict[str, Any] | None]:
@@ -381,6 +406,15 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
         blockers.append("pipeline_manifest_missing_or_invalid")
         return {"status": "blocked", "accepted": False, "blockers": sorted(set(blockers)), "checks": checks}
 
+    # Batch outputs have a canonical case boundary.  A manifest may contain
+    # absolute paths, but acceptance must not allow it to point at an older
+    # build, a shared worktree, or an arbitrary external file.
+    case_root = manifest_path.parent.parent if manifest_path is not None else None
+    if case_root is None:
+        blockers.append("case_root_missing")
+        return {"status": "blocked", "accepted": False, "blockers": sorted(set(blockers)), "checks": checks}
+    checks["case_root"] = str(case_root.resolve())
+
     checks["pipeline_status"] = manifest.get("status")
     if manifest.get("status") != "completed":
         blockers.append(f"pipeline_status:{manifest.get('status')}")
@@ -396,10 +430,38 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
     post_acceptance_path, post_acceptance = _read_artifact_json(
         manifest.get("post_render_acceptance"), root=root
     )
-    post_render_active = post_acceptance is not None or manifest.get("post_render_status") is not None
+    # Full compliance is never accepted on the basis of the pre-render DOCX.
+    # The post-Word chain is a mandatory release gate, even when its manifest
+    # is missing or malformed; otherwise a self-authored pipeline manifest can
+    # silently downgrade a release to the weaker pre-render checks.
+    requires_post_render = manifest.get("compliance_mode") == "full"
+    post_render_active = requires_post_render or (
+        post_acceptance is not None or manifest.get("post_render_status") is not None
+    )
+    checks["post_render_required"] = requires_post_render
     checks["post_render_acceptance"] = str(post_acceptance_path) if post_acceptance_path else None
+    if requires_post_render and post_acceptance is None:
+        blockers.append("post_render_acceptance_required_missing")
     if post_render_active and (post_acceptance is None or post_acceptance.get("status") != "accepted"):
         blockers.append("post_render_acceptance_not_passed")
+
+    if post_render_active and isinstance(post_acceptance, dict):
+        if post_acceptance.get("blockers"):
+            blockers.append("post_render_acceptance_contains_blockers")
+        for label, value in (
+            ("post_render_acceptance", post_acceptance_path),
+            ("post_render_docx", _artifact_path(post_acceptance.get("post_render_docx"), root=root)),
+            ("rendered_pdf", _artifact_path(post_acceptance.get("rendered_pdf"), root=root)),
+            ("render_report", _artifact_path(post_acceptance.get("render_report"), root=root)),
+            ("submission_audit", _artifact_path(post_acceptance.get("submission_audit"), root=root)),
+            ("format_comparison", _artifact_path(post_acceptance.get("format_comparison"), root=root)),
+        ):
+            if value is not None and not _path_within(value, case_root):
+                blockers.append(f"{label}_outside_case")
+        if not post_acceptance.get("pre_render_docx_sha256"):
+            blockers.append("post_render_pre_render_hash_missing")
+        if not post_acceptance.get("post_render_docx_sha256"):
+            blockers.append("post_render_final_hash_missing")
 
     output_path = _artifact_path(manifest.get("output"), root=root)
     checks["output"] = str(output_path) if output_path else None
@@ -411,10 +473,9 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
         checks["output_artifact"] = output_artifact
         if not output_artifact.get("opc_package_valid"):
             blockers.append("generated_docx_not_valid_opc")
-    if output_path is not None and manifest.get("output"):
-        manifest_output = _artifact_path(manifest.get("output"), root=root)
-        if manifest_output != output_path:
-            blockers.append("manifest_output_path_mismatch")
+    expected_output = case_root / ("final-word.docx" if post_render_active else "generated.docx")
+    if output_path is not None and output_path != expected_output.resolve():
+        blockers.append("generated_output_path_not_canonical")
 
     pre_render_output_path = _artifact_path(manifest.get("pre_render_output"), root=root)
     if post_render_active:
@@ -425,12 +486,35 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
             checks["pre_render_output_artifact"] = pre_artifact
             if not pre_artifact.get("opc_package_valid"):
                 blockers.append("pre_render_docx_not_valid_opc")
+        if pre_render_output_path is not None and pre_render_output_path != (case_root / "generated.docx").resolve():
+            blockers.append("pre_render_output_path_not_canonical")
         if post_acceptance is not None:
             if _artifact_path(post_acceptance.get("post_render_docx"), root=root) != output_path:
                 blockers.append("post_render_acceptance_output_path_mismatch")
             if (output_artifact is not None
                     and post_acceptance.get("post_render_docx_sha256") != output_artifact.get("sha256")):
                 blockers.append("post_render_acceptance_artifact_hash_mismatch")
+
+    if post_render_active:
+        post_manifest = manifest.get("post_word_render")
+        if not isinstance(post_manifest, dict):
+            blockers.append("post_word_render_manifest_missing")
+        else:
+            required_post_keys = (
+                "pre_render_docx", "final_docx", "pdf", "render_report",
+                "visual_audit", "submission_audit", "format_comparison",
+                "format_comparison_markdown",
+            )
+            for key in required_post_keys:
+                path = _artifact_path(post_manifest.get(key), root=root)
+                if path is None or not path.is_file():
+                    blockers.append(f"post_word_render_{key}_missing")
+                elif not _path_within(path, case_root):
+                    blockers.append(f"post_word_render_{key}_outside_case")
+            if _artifact_path(post_manifest.get("final_docx"), root=root) != output_path:
+                blockers.append("post_word_render_final_path_mismatch")
+            if _artifact_path(post_manifest.get("pre_render_docx"), root=root) != pre_render_output_path:
+                blockers.append("post_word_render_pre_render_path_mismatch")
 
     format_spec_path = _artifact_path(manifest.get("format_spec"), root=root)
     schema_path = format_spec_path.parent / "schema-validation.json" if format_spec_path else None
@@ -500,6 +584,85 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
     if comparison is None or comparison.get("status") != "passed":
         blockers.append("post_generation_comparison_not_passed")
 
+    if post_render_active:
+        post_pdf = _artifact_path((manifest.get("post_word_render") or {}).get("pdf"), root=root)
+        if post_pdf is None or not post_pdf.is_file() or post_pdf.stat().st_size <= 0:
+            blockers.append("post_render_pdf_missing")
+        else:
+            checks["post_render_pdf_sha256"] = hashlib.sha256(post_pdf.read_bytes()).hexdigest()
+        post_manifest = manifest.get("post_word_render") if isinstance(manifest.get("post_word_render"), dict) else {}
+        render_path = _artifact_path(post_manifest.get("render_report"), root=root)
+        render = None
+        if render_path and render_path.is_file():
+            try:
+                render = json.loads(render_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                render = None
+        if not isinstance(render, dict):
+            blockers.append("post_render_report_missing_or_invalid")
+        else:
+            final_hash = output_artifact.get("sha256") if output_artifact else None
+            pdf_hash = checks.get("post_render_pdf_sha256")
+            source_record = render.get("source_docx") if isinstance(render.get("source_docx"), dict) else {}
+            pdf_record = render.get("rendered_pdf") if isinstance(render.get("rendered_pdf"), dict) else {}
+            if source_record.get("sha256") != final_hash:
+                blockers.append("post_render_report_final_docx_hash_mismatch")
+            if pdf_record.get("sha256") != pdf_hash:
+                blockers.append("post_render_report_pdf_hash_mismatch")
+        visual_path = _artifact_path(post_manifest.get("visual_audit"), root=root)
+        visual = None
+        if visual_path and visual_path.is_file():
+            try:
+                visual = json.loads(visual_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                visual = None
+        if not isinstance(visual, dict) or visual.get("status") != "passed":
+            blockers.append("post_render_pdf_visual_audit_not_passed")
+        elif ((visual.get("pdf") or {}).get("sha256")
+              != checks.get("post_render_pdf_sha256")):
+            blockers.append("post_render_pdf_visual_audit_hash_mismatch")
+        # Do not trust a report that was produced by the same post-render
+        # command merely because its status and hash look correct.  Re-run the
+        # PDF parser/raster sanity gate from this independent acceptance
+        # process and bind the result to the exact bytes observed above.
+        independent_visual_path = case_root / "post-render-independent-pdf-visual-audit.json"
+        if post_pdf is None or not post_pdf.is_file() or post_pdf.stat().st_size <= 0:
+            independent_visual = {
+                "status": "blocked",
+                "blockers": ["independent_pdf_visual_audit_input_missing"],
+            }
+        else:
+            try:
+                independent_visual = audit_pdf(post_pdf, output=independent_visual_path)
+            except (OSError, ValueError, RuntimeError, TypeError, AttributeError) as exc:
+                independent_visual = {
+                    "status": "blocked",
+                    "blockers": [f"independent_pdf_visual_audit_failed:{type(exc).__name__}"],
+                }
+        checks["independent_pdf_visual_audit"] = independent_visual
+        if not isinstance(independent_visual, dict) or independent_visual.get("status") != "passed":
+            blockers.append("independent_pdf_visual_audit_not_passed")
+        elif ((independent_visual.get("pdf") or {}).get("sha256")
+              != checks.get("post_render_pdf_sha256")):
+            blockers.append("independent_pdf_visual_audit_hash_mismatch")
+        audit_path = _artifact_path(post_manifest.get("submission_audit"), root=root)
+        audit = None
+        if audit_path and audit_path.is_file():
+            try:
+                audit = json.loads(audit_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError):
+                audit = None
+        if not isinstance(audit, dict) or audit.get("submission_ready") is not True:
+            blockers.append("post_render_submission_not_ready")
+        else:
+            render_validation = audit.get("render_validation")
+            if not isinstance(render_validation, dict) or render_validation.get("rendered_verified") is not True:
+                blockers.append("post_render_trusted_render_not_verified")
+        if isinstance(comparison, dict):
+            comparison_inputs = comparison.get("inputs") if isinstance(comparison.get("inputs"), dict) else {}
+            if comparison_inputs.get("generated_docx_sha256") != (output_artifact or {}).get("sha256"):
+                blockers.append("post_render_comparison_artifact_hash_mismatch")
+
     unique_blockers = sorted(set(blockers))
     return {
         "status": "accepted" if not unique_blockers else "blocked",
@@ -565,10 +728,11 @@ def run_case(base: Path, source: Path, case: dict[str, Any], *, prepare_host_rev
              host_agent_id: str = "main", openclaw_bin: str | None = None,
              openclaw_config: Path | None = None,
              codex_bin: str | None = None,
-             codex_model: str = codex_adapter.DEFAULT_MODEL,
+             codex_model: str | None = None,
              neutral_reference_docx: Path | None = None,
              word_open_timeout: int = 45,
-             word_timeout: int = 180) -> dict[str, Any]:
+             word_timeout: int = 180,
+             stage_timeout: int = 1800) -> dict[str, Any]:
     case_dir = base / str(case["id"])
     work = case_dir / "work"
     review_requirements = work / "review" / "requirements"
@@ -596,6 +760,7 @@ def run_case(base: Path, source: Path, case: dict[str, Any], *, prepare_host_rev
         label=(f"[{case['id']}] fresh extraction + host-agent packet"
                if host_review else
                f"[{case['id']}] fresh deterministic extraction ({case['analysis_mode']})"),
+        timeout=stage_timeout,
     )
     # Keep the final case summary separate from each stage record.  Otherwise
     # attaching ``stages`` below makes the active stage dict contain itself and
@@ -632,7 +797,8 @@ def run_case(base: Path, source: Path, case: dict[str, Any], *, prepare_host_rev
             if host_adapter_id == "codex":
                 if codex_bin:
                     bridge_command.extend(["--codex-bin", codex_bin])
-                bridge_command.extend(["--codex-model", codex_model])
+                if codex_model:
+                    bridge_command.extend(["--codex-model", codex_model])
             else:
                 bridge_command.extend(["--agent-id", host_agent_id])
                 if host_agent_auth_env_only:
@@ -653,6 +819,7 @@ def run_case(base: Path, source: Path, case: dict[str, Any], *, prepare_host_rev
             host_result = run_command(
                 bridge_command,
                 label=f"[{case['id']}] current Host Agent review + provenance merge",
+                timeout=stage_timeout,
             )
         stages["host_agent"] = host_result
         result = dict(host_result)
@@ -671,6 +838,7 @@ def run_case(base: Path, source: Path, case: dict[str, Any], *, prepare_host_rev
                     host_review_chunk_size=host_review_chunk_size,
                 ),
                 label=f"[{case['id']}] full deterministic DOCX + declaration resources",
+                timeout=stage_timeout,
             )
             stages["full"] = full_result
             result = dict(full_result)
@@ -684,6 +852,7 @@ def run_case(base: Path, source: Path, case: dict[str, Any], *, prepare_host_rev
         final_docx = case_dir / "final-word.docx"
         pdf = case_dir / "final.pdf"
         render_report = post_dir / "word-render-report.json"
+        visual_audit = post_dir / "pdf-visual-audit.json"
         submission_audit = post_dir / "final-submission-audit.json"
         format_comparison = post_dir / "final-format-comparison.json"
         format_comparison_markdown = post_dir / "FINAL-FORMAT-COMPARISON.md"
@@ -702,6 +871,7 @@ def run_case(base: Path, source: Path, case: dict[str, Any], *, prepare_host_rev
                 final_docx=final_docx,
                 pdf=pdf,
                 render_report=render_report,
+                visual_audit=visual_audit,
                 pre_validation=work / "application" / "validation-report.json",
                 format_spec=execution_requirements / "format-spec.json",
                 official_template=official_template,
@@ -715,7 +885,11 @@ def run_case(base: Path, source: Path, case: dict[str, Any], *, prepare_host_rev
                 word_open_timeout=word_open_timeout,
                 word_timeout=word_timeout,
             )
-            post_result = run_command(post_cmd, label=f"[{case['id']}] Word render + final artifact acceptance")
+            post_result = run_command(
+                post_cmd,
+                label=f"[{case['id']}] Word render + final artifact acceptance",
+                timeout=stage_timeout,
+            )
         except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
             post_result = {
                 "returncode": 2,
@@ -737,6 +911,7 @@ def run_case(base: Path, source: Path, case: dict[str, Any], *, prepare_host_rev
             final_docx=final_docx,
             pdf=pdf,
             render_report=render_report,
+            visual_audit=visual_audit,
             submission_audit=submission_audit,
             format_comparison=format_comparison,
             format_comparison_markdown=format_comparison_markdown,
@@ -812,12 +987,14 @@ def main(argv: list[str] | None = None) -> int:
                         help="optional config file passed explicitly to `openclaw agent exec`")
     parser.add_argument("--codex-bin",
                         help="optional native codex executable used by --auto-host-agent")
-    parser.add_argument("--codex-model", default=codex_adapter.DEFAULT_MODEL,
-                        help=f"explicit native Codex model (default: {codex_adapter.DEFAULT_MODEL})")
+    parser.add_argument("--codex-model",
+                        help="optional explicit native Codex model; omitted means the current Codex CLI configuration")
     parser.add_argument("--word-open-timeout", type=int, default=45,
                         help="seconds to wait for Microsoft Word to activate the staged DOCX")
     parser.add_argument("--word-timeout", type=int, default=180,
                         help="maximum seconds for one Microsoft Word export")
+    parser.add_argument("--stage-timeout", type=int, default=1800,
+                        help="hard timeout for each pipeline/bridge/render subprocess")
     args = parser.parse_args(argv)
     try:
         source, cases, manifest_path = load_manifest(args.template_manifest)
@@ -852,6 +1029,8 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--word-open-timeout must be a positive integer")
     if args.word_timeout <= 0:
         parser.error("--word-timeout must be a positive integer")
+    if args.stage_timeout <= 0:
+        parser.error("--stage-timeout must be a positive integer")
     if any(case["analysis_mode"] == "llm_primary" for case in selected) and not (
         args.prepare_host_review or args.auto_host_agent
     ):
@@ -926,8 +1105,9 @@ def main(argv: list[str] | None = None) -> int:
             "global_stop_reason": global_stop_reason,
             "cases": results,
         }
-        (base / "run-results.json").write_text(
-            json.dumps(payload, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+        atomic_write_text(
+            base / "run-results.json",
+            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
         )
 
     for case in selected:
@@ -954,6 +1134,7 @@ def main(argv: list[str] | None = None) -> int:
                 neutral_reference_docx=neutral_reference,
                 word_open_timeout=args.word_open_timeout,
                 word_timeout=args.word_timeout,
+                stage_timeout=args.stage_timeout,
             )
         except Exception as exc:  # keep each school independently auditable
             result = {

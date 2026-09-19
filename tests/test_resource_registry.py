@@ -109,6 +109,22 @@ class RunScopedResourceRegistryTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not present verbatim"):
             materialize_declaration_resources(broken, "run-evidence", evidence=broken_evidence)
 
+    def test_neutral_signature_placeholder_label_is_not_fixed_source_prose(self) -> None:
+        spec = self._spec()
+        spec["declarations"]["items"][0]["source_evidence_ids"] = [
+            "E-current-1", "E-current-2", "E-current-3",
+        ]
+        evidence = {"evidence": [
+            {"id": "E-current-1", "text": "本次输入的声明标题"},
+            {"id": "E-current-2", "text": "本次输入的第一段固定正文。"},
+            {"id": "E-current-3", "text": "本次输入的第二段固定正文。"},
+        ]}
+        materialized = materialize_declaration_resources(spec, "run-placeholder", evidence=evidence)
+        self.assertEqual(
+            materialized["declarations"]["items"][0]["signature_placeholders"][0]["label"],
+            "作者签名",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -21,6 +21,7 @@ from typing import Any
 from uuid import uuid4
 import xml.etree.ElementTree as ET
 
+from artifact_io import atomic_write_text
 from format_spec_validation import load_and_validate, validate_instance
 from host_review_contract import validate_response as validate_host_review_response
 from compliance import (
@@ -1263,6 +1264,40 @@ def build_rule_result(source: Path, clauses: list[dict[str, Any]]) -> tuple[dict
     return spec, questions, conflicts
 
 
+def _declaration_anchor_candidates(structure: dict[str, Any] | None) -> list[str]:
+    """Return insertion anchors observable in the current target structure."""
+    candidates = ["document_start"]
+    if not isinstance(structure, dict):
+        return candidates
+    sections = structure.get("sections")
+    if not isinstance(sections, list):
+        return candidates
+    for section in sections:
+        if not isinstance(section, dict):
+            continue
+        paragraphs = [
+            item for key in ("first_paragraphs", "last_paragraphs")
+            for item in (section.get(key) or [])
+            if isinstance(item, dict)
+        ]
+        for item in paragraphs:
+            text = re.sub(r"\s+", "", str(item.get("text") or ""))
+            style = re.sub(
+                r"[\s_\-]+", "",
+                str(item.get("style_name") or item.get("style_id") or ""),
+            ).casefold()
+            if re.fullmatch(r"摘要", text) or "abstracttitlecn" in style:
+                candidates.append("abstract_title_zh")
+                return candidates
+    return candidates
+
+
+def _declaration_anchor_preference(structure: dict[str, Any] | None) -> str:
+    """Choose the existing deterministic placement policy for this target."""
+    candidates = _declaration_anchor_candidates(structure)
+    return "abstract_title_zh" if "abstract_title_zh" in candidates else "document_start"
+
+
 def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, Any]],
                       evidence_doc: dict[str, Any] | None = None,
                       rule_spec: dict[str, Any] | None = None,
@@ -1329,6 +1364,10 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
                 "A blank author/supervisor/date signature placeholder is DOCX structure, never proof of an actual signature. For mixed clauses, emit a declarations requirement only for fixed text/order/placeholders and preserve actual signing as an external clause review rather than claiming it generated_and_verified.",
                 "For a declarations requirement, copy each fixed-text heading and every fixed-text body paragraph exactly from the cited evidence into properties.items[].heading and properties.items[].body_parts. Use a semantic item id local to this run, such as originality or authorization, and include only source_evidence_ids and blank signature_placeholders. Do not invent resource_id, version, or sha256: the host materializes those fields from this run and the exact source text.",
                 "Never identify a declaration by institution or school name in the execution contract. The current input evidence is the only source of fixed declaration text; if it is not available, classify the clause as unresolved or requires_source_content.",
+                "The source_continuity_context is orientation-only: do not emit clause_reviews or requirements for its clause IDs, and do not cite its evidence unless that evidence is also present in the current chunk. It shows adjacent source clauses so a fixed declaration split at a chunk boundary can retain one semantic item and one verified insertion anchor.",
+                "Declaration continuity rule: when the current clause is a continuation of a fixed declaration shown in source_continuity_context, keep the same semantic declaration item and before_role as the continuation. Never create competing declaration anchors merely because fragments arrived in different chunks. If identity or placement cannot be established from current evidence and continuity context, classify the clause as unresolved or external_compliance with requirement_indexes: [] instead of guessing.",
+                "Generic author-name, date, signature, or location lines (for example 作者姓名 or 年 月 日于某校) are metadata/signature material, not an executable declarations requirement by themselves. Keep them non-executable unless current evidence contains an explicit fixed declaration heading/body that they complete.",
+                "For declarations.properties.before_role use exactly declaration_anchor_preference, which is the deterministic placement selected from the current target structure; it must also be one of declaration_anchor_candidates. The value declarations is a requirement role, not an insertion anchor. If the current chunk is a continuation and the earlier heading evidence is outside this chunk, omit heading rather than shortening a body paragraph into a guessed heading; the deterministic merger will combine it with the same semantic item from the earlier chunk.",
                 "A cover requirement declares document structure independently of instance metadata. Bind fields deterministically to thesis_profile.cover_metadata; when the complete confirmed metadata record is absent, preserve required cover fields with the neutral placeholder configured by cover.missing_value_placeholder (default ——). Never infer identity, degree, supervisor, security approval, physical cover color, or spine compliance.",
                 "The rule_spec is advisory evidence, not authoritative; report disagreements in conflicts.",
                 "For page numbering, identify the body start with first_heading_1, heading_text, or section_index.",
@@ -1340,6 +1379,10 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
                 "requirement_indexes are zero-based indexes into this response's requirements array. They MUST be [] for informational, requires_metadata, requires_source_content, external_compliance, not_applicable, unsupported_backend, unsupported, unverifiable, unresolved, or ignored reviews; only covered, executable, and verify_existing may reference requirements.",
                 "Use verify_existing only when an existing_requirement_id is being reused and the emitted role, properties, evidence_ids, and source text are an exact evidence-backed match. If the evidence occurrence differs, emit a new requirement or use a non-executable classification; do not force an existing_requirement_id.",
                 "Every emitted requirement must be referenced by at least one covered, executable, or verify_existing clause_review; do not emit unused requirement objects. Every such clause review reference must point to a semantically matching emitted requirement.",
+                "Mechanical response gate: classification is not normative_basis. Never put informational, executable, or any classification string into normative_basis; use only the enum values declared by response_schema and omit the field when no declared basis is supported.",
+                "Mechanical response gate: requirement_indexes MUST be [] for every non-executable classification, including informational, requires_metadata, requires_source_content, external_compliance, not_applicable, unsupported_backend, unsupported, unverifiable, unresolved, and ignored.",
+                "Mechanical response gate: require_after_role and keyword constraints must remain at the exact nested path declared by the selected role_properties_schema. Do not create a top-level keywords_zh/keywords_en role or move nested properties into a different role.",
+                "Mechanical response gate: on retry after local rejection, regenerate the complete object from this chunk. Never auto-correct an invalid enum, invent missing evidence, change a semantic classification without evidence, or reuse a prior response. Apply only mechanical schema corrections explicitly required by the validator, such as omitting an invalid optional field or using [] for a non-executable classification.",
                 "Use only the allowed requirement roles and the corresponding properties schema in requirement_contract. Never invent role names such as cover_metadata, declaration_originality, authorization_statement, or other role names absent from that contract; use cover, declarations, document_structure, or a registered text role instead.",
                 "For an existing requirement, the request-only field _eligible_clause_ids lists the exact clause occurrences whose evidence may be reused. Do not use that existing_requirement_id for any other clause_id; never copy an existing requirement from a different evidence occurrence.",
                 "When reusing an existing requirement, do not combine unrelated clauses or repeated occurrences with different evidence. Every clause_id listed in that requirement must be exactly represented by its source text and cited evidence.",
@@ -1360,6 +1403,12 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
                 "$defs": request_defs,
             },
             "document_structure": (evidence_doc or {}).get("structure_evidence", {}),
+            "declaration_anchor_candidates": _declaration_anchor_candidates(
+                (evidence_doc or {}).get("structure_evidence", {})
+            ),
+            "declaration_anchor_preference": _declaration_anchor_preference(
+                (evidence_doc or {}).get("structure_evidence", {})
+            ),
             "page_evidence": (evidence_doc or {}).get("page_evidence", {}),
             "rule_spec": request_rule_spec,
             "response_schema": {
@@ -2225,6 +2274,71 @@ def _validate_host_review_chunk_size(value: int) -> int:
     return value
 
 
+def _chunk_projection(request_chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return the only source-bound projection that may define chunk scope."""
+    projection: list[dict[str, Any]] = []
+    for chunk in request_chunks:
+        batch = chunk.get("batch") if isinstance(chunk, dict) else {}
+        clauses = chunk.get("clauses") if isinstance(chunk, dict) else []
+        evidence = chunk.get("evidence_context") if isinstance(chunk, dict) else {}
+        continuity = chunk.get("source_continuity_context") if isinstance(chunk, dict) else {}
+        continuity_ids: list[str] = []
+        if isinstance(continuity, dict):
+            for key in ("preceding_clauses", "following_clauses"):
+                values = continuity.get(key)
+                if isinstance(values, list):
+                    continuity_ids.extend(
+                        str(item.get("id"))
+                        for item in values
+                        if isinstance(item, dict) and item.get("id")
+                    )
+        projection.append({
+            "index": batch.get("index") if isinstance(batch, dict) else None,
+            "count": batch.get("count") if isinstance(batch, dict) else None,
+            "clause_ids": [
+                str(item.get("id")) for item in clauses
+                if isinstance(item, dict) and item.get("id")
+            ] if isinstance(clauses, list) else [],
+            "evidence_ids": sorted(str(key) for key in evidence)
+            if isinstance(evidence, dict) else [],
+            "continuity_clause_ids": continuity_ids,
+        })
+    return projection
+
+
+def _continuity_clause_projection(clause: dict[str, Any]) -> dict[str, Any]:
+    """Expose only bounded source order/text needed across a chunk boundary."""
+    return {
+        key: copy.deepcopy(clause[key])
+        for key in ("id", "text", "evidence_ids", "source_kind", "location", "part_index")
+        if key in clause
+    }
+
+
+def _source_continuity_context(
+    clauses: list[dict[str, Any]], start: int, end: int, *, radius: int = 3,
+) -> dict[str, Any]:
+    """Provide adjacent source clauses without expanding the response scope.
+
+    Chunk responses must still cover exactly their own clause IDs.  The
+    bounded context exists to prevent a declaration or other fixed source
+    paragraph from being semantically re-started at a chunk boundary.
+    """
+    before = [
+        _continuity_clause_projection(item)
+        for item in clauses[max(0, start - radius):start]
+    ]
+    after = [
+        _continuity_clause_projection(item)
+        for item in clauses[end:min(len(clauses), end + radius)]
+    ]
+    return {
+        "policy": "orientation_only_not_for_review",
+        "preceding_clauses": before,
+        "following_clauses": after,
+    }
+
+
 def _build_host_review_chunks(
     full_request: dict[str, Any],
     clauses: list[dict[str, Any]],
@@ -2247,11 +2361,16 @@ def _build_host_review_chunks(
         if isinstance(item, dict) and item.get("id")
     }
     for index, chunk in enumerate(chunks):
+        start = index * chunk_size
+        end = start + len(chunk)
         chunk_ids = {cid for clause in chunk for cid in clause.get("evidence_ids", [])}
         chunk_evidence = copy.deepcopy(evidence_doc)
         chunk_evidence["evidence"] = [item for eid, item in all_evidence.items() if eid in chunk_ids]
         chunk_rule_spec = _narrow_rule_spec_for_chunk(full_request.get("rule_spec", {}), chunk)
         chunk_request = build_llm_request([], chunk, chunk_evidence, chunk_rule_spec, "full")
+        chunk_request["source_continuity_context"] = _source_continuity_context(
+            clauses, start, end,
+        )
         chunk_request["batch"] = {
             "index": index + 1,
             "count": len(chunks),
@@ -2317,6 +2436,7 @@ def prepare_host_agent_review_packets(
         "chunk_count": len(request_chunks),
         "chunk_size": chunk_size,
         "clause_count": len(clauses),
+        "chunk_projection_sha256": sha256_json(_chunk_projection(request_chunks)),
         "instructions": [
             "The host Agent must generate each response with its current runtime model.",
             "The project performs no provider/API call and must not receive an API key.",
@@ -2424,6 +2544,11 @@ def merge_host_agent_review_packets(
         raise ValueError("host-agent response file manifest contains a non-string path")
     if len(set(response_files)) != len(response_files):
         raise ValueError("host-agent response file manifest contains duplicate paths")
+    declared_projection_sha = manifest.get("chunk_projection_sha256")
+    if not isinstance(declared_projection_sha, str) or declared_projection_sha != sha256_json(
+        _chunk_projection(request_chunks)
+    ):
+        raise ValueError("host-agent chunk projection does not match its signed manifest")
 
     response_out_path = (
         _merge_output_path(review_dir, response_out)
@@ -2713,7 +2838,10 @@ def validate_spec(spec: dict[str, Any], evidence_ids: set[str]) -> list[str]:
 
 
 def write_json(path: Path, data: Any) -> None:
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    atomic_write_text(
+        path,
+        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+    )
 
 
 GENERATED_REQUIREMENT_ARTIFACTS = {

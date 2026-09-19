@@ -153,9 +153,13 @@ def _verify_source_texts(
         atoms.append(("heading", heading))
     for index, body in enumerate(_body_parts(item), start=1):
         atoms.append((f"body_parts[{index - 1}]", body))
-    for index, placeholder in enumerate(item.get("signature_placeholders") or []):
-        if isinstance(placeholder, dict) and isinstance(placeholder.get("label"), str):
-            atoms.append((f"signature_placeholders[{index}].label", placeholder["label"]))
+    # Placeholder labels are a neutral DOCX structure field, not fixed
+    # declaration prose.  They may be normalized by the executor (for example
+    # from a source signature line to a blank author/date label), and their
+    # non-attestation semantics are validated separately by the format-spec
+    # contract.  Requiring the label to be a whole source paragraph would
+    # incorrectly reject a valid declaration whose signature line is outside
+    # the fixed-text evidence cited by its body.
     for field, value in atoms:
         if _normalized(value) not in normalized_sources:
             raise ValueError(

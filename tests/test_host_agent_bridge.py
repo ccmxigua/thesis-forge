@@ -379,6 +379,22 @@ class HostAgentBridgeTests(unittest.TestCase):
             self.assertEqual(audit["error_type"], "HostAgentProvenanceMismatch")
             self.assertFalse(audit["merged_response_written"])
 
+    def test_bridge_rejects_tampered_chunk_before_starting_native_agent(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            review_dir, _chunk = self._packet(Path(td) / "requirements")
+            chunks_path = review_dir / "llm-request-chunks.json"
+            chunks = json.loads(chunks_path.read_text(encoding="utf-8"))
+            chunks[0]["clauses"][0]["text"] = "被篡改的正文"
+            chunks_path.write_text(json.dumps(chunks, ensure_ascii=False), encoding="utf-8")
+            with patch.object(bridge, "_run_command") as run:
+                with self.assertRaisesRegex(ValueError, "source projection"):
+                    bridge.run_bridge(
+                        review_dir, response_out=Path(td) / "host-agent-response.json",
+                        agent_id="main", timeout=1, max_attempts=1,
+                        openclaw_bin="openclaw", model="openai/gpt-5.6-luna",
+                    )
+            run.assert_not_called()
+
     def test_bridge_requires_declared_host_runtime(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             review_dir, _chunk = self._packet(Path(td) / "requirements")
@@ -435,6 +451,9 @@ class HostAgentBridgeTests(unittest.TestCase):
             self.assertEqual(failure["status"], "failed")
             self.assertFalse(failure["merged_response_written"])
             self.assertFalse(response_out.exists())
+            self.assertEqual(len(failure["chunk_lifecycle"]), 1)
+            self.assertEqual(failure["chunk_lifecycle"][0]["status"], "failed")
+            self.assertEqual(failure["chunk_lifecycle"][0]["attempts"][0]["status"], "failed")
 
     def test_bridge_calls_openclaw_without_delivery_and_merges_fresh_response(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -526,7 +545,7 @@ class HostAgentBridgeTests(unittest.TestCase):
         fake = subprocess.CompletedProcess(
             ["openclaw", "sessions"], 0, json.dumps(sessions), "",
         )
-        with patch.object(bridge.subprocess, "run", return_value=fake) as run:
+        with patch.object(bridge, "_run_command", return_value=fake) as run:
             resolved = bridge.resolve_parent_model(
                 "openclaw", agent_id="main", parent_session_key=parent_key,
             )
@@ -576,14 +595,13 @@ class HostAgentBridgeTests(unittest.TestCase):
                     return session_result
                 return agent_result
 
-            with patch.object(bridge.subprocess, "run", return_value=session_result):
-                with patch.object(bridge, "_run_command", side_effect=fake_run) as run:
-                    audit = bridge.run_bridge(
-                        review_dir, response_out=response_out,
-                        agent_id="main", timeout=1, openclaw_bin="openclaw",
-                        inherit_parent_model=True, parent_session_key=parent_key,
-                        auth_env_only=True,
-                    )
+            with patch.object(bridge, "_run_command", side_effect=fake_run) as run:
+                audit = bridge.run_bridge(
+                    review_dir, response_out=response_out,
+                    agent_id="main", timeout=1, openclaw_bin="openclaw",
+                    inherit_parent_model=True, parent_session_key=parent_key,
+                    auth_env_only=True,
+                )
             command = next(
                 call.args[0] for call in run.call_args_list if "agent" in call.args[0]
             )
@@ -642,7 +660,7 @@ class HostAgentBridgeTests(unittest.TestCase):
         fake = subprocess.CompletedProcess(
             ["openclaw", "sessions"], 0, json.dumps(sessions), "",
         )
-        with patch.object(bridge.subprocess, "run", return_value=fake):
+        with patch.object(bridge, "_run_command", return_value=fake):
             resolved = bridge.resolve_parent_model(
                 "openclaw", agent_id="main", parent_session_key=parent_key,
             )
@@ -664,7 +682,7 @@ class HostAgentBridgeTests(unittest.TestCase):
         fake = subprocess.CompletedProcess(
             ["openclaw", "sessions"], 0, json.dumps(sessions), "",
         )
-        with patch.object(bridge.subprocess, "run", return_value=fake):
+        with patch.object(bridge, "_run_command", return_value=fake):
             with self.assertRaisesRegex(ValueError, "refusing to use the gateway default"):
                 bridge.resolve_parent_model(
                     "openclaw", agent_id="main", parent_session_key=parent_key,
@@ -704,18 +722,21 @@ class HostAgentBridgeTests(unittest.TestCase):
                 calls.append(command)
                 return session_result if "sessions" in command else agent_result
 
-            with patch.object(bridge.subprocess, "run", return_value=session_result):
-                with patch.object(bridge, "_run_command", side_effect=fake_run) as run:
-                    with self.assertRaises(bridge.HostAgentRouteMismatch):
-                        bridge.run_bridge(
-                            review_dir,
-                            response_out=Path(td) / "host-agent-response.json",
-                            agent_id="main", timeout=1, max_attempts=2,
-                            openclaw_bin="openclaw",
-                            inherit_parent_model=True,
-                            parent_session_key=parent_key,
-                        )
-            self.assertEqual(len(calls), 1)
+            with patch.object(bridge, "_run_command", side_effect=fake_run) as run:
+                with self.assertRaises(bridge.HostAgentRouteMismatch):
+                    bridge.run_bridge(
+                        review_dir,
+                        response_out=Path(td) / "host-agent-response.json",
+                        agent_id="main", timeout=1, max_attempts=2,
+                        openclaw_bin="openclaw",
+                        inherit_parent_model=True,
+                        parent_session_key=parent_key,
+                    )
+            # One owned session-discovery call plus one child call; a route
+            # mismatch must still not trigger a second child attempt.
+            self.assertEqual(len(calls), 2)
+            self.assertIn("sessions", calls[0])
+            self.assertIn("agent", calls[1])
             self.assertFalse((Path(td) / "host-agent-response.json").exists())
 
     def test_bridge_refuses_existing_chunk_response_instead_of_reusing_it(self) -> None:

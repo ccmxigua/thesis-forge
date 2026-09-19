@@ -13,13 +13,15 @@ import hashlib
 import json
 import platform
 import re
-import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from submission_audit import PDF_RENDER_ERROR_PATTERNS, _pdf_layout_evidence
 from artifact_io import atomic_write_text, paths_alias
+from process_runner import run_process
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def sha256(path: Path) -> str:
@@ -33,10 +35,13 @@ def sha256(path: Path) -> str:
 def word_version() -> str | None:
     if platform.system() != "Darwin":
         return None
-    result = subprocess.run(
-        ["osascript", "-e", 'tell application "Microsoft Word" to get version'],
-        text=True, capture_output=True, timeout=15,
-    )
+    try:
+        result = run_process(
+            ["osascript", "-e", 'tell application "Microsoft Word" to get version'],
+            cwd=ROOT, timeout=15,
+        )
+    except OSError:
+        return None
     return result.stdout.strip() if result.returncode == 0 else None
 
 

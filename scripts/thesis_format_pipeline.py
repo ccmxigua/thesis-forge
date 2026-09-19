@@ -24,6 +24,55 @@ from process_runner import run_process
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def _runtime_code_files() -> list[Path]:
+    """Return the tracked/runtime inputs whose drift invalidates a stage.
+
+    Generated ``build`` artifacts and tests are deliberately excluded.  The
+    fingerprint covers the executable pipeline, schemas, capability registry,
+    skill contract, conversion wrapper, and CI/dependency declarations that
+    define the meaning of an existing run.
+    """
+    candidates: list[Path] = []
+    for relative in ("SKILL.md", "Makefile", "pytest.ini", "convert.sh"):
+        path = ROOT / relative
+        if path.is_file():
+            candidates.append(path)
+    for relative in ("requirements.txt", "requirements-test.txt", "pyproject.toml"):
+        path = ROOT / relative
+        if path.is_file():
+            candidates.append(path)
+    for directory in ("scripts", "schema", "resources", ".github/workflows"):
+        root = ROOT / directory
+        if not root.is_dir():
+            continue
+        candidates.extend(
+            path for path in root.rglob("*")
+            if path.is_file()
+            and "__pycache__" not in path.parts
+            and path.suffix not in {".pyc", ".tmp"}
+        )
+    return sorted(set(candidates), key=lambda path: path.relative_to(ROOT).as_posix())
+
+
+def runtime_code_fingerprint() -> dict[str, Any]:
+    """Compute a deterministic code/runtime fingerprint for stage binding."""
+    records: list[dict[str, Any]] = []
+    digest = hashlib.sha256()
+    for path in _runtime_code_files():
+        relative = path.relative_to(ROOT).as_posix()
+        record = file_record(path)
+        records.append({"path": relative, "bytes": record["bytes"], "sha256": record["sha256"]})
+        digest.update(relative.encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(record["sha256"].encode("ascii"))
+        digest.update(b"\n")
+    return {
+        "algorithm": "sha256(path\\0file_sha256\\n)",
+        "sha256": digest.hexdigest(),
+        "files": records,
+    }
+
+
 def validate_semantic_review_configuration(args: argparse.Namespace, parser: argparse.ArgumentParser) -> None:
     """Fail before conversion when the requested compliance contract is impossible.
 
@@ -117,6 +166,40 @@ def file_record(path: Path) -> dict[str, Any]:
     return {"path": str(resolved), "bytes": resolved.stat().st_size, "sha256": digest.hexdigest()}
 
 
+def validate_explicit_thesis_profile(
+    profile: Any, *, source_record: dict[str, Any], profile_path: Path,
+) -> list[str]:
+    """Validate a user-supplied profile without inferring missing semantics.
+
+    A profile may resolve fields that the source extractor cannot determine,
+    but it must still be a complete schema object, explicitly confirmed, and
+    bound to the exact current source bytes.  This keeps a profile an
+    auditable input rather than an untracked override or a model guess.
+    """
+    errors = load_and_validate(profile, ROOT / "schema" / "thesis-profile.schema.json")
+    if errors:
+        return errors
+    if not isinstance(profile, dict):
+        return ["explicit thesis profile must be a JSON object"]
+    provenance = profile.get("provenance")
+    if not isinstance(provenance, dict):
+        return ["explicit thesis profile requires provenance bound to the current source"]
+    if provenance.get("source_sha256") != source_record.get("sha256"):
+        return [
+            "explicit thesis profile provenance.source_sha256 does not match "
+            f"the current source ({profile_path.resolve()})"
+        ]
+    trust = provenance.get("trust")
+    if not isinstance(trust, dict) or trust.get("confirmed") is not True:
+        return ["explicit thesis profile provenance.trust.confirmed must be true"]
+    if trust.get("source") != "user_confirmed":
+        return [
+            "explicit thesis profile provenance.trust.source must be user_confirmed; "
+            "source-derived metadata cannot silently become a user override"
+        ]
+    return []
+
+
 def _path_under(path: Path, root: Path, *, label: str) -> Path:
     resolved = path.expanduser().resolve()
     root = root.resolve()
@@ -148,6 +231,7 @@ def validate_host_review_receipts(
         "llm_request_envelope_sha256"
     )
     expected_request_file_sha = extraction_manifest.get("llm_request_file_sha256")
+    expected_runtime_context = extraction_manifest.get("runtime_context")
     if not expected_run_id or not expected_request_body_sha:
         raise ValueError("fresh extraction manifest is missing run_id or request body hash")
     if receipt.get("status") != "merged" or receipt.get("protocol") != "host_agent_semantic_review":
@@ -162,11 +246,15 @@ def validate_host_review_receipts(
         raise ValueError("merge receipt request file hash does not match the fresh request")
     if receipt.get("aggregate_sha256") != sha256_json(response):
         raise ValueError("merge receipt aggregate_sha256 does not match the response")
+    if expected_runtime_context is not None and receipt.get("runtime_context") != expected_runtime_context:
+        raise ValueError("merge receipt runtime context does not match the fresh request")
     merged_response_path = receipt.get("merged_response_path")
     if merged_response_path and Path(str(merged_response_path)).resolve() != response_path:
         raise ValueError("merge receipt response path does not match --llm-response")
     if audit.get("status") != "merged" or audit.get("run_id") != expected_run_id:
         raise ValueError("host-agent audit is not a successful record for the fresh run")
+    if expected_runtime_context is not None and audit.get("runtime_context") != expected_runtime_context:
+        raise ValueError("host-agent audit runtime context does not match the fresh request")
     if audit.get("response_path") and Path(str(audit["response_path"])).resolve() != response_path:
         raise ValueError("host-agent audit response path does not match --llm-response")
     merge = audit.get("merge") if isinstance(audit.get("merge"), dict) else {}
@@ -178,6 +266,8 @@ def validate_host_review_receipts(
         raise ValueError("host-agent audit request envelope hash does not match the fresh request")
     if expected_request_file_sha and merge.get("request_file_sha256") != expected_request_file_sha:
         raise ValueError("host-agent audit request file hash does not match the fresh request")
+    if expected_runtime_context is not None and merge.get("runtime_context") != expected_runtime_context:
+        raise ValueError("host-agent merge runtime context does not match the fresh request")
     if merge.get("merge_receipt_path") and Path(str(merge["merge_receipt_path"])).resolve() != receipt_path:
         raise ValueError("host-agent audit receipt path does not match the supplied receipt")
     return {
@@ -190,6 +280,7 @@ def validate_host_review_receipts(
         "request_envelope_sha256": expected_request_envelope_sha,
         "request_file_sha256": expected_request_file_sha,
         "run_id": expected_run_id,
+        "runtime_context": expected_runtime_context,
     }
 
 
@@ -479,7 +570,7 @@ def compile_preflight_plans(spec: dict[str, Any], effective_input: Path,
     return section_plan, assembly_result
 
 
-def main(argv: list[str]) -> int:
+def _main(argv: list[str]) -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
         "requirements", type=Path,
@@ -506,6 +597,7 @@ def main(argv: list[str]) -> int:
     p.add_argument("--merge-receipt", type=Path,
                    help="immutable merge-receipt.json bound to --llm-response")
     p.add_argument("--run-id", help="explicit current semantic-review run id when resuming a fresh host response")
+    p.add_argument("--case-id", help="stable batch case identity bound into the host-review request")
     p.add_argument("--thesis-profile", type=Path, help="JSON metadata for conditional requirements such as master/doctor limits")
     p.add_argument("--analysis-mode", choices=["llm_primary", "rule_only", "known_template"], default="llm_primary",
                    help="unseen templates default to full LLM semantic extraction and completeness review")
@@ -538,6 +630,12 @@ def main(argv: list[str]) -> int:
     p.add_argument("--pandoc-arg", action="append", default=[],
                    help="extra argument forwarded to convert.sh/Pandoc for .tex input; repeat as needed")
     args = p.parse_args(argv)
+    if args.case_id is not None:
+        args.case_id = args.case_id.strip()
+        if not args.case_id or not all(
+            character.isalnum() or character in ".-_" for character in args.case_id
+        ):
+            p.error("--case-id must contain only letters, digits, dot, underscore, or hyphen")
     validate_semantic_review_configuration(args, p)
     if args.host_review_chunk_size <= 0:
         p.error("--host-review-chunk-size must be a positive integer")
@@ -553,6 +651,7 @@ def main(argv: list[str]) -> int:
         p.error(f"style/official template DOCX does not exist: {args.style_template}")
 
     work = args.work_dir.resolve()
+    current_code_fingerprint = runtime_code_fingerprint()
     requirements_dir = (args.requirements_dir.resolve() if args.requirements_dir
                         else work / "requirements")
     if requirements_dir == work or work not in requirements_dir.parents:
@@ -610,6 +709,21 @@ def main(argv: list[str]) -> int:
         if not isinstance(candidate, dict):
             p.error("existing pipeline manifest is not a JSON object; start a fresh run directory")
         prior_manifest = candidate
+        prior_status = candidate.get("status")
+        allowed_reuse_statuses = {"completed"} if not args.llm_response else {"host_review_required"}
+        if prior_status not in allowed_reuse_statuses:
+            p.error(
+                "--allow-existing-work is limited to a completed supported-subset rebuild "
+                "or the explicit host-review-to-execution transition; "
+                f"existing manifest status is {prior_status!r}"
+            )
+        if args.compliance_mode == "full" and not args.llm_response:
+            p.error(
+                "--allow-existing-work cannot reuse a full-compliance work directory "
+                "without a fresh bound --llm-response and host receipts"
+            )
+        if args.llm_response and args.analysis_mode != "llm_primary":
+            p.error("a bound --llm-response continuation requires --analysis-mode llm_primary")
         prior_source = (candidate.get("inputs") or {}).get("source")
         current_source = file_record(source_input)
         if (
@@ -621,6 +735,17 @@ def main(argv: list[str]) -> int:
                 "existing work directory is bound to a different source input; "
                 "start a fresh run directory instead of mixing stages"
             )
+        prior_code_fingerprint = candidate.get("code_fingerprint")
+        if prior_code_fingerprint != current_code_fingerprint:
+            p.error(
+                "existing work directory was created by a different pipeline code/runtime "
+                "fingerprint; start a fresh run directory instead of mixing stages"
+            )
+    elif args.allow_existing_work:
+        p.error(
+            "--allow-existing-work requires an existing pipeline-manifest.json; "
+            "start a fresh work directory instead"
+        )
 
     steps: list[dict[str, Any]] = []
     manifest: dict[str, Any] = {
@@ -633,6 +758,8 @@ def main(argv: list[str]) -> int:
             "source_kind": "latex" if source_suffix == ".tex" else "docx",
         },
         "output": str(args.output.resolve()), "work_dir": str(work), "steps": steps,
+        "code_fingerprint": current_code_fingerprint,
+        "case_id": args.case_id,
         "work_reuse_policy": (
             "explicit_allow_existing_work" if args.allow_existing_work
             else "new_directory_required"
@@ -642,6 +769,11 @@ def main(argv: list[str]) -> int:
         "preview_bypassed_section_plan_findings": [],
         "preview_added_cover_fields": [],
     }
+    # Persist a parseable running marker before any external converter or
+    # metadata extractor starts.  The outer wrapper can then close an
+    # unexpected exception or KeyboardInterrupt as a truthful terminal state
+    # instead of leaving an untracked invocation.
+    write_json(manifest_path, manifest)
 
     effective_input = source_input
     if source_suffix == ".tex":
@@ -684,6 +816,78 @@ def main(argv: list[str]) -> int:
                 manifest.update(status="failed", reason="LaTeX to DOCX conversion failed")
                 write_json(manifest_path, manifest); print(json.dumps(manifest, ensure_ascii=False)); return result.returncode or 2
         manifest["intermediate_docx"] = file_record(effective_input)
+
+    # Resolve thesis metadata before requirements extraction so the exact
+    # confirmed profile is visible in the host-review request.  For TeX, the
+    # extractor still runs to produce independent source evidence; an explicit
+    # profile then replaces only the canonical profile artifact after its
+    # schema, trust, and source-byte binding pass.
+    canonical_profile: dict[str, Any] | None = None
+    if source_suffix == ".tex":
+        metadata_cmd = [
+            sys.executable, str(ROOT / "scripts" / "extract_semantic_metadata.py"),
+            str(source_input), str(metadata_path),
+            "--thesis-profile-out", str(canonical_profile_path),
+        ]
+        metadata_result = run_step("semantic_metadata", metadata_cmd, steps)
+        if metadata_result.returncode or not metadata_path.exists() or not canonical_profile_path.exists():
+            manifest.update(status="failed", reason="semantic metadata extraction failed")
+            write_json(manifest_path, manifest)
+            print(json.dumps(manifest, ensure_ascii=False))
+            return metadata_result.returncode or 2
+        semantic_metadata = read_json(metadata_path)
+        extracted_profile = read_json(canonical_profile_path)
+        extracted_errors = load_and_validate(extracted_profile, ROOT / "schema" / "thesis-profile.schema.json")
+        extracted_source_sha = (
+            extracted_profile.get("provenance", {}).get("source_sha256")
+            if isinstance(extracted_profile, dict) else None
+        )
+        if extracted_errors or extracted_source_sha != semantic_metadata.get("source_sha256"):
+            manifest.update(
+                status="failed",
+                reason="canonical thesis profile validation failed",
+                thesis_profile_errors=extracted_errors or ["canonical profile/source provenance mismatch"],
+            )
+            write_json(manifest_path, manifest)
+            print(json.dumps(manifest, ensure_ascii=False))
+            return 2
+        canonical_profile = extracted_profile
+        manifest["inputs"]["semantic_metadata"] = file_record(metadata_path)
+        if args.thesis_profile:
+            supplied_profile = read_json(args.thesis_profile)
+            profile_errors = validate_explicit_thesis_profile(
+                supplied_profile,
+                source_record=manifest["inputs"]["source"],
+                profile_path=args.thesis_profile,
+            )
+            if profile_errors:
+                manifest.update(status="failed", reason="explicit thesis profile validation failed",
+                                thesis_profile_errors=profile_errors)
+                write_json(manifest_path, manifest)
+                print(json.dumps(manifest, ensure_ascii=False))
+                return 2
+            canonical_profile = supplied_profile
+            write_json(canonical_profile_path, canonical_profile)
+            manifest["inputs"]["thesis_profile_source"] = file_record(args.thesis_profile)
+        manifest["inputs"]["thesis_profile"] = file_record(canonical_profile_path)
+    elif args.thesis_profile:
+        supplied_profile = read_json(args.thesis_profile)
+        profile_errors = validate_explicit_thesis_profile(
+            supplied_profile,
+            source_record=manifest["inputs"]["source"],
+            profile_path=args.thesis_profile,
+        )
+        if profile_errors:
+            manifest.update(status="failed", reason="explicit thesis profile validation failed",
+                            thesis_profile_errors=profile_errors)
+            write_json(manifest_path, manifest)
+            print(json.dumps(manifest, ensure_ascii=False))
+            return 2
+        canonical_profile = supplied_profile
+        write_json(canonical_profile_path, canonical_profile)
+        manifest["inputs"]["semantic_metadata"] = file_record(args.thesis_profile)
+        manifest["inputs"]["thesis_profile_source"] = file_record(args.thesis_profile)
+        manifest["inputs"]["thesis_profile"] = file_record(canonical_profile_path)
 
     profile_official_template = official_template_from_profile(args.template_profile) if args.template_profile else None
     official_template_evidence = (
@@ -732,7 +936,12 @@ def main(argv: list[str]) -> int:
     }
     req_cmd = [sys.executable, str(ROOT / "scripts" / "requirements_engine.py"), str(requirements_source), "--out", str(requirements_dir),
                "--analysis-mode", args.analysis_mode, "--structure-docx", str(effective_input),
-               "--host-review-chunk-size", str(args.host_review_chunk_size)]
+               "--host-review-chunk-size", str(args.host_review_chunk_size),
+               "--code-fingerprint", current_code_fingerprint["sha256"]]
+    if args.case_id:
+        req_cmd += ["--case-id", args.case_id]
+    if canonical_profile is not None:
+        req_cmd += ["--thesis-profile", str(canonical_profile_path)]
     if official_template_evidence:
         req_cmd += ["--official-template-evidence-docx", str(official_template_evidence)]
     if args.compliance_mode == "full" or args.strict_release:
@@ -791,6 +1000,7 @@ def main(argv: list[str]) -> int:
         "sources": extraction_manifest.get("sources"),
         "template_evidence": extraction_manifest.get("template_evidence"),
         "template_reconciliation": extraction_manifest.get("template_reconciliation"),
+        "runtime_context": extraction_manifest.get("runtime_context"),
     })
     manifest["template_evidence"] = extraction_manifest.get("template_evidence")
     manifest["template_reconciliation"] = extraction_manifest.get("template_reconciliation")
@@ -820,42 +1030,6 @@ def main(argv: list[str]) -> int:
     if args.preview_placeholders:
         ensure_preview_cover_placeholders(spec, manifest)
         ensure_preview_page_number_selector(spec, manifest)
-    canonical_profile: dict[str, Any] | None = None
-
-    # A .tex run always derives one canonical profile from the original source.
-    # A caller-supplied profile is copied into the work directory after schema
-    # validation, so every downstream consumer receives the same artifact.
-    if source_suffix == ".tex":
-        metadata_cmd = [
-            sys.executable, str(ROOT / "scripts" / "extract_semantic_metadata.py"),
-            str(source_input), str(metadata_path),
-            "--thesis-profile-out", str(canonical_profile_path),
-        ]
-        metadata_result = run_step("semantic_metadata", metadata_cmd, steps)
-        if metadata_result.returncode or not metadata_path.exists() or not canonical_profile_path.exists():
-            manifest.update(status="failed", reason="semantic metadata extraction failed")
-            write_json(manifest_path, manifest); print(json.dumps(manifest, ensure_ascii=False)); return metadata_result.returncode or 2
-        semantic_metadata = read_json(metadata_path)
-        canonical_profile = read_json(canonical_profile_path)
-        profile_errors = load_and_validate(canonical_profile, ROOT / "schema" / "thesis-profile.schema.json")
-        profile_source_sha = ((canonical_profile.get("provenance") or {}).get("source_sha256")
-                              if isinstance(canonical_profile, dict) else None)
-        if profile_errors or profile_source_sha != semantic_metadata.get("source_sha256"):
-            manifest.update(status="failed", reason="canonical thesis profile validation failed",
-                            thesis_profile_errors=profile_errors or ["canonical profile/source provenance mismatch"])
-            write_json(manifest_path, manifest); print(json.dumps(manifest, ensure_ascii=False)); return 2
-        manifest["inputs"]["semantic_metadata"] = file_record(metadata_path)
-        manifest["inputs"]["thesis_profile"] = file_record(canonical_profile_path)
-    elif args.thesis_profile:
-        profile = read_json(args.thesis_profile)
-        profile_errors = load_and_validate(profile, ROOT / "schema" / "thesis-profile.schema.json")
-        if profile_errors:
-            raise SystemExit("invalid thesis profile:\n" + "\n".join(profile_errors))
-        canonical_profile = profile
-        write_json(canonical_profile_path, canonical_profile)
-        manifest["inputs"]["semantic_metadata"] = file_record(args.thesis_profile.resolve())
-        manifest["inputs"]["thesis_profile"] = file_record(canonical_profile_path)
-
     if canonical_profile is not None:
         spec["thesis_profile"] = canonical_profile
         manifest["metadata_status"] = canonical_profile.get("metadata_status")
@@ -1188,6 +1362,57 @@ def main(argv: list[str]) -> int:
     print(json.dumps({"status": "completed", "output": str(args.output), "work_dir": str(work),
                       "manifest": str(manifest_path)}, ensure_ascii=False))
     return 0
+
+
+def _work_dir_from_argv(argv: list[str]) -> Path | None:
+    for index, value in enumerate(argv):
+        if value == "--work-dir" and index + 1 < len(argv):
+            return Path(argv[index + 1]).expanduser().resolve()
+        if value.startswith("--work-dir="):
+            return Path(value.split("=", 1)[1]).expanduser().resolve()
+    return None
+
+
+def main(argv: list[str]) -> int:
+    """Run the pipeline and close an already-created manifest on interruption."""
+    try:
+        return _main(argv)
+    except KeyboardInterrupt as exc:
+        work = _work_dir_from_argv(argv)
+        if work is not None:
+            manifest_path = work / "pipeline-manifest.json"
+            try:
+                current = read_json(manifest_path) if manifest_path.is_file() else {}
+                if isinstance(current, dict) and current.get("status") == "running":
+                    current.update(
+                        status="interrupted",
+                        finished_at=datetime.now(timezone.utc).isoformat(),
+                        failure_stage=(current.get("steps") or [{}])[-1].get("name"),
+                        error_type=type(exc).__name__,
+                        error="pipeline interrupted",
+                    )
+                    write_json(manifest_path, current)
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                pass
+        raise
+    except Exception as exc:
+        work = _work_dir_from_argv(argv)
+        if work is not None:
+            manifest_path = work / "pipeline-manifest.json"
+            try:
+                current = read_json(manifest_path) if manifest_path.is_file() else {}
+                if isinstance(current, dict) and current.get("status") == "running":
+                    current.update(
+                        status="failed",
+                        finished_at=datetime.now(timezone.utc).isoformat(),
+                        failure_stage=(current.get("steps") or [{}])[-1].get("name"),
+                        error_type=type(exc).__name__,
+                        error=str(exc),
+                    )
+                    write_json(manifest_path, current)
+            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                pass
+        raise
 
 
 if __name__ == "__main__":

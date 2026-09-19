@@ -25,6 +25,17 @@ OpenAI, Grok, Claude, or any other specific vendor.
   edits, shell commands, or executable code.
 - Treat the local scripts as the authority for extraction, provenance,
   contract validation, merging, formatting, and release gates.
+- Treat the frozen request and its deterministic chunk projection as immutable
+  source data. The bridge and merge stages rebuild and compare that projection
+  before accepting any native response; a model-supplied hash or provenance
+  replacement is never an authorization to continue.
+- Bind every batch case, fresh run, code fingerprint, and explicitly confirmed
+  thesis profile into the request/runtime receipt. A profile may resolve
+  conditional metadata only when its schema, confirmation flag, and source-byte
+  provenance are valid; missing metadata remains unresolved and is not guessed.
+- A batch manifest may name a per-case `thesis_profile` for confirmed metadata;
+  the batch runner passes it through as an explicit source-bound input rather
+  than treating `template_profile` or a prior run as a metadata substitute.
 - Fail closed when a clause is missing, ambiguous, unsupported, stale, or not
   backed by the supplied evidence. Never fill gaps with a plausible guess.
 
@@ -206,6 +217,12 @@ and must:
 Do not combine chunks manually and do not copy a response from an earlier
 run. The provenance hash binds the response to the exact fresh extraction.
 
+The packet manifest also records request/body/envelope/file hashes, runtime
+context, and the complete chunk list. Native runs record a lifecycle entry for
+every chunk and attempt, including not-started, retrying, terminated, and
+remote-unobservable states. A failure never produces a partial merged response,
+and an existing response, audit, or attempt file is never reused.
+
 ### 2. Merge and format locally
 
 After every chunk response exists, merge them with deterministic local code:
@@ -261,6 +278,20 @@ re-extracting and re-verifying the properties. A case is submission-ready only
 when the post-render acceptance, final submission audit, and final format
 comparison all pass. A generated DOCX alone, or a self-authored render flag,
 is not sufficient evidence.
+
+Word field repair is source-bound only. TOC hyperlinks and post-update
+`PAGEREF` fields may be repaired only from an explicit target map whose input
+DOCX hash matches the current run; entry order, bookmark names, or similar
+text are not sufficient evidence. The Word exporter stages work inside Word's
+container, runs children in a process group, and commits final DOCX, PDF, and
+reports only after independent path/hash validation.
+
+The pipeline writes a durable `running` manifest before external conversion or
+extraction. Unexpected exceptions and interrupts close it as terminal
+`failed`/`interrupted` records. `--allow-existing-work` is limited to a
+completed supported-subset rebuild or the explicit host-review-to-execution
+transition; full compliance cannot reuse a directory without a fresh bound
+contract response and immutable host receipts.
 
 ## Handling failures
 

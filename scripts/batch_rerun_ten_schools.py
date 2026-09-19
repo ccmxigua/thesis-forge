@@ -36,6 +36,7 @@ from host_runtime import (  # noqa: E402
 )
 from pdf_visual_audit import audit_pdf  # noqa: E402
 from process_runner import run_process  # noqa: E402
+from thesis_format_pipeline import runtime_code_fingerprint  # noqa: E402
 
 
 def resolve_project_path(value: str | Path, *, label: str) -> Path:
@@ -78,6 +79,11 @@ def load_manifest(path: Path) -> tuple[Path, list[dict[str, Any]], Path]:
         style = resolve_project_path(style_value, label=f"{case_id}.style_template") if style_value else None
         profile_value = raw.get("template_profile")
         profile = resolve_project_path(profile_value, label=f"{case_id}.template_profile") if profile_value else None
+        thesis_profile_value = raw.get("thesis_profile")
+        thesis_profile = (
+            resolve_project_path(thesis_profile_value, label=f"{case_id}.thesis_profile")
+            if thesis_profile_value else None
+        )
         template_boundary = raw.get("template_boundary")
         if template_boundary is None:
             template_boundary = "official_template" if (style or profile) else "requirements_only"
@@ -98,6 +104,7 @@ def load_manifest(path: Path) -> tuple[Path, list[dict[str, Any]], Path]:
             "requirements": requirements,
             "style_template": style,
             "template_profile": profile,
+            "thesis_profile": thesis_profile,
             "template_boundary": template_boundary,
             "analysis_mode": mode,
         })
@@ -143,6 +150,7 @@ def pipeline_command(case: dict[str, Any], source: Path, work_dir: Path, output_
         "--analysis-mode", str(case["analysis_mode"]),
         "--compliance-mode", compliance_mode,
         "--host-review-chunk-size", str(host_review_chunk_size),
+        "--case-id", str(case["id"]),
     ]
     if requirements_dir:
         command.extend(["--requirements-dir", str(requirements_dir)])
@@ -169,6 +177,8 @@ def pipeline_command(case: dict[str, Any], source: Path, work_dir: Path, output_
         command.extend(["--merge-receipt", str(merge_receipt)])
     if case.get("template_profile") and not neutral_reference_docx:
         command.extend(["--template-profile", str(case["template_profile"])])
+    if case.get("thesis_profile"):
+        command.extend(["--thesis-profile", str(case["thesis_profile"])])
     return command
 
 
@@ -179,6 +189,8 @@ def post_render_command(
     submission_audit: Path, format_comparison: Path,
     format_comparison_markdown: Path, acceptance_out: Path,
     thesis_profile: Path | None = None,
+    case_id: str | None = None,
+    run_id: str | None = None,
     word_open_timeout: int = 45, word_timeout: int = 180,
 ) -> list[str]:
     """Build the explicit post-Word release command for one case.
@@ -211,6 +223,10 @@ def post_render_command(
         command.extend(["--template-profile", str(case["template_profile"])])
     if thesis_profile:
         command.extend(["--thesis-profile", str(thesis_profile)])
+    if case_id:
+        command.extend(["--case-id", str(case_id)])
+    if run_id:
+        command.extend(["--run-id", str(run_id)])
     return command
 
 
@@ -218,7 +234,7 @@ def attach_post_render_manifest(
     manifest_path: Path, *, pre_render_docx: Path, final_docx: Path, pdf: Path,
     render_report: Path, visual_audit: Path, submission_audit: Path, format_comparison: Path,
     format_comparison_markdown: Path, acceptance_out: Path,
-    accepted: bool,
+    accepted: bool, case_id: str | None = None, run_id: str | None = None,
 ) -> dict[str, Any]:
     """Record the two-stage artifact chain without rewriting pre-render receipts."""
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
@@ -237,7 +253,10 @@ def attach_post_render_manifest(
         "format_comparison": str(format_comparison.resolve()),
         "format_comparison_markdown": str(format_comparison_markdown.resolve()),
         "pre_render_receipts_remain_bound_to_pre_render_docx": True,
+        "case_id": case_id,
+        "run_id": run_id,
     }
+    payload["post_render_identity"] = {"case_id": case_id, "run_id": run_id}
     if accepted:
         payload["output"] = str(final_docx.resolve())
         payload["format_comparison"] = str(format_comparison.resolve())
@@ -414,6 +433,17 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
         blockers.append("case_root_missing")
         return {"status": "blocked", "accepted": False, "blockers": sorted(set(blockers)), "checks": checks}
     checks["case_root"] = str(case_root.resolve())
+    if not _path_within(case_root, root):
+        blockers.append("case_root_outside_run_root")
+    if manifest_path != (case_root / "work" / "pipeline-manifest.json").resolve():
+        blockers.append("pipeline_manifest_path_not_canonical")
+
+    def case_artifact(label: str, value: Any) -> Path | None:
+        path = _artifact_path(value, root=root)
+        if path is not None and not _path_within(path, case_root):
+            blockers.append(f"{label}_outside_case")
+            return None
+        return path
 
     checks["pipeline_status"] = manifest.get("status")
     if manifest.get("status") != "completed":
@@ -427,9 +457,17 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
     if manifest.get("capability_preflight_status") in {None, "blocked", "failed"}:
         blockers.append("capability_preflight_not_passed")
 
-    post_acceptance_path, post_acceptance = _read_artifact_json(
-        manifest.get("post_render_acceptance"), root=root
-    )
+    post_acceptance_path = _artifact_path(manifest.get("post_render_acceptance"), root=root)
+    post_acceptance = None
+    if post_acceptance_path is not None and not _path_within(post_acceptance_path, case_root):
+        blockers.append("post_render_acceptance_outside_case")
+        post_acceptance_path = None
+    elif post_acceptance_path is not None and post_acceptance_path.is_file():
+        try:
+            payload = json.loads(post_acceptance_path.read_text(encoding="utf-8"))
+            post_acceptance = payload if isinstance(payload, dict) else None
+        except (OSError, json.JSONDecodeError):
+            post_acceptance = None
     # Full compliance is never accepted on the basis of the pre-render DOCX.
     # The post-Word chain is a mandatory release gate, even when its manifest
     # is missing or malformed; otherwise a self-authored pipeline manifest can
@@ -463,7 +501,7 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
         if not post_acceptance.get("post_render_docx_sha256"):
             blockers.append("post_render_final_hash_missing")
 
-    output_path = _artifact_path(manifest.get("output"), root=root)
+    output_path = case_artifact("output", manifest.get("output"))
     checks["output"] = str(output_path) if output_path else None
     if output_path is None or not output_path.is_file() or output_path.stat().st_size <= 0:
         blockers.append("generated_docx_missing")
@@ -477,7 +515,7 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
     if output_path is not None and output_path != expected_output.resolve():
         blockers.append("generated_output_path_not_canonical")
 
-    pre_render_output_path = _artifact_path(manifest.get("pre_render_output"), root=root)
+    pre_render_output_path = case_artifact("pre_render_output", manifest.get("pre_render_output"))
     if post_render_active:
         if pre_render_output_path is None or not pre_render_output_path.is_file():
             blockers.append("pre_render_docx_missing")
@@ -516,7 +554,7 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
             if _artifact_path(post_manifest.get("pre_render_docx"), root=root) != pre_render_output_path:
                 blockers.append("post_word_render_pre_render_path_mismatch")
 
-    format_spec_path = _artifact_path(manifest.get("format_spec"), root=root)
+    format_spec_path = case_artifact("format_spec", manifest.get("format_spec"))
     schema_path = format_spec_path.parent / "schema-validation.json" if format_spec_path else None
     schema = None
     if schema_path and schema_path.is_file():
@@ -528,14 +566,46 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
     if not isinstance(schema, dict) or schema.get("valid") is not True:
         blockers.append("schema_validation_not_passed")
 
-    capability_path, capability = _read_artifact_json(manifest.get("capability_preflight"), root=root)
+    capability_path = case_artifact("capability_preflight", manifest.get("capability_preflight"))
+    capability = None
+    if capability_path is not None and capability_path.is_file():
+        try:
+            payload = json.loads(capability_path.read_text(encoding="utf-8"))
+            capability = payload if isinstance(payload, dict) else None
+        except (OSError, json.JSONDecodeError):
+            capability = None
     checks["capability_preflight"] = str(capability_path) if capability_path else None
     if capability is None or capability.get("status") in {"blocked", "failed"}:
         blockers.append("capability_artifact_not_passed")
     elif any(item.get("blocking") for item in capability.get("findings", []) if isinstance(item, dict)):
         blockers.append("capability_blocking_findings")
 
-    validation_path, validation = _read_artifact_json(manifest.get("validation_report"), root=root)
+    # A report from another checkout or case must not be promoted merely
+    # because its individual hashes look plausible.  Bind acceptance to the
+    # exact runtime code inventory and the fresh case/run identity.
+    if manifest.get("code_fingerprint") != runtime_code_fingerprint():
+        blockers.append("code_runtime_fingerprint_mismatch")
+    expected_case_id = manifest.get("case_id")
+    extraction = manifest.get("requirements_extraction")
+    expected_run_id = extraction.get("run_id") if isinstance(extraction, dict) else None
+    if not isinstance(expected_case_id, str) or not expected_case_id:
+        blockers.append("case_id_missing")
+    if not isinstance(expected_run_id, str) or not expected_run_id:
+        blockers.append("pipeline_run_id_missing")
+    if post_acceptance is not None:
+        if post_acceptance.get("case_id") != expected_case_id:
+            blockers.append("post_render_case_id_mismatch")
+        if post_acceptance.get("run_id") != expected_run_id:
+            blockers.append("post_render_run_id_mismatch")
+
+    validation_path = case_artifact("validation_report", manifest.get("validation_report"))
+    validation = None
+    if validation_path is not None and validation_path.is_file():
+        try:
+            payload = json.loads(validation_path.read_text(encoding="utf-8"))
+            validation = payload if isinstance(payload, dict) else None
+        except (OSError, json.JSONDecodeError):
+            validation = None
     checks["validation_report"] = str(validation_path) if validation_path else None
     if validation is None:
         blockers.append("validation_report_missing_or_invalid")
@@ -579,19 +649,26 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
             if validation.get("submission_ready") is not True:
                 blockers.append("submission_gate_not_ready")
 
-    comparison_path, comparison = _read_artifact_json(manifest.get("format_comparison"), root=root)
+    comparison_path = case_artifact("format_comparison", manifest.get("format_comparison"))
+    comparison = None
+    if comparison_path is not None and comparison_path.is_file():
+        try:
+            payload = json.loads(comparison_path.read_text(encoding="utf-8"))
+            comparison = payload if isinstance(payload, dict) else None
+        except (OSError, json.JSONDecodeError):
+            comparison = None
     checks["format_comparison"] = str(comparison_path) if comparison_path else None
     if comparison is None or comparison.get("status") != "passed":
         blockers.append("post_generation_comparison_not_passed")
 
     if post_render_active:
-        post_pdf = _artifact_path((manifest.get("post_word_render") or {}).get("pdf"), root=root)
+        post_pdf = case_artifact("post_render_pdf", (manifest.get("post_word_render") or {}).get("pdf"))
         if post_pdf is None or not post_pdf.is_file() or post_pdf.stat().st_size <= 0:
             blockers.append("post_render_pdf_missing")
         else:
             checks["post_render_pdf_sha256"] = hashlib.sha256(post_pdf.read_bytes()).hexdigest()
         post_manifest = manifest.get("post_word_render") if isinstance(manifest.get("post_word_render"), dict) else {}
-        render_path = _artifact_path(post_manifest.get("render_report"), root=root)
+        render_path = case_artifact("post_render_report", post_manifest.get("render_report"))
         render = None
         if render_path and render_path.is_file():
             try:
@@ -605,11 +682,22 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
             pdf_hash = checks.get("post_render_pdf_sha256")
             source_record = render.get("source_docx") if isinstance(render.get("source_docx"), dict) else {}
             pdf_record = render.get("rendered_pdf") if isinstance(render.get("rendered_pdf"), dict) else {}
+            if _artifact_path(source_record.get("path"), root=root) != output_path:
+                blockers.append("post_render_report_final_docx_path_mismatch")
+            if _artifact_path(pdf_record.get("path"), root=root) != post_pdf:
+                blockers.append("post_render_report_pdf_path_mismatch")
             if source_record.get("sha256") != final_hash:
                 blockers.append("post_render_report_final_docx_hash_mismatch")
             if pdf_record.get("sha256") != pdf_hash:
                 blockers.append("post_render_report_pdf_hash_mismatch")
-        visual_path = _artifact_path(post_manifest.get("visual_audit"), root=root)
+            if expected_case_id := manifest.get("case_id"):
+                if render.get("case_id") != expected_case_id:
+                    blockers.append("post_render_report_case_id_mismatch")
+            if expected_run_id := ((manifest.get("requirements_extraction") or {}).get("run_id")
+                                   if isinstance(manifest.get("requirements_extraction"), dict) else None):
+                if render.get("run_id") != expected_run_id:
+                    blockers.append("post_render_report_run_id_mismatch")
+        visual_path = case_artifact("post_render_visual_audit", post_manifest.get("visual_audit"))
         visual = None
         if visual_path and visual_path.is_file():
             try:
@@ -645,7 +733,7 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
         elif ((independent_visual.get("pdf") or {}).get("sha256")
               != checks.get("post_render_pdf_sha256")):
             blockers.append("independent_pdf_visual_audit_hash_mismatch")
-        audit_path = _artifact_path(post_manifest.get("submission_audit"), root=root)
+        audit_path = case_artifact("post_render_submission_audit", post_manifest.get("submission_audit"))
         audit = None
         if audit_path and audit_path.is_file():
             try:
@@ -655,13 +743,38 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
         if not isinstance(audit, dict) or audit.get("submission_ready") is not True:
             blockers.append("post_render_submission_not_ready")
         else:
+            if _artifact_path(audit.get("artifact"), root=root) != output_path:
+                blockers.append("post_render_submission_artifact_path_mismatch")
             render_validation = audit.get("render_validation")
             if not isinstance(render_validation, dict) or render_validation.get("rendered_verified") is not True:
                 blockers.append("post_render_trusted_render_not_verified")
+            else:
+                render_evidence = render_validation.get("evidence") if isinstance(render_validation.get("evidence"), dict) else {}
+                if render_evidence.get("source_docx_sha256") != (output_artifact or {}).get("sha256"):
+                    blockers.append("post_render_submission_docx_hash_mismatch")
+                rendered_pdf = render_evidence.get("rendered_pdf") if isinstance(render_evidence.get("rendered_pdf"), dict) else {}
+                if rendered_pdf.get("sha256") != checks.get("post_render_pdf_sha256"):
+                    blockers.append("post_render_submission_pdf_hash_mismatch")
         if isinstance(comparison, dict):
             comparison_inputs = comparison.get("inputs") if isinstance(comparison.get("inputs"), dict) else {}
             if comparison_inputs.get("generated_docx_sha256") != (output_artifact or {}).get("sha256"):
                 blockers.append("post_render_comparison_artifact_hash_mismatch")
+            if _artifact_path(comparison_inputs.get("generated_docx"), root=root) != output_path:
+                blockers.append("post_render_comparison_docx_path_mismatch")
+            if _artifact_path(comparison_inputs.get("format_spec"), root=root) != format_spec_path:
+                blockers.append("post_render_comparison_format_spec_path_mismatch")
+            if post_manifest.get("requirements_only") or manifest.get("inputs", {}).get("baseline_authority") == "fallback_input_not_official":
+                if comparison_inputs.get("official_template") not in (None, ""):
+                    blockers.append("requirements_only_official_template_evidence_present")
+                if comparison_inputs.get("official_template_sha256") not in (None, ""):
+                    blockers.append("requirements_only_official_template_hash_present")
+            else:
+                style_record = (manifest.get("inputs") or {}).get("style_template")
+                expected_style = _artifact_path(style_record.get("path"), root=root) if isinstance(style_record, dict) else None
+                if _artifact_path(comparison_inputs.get("official_template"), root=root) != expected_style:
+                    blockers.append("post_render_comparison_official_template_path_mismatch")
+                if isinstance(style_record, dict) and comparison_inputs.get("official_template_sha256") != style_record.get("sha256"):
+                    blockers.append("post_render_comparison_official_template_hash_mismatch")
 
     unique_blockers = sorted(set(blockers))
     return {
@@ -860,6 +973,16 @@ def run_case(base: Path, source: Path, case: dict[str, Any], *, prepare_host_rev
         manifest_path = work / "pipeline-manifest.json"
         try:
             pipeline_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            extraction = pipeline_manifest.get("requirements_extraction")
+            case_run_id = extraction.get("run_id") if isinstance(extraction, dict) else None
+            if not isinstance(case_run_id, str) or not case_run_id:
+                raise ValueError("pipeline manifest does not contain a fresh requirements run_id")
+            pipeline_manifest["case_id"] = case["id"]
+            pipeline_manifest["case_run_id"] = case_run_id
+            atomic_write_text(
+                manifest_path,
+                json.dumps(pipeline_manifest, ensure_ascii=False, indent=2) + "\n",
+            )
             style_record = ((pipeline_manifest.get("inputs") or {}).get("style_template")
                             if isinstance(pipeline_manifest, dict) else None)
             official_template = Path(str(style_record.get("path"))) if isinstance(style_record, dict) else None
@@ -882,6 +1005,8 @@ def run_case(base: Path, source: Path, case: dict[str, Any], *, prepare_host_rev
                 format_comparison_markdown=format_comparison_markdown,
                 acceptance_out=acceptance_out,
                 thesis_profile=(work / "thesis-profile.json") if (work / "thesis-profile.json").is_file() else None,
+                case_id=case["id"],
+                run_id=case_run_id,
                 word_open_timeout=word_open_timeout,
                 word_timeout=word_timeout,
             )
@@ -917,6 +1042,12 @@ def run_case(base: Path, source: Path, case: dict[str, Any], *, prepare_host_rev
             format_comparison_markdown=format_comparison_markdown,
             acceptance_out=acceptance_out,
             accepted=bool(acceptance_payload and acceptance_payload.get("status") == "accepted"),
+            case_id=case["id"],
+            run_id=(
+                acceptance_payload.get("run_id")
+                if isinstance(acceptance_payload, dict)
+                else None
+            ),
         )
     result["stages"] = stages
     result["case_id"] = case["id"]

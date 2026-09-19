@@ -33,6 +33,7 @@ from compliance import (
 from semantic_contract import (
     HOST_AGENT_ORIGIN,
     attach_request_provenance,
+    canonical_json,
     evidence_payload,
     request_body_sha256,
     request_envelope_sha256,
@@ -1301,7 +1302,8 @@ def _declaration_anchor_preference(structure: dict[str, Any] | None) -> str:
 def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, Any]],
                       evidence_doc: dict[str, Any] | None = None,
                       rule_spec: dict[str, Any] | None = None,
-                      mode: str = "questions") -> dict[str, Any]:
+                      mode: str = "questions",
+                      runtime_context: dict[str, Any] | None = None) -> dict[str, Any]:
     if mode == "full":
         # Clause records retain rich context for deterministic auditing, but
         # embedding that context into every clause duplicates the same DOCX
@@ -1345,7 +1347,7 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
         if isinstance(request_rule_spec, dict):
             request_rule_spec.pop("content_instances", None)
             request_rule_spec.pop("cover_field_instances", None)
-        return {
+        request = {
             "contract_version": "2.1",
             "task": "extract_and_review_complete_thesis_format_spec",
             "instructions": [
@@ -1387,6 +1389,7 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
                 "For an existing requirement, the request-only field _eligible_clause_ids lists the exact clause occurrences whose evidence may be reused. Do not use that existing_requirement_id for any other clause_id; never copy an existing requirement from a different evidence occurrence.",
                 "When reusing an existing requirement, do not combine unrelated clauses or repeated occurrences with different evidence. Every clause_id listed in that requirement must be exactly represented by its source text and cited evidence.",
                 "Do not author, copy, abbreviate, or recompute provenance/hash fields; an automatic native bridge binds the accepted response to the current invocation. Offline/manual merger inputs must carry the exact chunk provenance before merge.",
+                "runtime_context.confirmed_thesis_profile and runtime_context.code_fingerprint_sha256 are read-only inputs for this run. Do not alter, reinterpret, or replace confirmed metadata; if a required value is absent, mark the clause unresolved or requires_metadata.",
             ],
             "clauses": clause_packets,
             "evidence_context": evidence_context,
@@ -1479,6 +1482,12 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
                 }, "additionalProperties": False
             }
         }
+        if runtime_context:
+            # Frozen non-model inputs belong to the semantic request body. A
+            # changed confirmed profile or executable fingerprint therefore
+            # invalidates all previous response packets and receipts.
+            request["runtime_context"] = copy.deepcopy(runtime_context)
+        return request
     clause_map = {c["id"]: c for c in clauses}
     return {
         "contract_version": "1.0", "task": "resolve_thesis_formatting_semantics",
@@ -2275,7 +2284,15 @@ def _validate_host_review_chunk_size(value: int) -> int:
 
 
 def _chunk_projection(request_chunks: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Return the only source-bound projection that may define chunk scope."""
+    """Return the source-bound projection recorded in the chunk manifest.
+
+    IDs alone are not a sufficient projection: a packet can preserve every
+    clause/evidence ID while changing the text the host Agent actually sees.
+    Keep the manifest compact, but include a digest of the complete semantic
+    packet (everything except the separately checked provenance envelope).
+    The merge/bridge validator additionally regenerates the packets from the
+    full request, so this digest is an audit aid rather than the sole gate.
+    """
     projection: list[dict[str, Any]] = []
     for chunk in request_chunks:
         batch = chunk.get("batch") if isinstance(chunk, dict) else {}
@@ -2302,8 +2319,102 @@ def _chunk_projection(request_chunks: list[dict[str, Any]]) -> list[dict[str, An
             "evidence_ids": sorted(str(key) for key in evidence)
             if isinstance(evidence, dict) else [],
             "continuity_clause_ids": continuity_ids,
+            "packet_sha256": sha256_json({
+                key: copy.deepcopy(value)
+                for key, value in chunk.items()
+                if key != "provenance"
+            }) if isinstance(chunk, dict) else None,
         })
     return projection
+
+
+def _evidence_doc_from_full_request(full_request: dict[str, Any]) -> dict[str, Any]:
+    """Reconstruct the exact evidence projection used to build host chunks."""
+    evidence_context = full_request.get("evidence_context")
+    if not isinstance(evidence_context, dict):
+        raise ValueError("host-agent full request is missing evidence_context")
+    return {
+        "evidence": [
+            copy.deepcopy(item)
+            for item in evidence_context.values()
+            if isinstance(item, dict) and item.get("id")
+        ],
+        "page_evidence": copy.deepcopy(full_request.get("page_evidence", {})),
+        "structure_evidence": copy.deepcopy(
+            full_request.get("document_structure", {})
+        ),
+        # The compact contract does not expose a separate structure-page map.
+        # Keep this explicit so the reconstruction cannot silently inherit a
+        # value from a different run.
+        "structure_page_evidence": {},
+    }
+
+
+def validate_host_review_chunk_source_projection(
+    full_request: dict[str, Any],
+    request_chunks: list[dict[str, Any]],
+    manifest: dict[str, Any],
+) -> None:
+    """Reject chunks that are self-consistent but not source-derived.
+
+    This is intentionally called both before native host calls and again at
+    merge time.  A local editor, a stale response directory, or a malicious
+    packet cannot change clause/evidence text while preserving IDs and its
+    own per-chunk hashes.
+    """
+    if not isinstance(full_request, dict):
+        raise ValueError("host-agent full request must be an object")
+    provenance = full_request.get("provenance")
+    clauses = full_request.get("clauses")
+    if not isinstance(provenance, dict) or not isinstance(clauses, list):
+        raise ValueError("host-agent full request is missing provenance or clauses")
+    source_sha256 = provenance.get("source_sha256")
+    if not isinstance(source_sha256, str) or not source_sha256:
+        raise ValueError("host-agent full request is missing provenance.source_sha256")
+    if not isinstance(manifest, dict):
+        raise ValueError("host-agent review manifest must be an object")
+    chunk_size = manifest.get("chunk_size")
+    chunk_size = _validate_host_review_chunk_size(chunk_size)
+    expected_chunks = _build_host_review_chunks(
+        full_request,
+        clauses,
+        _evidence_doc_from_full_request(full_request),
+        source_sha256,
+        chunk_size,
+    )
+    if not isinstance(request_chunks, list):
+        raise ValueError("host-agent request chunks must be a JSON array")
+    # Report identity failures before the larger projection comparison.  This
+    # keeps a stale/misbound packet diagnosable even when its other fields also
+    # differ, and it prevents a generic projection error from hiding the
+    # security-relevant provenance mismatch.
+    for index, actual in enumerate(request_chunks[:len(expected_chunks)]):
+        expected_provenance = expected_chunks[index].get("provenance", {})
+        actual_provenance = actual.get("provenance") if isinstance(actual, dict) else None
+        if not isinstance(actual_provenance, dict):
+            raise ValueError(
+                f"host-agent request chunk {index + 1}/{len(expected_chunks)} provenance is missing"
+            )
+        for key in ("version", "origin", "source_sha256", "evidence_sha256",
+                    "clause_sha256", "request_sha256", "run_id"):
+            if key in expected_provenance and actual_provenance.get(key) != expected_provenance.get(key):
+                raise ValueError(
+                    f"host-agent request chunk {index + 1}/{len(expected_chunks)} "
+                    f"provenance {key} does not match the deterministic source projection"
+                )
+    if canonical_json(expected_chunks) != canonical_json(request_chunks):
+        expected_count = len(expected_chunks)
+        actual_count = len(request_chunks)
+        for index in range(min(expected_count, actual_count or 0)):
+            if canonical_json(expected_chunks[index]) != canonical_json(request_chunks[index]):
+                raise ValueError(
+                    "host-agent request chunk does not match the deterministic "
+                    f"source projection at index {index + 1}/{expected_count}"
+                )
+        raise ValueError(
+            "host-agent request chunks do not match the deterministic source projection "
+            f"(expected {expected_count}, observed {actual_count})"
+        )
 
 
 def _continuity_clause_projection(clause: dict[str, Any]) -> dict[str, Any]:
@@ -2368,6 +2479,8 @@ def _build_host_review_chunks(
         chunk_evidence["evidence"] = [item for eid, item in all_evidence.items() if eid in chunk_ids]
         chunk_rule_spec = _narrow_rule_spec_for_chunk(full_request.get("rule_spec", {}), chunk)
         chunk_request = build_llm_request([], chunk, chunk_evidence, chunk_rule_spec, "full")
+        if isinstance(full_request.get("runtime_context"), dict):
+            chunk_request["runtime_context"] = copy.deepcopy(full_request["runtime_context"])
         chunk_request["source_continuity_context"] = _source_continuity_context(
             clauses, start, end,
         )
@@ -2437,6 +2550,7 @@ def prepare_host_agent_review_packets(
         "chunk_size": chunk_size,
         "clause_count": len(clauses),
         "chunk_projection_sha256": sha256_json(_chunk_projection(request_chunks)),
+        "runtime_context": copy.deepcopy(full_request.get("runtime_context")),
         "instructions": [
             "The host Agent must generate each response with its current runtime model.",
             "The project performs no provider/API call and must not receive an API key.",
@@ -2544,11 +2658,20 @@ def merge_host_agent_review_packets(
         raise ValueError("host-agent response file manifest contains a non-string path")
     if len(set(response_files)) != len(response_files):
         raise ValueError("host-agent response file manifest contains duplicate paths")
+    if not isinstance(full_request, dict):
+        raise ValueError("host-agent full request must be an object")
+    # Rebuild the complete visible packet from the frozen full request before
+    # trusting any response file.  Per-chunk hashes below are necessary but
+    # not sufficient: a tampered packet can otherwise preserve its own IDs
+    # and hashes while changing the text shown to the model.
+    validate_host_review_chunk_source_projection(
+        full_request, request_chunks, manifest,
+    )
     declared_projection_sha = manifest.get("chunk_projection_sha256")
     if not isinstance(declared_projection_sha, str) or declared_projection_sha != sha256_json(
         _chunk_projection(request_chunks)
     ):
-        raise ValueError("host-agent chunk projection does not match its signed manifest")
+        raise ValueError("host-agent chunk projection does not match its declared manifest")
 
     response_out_path = (
         _merge_output_path(review_dir, response_out)
@@ -2733,6 +2856,7 @@ def merge_host_agent_review_packets(
         "request_file_sha256": sha256_file(
             _manifest_path(review_dir, str(manifest.get("request_path", "llm-request.json")))
         ),
+        "runtime_context": copy.deepcopy(full_request.get("runtime_context")),
     }
     receipt = {
         "schema_version": "1.0",
@@ -3048,6 +3172,34 @@ def analyse(args: argparse.Namespace) -> int:
     llm_batch = None
     supplied_response = None
     expected_provenance = None
+    runtime_context: dict[str, Any] = {}
+    if args.case_id is not None:
+        case_id = str(args.case_id).strip()
+        if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", case_id):
+            raise ValueError("--case-id must contain only letters, digits, dot, underscore, or hyphen")
+        runtime_context["case_id"] = case_id
+    if args.code_fingerprint:
+        if not re.fullmatch(r"[0-9a-f]{64}", args.code_fingerprint):
+            raise ValueError("--code-fingerprint must be a lowercase SHA-256 digest")
+        runtime_context["code_fingerprint_sha256"] = args.code_fingerprint
+    if args.thesis_profile:
+        profile = strict_json_loads(args.thesis_profile.read_text(encoding="utf-8"))
+        profile_errors = load_and_validate(profile, Path(__file__).resolve().parents[1] / "schema" / "thesis-profile.schema.json")
+        if profile_errors:
+            raise ValueError("supplied thesis profile failed schema validation: " + "; ".join(profile_errors))
+        profile_provenance = profile.get("provenance") if isinstance(profile, dict) else None
+        profile_trust = profile_provenance.get("trust") if isinstance(profile_provenance, dict) else None
+        if (
+            not isinstance(profile_provenance, dict)
+            or not re.fullmatch(r"[0-9a-f]{64}", str(profile_provenance.get("source_sha256") or ""))
+            or not isinstance(profile_trust, dict)
+            or profile_trust.get("confirmed") is not True
+        ):
+            raise ValueError(
+                "supplied thesis profile must carry confirmed source-byte provenance"
+            )
+        runtime_context["confirmed_thesis_profile"] = profile
+        runtime_context["thesis_profile_sha256"] = _sha256(args.thesis_profile)
     if args.llm_response:
         supplied_response = strict_json_loads(args.llm_response.read_text(encoding="utf-8"))
     supplied_contract_kind = response_contract_kind(supplied_response) if args.llm_response else "none"
@@ -3069,7 +3221,10 @@ def analyse(args: argparse.Namespace) -> int:
         # post-merge cross-check, but expose only exact, evidence-eligible
         # existing requirements to the LLM request.
         llm_rule_spec = _narrow_rule_spec_for_chunk(rule_spec, clauses)
-        llm_request = build_llm_request(rule_questions, clauses, evidence, llm_rule_spec, "full")
+        llm_request = build_llm_request(
+            rule_questions, clauses, evidence, llm_rule_spec, "full",
+            runtime_context=runtime_context or None,
+        )
         llm_request["execution_policy"] = "fresh_run_no_cache"
         llm_request = attach_request_provenance(
             llm_request,
@@ -3229,6 +3384,8 @@ def analyse(args: argparse.Namespace) -> int:
             if llm_request and (out / "llm-request.json").is_file() else None
         ),
         "semantic_review_provenance": expected_provenance,
+        "runtime_context": runtime_context or None,
+        "case_id": runtime_context.get("case_id"),
         "llm_batch": llm_batch,
         "sources": reconciliation_sources,
         "template_evidence": {
@@ -3273,6 +3430,12 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
                    help="require a fresh response bound to this extraction and exact LLM request")
     p.add_argument("--run-id",
                    help="explicit current semantic-review run id when resuming a fresh host response")
+    p.add_argument("--case-id",
+                   help="stable batch case identity bound into the fresh host-review request")
+    p.add_argument("--thesis-profile", type=Path,
+                   help="validated, explicitly supplied thesis metadata exposed as read-only host context")
+    p.add_argument("--code-fingerprint",
+                   help="current executable pipeline fingerprint bound into the host-review request")
     p.add_argument("--analysis-mode", choices=["llm_primary", "rule_only", "known_template"], default="llm_primary",
                    help="fresh user inputs default to a complete LLM review; rule_only/known_template require explicit compatibility opt-in")
     args = p.parse_args(argv)
@@ -3280,6 +3443,10 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
         p.error("choose exactly one semantic-review stage: --prepare-host-review or --llm-response")
     if args.structure_docx and not args.structure_docx.is_file():
         p.error(f"structure DOCX does not exist: {args.structure_docx}")
+    if args.thesis_profile and not args.thesis_profile.is_file():
+        p.error(f"thesis profile does not exist: {args.thesis_profile}")
+    if args.case_id and not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", args.case_id.strip()):
+        p.error("--case-id must contain only letters, digits, dot, underscore, or hyphen")
     if args.official_template_evidence_docx:
         if not args.official_template_evidence_docx.is_file():
             p.error(f"official template evidence DOCX does not exist: {args.official_template_evidence_docx}")

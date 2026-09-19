@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from artifact_io import atomic_write_text
+from process_runner import run_process
 from uuid import uuid4
 import xml.etree.ElementTree as ET
 
@@ -30,6 +31,7 @@ WORDPROCESSINGML_MAIN = (
 )
 CONTENT_TYPES_NS = "http://schemas.openxmlformats.org/package/2006/content-types"
 WORD_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class RequirementsInputError(ValueError):
@@ -85,8 +87,8 @@ def _write_manifest(path: Path, manifest: dict[str, Any]) -> None:
 
 def _soffice_version(path: Path) -> str:
     try:
-        result = subprocess.run(
-            [str(path), "--version"], text=True, capture_output=True, timeout=15,
+        result = run_process(
+            [str(path), "--version"], cwd=ROOT, timeout=15,
         )
     except (OSError, subprocess.SubprocessError):
         return "unknown"
@@ -305,8 +307,8 @@ def normalize_requirements_input(
             "command": command,
         }
         try:
-            result = subprocess.run(
-                command, cwd=run_dir, text=True, capture_output=True, timeout=180,
+            result = run_process(
+                command, cwd=run_dir, timeout=180,
             )
             attempt.update(
                 returncode=result.returncode,

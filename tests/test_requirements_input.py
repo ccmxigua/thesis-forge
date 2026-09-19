@@ -86,7 +86,7 @@ class RequirementsInputAdapterTest(unittest.TestCase):
 
             with (
                 patch.object(adapter, "_discover_converters", return_value=[mock_converter()]),
-                patch.object(adapter.subprocess, "run", side_effect=successful_conversion(template)) as run_mock,
+                patch.object(adapter, "run_process", side_effect=successful_conversion(template)) as run_mock,
             ):
                 first = adapter.normalize_requirements_input(
                     source, root / "work", root / "manifest-1.json",
@@ -136,7 +136,7 @@ class RequirementsInputAdapterTest(unittest.TestCase):
             failed = subprocess.CompletedProcess([], 7, "", "conversion exploded")
             with (
                 patch.object(adapter, "_discover_converters", return_value=[mock_converter()]),
-                patch.object(adapter.subprocess, "run", return_value=failed),
+                patch.object(adapter, "run_process", return_value=failed),
             ):
                 with self.assertRaisesRegex(adapter.RequirementsInputError, "failed closed"):
                     adapter.normalize_requirements_input(source, root / "work", manifest_path)
@@ -160,7 +160,7 @@ class RequirementsInputAdapterTest(unittest.TestCase):
 
             with (
                 patch.object(adapter, "_discover_converters", return_value=[mock_converter()]),
-                patch.object(adapter.subprocess, "run", side_effect=invalid_run),
+                patch.object(adapter, "run_process", side_effect=invalid_run),
             ):
                 with self.assertRaisesRegex(adapter.RequirementsInputError, "invalid DOCX"):
                     adapter.normalize_requirements_input(source, root / "work", manifest_path)
@@ -186,7 +186,7 @@ class RequirementsInputAdapterTest(unittest.TestCase):
 
             with (
                 patch.object(adapter, "_discover_converters", return_value=[mock_converter()]),
-                patch.object(adapter.subprocess, "run", side_effect=successful_conversion(template)),
+                patch.object(adapter, "run_process", side_effect=successful_conversion(template)),
             ):
                 code = requirements_engine.analyse(args)
 

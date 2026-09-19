@@ -102,6 +102,13 @@ def _path(value: Path) -> Path:
     return value.expanduser().resolve()
 
 
+def _reported_path(value: Any) -> Path | None:
+    """Resolve a report path only when the report actually declares one."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return _path(Path(value))
+
+
 def _write(path: Path, payload: dict[str, Any]) -> None:
     atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
 
@@ -128,7 +135,7 @@ def _pre_render_checks(source: Path, validation_path: Path) -> tuple[dict[str, A
         "serialized_docx_valid": validation.get("serialized_docx_valid"),
     }
     reported_output = validation.get("output_docx")
-    if isinstance(reported_output, str) and _path(Path(reported_output)) != source:
+    if _reported_path(reported_output) != source:
         blockers.append("pre_render_validation_output_path_mismatch")
     if validation.get("valid") is not True or validation.get("format_ready") is not True:
         blockers.append("pre_render_validation_not_passed")
@@ -171,6 +178,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--generated-style-map", type=Path, required=True)
     parser.add_argument("--template-profile", type=Path)
     parser.add_argument("--thesis-profile", type=Path)
+    parser.add_argument("--case-id", help="fresh batch case identity bound to this render")
+    parser.add_argument("--run-id", help="fresh requirements run identity bound to this render")
+    parser.add_argument("--toc-target-map", type=Path,
+                        help="trusted source-derived TOC/PAGEREF map for the pre-render DOCX")
     parser.add_argument("--requirements-only", action="store_true")
     parser.add_argument("--word-open-timeout", type=int, default=45)
     parser.add_argument("--word-timeout", type=int, default=180)
@@ -190,6 +201,7 @@ def main(argv: list[str] | None = None) -> int:
     official_template = _path(args.official_template)
     official_style_map = _path(args.official_style_map)
     generated_style_map = _path(args.generated_style_map)
+    toc_target_map = _path(args.toc_target_map) if args.toc_target_map else None
 
     case_root = source.parent.resolve()
     output_scope = {
@@ -204,6 +216,8 @@ def main(argv: list[str] | None = None) -> int:
     for label, path in output_scope.items():
         if path == case_root or case_root not in path.parents:
             parser.error(f"{label} must remain inside the case output directory: {path}")
+    if toc_target_map is not None and (toc_target_map == case_root or case_root not in toc_target_map.parents):
+        parser.error(f"toc target map must remain inside the case output directory: {toc_target_map}")
 
     if not source.is_file():
         parser.error(f"pre-Word DOCX does not exist: {source}")
@@ -222,6 +236,8 @@ def main(argv: list[str] | None = None) -> int:
         input_paths.append(_path(args.template_profile))
     if args.thesis_profile:
         input_paths.append(_path(args.thesis_profile))
+    if toc_target_map:
+        input_paths.append(toc_target_map)
     if paths_alias(output_paths + input_paths):
         parser.error("source DOCX, final DOCX, PDF, reports, and acceptance output must be distinct")
     if source == final:
@@ -236,6 +252,8 @@ def main(argv: list[str] | None = None) -> int:
             "created_at": datetime.now(timezone.utc).isoformat(),
             "pre_render_docx": str(source),
             "pre_render_docx_sha256": checks.get("pre_render_artifact", {}).get("sha256"),
+            "case_id": args.case_id,
+            "run_id": args.run_id,
             "blockers": sorted(set(blockers)),
             "checks": checks,
         }
@@ -248,6 +266,12 @@ def main(argv: list[str] | None = None) -> int:
         str(source), str(final), str(pdf), "--report", str(render_report),
         "--open-timeout", str(args.word_open_timeout), "--word-timeout", str(args.word_timeout),
     ]
+    if args.case_id:
+        render_cmd += ["--case-id", args.case_id]
+    if args.run_id:
+        render_cmd += ["--run-id", args.run_id]
+    if toc_target_map:
+        render_cmd += ["--toc-target-map", str(toc_target_map)]
     render_step = run_step(render_cmd)
     checks["word_render"] = render_step
     if render_step["returncode"] != 0:
@@ -314,10 +338,18 @@ def main(argv: list[str] | None = None) -> int:
     else:
         source_record = render.get("source_docx") if isinstance(render.get("source_docx"), dict) else {}
         rendered_record = render.get("rendered_pdf") if isinstance(render.get("rendered_pdf"), dict) else {}
+        if _reported_path(source_record.get("path")) != final:
+            blockers.append("render_report_final_docx_path_mismatch")
+        if _reported_path(rendered_record.get("path")) != pdf:
+            blockers.append("render_report_pdf_path_mismatch")
         if source_record.get("sha256") != final_artifact.get("sha256"):
             blockers.append("render_report_final_docx_hash_mismatch")
         if rendered_record.get("sha256") != (sha256(pdf) if pdf.is_file() else None):
             blockers.append("render_report_pdf_hash_mismatch")
+        if args.case_id and render.get("case_id") != args.case_id:
+            blockers.append("render_report_case_id_mismatch")
+        if args.run_id and render.get("run_id") != args.run_id:
+            blockers.append("render_report_run_id_mismatch")
 
     visual = read_object(visual_audit)
     checks["pdf_visual_audit"] = str(visual_audit)
@@ -337,9 +369,18 @@ def main(argv: list[str] | None = None) -> int:
     else:
         if audit.get("submission_ready") is not True:
             blockers.append("post_render_submission_not_ready")
+        if _reported_path(audit.get("artifact")) != final:
+            blockers.append("post_render_submission_artifact_path_mismatch")
         render_validation = audit.get("render_validation")
         if not isinstance(render_validation, dict) or render_validation.get("rendered_verified") is not True:
             blockers.append("post_render_trusted_render_not_verified")
+        else:
+            evidence = render_validation.get("evidence") if isinstance(render_validation.get("evidence"), dict) else {}
+            if evidence.get("source_docx_sha256") != final_artifact.get("sha256"):
+                blockers.append("post_render_submission_docx_hash_mismatch")
+            rendered_evidence = evidence.get("rendered_pdf") if isinstance(evidence.get("rendered_pdf"), dict) else {}
+            if rendered_evidence.get("sha256") != (sha256(pdf) if pdf.is_file() else None):
+                blockers.append("post_render_submission_pdf_hash_mismatch")
 
     final_comparison = read_object(comparison)
     checks["post_render_format_comparison"] = str(comparison)
@@ -351,6 +392,24 @@ def main(argv: list[str] | None = None) -> int:
         generated_inputs = final_comparison.get("inputs") if isinstance(final_comparison.get("inputs"), dict) else {}
         if generated_inputs.get("generated_docx_sha256") != final_artifact.get("sha256"):
             blockers.append("post_render_comparison_artifact_hash_mismatch")
+        if _reported_path(generated_inputs.get("generated_docx")) != final:
+            blockers.append("post_render_comparison_docx_path_mismatch")
+        if _reported_path(generated_inputs.get("format_spec")) != format_spec:
+            blockers.append("post_render_comparison_format_spec_path_mismatch")
+        if _reported_path(generated_inputs.get("official_style_map")) != official_style_map:
+            blockers.append("post_render_comparison_official_style_map_path_mismatch")
+        if _reported_path(generated_inputs.get("generated_style_map")) != generated_style_map:
+            blockers.append("post_render_comparison_generated_style_map_path_mismatch")
+        if args.requirements_only:
+            if generated_inputs.get("official_template") not in (None, ""):
+                blockers.append("requirements_only_official_template_evidence_present")
+            if generated_inputs.get("official_template_sha256") not in (None, ""):
+                blockers.append("requirements_only_official_template_hash_present")
+        else:
+            if _reported_path(generated_inputs.get("official_template")) != official_template:
+                blockers.append("post_render_comparison_official_template_path_mismatch")
+            if generated_inputs.get("official_template_sha256") != (sha256(official_template) if official_template.is_file() else None):
+                blockers.append("post_render_comparison_official_template_hash_mismatch")
 
     payload = {
         "schema_version": "1.0",
@@ -359,6 +418,8 @@ def main(argv: list[str] | None = None) -> int:
         "created_at": datetime.now(timezone.utc).isoformat(),
         "pre_render_docx": str(source),
         "pre_render_docx_sha256": checks.get("pre_render_artifact", {}).get("sha256"),
+        "case_id": args.case_id,
+        "run_id": args.run_id,
         "post_render_docx": str(final),
         "post_render_docx_sha256": final_artifact.get("sha256"),
         "rendered_pdf": str(pdf),

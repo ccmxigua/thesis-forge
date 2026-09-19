@@ -187,7 +187,10 @@ from host_runtime import (  # noqa: E402
     require_host_runtime,
     require_parent_session,
 )
-from requirements_engine import merge_host_agent_review_packets  # noqa: E402
+from requirements_engine import (  # noqa: E402
+    merge_host_agent_review_packets,
+    validate_host_review_chunk_source_projection,
+)
 from semantic_contract import (  # noqa: E402
     sha256_file,
     strict_json_loads,
@@ -548,7 +551,9 @@ Read exactly this compact current-chunk packet with your local file tool:
 
 It contains every clause and cited evidence item for this subtask, plus the
 allowed roles, the complete machine-readable requirement_contract and
-response_schema, declaration instructions, structure summary, and provenance.
+response_schema, declaration instructions, and structure summary. The trusted
+provenance remains in the bridge-owned request packet and is not a model input;
+the bridge will bind it only after the semantic contract passes.
 The requirement_contract and response_schema are authoritative. Follow their
 role-specific properties and nested schemas exactly; do not invent aliases or
 free-form replacements for fields such as applicability, input_prerequisites,
@@ -604,14 +609,10 @@ def _load_session_records(
         command += ["--agent", agent_id]
     if active_minutes is not None:
         command += ["--active", str(active_minutes)]
-    result = subprocess.run(
-        command,
-        cwd=ROOT,
-        text=True,
-        capture_output=True,
-        timeout=30,
-        check=False,
-    )
+    # Session discovery is part of the host invocation boundary.  Keep it in
+    # the same owned process group as agent calls so a timed-out gateway
+    # query cannot leave a descendant holding captured pipes open.
+    result = _run_command(command, timeout=30)
     if result.returncode:
         detail = (result.stderr or result.stdout or "").strip()[-1200:]
         raise RuntimeError(
@@ -1024,8 +1025,15 @@ def run_bridge(
         raise ValueError("host-agent response file manifest contains a non-string path")
     if len(set(response_files)) != len(response_files):
         raise ValueError("host-agent response file manifest contains duplicate paths")
+    # Do this before starting any native host process.  A packet that is
+    # internally self-consistent is still unsafe if its clause/evidence text
+    # no longer matches the frozen full request.
+    validate_host_review_chunk_source_projection(
+        full_request, chunks, manifest,
+    )
     expected_run_id = ((full_request.get("provenance") or {}).get("run_id")
                        if isinstance(full_request, dict) else None)
+    runtime_context = copy.deepcopy(full_request.get("runtime_context"))
     effective_run_id = run_id or expected_run_id
     if not isinstance(effective_run_id, str) or not effective_run_id:
         raise ValueError("fresh host-agent request is missing provenance.run_id")
@@ -1092,11 +1100,30 @@ def run_bridge(
     if effective_model and adapter_id == "openclaw":
         _split_model_route(str(effective_model))
 
+    lifecycle_lock = threading.Lock()
+    chunk_lifecycle: dict[int, dict[str, Any]] = {
+        index: {
+            "chunk_index": index,
+            "status": "not_started",
+            "started_at": None,
+            "finished_at": None,
+            "attempts": [],
+            "remote_operation_state": "unknown",
+        }
+        for index in range(1, len(chunks) + 1)
+    }
+
+    def update_chunk_lifecycle(index: int, **updates: Any) -> None:
+        with lifecycle_lock:
+            record = chunk_lifecycle.setdefault(index, {"chunk_index": index})
+            record.update(updates)
+
     def persist_failure_audit(
         error: BaseException,
         chunk_runs: list[dict[str, Any]],
         *,
         in_flight_chunk_indexes: list[int] | None = None,
+        chunk_lifecycle: dict[int, dict[str, Any]] | None = None,
     ) -> None:
         """Persist a terminal failure without manufacturing a merged response."""
         _write_json(audit_path, {
@@ -1111,6 +1138,7 @@ def run_bridge(
             "max_concurrency": max_concurrency,
             "max_attempts": max_attempts,
             "model": effective_model,
+            "runtime_context": copy.deepcopy(runtime_context),
             **_route_audit_fields(
                 effective_model if adapter_id == "openclaw" else None,
                 chunk_runs,
@@ -1159,6 +1187,10 @@ def run_bridge(
                 if isinstance(item, int)
             }),
             "chunk_runs": chunk_runs,
+            "chunk_lifecycle": [
+                (chunk_lifecycle or {})[index]
+                for index in sorted(chunk_lifecycle or {})
+            ],
             "merged_response_written": False,
         })
 
@@ -1179,6 +1211,12 @@ def run_bridge(
         batch = chunk.get("batch") if isinstance(chunk.get("batch"), dict) else {}
         chunk_index = int(batch.get("index", index))
         chunk_count = int(batch.get("count", len(chunks)))
+        update_chunk_lifecycle(
+            index,
+            status="running",
+            started_at=datetime.now(timezone.utc).isoformat(),
+            chunk_count=chunk_count,
+        )
         failures: list[str] = []
         for attempt in range(1, max_attempts + 1):
             attempt_response_path = response_path.with_name(
@@ -1190,6 +1228,15 @@ def run_bridge(
                     f"{attempt_response_path}"
                 )
             try:
+                attempt_started = datetime.now(timezone.utc).isoformat()
+                with lifecycle_lock:
+                    chunk_lifecycle[index].update(
+                        current_attempt=attempt,
+                        attempts=[
+                            *chunk_lifecycle[index].get("attempts", []),
+                            {"attempt": attempt, "status": "running", "started_at": attempt_started},
+                        ],
+                    )
                 audit = run_host_agent_chunk(
                     request_path=request_path,
                     chunk_path=chunks_path,
@@ -1238,16 +1285,48 @@ def run_bridge(
                     )
                 attempt_response_path.replace(response_path)
                 audit["attempt_failures"] = failures
+                update_chunk_lifecycle(
+                    index,
+                    status="completed",
+                    finished_at=datetime.now(timezone.utc).isoformat(),
+                    remote_operation_state="completed",
+                )
+                with lifecycle_lock:
+                    if chunk_lifecycle[index].get("attempts"):
+                        chunk_lifecycle[index]["attempts"][-1].update(
+                            status="completed", finished_at=datetime.now(timezone.utc).isoformat()
+                        )
                 return audit
-            except (HostAgentRouteMismatch, HostAgentProvenanceMismatch, HostAgentCancelled):
+            except (HostAgentRouteMismatch, HostAgentProvenanceMismatch, HostAgentCancelled) as exc:
                 # A route mismatch is not a model-quality error.  Retrying
                 # would spend more tokens on an unauthorized route, so abort
                 # the whole run immediately and preserve fail-closed behavior.
+                with lifecycle_lock:
+                    if chunk_lifecycle[index].get("attempts"):
+                        chunk_lifecycle[index]["attempts"][-1].update(
+                            status="terminated",
+                            finished_at=datetime.now(timezone.utc).isoformat(),
+                            error=str(exc),
+                        )
                 raise
             except (OSError, ValueError, RuntimeError) as exc:
                 controller.check()
                 failures.append(str(exc))
+                with lifecycle_lock:
+                    if chunk_lifecycle[index].get("attempts"):
+                        chunk_lifecycle[index]["attempts"][-1].update(
+                            status="failed" if attempt >= max_attempts else "retrying",
+                            finished_at=datetime.now(timezone.utc).isoformat(),
+                            error=str(exc),
+                        )
                 if attempt >= max_attempts:
+                    update_chunk_lifecycle(
+                        index,
+                        status="failed",
+                        finished_at=datetime.now(timezone.utc).isoformat(),
+                        remote_operation_state="unknown",
+                        error=str(exc),
+                    )
                     raise ValueError(
                         f"Host Agent response {index}/{len(chunks)} failed after "
                         f"{max_attempts} attempts: {failures[-1]}"
@@ -1285,13 +1364,30 @@ def run_bridge(
                 if isinstance(index, int)
             })
             controller.terminate_all()
+            with lifecycle_lock:
+                for index, record in chunk_lifecycle.items():
+                    if record.get("status") in {"not_started", "running", "retrying"}:
+                        record.update(
+                            status="terminated",
+                            finished_at=datetime.now(timezone.utc).isoformat(),
+                            remote_operation_state="unknown",
+                            termination_reason=str(exc),
+                        )
             for future in futures:
+                update_chunk_lifecycle(
+                    futures[future],
+                    status="terminated",
+                    finished_at=datetime.now(timezone.utc).isoformat(),
+                    remote_operation_state="unknown",
+                    termination_reason=str(exc),
+                )
                 future.cancel()
             persist_failure_audit(
                 exc,
                 [chunk_audits_by_index[index]
                  for index in sorted(chunk_audits_by_index)],
                 in_flight_chunk_indexes=in_flight_chunk_indexes,
+                chunk_lifecycle=chunk_lifecycle,
             )
             raise
 
@@ -1303,7 +1399,7 @@ def run_bridge(
             review_dir, response_out=response_out,
         )
     except Exception as exc:
-        persist_failure_audit(exc, chunk_audits)
+        persist_failure_audit(exc, chunk_audits, chunk_lifecycle=chunk_lifecycle)
         raise
     payload = {
         "schema_version": "1.0",
@@ -1317,6 +1413,7 @@ def run_bridge(
         "max_concurrency": max_concurrency,
         "max_attempts": max_attempts,
         "model": effective_model,
+        "runtime_context": copy.deepcopy(runtime_context),
         **_route_audit_fields(
             effective_model if adapter_id == "openclaw" else None,
             chunk_audits,
@@ -1324,6 +1421,7 @@ def run_bridge(
         "route_visibility": "provider-model" if adapter_id == "openclaw" else "unobservable",
         "local_process_state": "completed",
         "remote_operation_state": "remote_operation_completed",
+        "chunk_lifecycle": [chunk_lifecycle[index] for index in sorted(chunk_lifecycle)],
         "auth_env_only": bool(auth_env_only),
         "runner": runner,
         "model_source": resolution.get("source"),

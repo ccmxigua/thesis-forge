@@ -12,13 +12,15 @@ import argparse
 import hashlib
 import json
 import shutil
-import subprocess
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from artifact_io import atomic_write_text
+from process_runner import run_process
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def sha256(path: Path) -> str:
@@ -58,10 +60,10 @@ def audit_pdf(pdf: Path, *, output: Path) -> dict[str, Any]:
                 from PIL import Image, ImageStat
                 with tempfile.TemporaryDirectory(prefix="pdf-visual-") as td:
                     prefix = str(Path(td) / "page")
-                    result = subprocess.run(
+                    result = run_process(
                         [pdftoppm, "-png", "-r", "72", "-f", "1", "-l", str(page_count),
                          str(pdf), prefix],
-                        text=True, capture_output=True, timeout=180,
+                        cwd=ROOT, timeout=180,
                     )
                     if result.returncode != 0:
                         blockers.append("pdf_rasterization_failed")
@@ -98,7 +100,7 @@ def audit_pdf(pdf: Path, *, output: Path) -> dict[str, Any]:
                                 blockers.append(f"pdf_page_blank:{index}")
             except ImportError:
                 blockers.append("pillow_unavailable")
-            except (OSError, subprocess.SubprocessError) as exc:
+            except OSError as exc:
                 blockers.append(f"pdf_visual_probe_failed:{type(exc).__name__}")
     payload = {
         "schema_version": "1.0",

@@ -97,6 +97,28 @@ class WordRenderExportTest(unittest.TestCase):
             self.assertIn("_StaleA", " ".join(instructions))
             self.assertIn("_StaleB", " ".join(instructions))
 
+            repaired_count = word_render_export.repair_parallel_toc_targets(
+                docx,
+                target_map={"_StaleA": "_TocA", "_StaleB": "_TocB"},
+            )
+            self.assertEqual(repaired_count, 2)
+            with ZipFile(docx) as archive:
+                repaired = etree.fromstring(archive.read("word/document.xml"))
+            repaired_instructions = ["".join(node.itertext()) for node in repaired.xpath(
+                ".//w:instrText", namespaces={"w": ns}
+            )]
+            hyperlinks = " ".join(
+                item for item in repaired_instructions if item.upper().startswith("HYPERLINK")
+            )
+            pagerefs = " ".join(
+                item for item in repaired_instructions if item.upper().startswith("PAGEREF")
+            )
+            self.assertNotIn("_StaleA", hyperlinks)
+            self.assertNotIn("_StaleB", hyperlinks)
+            self.assertIn("_TocA", hyperlinks)
+            self.assertIn("_StaleA", pagerefs)
+            self.assertIn("_StaleB", pagerefs)
+
     def test_cli_refuses_hard_link_aliases(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td); source = root / "source.docx"; final = root / "final.docx"
@@ -253,6 +275,22 @@ class WordRenderExportTest(unittest.TestCase):
             self.assertIn("_OldA", text)
             self.assertIn("_OldB", text)
             self.assertIn("错误!未定义书签", text)
+
+            repaired_count = word_render_export.repair_post_update_pageref_targets(
+                docx,
+                target_map={
+                    "_OldA": {"target": "_NewA", "cached_text": "7"},
+                    "_OldB": {"target": "_NewB", "cached_text": "9"},
+                },
+            )
+            self.assertEqual(repaired_count, 2)
+            with ZipFile(docx) as archive:
+                repaired = etree.fromstring(archive.read("word/document.xml"))
+            text = " ".join(repaired.xpath(".//w:instrText/text() | .//w:t/text()", namespaces={"w": ns}))
+            self.assertNotIn("_OldA", text)
+            self.assertNotIn("_OldB", text)
+            self.assertIn("_NewA", text)
+            self.assertNotIn("错误!未定义书签", text)
 
     def test_generic_validator_has_no_attestation_cli_switch(self) -> None:
         with tempfile.TemporaryDirectory() as td:

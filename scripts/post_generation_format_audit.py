@@ -337,7 +337,16 @@ def build_report(generated_docx: Path, official_docx: Path, format_spec: Path,
         },
         "inputs": {
             "generated_docx": str(generated_docx), "generated_docx_sha256": sha256(generated_docx),
-            "official_template": str(official_docx), "official_template_sha256": sha256(official_docx),
+            # In requirements-only mode the input DOCX is merely a disposable
+            # formatting baseline.  Never serialize it under the authoritative
+            # official-template field, because downstream gates may treat the
+            # presence of that field as proof of school-template evidence.
+            "official_template": None if requirements_only else str(official_docx),
+            "official_template_sha256": None if requirements_only else sha256(official_docx),
+            "fallback_baseline": (
+                {"path": str(official_docx), "sha256": sha256(official_docx)}
+                if requirements_only else None
+            ),
             "format_spec": str(format_spec), "official_style_map": str(official_style_map),
             "generated_style_map": str(generated_style_map),
         },

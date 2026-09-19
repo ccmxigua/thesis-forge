@@ -147,6 +147,18 @@ class BatchAcceptanceTests(unittest.TestCase):
         self.assertIn("--allow-existing-work", command)
         self.assertIn("--host-agent-audit", command)
         self.assertIn("--merge-receipt", command)
+        self.assertIn("--case-id", command)
+        self.assertIn("bsu", command)
+
+    def test_pipeline_command_passes_explicit_source_bound_thesis_profile(self) -> None:
+        command = batch.pipeline_command(
+            {"id": "bsu", "requirements": Path("requirements.docx"),
+             "analysis_mode": "llm_primary", "thesis_profile": Path("profile.json")},
+            Path("source.tex"), Path("work"), Path("output.docx"),
+            compliance_mode="full", prepare_host_review=True,
+        )
+        self.assertIn("--thesis-profile", command)
+        self.assertEqual(command[command.index("--thesis-profile") + 1], "profile.json")
 
 
 if __name__ == "__main__":

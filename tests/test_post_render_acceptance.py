@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import batch_rerun_ten_schools as batch  # noqa: E402
 import post_render_acceptance as post_render  # noqa: E402
+from thesis_format_pipeline import runtime_code_fingerprint  # noqa: E402
 
 
 def _sha256(path: Path) -> str:
@@ -81,6 +82,10 @@ class PostRenderAcceptanceTests(unittest.TestCase):
         manifest.write_text(json.dumps({
             "status": "completed",
             "compliance_mode": "full",
+            "case_id": "fixture-case",
+            "inputs": {"baseline_authority": "fallback_input_not_official"},
+            "requirements_extraction": {"run_id": "fresh-run"},
+            "code_fingerprint": runtime_code_fingerprint(),
             "output": str(output),
             "format_spec": str(format_spec),
             "capability_preflight": str(capability),
@@ -115,6 +120,7 @@ class PostRenderAcceptanceTests(unittest.TestCase):
             manifest_path = Path(case_result["fresh_run"]["pipeline_manifest"])
             manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
             pre_render = Path(manifest["output"])
+            format_spec = Path(manifest["format_spec"])
             final = pre_render.with_name("final-word.docx")
             final_doc = Document()
             final_doc.add_paragraph("post-word")
@@ -128,11 +134,20 @@ class PostRenderAcceptanceTests(unittest.TestCase):
             render_report.write_text(json.dumps({
                 "source_docx": {"path": str(final), "sha256": final_digest},
                 "rendered_pdf": {"path": str(pdf), "sha256": _sha256(pdf)},
+                "case_id": "fixture-case",
+                "run_id": "fresh-run",
             }), encoding="utf-8")
             submission_audit = final.parent / "final-submission-audit.json"
             submission_audit.write_text(json.dumps({
                 "submission_ready": True,
-                "render_validation": {"rendered_verified": True},
+                "artifact": str(final),
+                "render_validation": {
+                    "rendered_verified": True,
+                    "evidence": {
+                        "source_docx_sha256": final_digest,
+                        "rendered_pdf": {"sha256": _sha256(pdf)},
+                    },
+                },
             }), encoding="utf-8")
             markdown = final.parent / "FINAL-FORMAT-COMPARISON.md"
             markdown.write_text("passed\n", encoding="utf-8")
@@ -143,11 +158,19 @@ class PostRenderAcceptanceTests(unittest.TestCase):
             }), encoding="utf-8")
             comparison.write_text(json.dumps({
                 "status": "passed",
-                "inputs": {"generated_docx_sha256": final_digest},
+                "inputs": {
+                    "generated_docx": str(final),
+                    "generated_docx_sha256": final_digest,
+                    "format_spec": str(format_spec),
+                    "official_template": None,
+                    "official_template_sha256": None,
+                },
             }), encoding="utf-8")
             acceptance.write_text(json.dumps({
                 "status": "accepted",
                 "blockers": [],
+                "case_id": "fixture-case",
+                "run_id": "fresh-run",
                 "pre_render_docx_sha256": _sha256(pre_render),
                 "post_render_docx": str(final),
                 "post_render_docx_sha256": final_digest,
@@ -171,12 +194,13 @@ class PostRenderAcceptanceTests(unittest.TestCase):
                     "submission_audit": str(submission_audit),
                     "format_comparison": str(comparison),
                     "format_comparison_markdown": str(markdown),
+                    "requirements_only": True,
                 },
                 "output": str(final),
                 "format_comparison": str(comparison),
             })
             manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-            accepted = batch.case_acceptance(case_result)
+            accepted = batch.case_acceptance(case_result, root=root)
             self.assertTrue(accepted["accepted"], accepted)
             self.assertNotEqual(_sha256(pre_render), final_digest)
 
@@ -247,7 +271,7 @@ class PostRenderAcceptanceTests(unittest.TestCase):
                 "format_comparison": str(comparison),
             })
             manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
-            accepted = batch.case_acceptance(case_result)
+            accepted = batch.case_acceptance(case_result, root=root)
             self.assertFalse(accepted["accepted"])
             self.assertIn("post_render_acceptance_artifact_hash_mismatch", accepted["blockers"])
 

@@ -10,6 +10,7 @@ post-Word DOCX bytes, not to the pre-render generator output.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import platform
@@ -20,12 +21,14 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import Any
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from lxml import etree
 
 from render_attestation import load_key, sign
 from artifact_io import commit_files, paths_alias, sibling_temp
+from process_runner import run_process
 
 ROOT = Path(__file__).resolve().parents[1]
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
@@ -38,18 +41,17 @@ def repair_parallel_toc_targets(
 ) -> int:
     """Repair stale TOC targets only from an explicit trusted target map.
 
-    Some official bilingual templates contain two visually complete TOC
-    caches, but the second cache was copied from another document and points
-    at bookmarks that do not exist.  Word then renders ``Error! Bookmark not
-    defined`` instead of rebuilding those links.  When the document contains
-    two equal-length HYPERLINK/PAGEREF sequences, the first sequence is fully
-    valid, and the second contains missing targets, bind the second sequence
-    to the first sequence's target bookmarks by entry order.
+    Some official bilingual templates contain stale HYPERLINK fields whose
+    bookmarks no longer exist.  Word then renders ``Error! Bookmark not
+    defined`` instead of rebuilding those links.  This function accepts only
+    a source-derived one-to-one map from the exact stale HYPERLINK target to
+    its intended bookmark.
 
     Entry order is not evidence that two TOC entries have the same semantic
-    target.  A caller must therefore supply a source-derived one-to-one map;
-    without it this function is deliberately a no-op and the normal render
-    validator remains responsible for failing closed on unresolved fields.
+    target.  Without an explicit map this function is deliberately a no-op;
+    PAGEREF fields are handled separately after Word updates the document,
+    and the normal render validator remains responsible for failing closed on
+    unresolved fields.
     """
     with ZipFile(docx) as archive:
         members = {name: archive.read(name) for name in archive.namelist()}
@@ -59,33 +61,34 @@ def repair_parallel_toc_targets(
         for node in root.xpath(".//w:bookmarkStart", namespaces=NS)
         if node.get(W + "name")
     }
-    pattern = re.compile(r"\b(HYPERLINK\s+\\l|PAGEREF)\s+([^\s\\]+)", re.I)
-    fields: dict[str, list[tuple[etree._Element, re.Match[str]]]] = {
-        "HYPERLINK": [], "PAGEREF": [],
-    }
+    # This pre-update repair is intentionally limited to hyperlink fields.
+    # PAGEREF fields have cached page-number result text and are repaired by
+    # ``repair_post_update_pageref_targets`` after Word updates the document.
+    # Treating both field families as one positional sequence would count and
+    # rewrite unrelated fields from the same stale map.
+    pattern = re.compile(r"\bHYPERLINK\s+\\l\s+([^\s\\]+)", re.I)
+    fields: list[tuple[etree._Element, re.Match[str]]] = []
     for node in root.xpath(".//w:instrText", namespaces=NS):
         match = pattern.search("".join(node.itertext()))
         if match:
-            kind = "HYPERLINK" if match.group(1).upper().startswith("HYPERLINK") else "PAGEREF"
-            fields[kind].append((node, match))
+            fields.append((node, match))
 
     if not target_map:
         return 0
     replacements: list[tuple[etree._Element, re.Match[str], str]] = []
-    for entries in fields.values():
-        for node, match in entries:
-            old_target = match.group(2)
-            if old_target in bookmarks:
-                continue
-            new_target = target_map.get(old_target)
-            if not new_target or new_target not in bookmarks:
-                return 0
-            replacements.append((node, match, new_target))
+    for node, match in fields:
+        old_target = match.group(1)
+        if old_target in bookmarks:
+            continue
+        new_target = target_map.get(old_target)
+        if not new_target or new_target not in bookmarks:
+            return 0
+        replacements.append((node, match, new_target))
 
     repaired = 0
     for node, match, target in replacements:
         text = "".join(node.itertext())
-        node.text = text[:match.start(2)] + target + text[match.end(2):]
+        node.text = text[:match.start(1)] + target + text[match.end(1):]
         repaired += 1
 
     if not repaired:
@@ -134,10 +137,11 @@ def repair_post_update_pageref_targets(
 
     Updating two TOCs can leave a manually translated TOC between Word's two
     regenerated caches.  Word creates fresh bookmarks for the regenerated
-    TOCs but the translated cache retains deleted targets.  A missing run is
-    repaired only when the immediately preceding run is the same length and
-    every preceding target exists.  Word-calculated page-number result text is
-    copied as well, so the second export need not update fields again.
+    TOCs but the translated cache retains deleted targets.  A missing field is
+    repaired only when the caller supplies its exact target and cached page
+    text; no sequence length, entry order, or neighbouring field is treated as
+    semantic evidence.  The supplied Word-calculated result text is copied so
+    the second export need not update fields again.
     """
     with ZipFile(docx) as archive:
         members = {name: archive.read(name) for name in archive.namelist()}
@@ -348,7 +352,7 @@ end run
 
 
 def run(command: list[str], *, timeout: int, input: str | None = None) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(command, text=True, capture_output=True, timeout=timeout, input=input)
+    return run_process(command, cwd=ROOT, timeout=timeout, input_text=input)
 
 
 def active_document_path() -> str | None:
@@ -400,6 +404,13 @@ def main() -> int:
             "staging parent; external directories are rejected"
         ),
     )
+    parser.add_argument("--case-id", help="fresh batch case identity bound to this render")
+    parser.add_argument("--run-id", help="fresh requirements run identity bound to this render")
+    parser.add_argument(
+        "--toc-target-map",
+        type=Path,
+        help="trusted source-derived TOC/PAGEREF target map; omitted means no repair is attempted",
+    )
     args = parser.parse_args()
 
     if platform.system() != "Darwin":
@@ -408,8 +419,25 @@ def main() -> int:
     final_docx = args.final_docx.expanduser().resolve()
     pdf = args.pdf.expanduser().resolve()
     report = args.report.expanduser().resolve()
+    toc_target_map_path = args.toc_target_map.expanduser().resolve() if args.toc_target_map else None
     if not source.is_file():
         parser.error(f"input DOCX does not exist: {source}")
+    target_map: dict[str, Any] | None = None
+    if toc_target_map_path is not None:
+        if not toc_target_map_path.is_file():
+            parser.error(f"TOC/PAGEREF target map does not exist: {toc_target_map_path}")
+        try:
+            target_map = json.loads(toc_target_map_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as exc:
+            parser.error(f"cannot read TOC/PAGEREF target map: {exc}")
+        if not isinstance(target_map, dict):
+            parser.error("TOC/PAGEREF target map must be a JSON object")
+        expected_source_sha = target_map.get("source_docx_sha256")
+        actual_source_sha = hashlib.sha256(source.read_bytes()).hexdigest()
+        if expected_source_sha != actual_source_sha:
+            parser.error("TOC/PAGEREF target map is not bound to the input DOCX bytes")
+        if not isinstance(target_map.get("parallel"), dict) and not isinstance(target_map.get("pageref"), dict):
+            parser.error("TOC/PAGEREF target map must contain parallel and/or pageref mappings")
     if paths_alias((source, final_docx, pdf, report)):
         parser.error("input DOCX, final DOCX, PDF, and report must be four filesystem-distinct paths")
     if source == final_docx:
@@ -445,7 +473,10 @@ def main() -> int:
     staged_pdf = staging_root / "final.pdf"
     staged_report = staging_root / "render-report.json"
     shutil.copy2(source, staged_docx)
-    toc_target_repairs = repair_parallel_toc_targets(staged_docx)
+    toc_target_repairs = repair_parallel_toc_targets(
+        staged_docx,
+        target_map=(target_map or {}).get("parallel"),
+    )
 
     try:
         # Avoid unnecessarily stealing foreground focus during unattended runs.
@@ -455,11 +486,12 @@ def main() -> int:
             raise SystemExit(opened.stderr.strip() or "failed to open DOCX in Microsoft Word")
         word_docx_path = wait_for_document(str(staged_docx), args.open_timeout)
 
-    # subprocess.run is used directly because the script is supplied on stdin.
+        # Pass the AppleScript through stdin while retaining the same owned
+        # process-group cleanup as every other renderer subprocess.
         try:
-            script = subprocess.run(
-                ["osascript", "-", word_docx_path, str(staged_pdf)], input=APPLE_SCRIPT,
-                text=True, capture_output=True, timeout=args.word_timeout,
+            script = run(
+                ["osascript", "-", word_docx_path, str(staged_pdf)],
+                input=APPLE_SCRIPT, timeout=args.word_timeout,
             )
         except subprocess.TimeoutExpired as exc:
             run(["osascript", "-", word_docx_path], timeout=15, input=CLEANUP_SCRIPT)
@@ -467,6 +499,12 @@ def main() -> int:
                 "Word export timed out. Check for a macOS/Word 'Grant File Access' dialog, "
                 "approve the selected output directory, then retry."
             ) from exc
+        if script.returncode == 124:
+            run(["osascript", "-", word_docx_path], timeout=15, input=CLEANUP_SCRIPT)
+            raise SystemExit(
+                "Word export timed out. Check for a macOS/Word 'Grant File Access' dialog, "
+                "approve the selected output directory, then retry."
+            )
         if script.returncode:
             raise SystemExit(script.stderr.strip() or "Word field update/PDF export failed")
         if not staged_docx.is_file() or not staged_pdf.is_file():
@@ -480,7 +518,10 @@ def main() -> int:
                 or word_update["updated_count"] != word_update["field_count"]):
             raise SystemExit(f"Word returned an invalid or failed update summary: {word_update!r}")
 
-        post_update_repairs = repair_post_update_pageref_targets(staged_docx)
+        post_update_repairs = repair_post_update_pageref_targets(
+            staged_docx,
+            target_map=(target_map or {}).get("pageref"),
+        )
         if post_update_repairs:
             staged_pdf.unlink(missing_ok=True)
             reopened = run(
@@ -490,14 +531,16 @@ def main() -> int:
                 raise SystemExit(reopened.stderr.strip() or "failed to reopen repaired DOCX")
             word_docx_path = wait_for_document(str(staged_docx), args.open_timeout)
             try:
-                export = subprocess.run(
+                export = run(
                     ["osascript", "-", word_docx_path, str(staged_pdf)],
-                    input=EXPORT_ONLY_SCRIPT, text=True, capture_output=True,
-                    timeout=args.word_timeout,
+                    input=EXPORT_ONLY_SCRIPT, timeout=args.word_timeout,
                 )
             except subprocess.TimeoutExpired as exc:
                 run(["osascript", "-", word_docx_path], timeout=15, input=CLEANUP_SCRIPT)
                 raise SystemExit("Word PDF re-export timed out after TOC target repair") from exc
+            if export.returncode == 124:
+                run(["osascript", "-", word_docx_path], timeout=15, input=CLEANUP_SCRIPT)
+                raise SystemExit("Word PDF re-export timed out after TOC target repair")
             if export.returncode:
                 raise SystemExit(export.stderr.strip() or "Word PDF re-export failed")
             if not staged_pdf.is_file():
@@ -532,6 +575,12 @@ def main() -> int:
         evidence["source_docx"]["path"] = str(final_docx)
         evidence["rendered_pdf"]["path"] = str(pdf)
         evidence["word_export"] = word_update
+        evidence["case_id"] = args.case_id
+        evidence["run_id"] = args.run_id
+        evidence["toc_target_map"] = (
+            {"path": str(toc_target_map_path), "sha256": hashlib.sha256(toc_target_map_path.read_bytes()).hexdigest()}
+            if toc_target_map_path else None
+        )
         evidence["pre_render_repairs"] = {
             "parallel_toc_targets": {
                 "count": toc_target_repairs,

@@ -157,6 +157,29 @@ class HostAgentReviewTests(unittest.TestCase):
                 engine.merge_host_agent_review_packets(review_dir)
             self.assertFalse((review_dir / "merge-receipt.json").exists())
 
+    def test_merge_rejects_chunk_text_tampering_even_when_ids_are_preserved(self) -> None:
+        clauses = [{
+            "id": "C1", "text": "正文使用宋体", "evidence_ids": ["E1"],
+            "source_kind": "paragraph", "location": {}, "part_index": 0,
+        }]
+        evidence = {"evidence": [{"id": "E1", "text": "正文使用宋体", "kind": "paragraph"}]}
+        request = self._request(clauses, evidence)
+        with tempfile.TemporaryDirectory() as td:
+            review_dir = Path(td)
+            engine.prepare_host_agent_review_packets(
+                request, clauses, evidence, "a" * 64, review_dir, chunk_size=1,
+            )
+            chunks_path = review_dir / "llm-request-chunks.json"
+            chunks = json.loads(chunks_path.read_text(encoding="utf-8"))
+            # Keep the IDs and even the old provenance block untouched.  The
+            # source-derived projection must still reject changed text before
+            # any response can be merged.
+            chunks[0]["clauses"][0]["text"] = "正文使用黑体"
+            chunks_path.write_text(json.dumps(chunks, ensure_ascii=False), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "source projection"):
+                engine.merge_host_agent_review_packets(review_dir)
+            self.assertFalse((review_dir / "merge-receipt.json").exists())
+
     def test_merge_rejects_a_response_from_another_model_protocol(self) -> None:
         clauses = [{
             "id": "C1", "text": "正文使用宋体", "evidence_ids": ["E1"],

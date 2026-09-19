@@ -39,8 +39,15 @@ def run_process(
     *,
     cwd: Path,
     timeout: int,
+    input_text: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Run ``command`` with a hard deadline and descendant cleanup."""
+    """Run ``command`` with a hard deadline and descendant cleanup.
+
+    ``input_text`` is intentionally named differently from the built-in
+    ``input`` argument used by :func:`subprocess.run`; callers that drive
+    AppleScript through stdin therefore use the same process-group cleanup as
+    ordinary pipeline stages.
+    """
     if isinstance(timeout, bool) or timeout <= 0:
         raise ValueError("process timeout must be a positive integer")
     process = subprocess.Popen(
@@ -52,7 +59,7 @@ def run_process(
         start_new_session=(os.name == "posix"),
     )
     try:
-        stdout, stderr = process.communicate(timeout=timeout)
+        stdout, stderr = process.communicate(input=input_text, timeout=timeout)
     except subprocess.TimeoutExpired:
         stdout, stderr = _terminate_and_reap(process)
         marker = f"[process-timeout] command exceeded {timeout}s and was terminated"

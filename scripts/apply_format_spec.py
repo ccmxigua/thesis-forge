@@ -22,6 +22,7 @@ from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Mm, Pt
 from docx.text.paragraph import Paragraph
+from docx.text.run import Run
 
 from artifact_io import atomic_write_text, commit_files, sibling_temp
 from docx_semantics import (
@@ -554,10 +555,16 @@ def audit_declarations(doc: Document, declarations: dict[str, Any],
     if anchor is None:
         return [{"role": "declarations", "property": "before_role", "template_value": False,
                  "required_value": before_role}]
-    try:
-        boundary = paragraphs.index(anchor)
-    except ValueError:
-        boundary = len(paragraphs)
+    # ``Document.paragraphs`` creates wrapper objects on each access.  The
+    # anchor returned by ``_declaration_anchor`` may therefore represent the
+    # same XML node as an item in this list without being the same Python
+    # object; ``list.index(anchor)`` is not a stable document-order lookup.
+    anchor_element = anchor._p
+    boundary = next(
+        (index for index, paragraph in enumerate(paragraphs)
+         if paragraph._p is anchor_element),
+        len(paragraphs),
+    )
     for item in declarations.get("items", []):
         resource_id = item.get("resource_id")
         resource = resources.get(resource_id) if isinstance(resource_id, str) else None
@@ -820,10 +827,19 @@ def diff_expected(actual: dict[str, Any], expected: dict[str, Any], prefix="") -
     return out
 
 
+def _paragraph_runs_including_nested(paragraph: Paragraph) -> list[Run]:
+    """Return direct and hyperlink/field-contained runs in document order."""
+    return [Run(node, paragraph) for node in paragraph._p.iter(qn("w:r"))]
+
+
 def apply_direct_format(paragraph, role_spec: dict[str, Any]) -> None:
     """Eliminate direct-formatting overrides on paragraphs governed by a role."""
     font_spec = role_spec.get("font", {})
-    for run in paragraph.runs:
+    # ``Paragraph.runs`` omits runs nested under ``w:hyperlink`` and several
+    # field containers.  Styling only that property leaves visible text
+    # instances with stale direct formatting even though the shared style
+    # audit passes.  Walk the underlying XML and wrap each run instead.
+    for run in _paragraph_runs_including_nested(paragraph):
         if font_spec.get("latin"): run.font.name = font_spec["latin"]
         if font_spec.get("size_pt") is not None: run.font.size = Pt(float(font_spec["size_pt"]))
         if font_spec.get("bold") is not None: run.font.bold = bool(font_spec["bold"])

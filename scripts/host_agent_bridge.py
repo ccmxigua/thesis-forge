@@ -341,7 +341,7 @@ _BASE_CONTRACT_REPAIR_RULES = (
     "classification and normative_basis are different fields: classification is a review status; normative_basis must be one of the declared enum values and must never be the word informational.",
     "If classification is informational, use requirement_indexes: [] and omit normative_basis unless a declared normative basis is explicitly supported by the cited evidence; never copy classification into normative_basis.",
     "Only covered, executable, and verify_existing clause reviews may contain requirement_indexes; every other classification must use an empty array.",
-    "Every executable/covered/verify_existing requirement reference must be a zero-based index of a semantically matching emitted requirement, and every emitted requirement must be referenced at least once.",
+    "Every executable/covered/verify_existing requirement reference must be a zero-based index of a semantically matching emitted requirement whose clause_ids contains that exact review clause_id; check every review/index pair independently. Never carry an adjacent clause's index, change clause_ids to make validation pass, or emit an unused requirement.",
     "Do not move nested properties to a top-level requirement role: a nested key such as require_after_role is legal only where the supplied role schema places it.",
     "Do not fabricate evidence or guess a semantic classification. Make only the mechanical schema corrections required by the supplied error, then regenerate the complete response from the current chunk.",
 )
@@ -360,6 +360,7 @@ def _contract_repair_guidance(
     changing the rejected response.
     """
     text = str(error_text or "").lower()
+    raw_text = str(error_text or "")
     rules = list(_BASE_CONTRACT_REPAIR_RULES) if include_base else []
     targeted: list[str] = []
     clause_match = re.search(r"\$\.clause_reviews\[(\d+)\]\.normative_basis", text)
@@ -375,6 +376,33 @@ def _contract_repair_guidance(
     if "requirement_index" in text or "nonexecutable" in text:
         targeted.append(
             "Re-check every clause_review classification against its requirement_indexes before returning; non-executable reviews must have [] even when the rejected response had an index."
+        )
+    backed_matches = list(re.finditer(
+        r"\$\.clause_reviews\[(?P<review>\d+)\]: "
+        r"requirement_index_not_backed_by_clause:"
+        r"clause_id=(?P<clause>[^:;]+):"
+        r"requirement_index=(?P<bad>\d+):"
+        r"matching_indexes=\[(?P<matching>[^\]]*)\]",
+        raw_text,
+    ))
+    for match in backed_matches[:4]:
+        matching = match.group("matching").strip() or "none"
+        targeted.append(
+            f"At clause_reviews[{match.group('review')}] for clause_id "
+            f"{match.group('clause')!r}, remove requirement index "
+            f"{match.group('bad')} because requirements[{match.group('bad')}].clause_ids "
+            f"does not contain that exact clause. The matching requirement indexes "
+            f"are [{matching}]; keep only those indexes "
+            "that semantically support this review. Do not copy a neighboring "
+            "clause's index or edit clause_ids just to satisfy the validator."
+        )
+    if "requirement_index_not_backed_by_clause" in text and not backed_matches:
+        targeted.append(
+            "For each covered/executable/verify_existing review, check every referenced "
+            "index against requirements[index].clause_ids and keep an index only when "
+            "that exact review clause_id is present. Do not copy an adjacent clause's "
+            "index or change clause_ids; if no matching requirement exists, regenerate "
+            "the complete requirement mapping from the current chunk."
         )
     if "require_after_role" in text or "unknown_or_disallowed_role" in text or "additionalproperties" in text:
         targeted.append(

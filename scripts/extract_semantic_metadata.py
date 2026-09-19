@@ -464,6 +464,10 @@ def extract(path: Path, encoding: str = "utf-8") -> dict[str, Any]:
     defense_date_en = _value(text, ("defensedateen",))
     degree_conferral_date = _value(text, ("degreeconferraldate", "degreedate"))
     degree_conferral_date_en = _value(text, ("degreeconferraldateen", "degreedateen"))
+    # Keep the academic/professional distinction as an explicit source field.
+    # The normalizer still validates it against the allowed enum and never
+    # infers a category from a school, major, or degree discipline.
+    degree_category = _value(text, ("degreecategory", "degree_category"))
     degree_display = _value(text, ("degreedisplay", "degreetype"))
     degree_display_en = _value(text, ("degreedisplayen", "degreetypeen"))
     figures = len(re.findall(r"\\includegraphics(?:\[[^]]*\])?\s*\{", text))
@@ -522,6 +526,7 @@ def extract(path: Path, encoding: str = "utf-8") -> dict[str, Any]:
         "defense_date_en": defense_date_en,
         "degree_conferral_date": degree_conferral_date,
         "degree_conferral_date_en": degree_conferral_date_en,
+        "degree_category": degree_category,
         "degree_display": degree_display,
         "degree_display_en": degree_display_en,
         "cn_subtitle": subtitle,

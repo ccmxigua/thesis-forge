@@ -207,6 +207,15 @@ def validate_response(response: Any, chunk: dict[str, Any]) -> list[str]:
                 f"$.requirements[{index}].evidence_ids: not_backed_by_clause:{','.join(unrelated_evidence)}"
             )
 
+    matching_requirement_indexes: dict[str, list[int]] = {
+        clause_id: [
+            index
+            for index, clause_ids in enumerate(requirement_clause_sets)
+            if clause_id in clause_ids
+        ]
+        for clause_id in clause_map
+    }
+
     expected_clause_ids = [
         str(item.get("id")) for item in clauses if isinstance(item, dict)
     ]
@@ -283,7 +292,12 @@ def validate_response(response: Any, chunk: dict[str, Any]) -> list[str]:
                 and clause_id not in requirement_clause_sets[requirement_index]
             ):
                 errors.append(
-                    f"$.clause_reviews[{review_index}]: requirement_index_not_backed_by_clause"
+                    f"$.clause_reviews[{review_index}]: "
+                    "requirement_index_not_backed_by_clause:"
+                    f"clause_id={clause_id}:"
+                    f"requirement_index={requirement_index}:"
+                    "matching_indexes="
+                    f"{matching_requirement_indexes.get(clause_id, [])}"
                 )
         if isinstance(classification, str):
             if classification_requires_requirement(classification) and not valid_indexes:

@@ -240,6 +240,55 @@ class HostAgentBridgeTests(unittest.TestCase):
                 errors,
             )
 
+    def test_preflight_reports_exact_clause_and_matching_requirement_indexes(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            _review_dir, chunk = self._packet(Path(td) / "requirements")
+            chunk["clauses"].append({
+                "id": "C2", "text": "标题居中", "evidence_ids": ["E2"],
+                "source_kind": "paragraph", "location": {}, "part_index": 0,
+            })
+            chunk["evidence_context"]["E2"] = {
+                "id": "E2", "text": "标题居中", "kind": "paragraph",
+            }
+            response = self._executable_response(chunk)
+            response["requirements"].append({
+                "role": "body_text",
+                "properties": {"font": {"cjk": "SimSun", "size_pt": 12}},
+                "clause_ids": ["C2"],
+                "evidence_ids": ["E2"],
+                "confidence": 0.9,
+                "reason": "The clause specifies the heading alignment.",
+                "verification": {
+                    "mode": "word_render",
+                    "checks": ["Check the heading alignment."],
+                },
+            })
+            response["clause_reviews"][0]["requirement_indexes"] = [0, 1]
+            response["clause_reviews"].append({
+                "clause_id": "C2",
+                "classification": "executable",
+                "requirement_indexes": [1],
+                "reason": "The clause is executable in DOCX.",
+            })
+
+            errors = bridge.validate_host_agent_response(response, chunk)
+            backed_errors = [
+                error for error in errors
+                if "requirement_index_not_backed_by_clause" in error
+            ]
+            self.assertEqual(len(backed_errors), 1, errors)
+            self.assertIn("clause_id=C1", backed_errors[0])
+            self.assertIn("requirement_index=1", backed_errors[0])
+            self.assertIn("matching_indexes=[0]", backed_errors[0])
+
+            response["clause_reviews"][0]["requirement_indexes"] = [0]
+            self.assertFalse(
+                any(
+                    "requirement_index_not_backed_by_clause" in error
+                    for error in bridge.validate_host_agent_response(response, chunk)
+                )
+            )
+
     def test_host_prompt_exposes_mechanical_contract_rules(self) -> None:
         prompt = bridge._host_prompt(
             request_path=Path("request.json"),
@@ -277,6 +326,19 @@ class HostAgentBridgeTests(unittest.TestCase):
         self.assertIn("remove the entire normative_basis property", retry)
         self.assertIn("Delete only the unknown property 'style_hint'", retry)
         self.assertNotIn("Do not repair by deleting evidence, clearing indexes", retry)
+
+    def test_retry_guidance_targets_exact_requirement_clause_mapping(self) -> None:
+        retry = bridge._contract_repair_guidance(
+            "local response contract validation failed: "
+            "$.clause_reviews[2]: requirement_index_not_backed_by_clause:"
+            "clause_id=C00243:requirement_index=2:matching_indexes=[1]",
+            include_base=False,
+        )
+        self.assertIn("clause_reviews[2]", retry)
+        self.assertIn("C00243", retry)
+        self.assertIn("requirements[2].clause_ids", retry)
+        self.assertIn("matching requirement indexes are [1]", retry)
+        self.assertIn("Do not copy a neighboring clause's index", retry)
 
     def test_bridge_retries_locally_rejected_contract_in_a_new_session(self) -> None:
         with tempfile.TemporaryDirectory() as td:

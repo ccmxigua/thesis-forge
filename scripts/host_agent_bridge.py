@@ -966,20 +966,21 @@ def _retry_semantic_change_error(
 
 def _apply_safe_mechanical_repairs(
     response: Any, error_records: list[dict[str, Any]],
+    *, chunk: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
     """Apply only validator-directed, semantics-preserving JSON repairs.
 
-    Unknown properties and evidence IDs that are explicitly reported as not
-    backed by the authoritative clause relation are mechanical boundary
-    errors. Removing exactly the named key or exact unbacked evidence ID from
-    exactly the validator's object avoids a second model turn that may
-    regenerate classifications or requirement relations. Any other error set
-    is left for the normal retry path; this helper never guesses how to repair
-    a semantic failure.
+    Unknown properties, evidence IDs that are explicitly reported as not
+    backed by the authoritative clause relation, and all-null style/text
+    payloads whose exact value is present in cited evidence are mechanical
+    boundary errors. The helper never invents a value or repairs a semantic
+    classification.
     """
     if not isinstance(response, dict) or not error_records:
         return None, []
-    allowed_codes = {"unknown_property", "evidence_relation_mismatch"}
+    allowed_codes = {
+        "unknown_property", "evidence_relation_mismatch", "empty_requirement_properties",
+    }
     if any(
         not isinstance(record, dict)
         or record.get("code") not in allowed_codes
@@ -1028,7 +1029,7 @@ def _apply_safe_mechanical_repairs(
                 "json_pointer": pointer,
                 "removed_property": property_name,
             })
-        else:
+        elif record.get("code") == "evidence_relation_mismatch":
             if evidence_match is None or not isinstance(target, list):
                 return None, []
             evidence_id = evidence_match.group(1)
@@ -1040,6 +1041,63 @@ def _apply_safe_mechanical_repairs(
                 "json_pointer": pointer,
                 "removed_evidence_id": evidence_id,
             })
+        else:
+            match = re.fullmatch(r"\$\.requirements\[(\d+)\]\.properties", pointer)
+            if match is None or not isinstance(target, dict):
+                return None, []
+            requirement_index = int(match.group(1))
+            requirements = repaired.get("requirements")
+            if (
+                not isinstance(requirements, list)
+                or requirement_index >= len(requirements)
+                or not isinstance(requirements[requirement_index], dict)
+                or any(value is not None for value in target.values())
+                or not isinstance(chunk, dict)
+            ):
+                return None, []
+            evidence_context = chunk.get("evidence_context")
+            requirement = requirements[requirement_index]
+            evidence_ids = requirement.get("evidence_ids")
+            if not isinstance(evidence_context, dict) or not isinstance(evidence_ids, list):
+                return None, []
+            evidence_items = [
+                evidence_context.get(str(evidence_id))
+                for evidence_id in evidence_ids
+            ]
+            style_values = sorted({
+                str(item.get("style_name")).strip()
+                for item in evidence_items
+                if isinstance(item, dict) and str(item.get("style_name") or "").strip()
+            })
+            text_values = sorted({
+                str(item.get("text"))
+                for item in evidence_items
+                if isinstance(item, dict) and str(item.get("text") or "").strip()
+            })
+            if "style" in target and len(style_values) == 1:
+                target["style"] = style_values[0]
+                repairs.append({
+                    "code": "empty_requirement_properties",
+                    "json_pointer": pointer,
+                    "filled_property": "style",
+                    "source_evidence_ids": [
+                        str(evidence_id)
+                        for evidence_id, item in zip(evidence_ids, evidence_items)
+                        if isinstance(item, dict) and item.get("style_name") == style_values[0]
+                    ],
+                    "value": style_values[0],
+                })
+            elif "text" in target and len(text_values) == 1:
+                target["text"] = text_values[0]
+                repairs.append({
+                    "code": "empty_requirement_properties",
+                    "json_pointer": pointer,
+                    "filled_property": "text",
+                    "source_evidence_ids": [str(evidence_id) for evidence_id in evidence_ids],
+                    "value": text_values[0],
+                })
+            else:
+                return None, []
     return repaired, repairs
 
 
@@ -1619,7 +1677,7 @@ def run_host_agent_chunk(
             contract_errors, response=response, chunk=chunk,
         )
         repaired_response, mechanical_repairs = _apply_safe_mechanical_repairs(
-            response, error_records,
+            response, error_records, chunk=chunk,
         )
         if repaired_response is not None:
             remaining_errors = validate_host_agent_response(repaired_response, chunk)

@@ -605,6 +605,28 @@ class HostAgentBridgeTests(unittest.TestCase):
         self.assertEqual(repaired["requirements"][0]["evidence_ids"], ["E1"])
         self.assertEqual(response["requirements"][0]["evidence_ids"], ["E1", "E2"])
 
+    def test_all_null_style_payload_is_filled_from_exact_evidence(self) -> None:
+        response = {
+            "requirements": [{
+                "role": "abstract_title_zh", "evidence_ids": ["E1"],
+                "properties": {"style": None, "top_border_pt": None},
+            }],
+        }
+        repaired, repairs = bridge._apply_safe_mechanical_repairs(
+            response,
+            [{
+                "code": "empty_requirement_properties",
+                "json_pointer": "$.requirements[0].properties",
+                "raw_error": "must_include_semantic_payload",
+            }],
+            chunk={"evidence_context": {
+                "E1": {"style_name": "heading 1", "text": "摘 要"},
+            }},
+        )
+        self.assertEqual(repaired["requirements"][0]["properties"]["style"], "heading 1")
+        self.assertEqual(repairs[0]["filled_property"], "style")
+        self.assertIsNone(response["requirements"][0]["properties"]["style"])
+
     def test_bridge_retries_locally_rejected_contract_in_a_new_session(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             review_dir, chunk = self._packet(Path(td) / "requirements")

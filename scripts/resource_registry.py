@@ -167,6 +167,73 @@ def _verify_source_texts(
             )
 
 
+def _authoritative_declaration_evidence_ids(
+    spec: dict[str, Any], item_id: str,
+) -> set[str]:
+    """Collect already-validated evidence IDs for one declaration item.
+
+    The response contract validates evidence on the requirement as a whole,
+    while a chunked host response may omit one of those IDs from the nested
+    fixed-text item.  This helper reads only the same declaration requirement
+    and never invents an ID or searches unrelated requirements.
+    """
+    result: set[str] = set()
+    for requirement in spec.get("requirements", []) if isinstance(spec, dict) else []:
+        if not isinstance(requirement, dict) or requirement.get("role") != "declarations":
+            continue
+        properties = requirement.get("properties")
+        items = properties.get("items") if isinstance(properties, dict) else None
+        if not isinstance(items, list):
+            continue
+        if not any(
+            isinstance(candidate, dict) and candidate.get("id") == item_id
+            for candidate in items
+        ):
+            continue
+        values = requirement.get("evidence_ids")
+        if isinstance(values, list):
+            result.update(str(value) for value in values if isinstance(value, str) and value.strip())
+    return result
+
+
+def _bind_exact_declaration_evidence_ids(
+    spec: dict[str, Any], item_id: str, item: dict[str, Any],
+    source_evidence_ids: list[str], evidence: dict[str, Any],
+) -> list[str]:
+    """Add only exact current-source evidence for omitted fixed-text atoms.
+
+    Nested declaration items are model-authored convenience groupings.  The
+    requirement-level evidence relation is authoritative after contract
+    validation, so a missing nested ID can be recovered mechanically when the
+    heading/body atom is an exact match in that relation.  No fuzzy matching,
+    paraphrase, or unrelated-evidence search is allowed.
+    """
+    evidence_items = {
+        str(candidate.get("id")): candidate
+        for candidate in (evidence.get("evidence") or [])
+        if isinstance(candidate, dict) and candidate.get("id")
+    }
+    candidate_ids = set(source_evidence_ids)
+    candidate_ids.update(_authoritative_declaration_evidence_ids(spec, item_id))
+    atoms: list[str] = []
+    heading = item.get("heading")
+    if isinstance(heading, str) and heading.strip():
+        atoms.append(heading)
+    atoms.extend(_body_parts(item))
+    bound = set(source_evidence_ids)
+    for atom in atoms:
+        atom_normalized = _normalized(atom)
+        if not atom_normalized:
+            continue
+        bound.update(
+            evidence_id
+            for evidence_id in candidate_ids
+            if isinstance(evidence_items.get(evidence_id), dict)
+            and _normalized(evidence_items[evidence_id].get("text", "")) == atom_normalized
+        )
+    return sorted(bound)
+
+
 def materialize_declaration_resources(
     spec: dict[str, Any], run_id: str, *, evidence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -218,6 +285,9 @@ def materialize_declaration_resources(
         if not source_evidence_ids:
             raise ValueError(f"declaration {item_id!r} needs source_evidence_ids")
         if evidence is not None:
+            source_evidence_ids = _bind_exact_declaration_evidence_ids(
+                spec, item_id, raw, source_evidence_ids, evidence,
+            )
             _verify_source_texts(item_id, raw, source_evidence_ids, evidence)
         seen_ids.add(item_id)
 

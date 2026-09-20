@@ -109,6 +109,30 @@ class RunScopedResourceRegistryTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not present verbatim"):
             materialize_declaration_resources(broken, "run-evidence", evidence=broken_evidence)
 
+    def test_nested_declaration_evidence_is_completed_from_authoritative_requirement(self) -> None:
+        spec = self._spec()
+        spec["requirements"] = [{
+            "id": "R1",
+            "role": "declarations",
+            "properties": {"items": [{"id": "custom_statement"}]},
+            "evidence_ids": ["E-current-1", "E-current-2", "E-current-3"],
+        }]
+        spec["declarations"]["items"][0]["source_evidence_ids"] = [
+            "E-current-2", "E-current-3",
+        ]
+        evidence = {"evidence": [
+            {"id": "E-current-1", "text": "本次输入的声明标题"},
+            {"id": "E-current-2", "text": "本次输入的第一段固定正文。"},
+            {"id": "E-current-3", "text": "本次输入的第二段固定正文。"},
+        ]}
+        materialized = materialize_declaration_resources(spec, "run-authoritative", evidence=evidence)
+        item = materialized["declarations"]["items"][0]
+        resource = materialized["resource_registry"]["items"][item["resource_id"]]
+        self.assertEqual(
+            resource["source_evidence_ids"],
+            ["E-current-1", "E-current-2", "E-current-3"],
+        )
+
     def test_neutral_signature_placeholder_label_is_not_fixed_source_prose(self) -> None:
         spec = self._spec()
         spec["declarations"]["items"][0]["source_evidence_ids"] = [

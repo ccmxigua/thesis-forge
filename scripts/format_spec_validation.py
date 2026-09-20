@@ -111,14 +111,19 @@ def validate_instance(instance: Any, schema: dict[str, Any], root: dict[str, Any
     if "const" in schema and instance != schema["const"]: errors.append(f"{path}: must equal {schema['const']!r}")
     if "enum" in schema and instance not in schema["enum"]: errors.append(f"{path}: {instance!r} is not in {schema['enum']!r}")
     typ = schema.get("type")
-    ok = True
-    if typ == "object": ok = isinstance(instance, dict)
-    elif typ == "array": ok = isinstance(instance, list)
-    elif typ == "string": ok = isinstance(instance, str)
-    elif typ == "boolean": ok = isinstance(instance, bool)
-    elif typ == "integer": ok = isinstance(instance, int) and not isinstance(instance, bool)
-    elif typ == "number": ok = isinstance(instance, (int, float)) and not isinstance(instance, bool)
-    if typ and not ok:
+    allowed_types = typ if isinstance(typ, list) else [typ]
+
+    def matches_type(expected: Any) -> bool:
+        if expected == "object": return isinstance(instance, dict)
+        if expected == "array": return isinstance(instance, list)
+        if expected == "string": return isinstance(instance, str)
+        if expected == "boolean": return isinstance(instance, bool)
+        if expected == "integer": return isinstance(instance, int) and not isinstance(instance, bool)
+        if expected == "number": return isinstance(instance, (int, float)) and not isinstance(instance, bool)
+        if expected == "null": return instance is None
+        return True
+
+    if typ and not any(matches_type(expected) for expected in allowed_types):
         return [f"{path}: expected {typ}, got {_typename(instance)}"]
     if isinstance(instance, dict):
         if len(instance) < schema.get("minProperties", 0):

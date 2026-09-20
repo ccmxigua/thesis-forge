@@ -134,6 +134,35 @@ def contract_error_records(
     return records
 
 
+def provenance_error_records(
+    errors: list[str], *, response: Any = None,
+) -> list[dict[str, Any]]:
+    """Convert provenance failures into the same machine-readable ledger.
+
+    Provenance failures are invocation-integrity failures, not semantic repair
+    requests.  They still need structured terminal evidence so a retry or a
+    stopped batch cannot collapse into a free-text summary.
+    """
+    response_hash = _response_sha256(response) if response is not None else None
+    return [{
+        "code": "provenance_validation_error",
+        "json_pointer": "$.provenance",
+        "schema_pointer": "$.provenance",
+        "clause_id": None,
+        "raw_error": str(error),
+        "response_sha256": response_hash,
+        "allowed_values": None,
+        "matching_requirement_indexes": None,
+        "requirement_count": (
+            len(response.get("requirements", []))
+            if isinstance(response, dict) and isinstance(response.get("requirements"), list)
+            else None
+        ),
+        "semantic_review_required": False,
+        "invocation_integrity_required": True,
+    } for error in errors]
+
+
 def _normalized_fixed_text(value: Any) -> str:
     return re.sub(r"\s+", "", str(value or "")).strip("：:")
 
@@ -256,6 +285,56 @@ def _keyword_obligation_gaps(
         gaps.append(f"{key}.max_item_chars")
     elif properties.get(f"{key}.item_length_metric") != "cjk_characters":
         gaps.append(f"{key}.item_length_metric:cjk_characters")
+    return gaps
+
+
+def _table_obligation_gaps(
+    clause: dict[str, Any], requirements: list[dict[str, Any]], indexes: list[int],
+) -> list[str]:
+    """Keep continuation-table obligations atomic and evidence-backed.
+
+    A continuation/table clause commonly combines the marker, repeated header,
+    caption position and caption alignment.  A table-level continuation object
+    cannot silently stand in for a separate caption requirement.  This guard
+    only checks explicit, mechanically representable obligations; it does not
+    infer an omitted semantic rule.
+    """
+    text = re.sub(r"\s+", "", str(clause.get("text") or clause.get("source_text_full") or ""))
+    if not re.search(r"表|table", text, re.I):
+        return []
+    selected = [
+        requirements[index] for index in indexes
+        if isinstance(index, int) and 0 <= index < len(requirements)
+        and isinstance(requirements[index], dict)
+    ]
+    table_requirements = [item for item in selected if item.get("role") == "table"]
+    caption_requirements = [item for item in selected if item.get("role") in {"table_caption", "figure_table_title"}]
+    gaps: list[str] = []
+    continuation_values = [
+        item.get("properties", {}).get("continuation")
+        for item in table_requirements
+        if isinstance(item.get("properties"), dict)
+    ]
+    continuation_values = [item for item in continuation_values if isinstance(item, dict)]
+    if "续" in text or "continuation" in text.lower():
+        if not any(item.get("caption_suffix") == "(续)" for item in continuation_values):
+            gaps.append("table.continuation.caption_suffix")
+        if "重复表头" in text or "repeatheader" in text.lower():
+            if not any(item.get("repeat_header_row") is True for item in continuation_values):
+                gaps.append("table.continuation.repeat_header_row")
+        if re.search(r"可省略|可略", text) and any(
+            item.get("caption_required_on_continuation") is True for item in continuation_values
+        ):
+            gaps.append("table.continuation.optional_caption_marked_required")
+    if re.search(r"表上方|置于表上|表上.*居中|居中.*表上", text):
+        if not any(item.get("properties", {}).get("position") == "above" for item in caption_requirements):
+            gaps.append("table_caption.position:above")
+    if "居中" in text:
+        if not any(
+            (item.get("properties", {}).get("paragraph") or {}).get("alignment") == "center"
+            for item in caption_requirements
+        ):
+            gaps.append("table_caption.paragraph.alignment:center")
     return gaps
 
 
@@ -524,6 +603,7 @@ def validate_response(response: Any, chunk: dict[str, Any]) -> list[str]:
                 if valid_indexes:
                     gaps = _abstract_obligation_gaps(clause or {}, requirements, valid_indexes)
                     gaps.extend(_keyword_obligation_gaps(clause or {}, requirements, valid_indexes))
+                    gaps.extend(_table_obligation_gaps(clause or {}, requirements, valid_indexes))
                     if gaps:
                         errors.append(
                             f"$.clause_reviews[{review_index}]: partial_clause_coverage:"
@@ -574,6 +654,7 @@ def validate_response(response: Any, chunk: dict[str, Any]) -> list[str]:
             if classification_requires_requirement(classification) and valid_indexes:
                 gaps = _abstract_obligation_gaps(clause or {}, requirements, valid_indexes)
                 gaps.extend(_keyword_obligation_gaps(clause or {}, requirements, valid_indexes))
+                gaps.extend(_table_obligation_gaps(clause or {}, requirements, valid_indexes))
                 if gaps:
                     errors.append(
                         f"$.clause_reviews[{review_index}]: partial_clause_coverage:"

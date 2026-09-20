@@ -181,10 +181,12 @@ from host_review_contract import (  # noqa: E402
     HOST_REVIEW_CONTRACT_V3,
     SUPPORTED_HOST_REVIEW_CONTRACTS,
     contract_error_records,
+    provenance_error_records,
     _response_sha256,
     summarize_contract_errors as _shared_summarize_contract_errors,
     validate_response as _shared_validate_response,
 )
+from host_review_schema import require_native_schema  # noqa: E402
 from host_runtime import (  # noqa: E402
     HostAdapterUnavailable,
     HostRuntimeError,
@@ -1066,6 +1068,7 @@ def run_host_agent_chunk(
         response_schema = chunk.get("response_schema")
         if not isinstance(response_schema, dict) or not response_schema:
             raise ValueError("current Host Agent chunk has no response schema")
+        require_native_schema(response_schema)
         _write_json(output_schema_path, response_schema)
         command = codex_adapter.build_command(
             binary=codex_bin,
@@ -1646,15 +1649,23 @@ def run_bridge(
                     response, provenance, require_fresh_origin=True,
                 )
                 if provenance_errors:
-                    raise ValueError(
+                    error = ValueError(
                         "provenance failed: " + ", ".join(provenance_errors)
                     )
+                    error.error_records = provenance_error_records(  # type: ignore[attr-defined]
+                        provenance_errors, response=response,
+                    )
+                    raise error
                 contract_errors = validate_host_agent_response(response, chunk)
                 if contract_errors:
-                    raise ValueError(
+                    error = ValueError(
                         "local response contract validation failed: "
                         + _summarize_contract_errors(contract_errors)
                     )
+                    error.error_records = contract_error_records(  # type: ignore[attr-defined]
+                        contract_errors, response=response, chunk=chunk,
+                    )
+                    raise error
                 attempt_response_path.replace(response_path)
                 audit["attempt_failures"] = failures
                 update_chunk_lifecycle(

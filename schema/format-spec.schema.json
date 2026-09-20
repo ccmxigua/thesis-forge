@@ -1141,7 +1141,25 @@
                   "absent"
                 ]
               },
-              "value": {}
+              "value": {
+                "anyOf": [
+                  {"type": "string"},
+                  {"type": "number"},
+                  {"type": "boolean"},
+                  {"type": "null"},
+                  {
+                    "type": "array",
+                    "items": {
+                      "anyOf": [
+                        {"type": "string"},
+                        {"type": "number"},
+                        {"type": "boolean"},
+                        {"type": "null"}
+                      ]
+                    }
+                  }
+                ]
+              }
             },
             "additionalProperties": false
           }

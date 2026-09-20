@@ -1,0 +1,193 @@
+"""Shared schema fragments and native structured-output checks.
+
+The host-review response is consumed by more than one layer: the model-facing
+request, the local contract validator, and native structured-output adapters.
+Keeping the provider-sensitive fragments here prevents a permissive JSON Schema
+placeholder from silently reaching a strict provider.
+"""
+from __future__ import annotations
+
+import copy
+from typing import Any
+
+
+def applicability_value_schema() -> dict[str, Any]:
+    """Return the closed value domain used by applicability conditions.
+
+    Conditions are evaluated against scalar profile/inventory facts or a list
+    of scalar candidates (the ``in`` operator).  An unconstrained ``{}`` is
+    valid JSON Schema, but it is not a valid native structured-output schema
+    and would make the provider reject the entire request.
+    """
+    scalar = [
+        {"type": "string"},
+        {"type": "number"},
+        {"type": "boolean"},
+        {"type": "null"},
+    ]
+    return {
+        "anyOf": [
+            *scalar,
+            {"type": "array", "items": {"anyOf": scalar}},
+        ]
+    }
+
+
+_COMPOSITION_KEYS = {"$ref", "const", "enum", "anyOf", "allOf", "oneOf", "not", "if"}
+
+
+def native_schema_support_errors(schema: Any, path: str = "$") -> list[str]:
+    """Reject schema constructs that native structured output cannot accept.
+
+    This is deliberately a small provider-boundary check, not a replacement
+    for the project JSON Schema validator.  The most important invariant is
+    that no empty schema reaches a native adapter: a permissive local validator
+    may accept it, while the provider requires a concrete ``type`` at that
+    location.
+    """
+    if not isinstance(schema, dict):
+        return [f"{path}: native schema must be an object"]
+    errors: list[str] = []
+    if not schema:
+        errors.append(f"{path}: native_schema_empty_schema")
+    if "type" not in schema and not (set(schema) & _COMPOSITION_KEYS):
+        # ``description``/``title`` alone are not a value schema.  ``enum``
+        # and composition forms are intentionally exempt because they carry
+        # an explicit assertion without a separate type keyword.
+        errors.append(f"{path}: native_schema_missing_type")
+    for name, child in (schema.get("properties") or {}).items():
+        errors.extend(native_schema_support_errors(child, f"{path}.properties.{name}"))
+    for name, child in (schema.get("$defs") or {}).items():
+        errors.extend(native_schema_support_errors(child, f"{path}.$defs.{name}"))
+    if isinstance(schema.get("items"), dict):
+        errors.extend(native_schema_support_errors(schema["items"], f"{path}.items"))
+    if isinstance(schema.get("additionalProperties"), dict):
+        errors.extend(native_schema_support_errors(schema["additionalProperties"], f"{path}.additionalProperties"))
+    for key in ("anyOf", "allOf", "oneOf"):
+        for index, child in enumerate(schema.get(key, []) or []):
+            errors.extend(native_schema_support_errors(child, f"{path}.{key}[{index}]"))
+    for key in ("not", "if", "then", "else"):
+        if isinstance(schema.get(key), dict):
+            errors.extend(native_schema_support_errors(schema[key], f"{path}.{key}"))
+    return errors
+
+
+def require_native_schema(schema: dict[str, Any]) -> None:
+    """Raise before a provider call when the native schema is malformed."""
+    errors = native_schema_support_errors(schema)
+    if errors:
+        raise ValueError("native Host Review response schema is not provider-compatible: " + "; ".join(errors[:12]))
+
+
+def build_host_review_response_schema(
+    format_schema: dict[str, Any],
+    *,
+    allowed_requirement_roles: set[str],
+    top_level_requirement_roles: set[str],
+    allowed_review_classifications: set[str],
+    contract_version: str,
+) -> dict[str, Any]:
+    """Compile the one Host Review response schema used by all adapters.
+
+    The format-spec schema remains the source of role property definitions;
+    this function owns the response envelope and its contract-version-specific
+    relation rule.  Contract 3.0 intentionally has no model-maintained reverse
+    integer index.
+    """
+    role_schema_by_name = {
+        "page": "pageSpec", "table": "tableSpec", "objects": "objectPaginationSpec",
+        "content_constraints": "contentConstraintSpec",
+        "conditional_constraints": "conditionalConstraintSpec",
+        "document_structure": "documentStructureSpec", "appendices": "appendixSpec",
+        "equations": "equationLayoutSpec", "cover": "coverSpec",
+        "declarations": "declarationsSpec",
+    }
+    role_schema_names = {
+        role: ("roleSpec" if role not in top_level_requirement_roles else role_schema_by_name[role])
+        for role in sorted(allowed_requirement_roles)
+    }
+    request_defs = {
+        key: copy.deepcopy(value)
+        for key, value in format_schema.get("$defs", {}).items()
+        if key not in {"contentInstance", "coverFieldInstance"}
+    }
+    if isinstance(request_defs.get("requirement"), dict):
+        request_defs["requirement"].get("properties", {}).pop("field_instance_ids", None)
+    applicability = request_defs.get("applicabilitySpec")
+    if isinstance(applicability, dict):
+        condition_items = applicability.get("properties", {}).get("conditions", {}).get("items", {})
+        if isinstance(condition_items, dict):
+            condition_properties = condition_items.setdefault("properties", {})
+            condition_properties["value"] = applicability_value_schema()
+            fact_schema = condition_properties.get("fact")
+            if isinstance(fact_schema, dict):
+                fact_schema["pattern"] = r"^(thesis_profile|source_inventory|template_profile|runtime)\."
+    response_schema: dict[str, Any] = {
+        "type": "object",
+        "required": ["contract_version", "requirements", "clause_reviews", "unsupported_items", "reported_conflicts"],
+        "properties": {
+            "contract_version": {"const": contract_version},
+            "provenance": {"type": "object", "required": [
+                "version", "origin", "source_sha256", "evidence_sha256",
+                "clause_sha256", "request_sha256",
+            ]},
+            "requirements": {"type": "array", "items": {
+                "type": "object", "required": [
+                    "role", "properties", "clause_ids", "evidence_ids", "confidence", "reason",
+                ],
+                "properties": {
+                    "existing_requirement_id": {"type": "string", "minLength": 1},
+                    "role": {"enum": sorted(allowed_requirement_roles)},
+                    "field_key": {"type": "string", "minLength": 1},
+                    "properties": {"type": "object", "minProperties": 1},
+                    "clause_ids": {"type": "array", "items": {"type": "string"}},
+                    "evidence_ids": {"type": "array", "items": {"type": "string"}},
+                    "confidence": {"type": "number"},
+                    "reason": {"type": "string", "minLength": 1},
+                    "applicability": {"$ref": "#/$defs/applicabilitySpec"},
+                    "input_prerequisites": {"type": "array", "items": {"$ref": "#/$defs/inputPrerequisiteSpec"}},
+                    "verification": {"$ref": "#/$defs/verificationSpec"},
+                },
+                "additionalProperties": False,
+            }},
+            "clause_reviews": {"type": "array", "items": {
+                "type": "object",
+                "required": (
+                    ["clause_id", "classification", "reason"]
+                    if contract_version == "3.0"
+                    else ["clause_id", "classification", "requirement_indexes", "reason"]
+                ),
+                "properties": {
+                    "clause_id": {"type": "string"},
+                    "classification": {"enum": sorted(allowed_review_classifications)},
+                    "reason": {"type": "string", "minLength": 1},
+                    "obligations": {"type": "array", "items": {
+                        "type": "object", "required": ["id", "status", "reason"],
+                        "properties": {
+                            "id": {"type": "string", "minLength": 1},
+                            "status": {"enum": [
+                                "covered", "requires_metadata", "requires_source_content",
+                                "unsupported_backend", "unverifiable", "unresolved",
+                            ]},
+                            "reason": {"type": "string", "minLength": 1},
+                        },
+                        "additionalProperties": False,
+                    }, "uniqueItems": True},
+                    "normative_basis": {"enum": [
+                        "explicit_normative_text", "template_structure", "fixed_statement",
+                        "sample_content", "source_content", "external_duty", "insufficient",
+                    ]},
+                },
+                "additionalProperties": False,
+            }},
+            "unsupported_items": {"type": "array", "items": {"type": "string"}},
+            "reported_conflicts": {"type": "array", "items": {"type": "object"}},
+        },
+        "$defs": request_defs,
+        "additionalProperties": False,
+    }
+    if contract_version == "2.1":
+        response_schema["properties"]["clause_reviews"]["items"]["properties"]["requirement_indexes"] = {
+            "type": "array", "items": {"type": "integer", "minimum": 0}, "uniqueItems": True,
+        }
+    return response_schema

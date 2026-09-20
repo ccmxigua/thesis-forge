@@ -56,7 +56,11 @@ from evidence_context_guards import (
 )
 from requirements_input import RequirementsInputError, normalize_requirements_input
 from resource_registry import materialize_declaration_resources
-from semantic_review_ledger import build_semantic_review_ledger
+from semantic_review_ledger import (
+    build_semantic_review_ledger,
+    deduplicate_exact_requirements,
+)
+from host_review_schema import build_host_review_response_schema
 from template_reconciliation import (
     extract_template_evidence,
     not_supplied_report,
@@ -1497,85 +1501,13 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
             ),
             "page_evidence": (evidence_doc or {}).get("page_evidence", {}),
             "rule_spec": request_rule_spec,
-            "response_schema": {
-                "type": "object",
-                "required": ["contract_version", "requirements", "clause_reviews", "unsupported_items", "reported_conflicts"],
-                "properties": {
-                    "contract_version": {"const": contract_version},
-                    "provenance": {"type": "object", "required": [
-                        "version", "origin", "source_sha256", "evidence_sha256",
-                        "clause_sha256", "request_sha256",
-                    ]},
-                    "requirements": {"type": "array", "items": {
-                        "type": "object", "required": ["role", "properties", "clause_ids", "evidence_ids", "confidence", "reason"],
-                        "properties": {
-                            "existing_requirement_id": {"type": "string", "minLength": 1},
-                            "role": {"enum": sorted(ALLOWED_REQUIREMENT_ROLES)},
-                            "field_key": {"type": "string", "minLength": 1},
-                            "properties": {"type": "object", "minProperties": 1},
-                            "clause_ids": {"type": "array", "items": {"type": "string"}},
-                            "evidence_ids": {"type": "array", "items": {"type": "string"}},
-                            "confidence": {"type": "number"}, "reason": {"type": "string", "minLength": 1},
-                            "applicability": {"$ref": "#/$defs/applicabilitySpec"},
-                            "input_prerequisites": {"type": "array", "items": {"$ref": "#/$defs/inputPrerequisiteSpec"}},
-                            "verification": {"$ref": "#/$defs/verificationSpec"}
-                        }, "additionalProperties": False}},
-                    "clause_reviews": {"type": "array", "items": {
-                        "type": "object",
-                        "required": (["clause_id", "classification", "reason"]
-                                     if contract_version == HOST_REVIEW_CONTRACT_V3
-                                     else ["clause_id", "classification", "requirement_indexes", "reason"]),
-                        "properties": {
-                            "clause_id": {"type": "string"},
-                            "classification": {"enum": sorted(ALLOWED_REVIEW_CLASSIFICATIONS)},
-                            "reason": {"type": "string", "minLength": 1},
-                            "obligations": {"type": "array", "items": {
-                                "type": "object", "required": ["id", "status", "reason"],
-                                "properties": {
-                                    "id": {"type": "string", "minLength": 1},
-                                    "status": {"enum": ["covered", "requires_metadata", "requires_source_content", "unsupported_backend", "unverifiable", "unresolved"]},
-                                    "reason": {"type": "string", "minLength": 1}
-                                }, "additionalProperties": False
-                            }, "uniqueItems": True},
-                            "normative_basis": {"enum": [
-                                "explicit_normative_text", "template_structure", "fixed_statement",
-                                "sample_content", "source_content", "external_duty", "insufficient"
-                            ]}
-                        }, "additionalProperties": False}},
-                    "unsupported_items": {"type": "array", "items": {"type": "string"}},
-                    "reported_conflicts": {"type": "array", "items": {"type": "object"}}
-                },
-                "$defs": {
-                    "applicabilitySpec": {
-                        "type": "object", "required": ["status"],
-                        "properties": {
-                            "status": {"enum": ["always", "conditional", "excluded"]},
-                            "conditions": {"type": "array", "items": {
-                                "type": "object", "required": ["fact", "operator", "value"],
-                                "properties": {
-                                    "fact": {"type": "string", "pattern": "^(thesis_profile|source_inventory|template_profile)\\."},
-                                    "operator": {"enum": ["equals", "not_equals", "in", "present", "absent"]},
-                                    "value": {}
-                                }, "additionalProperties": False}},
-                            "exceptions": {"type": "array", "items": {"type": "string", "minLength": 1}}
-                        }, "additionalProperties": False},
-                    "inputPrerequisiteSpec": {
-                        "type": "object", "required": ["kind", "key", "required", "reason"],
-                        "properties": {
-                            "kind": {"enum": ["metadata", "source_content", "template_resource", "runtime"]},
-                            "key": {"type": "string", "pattern": "^(thesis_profile|source_inventory|template_profile|runtime)\\."},
-                            "required": {"type": "boolean"},
-                            "reason": {"type": "string", "minLength": 1}
-                        }, "additionalProperties": False},
-                    "verificationSpec": {
-                        "type": "object", "required": ["mode", "checks"],
-                        "properties": {
-                            "mode": {"enum": ["static_docx", "word_render", "pdf_render", "manual", "external"]},
-                            "checks": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
-                            "checker_ids": {"type": "array", "uniqueItems": True, "items": {"type": "string", "minLength": 1}}
-                        }, "additionalProperties": False}
-                }, "additionalProperties": False
-            }
+            "response_schema": build_host_review_response_schema(
+                format_schema,
+                allowed_requirement_roles=ALLOWED_REQUIREMENT_ROLES,
+                top_level_requirement_roles=TOP_LEVEL_REQUIREMENT_ROLES,
+                allowed_review_classifications=ALLOWED_REVIEW_CLASSIFICATIONS,
+                contract_version=contract_version,
+            )
         }
         review_properties = request["response_schema"]["properties"]["clause_reviews"]["items"]["properties"]
         if contract_version == HOST_REVIEW_CONTRACT_V2:
@@ -1647,11 +1579,15 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
     """
     clause_map = {c["id"]: c for c in clauses}
     all_clause_ids = set(clause_map)
+    input_response_sha256 = sha256_json(response)
+    input_rule_spec_sha256 = sha256_json(rule_spec or {})
     audit: list[dict[str, Any]] = []
     audit.append({
         "type": "merge_transformation_policy",
-        "policy_version": "host-review-merge-1",
+        "policy_version": "host-review-merge-2",
         "input": "validated_host_review_response",
+        "input_response_sha256": input_response_sha256,
+        "input_rule_spec_sha256": input_rule_spec_sha256,
         "semantic_inference": "disabled",
         "allowed_transformations": [
             "derive_contract_3_reverse_relation",
@@ -2382,6 +2318,14 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
         "blocking_conflict_count": len(blocking_conflicts),
         "accepted_requirement_count": len(spec.get("requirements", [])),
         "semantic_review_required": bool(unresolved or missing or blocking_conflicts),
+        "output_spec_sha256": sha256_json(spec),
+        "compliance_summary_sha256": sha256_json(spec.get("compliance_summary", {})),
+        "conflicts_sha256": sha256_json(conflicts),
+    })
+    audit[0].update({
+        "output_spec_sha256": sha256_json(spec),
+        "conflicts_sha256": sha256_json(conflicts),
+        "transformation_receipt": "complete_input_output_hashes_and_post_merge_gate",
     })
     return spec, conflicts, audit
 
@@ -2996,6 +2940,7 @@ def merge_host_agent_review_packets(
         "unsupported_items": aggregate_unsupported,
         "reported_conflicts": aggregate_conflicts,
     }
+    aggregate, deduplication = deduplicate_exact_requirements(aggregate)
     aggregate_errors = validate_host_review_response(aggregate, full_request)
     if aggregate_errors:
         raise ValueError(
@@ -3026,6 +2971,7 @@ def merge_host_agent_review_packets(
             "model_authoritative_v2_1" if contract_version == HOST_REVIEW_CONTRACT_V2
             else "code_derived_v3_0"
         ),
+        "deduplication_policy": copy.deepcopy(deduplication),
         "semantic_review_ledger_path": str(ledger_path.resolve()),
         "semantic_review_ledger_sha256": sha256_json(ledger),
     }

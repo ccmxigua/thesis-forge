@@ -15,7 +15,12 @@ from host_review_contract import (  # noqa: E402
     HOST_REVIEW_CONTRACT_V3,
     contract_error_records,
     derived_requirement_indexes,
+    provenance_error_records,
     validate_response,
+)
+from host_review_schema import (  # noqa: E402
+    native_schema_support_errors,
+    applicability_value_schema,
 )
 from requirements_engine import build_llm_request  # noqa: E402
 from semantic_contract import attach_request_provenance  # noqa: E402
@@ -211,6 +216,84 @@ class HostReviewV3Tests(unittest.TestCase):
         schema = {"type": "array", "contains": {"const": "required"}}
         self.assertTrue(any("unsupported_schema_keyword:contains" in error for error in schema_support_errors(schema)))
         self.assertTrue(any("unsupported_schema_keyword:contains" in error for error in validate_instance([], schema)))
+
+    def test_native_response_schema_has_no_provider_empty_schema(self) -> None:
+        self.assertEqual(native_schema_support_errors(self.request["response_schema"]), [])
+        value_schema = (
+            self.request["response_schema"]["$defs"]["applicabilitySpec"]
+            ["properties"]["conditions"]["items"]["properties"]["value"]
+        )
+        self.assertNotEqual(value_schema, {})
+        self.assertEqual(native_schema_support_errors(value_schema), [])
+
+    def test_applicability_value_domain_covers_scalars_and_in_lists(self) -> None:
+        schema = applicability_value_schema()
+        for value in ("master", 2, 1.5, True, None, ["restricted", "classified"], [0, 2]):
+            self.assertEqual(validate_instance(value, schema), [], value)
+
+    def test_provenance_failures_are_structured_integrity_records(self) -> None:
+        records = provenance_error_records(["run_id mismatch"], response=self._informational_response())
+        self.assertEqual(records[0]["code"], "provenance_validation_error")
+        self.assertTrue(records[0]["invocation_integrity_required"])
+        self.assertFalse(records[0]["semantic_review_required"])
+
+    def test_exact_duplicate_requirements_are_explicitly_recorded(self) -> None:
+        response = self._executable_response()
+        duplicate = json.loads(json.dumps(response["requirements"][0]))
+        response["requirements"].append(duplicate)
+        from semantic_review_ledger import deduplicate_exact_requirements
+        deduped, audit = deduplicate_exact_requirements(response)
+        self.assertEqual(len(deduped["requirements"]), 1)
+        self.assertEqual(audit["removed_indexes"], [1])
+
+    def test_regression_a1_rejects_equation_shape_and_partial_table_coverage(self) -> None:
+        clauses = [
+            {"id": "C00243", "text": "表序后跟表题（可省略）和（续），居中置于表上方，续表均应重复表头。", "evidence_ids": ["E1"]},
+            {"id": "C00252", "text": "公式按章编号。", "evidence_ids": ["E2"]},
+        ]
+        evidence = {"evidence": [
+            {"id": "E1", "text": clauses[0]["text"], "kind": "paragraph"},
+            {"id": "E2", "text": clauses[1]["text"], "kind": "paragraph"},
+        ]}
+        request = build_llm_request([], clauses, evidence, {}, "full", contract_version="2.1")
+        request = attach_request_provenance(request, source_sha256="b" * 64, evidence_doc=evidence, clauses=clauses, run_id="a1")
+        response = {
+            "contract_version": "2.1", "provenance": request["provenance"],
+            "requirements": [
+                {"role": "table", "properties": {"continuation": {
+                    "caption_suffix": "(续)", "repeat_header_row": True,
+                    "caption_required_on_continuation": True, "verification": "word_render",
+                }}, "clause_ids": ["C00243"], "evidence_ids": ["E1"], "confidence": 0.9, "reason": "table"},
+                {"role": "equations", "properties": {"numbering": {"format": "chapter.decimal", "style": "decimal", "depth": 2}},
+                 "clause_ids": ["C00252"], "evidence_ids": ["E2"], "confidence": 0.9, "reason": "equation"},
+            ],
+            "clause_reviews": [
+                {"clause_id": "C00243", "classification": "executable", "requirement_indexes": [0], "reason": "table", "obligations": [{"id": "all", "status": "covered", "reason": "all"}]},
+                {"clause_id": "C00252", "classification": "executable", "requirement_indexes": [1], "reason": "equation"},
+            ],
+            "unsupported_items": [], "reported_conflicts": [],
+        }
+        errors = validate_response(response, request)
+        self.assertTrue(any("unknown property 'numbering'" in error for error in errors), errors)
+        self.assertTrue(any("partial_clause_coverage" in error for error in errors), errors)
+
+    def test_regression_a2_rejects_relation_drift_and_classification_as_basis(self) -> None:
+        clauses = [{"id": "C00243", "text": "续表居中置于表上方并重复表头。", "evidence_ids": ["E1"]}]
+        evidence = {"evidence": [{"id": "E1", "text": clauses[0]["text"], "kind": "paragraph"}]}
+        request = build_llm_request([], clauses, evidence, {}, "full", contract_version="2.1")
+        request = attach_request_provenance(request, source_sha256="c" * 64, evidence_doc=evidence, clauses=clauses, run_id="a2")
+        response = {
+            "contract_version": "2.1", "provenance": request["provenance"],
+            "requirements": [
+                {"role": "table", "properties": {"continuation": {"caption_suffix": "(续)", "repeat_header_row": True, "verification": "word_render"}}, "clause_ids": ["C00243"], "evidence_ids": ["E1"], "confidence": 0.9, "reason": "table"},
+                {"role": "table_caption", "properties": {"position": "above", "paragraph": {"alignment": "center"}}, "clause_ids": ["C00245"], "evidence_ids": ["E1"], "confidence": 0.9, "reason": "caption"},
+            ],
+            "clause_reviews": [{"clause_id": "C00243", "classification": "executable", "requirement_indexes": [0, 1], "reason": "table", "normative_basis": "informational"}],
+            "unsupported_items": [], "reported_conflicts": [],
+        }
+        errors = validate_response(response, request)
+        self.assertTrue(any("normative_basis" in error for error in errors), errors)
+        self.assertTrue(any("requirement_index_not_backed_by_clause" in error for error in errors), errors)
 
 
 if __name__ == "__main__":

@@ -14,11 +14,15 @@ from typing import Any
 from compliance import report as compliance_report
 from docx import Document
 from format_spec_validation import load_and_validate
-from host_review_contract import SUPPORTED_HOST_REVIEW_CONTRACTS, HOST_REVIEW_CONTRACT_V3
+from host_review_contract import (
+    SUPPORTED_HOST_REVIEW_CONTRACTS,
+    HOST_REVIEW_CONTRACT_V3,
+    validate_response as validate_host_review_response,
+)
 from pipeline_finding import evidence, finding
 from region_graph import compile_region_graph
 from section_model import compile_section_plan
-from semantic_contract import sha256_json
+from semantic_contract import sha256_json, validate_response_provenance
 from semantic_issue_confirmation import (
     bind_confirmations,
     build_confirmation_receipt,
@@ -323,6 +327,66 @@ def validate_host_review_receipts(
         "semantic_review_ledger": (
             {"path": str(ledger_path), "sha256": ledger_sha}
             if response_contract_version == HOST_REVIEW_CONTRACT_V3 else None
+        ),
+    }
+
+
+def validate_semantic_contract_gate(
+    *, response_path: Path, request_path: Path, require_provenance: bool,
+) -> dict[str, Any]:
+    """Validate the response immediately before capability planning.
+
+    The requirements stage intentionally keeps malformed host output available
+    as diagnostic evidence.  That is useful for root-cause analysis, but it
+    must never be enough to reach capability planning.  This gate is the
+    single preflight boundary for every ``--llm-response`` entry point:
+
+    * the exact current request owns the response schema and clause set;
+    * the shared contract validator owns cross-array relation checks; and
+    * provenance is mandatory for release/receipt-bound runs, while an
+      explicitly offline supported-subset fixture may omit it.
+
+    No repair, reclassification, or inferred relation is performed here.
+    """
+    response_path = response_path.expanduser().resolve()
+    request_path = request_path.expanduser().resolve()
+    response = read_json(response_path)
+    request = read_json(request_path)
+    if not isinstance(request, dict):
+        raise ValueError("semantic contract gate request is not an object")
+    if not isinstance(response, dict):
+        raise ValueError("semantic contract gate response is not an object")
+    contract_errors = validate_host_review_response(response, request)
+    expected_provenance = request.get("provenance")
+    actual_provenance = response.get("provenance")
+    provenance_required = bool(require_provenance)
+    provenance_errors: list[str] = []
+    if provenance_required or isinstance(actual_provenance, dict):
+        if not isinstance(expected_provenance, dict):
+            provenance_errors = ["request_provenance_missing"]
+        else:
+            provenance_errors = validate_response_provenance(
+                response, expected_provenance, require_fresh_origin=True,
+            )
+    if contract_errors or provenance_errors:
+        details = [*contract_errors, *[f"provenance:{item}" for item in provenance_errors]]
+        raise ValueError(
+            "semantic contract/provenance gate failed before capability planning: "
+            + "; ".join(details[:24])
+        )
+    return {
+        "status": "passed",
+        "response_path": str(response_path),
+        "request_path": str(request_path),
+        "response_sha256": sha256_json(response),
+        "request_sha256": sha256_json(request),
+        "contract_version": response.get("contract_version"),
+        "contract_errors": [],
+        "provenance_required": provenance_required,
+        "provenance_validated": bool(provenance_required or isinstance(actual_provenance, dict)),
+        "provenance_errors": [],
+        "offline_provenance_exception": bool(
+            not provenance_required and not isinstance(actual_provenance, dict)
         ),
     }
 
@@ -1069,6 +1133,37 @@ def _main(argv: list[str]) -> int:
             manifest.update(status="failed", reason="host-agent review receipt gate failed",
                             host_review_receipt_error=str(exc))
             write_json(manifest_path, manifest); print(json.dumps(manifest, ensure_ascii=False)); return 10
+    if args.llm_response:
+        # Do this before semantic issue binding, capability planning, section
+        # compilation, or any document-generation stage.  The requirements
+        # stage may have emitted a diagnostic ``format-spec.json`` from an
+        # invalid response, but no invalid response may become a capability
+        # input or a release candidate.
+        try:
+            manifest["semantic_contract_gate"] = validate_semantic_contract_gate(
+                response_path=args.llm_response,
+                request_path=requirements_dir / "llm-request.json",
+                require_provenance=bool(
+                    args.compliance_mode == "full"
+                    or args.host_agent_audit
+                    or args.merge_receipt
+                    or args.strict_release
+                ),
+            )
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            manifest.update(
+                status="failed",
+                reason="semantic contract/provenance gate failed before capability preflight",
+                semantic_contract_gate={
+                    "status": "failed",
+                    "response_path": str(args.llm_response.resolve()),
+                    "request_path": str((requirements_dir / "llm-request.json").resolve()),
+                    "error": str(exc),
+                },
+            )
+            write_json(manifest_path, manifest)
+            print(json.dumps(manifest, ensure_ascii=False))
+            return 10
     manifest["requirements_input_normalization"] = normalization
     manifest["inputs"]["requirements_normalized"] = normalization["normalized"]
     manifest["requirements_extraction"].update({

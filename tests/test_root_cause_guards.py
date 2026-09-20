@@ -22,6 +22,48 @@ def _request(clause_text: str, evidence_id: str = "E1") -> dict:
 
 
 class RootCauseGuardTests(unittest.TestCase):
+    def test_merge_guards_are_explicitly_versioned_and_authorized(self) -> None:
+        clauses = [
+            {
+                "id": "C0", "text": "参考文献",
+                "evidence_ids": ["E0"], "source_kind": "paragraph",
+                "location": {"part": "document", "child_index": 10, "order": 10},
+            },
+            {
+                "id": "C1", "text": "[1] Doe. Sample thesis.",
+                "evidence_ids": ["E1"], "source_kind": "paragraph",
+                "location": {"part": "document", "child_index": 11, "order": 11},
+            },
+        ]
+        response = {
+            "contract_version": "2.1",
+            "requirements": [{
+                "role": "body_text", "properties": {"font": {"size_pt": 12}},
+                "clause_ids": ["C1"], "evidence_ids": ["E1"],
+                "confidence": 0.9, "reason": "The sample entry was present.",
+            }],
+            "clause_reviews": [
+                {"clause_id": "C0", "classification": "informational",
+                 "requirement_indexes": [], "reason": "Heading only."},
+                {"clause_id": "C1", "classification": "executable",
+                 "requirement_indexes": [0], "reason": "The sample entry was present."},
+            ],
+            "unsupported_items": [], "reported_conflicts": [],
+        }
+        spec, conflicts, audit = engine.merge_llm_primary(
+            Path("synthetic-source"),
+            {"schema_version": "1.0", "roles": {}, "page": {},
+             "requirements": [], "content_instances": []},
+            clauses, response, {"E0", "E1"},
+        )
+        self.assertFalse(any(item.get("type") == "llm_internal_conflict" for item in conflicts))
+        policy = next(item for item in audit if item.get("type") == "merge_transformation_policy")
+        self.assertEqual(policy["semantic_transformation_policy_version"], "merge-semantic-guards-v1")
+        guard = next(item for item in audit if item.get("type") == "normative_scope_guard")
+        self.assertEqual(guard["policy_version"], "merge-semantic-guards-v1")
+        self.assertEqual(guard["authorization"], "registered_evidence_context_guard_v1")
+        self.assertEqual(spec["requirements"], [])
+
     def test_sample_content_context_uses_document_structure_not_broad_order_window(self) -> None:
         clauses = [
             {

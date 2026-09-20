@@ -76,6 +76,93 @@ def derived_requirement_indexes(
     return result
 
 
+def analyze_requirement_relations(
+    response: dict[str, Any], clauses: list[dict[str, Any]] | None,
+) -> list[dict[str, Any]]:
+    """Classify every requirement-to-clause edge deterministically.
+
+    Contract 3.0 has one authored direction: ``requirements[].clause_ids``.
+    This helper does not infer missing edges.  It is shared by validation,
+    structured error records, and the bridge's narrow mechanical projection so
+    those layers cannot disagree about which requirements are safe to remove.
+    """
+    requirements = response.get("requirements", []) if isinstance(response, dict) else []
+    if not isinstance(requirements, list):
+        return []
+    authoritative_clauses = clauses if isinstance(clauses, list) else []
+    clause_id_counts: dict[str, int] = {}
+    for clause in authoritative_clauses:
+        if isinstance(clause, dict) and clause.get("id"):
+            clause_id = str(clause["id"])
+            clause_id_counts[clause_id] = clause_id_counts.get(clause_id, 0) + 1
+    reviews = response.get("clause_reviews", []) if isinstance(response, dict) else []
+    if not isinstance(reviews, list):
+        reviews = []
+    review_counts: dict[str, int] = {}
+    review_classifications: dict[str, list[str]] = {}
+    for review in reviews:
+        if not isinstance(review, dict) or not review.get("clause_id"):
+            continue
+        clause_id = str(review["clause_id"])
+        review_counts[clause_id] = review_counts.get(clause_id, 0) + 1
+        review_classifications.setdefault(clause_id, []).append(
+            str(review.get("classification") or "")
+        )
+    if not clause_id_counts:
+        # Unit-level callers may only provide the response.  This fallback can
+        # classify an informational-only relation, but cannot claim that a
+        # clause is known outside the response; production callers always pass
+        # the authoritative current chunk.
+        clause_id_counts = {clause_id: 1 for clause_id in review_counts}
+
+    facts: list[dict[str, Any]] = []
+    for index, requirement in enumerate(requirements):
+        raw_clause_ids = requirement.get("clause_ids") if isinstance(requirement, dict) else None
+        clause_ids = [str(value) for value in raw_clause_ids] if isinstance(raw_clause_ids, list) else []
+        unique_clause_ids = list(dict.fromkeys(clause_ids))
+        unknown_clause_ids = sorted(
+            clause_id for clause_id in unique_clause_ids if clause_id not in clause_id_counts
+        )
+        missing_review_ids = sorted(
+            clause_id for clause_id in unique_clause_ids if review_counts.get(clause_id, 0) == 0
+        )
+        duplicate_review_ids = sorted(
+            clause_id for clause_id in unique_clause_ids if review_counts.get(clause_id, 0) != 1
+            and clause_id not in missing_review_ids
+        )
+        classifications = {
+            clause_id: list(review_classifications.get(clause_id, []))
+            for clause_id in unique_clause_ids
+        }
+        if not clause_ids:
+            category = "missing_clause_relation"
+        elif unknown_clause_ids:
+            category = "unknown_clause_relation"
+        elif missing_review_ids or duplicate_review_ids:
+            category = "missing_clause_review"
+        else:
+            values = [classifications[clause_id][0] for clause_id in unique_clause_ids]
+            requires = [classification_requires_requirement(value) for value in values]
+            if values and all(value == "informational" for value in values):
+                category = "informational_only"
+            elif any(requires) and not all(requires):
+                category = "mixed_execution_classification"
+            elif values and all(requires):
+                category = "execution"
+            else:
+                category = "non_requirement_classification"
+        facts.append({
+            "requirement_index": index,
+            "clause_ids": unique_clause_ids,
+            "clause_classifications": classifications,
+            "category": category,
+            "unknown_clause_ids": unknown_clause_ids,
+            "missing_review_ids": missing_review_ids,
+            "duplicate_review_ids": duplicate_review_ids,
+        })
+    return facts
+
+
 def project_compatibility_indexes(
     response: dict[str, Any], clauses: list[dict[str, Any]],
 ) -> dict[str, Any]:
@@ -93,6 +180,53 @@ def project_compatibility_indexes(
     return projected
 
 
+_RELATION_CATEGORY_CODES = {
+    "informational_only": "informational_requirement_forbidden",
+    "mixed_execution_classification": "mixed_execution_classification_relation",
+    "missing_clause_review": "missing_clause_review",
+    "unknown_clause_relation": "unknown_clause_relation",
+    "non_requirement_classification": "non_requirement_classification_relation",
+    "execution": "unused_executable_requirement",
+}
+
+
+def _relation_record(
+    *,
+    code: str,
+    raw_error: str,
+    response: Any,
+    requirements: list[Any] | None,
+    fact: dict[str, Any] | None = None,
+    json_pointer: str | None = None,
+    clause_id: str | None = None,
+    matching_requirement_indexes: list[int] | None = None,
+) -> dict[str, Any]:
+    record: dict[str, Any] = {
+        "code": code,
+        "json_pointer": json_pointer,
+        "schema_pointer": json_pointer,
+        "clause_id": clause_id,
+        "raw_error": raw_error,
+        "response_sha256": _response_sha256(response) if response is not None else None,
+        "allowed_values": None,
+        "matching_requirement_indexes": matching_requirement_indexes,
+        "requirement_count": len(requirements) if isinstance(requirements, list) else None,
+        "semantic_review_required": True,
+    }
+    if fact is not None:
+        record.update({
+            "requirement_index": fact.get("requirement_index"),
+            "clause_ids": list(fact.get("clause_ids", [])),
+            "clause_classifications": fact.get("clause_classifications", {}),
+            "relation_category": fact.get("category"),
+            "unknown_clause_ids": list(fact.get("unknown_clause_ids", [])),
+            "missing_review_ids": list(fact.get("missing_review_ids", [])),
+            "duplicate_review_ids": list(fact.get("duplicate_review_ids", [])),
+            "mechanically_removable": code == "informational_requirement_forbidden",
+        })
+    return record
+
+
 def contract_error_records(
     errors: list[str], *, response: Any = None, chunk: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
@@ -100,20 +234,124 @@ def contract_error_records(
     records: list[dict[str, Any]] = []
     requirements = response.get("requirements", []) if isinstance(response, dict) else []
     clauses = chunk.get("clauses", []) if isinstance(chunk, dict) else []
+    analysis_clauses = clauses if isinstance(clauses, list) else []
+    if isinstance(response, dict) and not analysis_clauses:
+        analysis_clauses = [
+            {"id": review.get("clause_id")}
+            for review in response.get("clause_reviews", [])
+            if isinstance(review, dict) and review.get("clause_id")
+        ]
+    relation_analysis = (
+        analyze_requirement_relations(response, analysis_clauses)
+        if isinstance(response, dict) else []
+    )
+    relation_by_index = {
+        int(item["requirement_index"]): item
+        for item in relation_analysis
+        if isinstance(item, dict) and isinstance(item.get("requirement_index"), int)
+    }
     relation_facts: dict[str, list[int]] = {}
-    if isinstance(response, dict) and isinstance(clauses, list):
-        relation_facts = derived_requirement_indexes(response, clauses)
+    if isinstance(response, dict) and isinstance(analysis_clauses, list):
+        relation_facts = derived_requirement_indexes(response, analysis_clauses)
+
+    def append_generic(
+        *, code: str, text: str, pointer: str | None, clause_id: str | None,
+        matching: list[int] | None = None,
+    ) -> None:
+        records.append({
+            "code": code,
+            "json_pointer": pointer,
+            "schema_pointer": pointer,
+            "clause_id": clause_id,
+            "raw_error": text,
+            "response_sha256": _response_sha256(response) if response is not None else None,
+            "allowed_values": (
+                [
+                    "explicit_normative_text", "template_structure", "fixed_statement",
+                    "sample_content", "source_content", "external_duty", "insufficient",
+                ] if "normative_basis" in text.lower() else None
+            ),
+            "matching_requirement_indexes": matching,
+            "requirement_count": len(requirements) if isinstance(requirements, list) else None,
+            "semantic_review_required": code in {
+                "partial_clause_coverage", "requirement_relation_mismatch",
+                "missing_derived_requirement", "informational_requirement_forbidden",
+                "mixed_execution_classification_relation", "missing_clause_review",
+                "unknown_clause_relation", "non_requirement_classification_relation",
+                "unused_executable_requirement",
+            },
+        })
+
     for raw in errors:
         text = str(raw)
         lowered = text.lower()
+        pointer_match = re.match(r"(\$[^:]+)", text)
+        clause_match = re.search(r"clause_id=([^:;]+)", text)
+
+        aggregate_match = re.fullmatch(
+            r"requirements_not_referenced_by_clause_review:(\d+(?:,\d+)*)",
+            text,
+        )
+        if aggregate_match and relation_by_index:
+            for index_text in aggregate_match.group(1).split(","):
+                requirement_index = int(index_text)
+                fact = relation_by_index.get(requirement_index)
+                if fact is None:
+                    append_generic(
+                        code="requirement_relation_mismatch", text=text,
+                        pointer=f"$.requirements[{requirement_index}]", clause_id=None,
+                    )
+                    continue
+                code = _RELATION_CATEGORY_CODES.get(
+                    str(fact.get("category")), "requirement_relation_mismatch"
+                )
+                matching = sorted({
+                    matching_index
+                    for clause_id in fact.get("clause_ids", [])
+                    for matching_index in relation_facts.get(str(clause_id), [])
+                })
+                records.append(_relation_record(
+                    code=code,
+                    raw_error=text,
+                    response=response,
+                    requirements=requirements,
+                    fact=fact,
+                    json_pointer=f"$.requirements[{requirement_index}]",
+                    matching_requirement_indexes=matching,
+                ))
+            continue
+
+        if "informational_requirement_forbidden" in lowered:
+            pointer = pointer_match.group(1) if pointer_match else None
+            index_match = re.fullmatch(r"\$\.requirements\[(\d+)\]", str(pointer or ""))
+            fact = relation_by_index.get(int(index_match.group(1))) if index_match else None
+            records.append(_relation_record(
+                code="informational_requirement_forbidden", raw_error=text,
+                response=response, requirements=requirements, fact=fact,
+                json_pointer=pointer,
+                matching_requirement_indexes=(
+                    relation_facts.get(clause_match.group(1), [])
+                    if clause_match else None
+                ),
+            ))
+            continue
         if "normative_basis" in lowered:
             code = "normative_basis_invalid"
         elif "requirement_index_not_backed_by_clause" in lowered:
             code = "requirement_relation_mismatch"
-        elif (
-            "executable_review_requires_derived_requirement" in lowered
-            or "requirements_not_referenced_by_clause_review" in lowered
-        ):
+        elif "executable_review_requires_derived_requirement" in lowered:
+            code = "missing_derived_requirement"
+        elif "mixed_execution_classification_relation" in lowered:
+            code = "mixed_execution_classification_relation"
+        elif "missing_clause_review" in lowered:
+            code = "missing_clause_review"
+        elif "unknown_clause_relation" in lowered:
+            code = "unknown_clause_relation"
+        elif "non_requirement_classification_relation" in lowered:
+            code = "non_requirement_classification_relation"
+        elif "unused_executable_requirement" in lowered:
+            code = "unused_executable_requirement"
+        elif "requirements_not_referenced_by_clause_review" in lowered:
             code = "requirement_relation_mismatch"
         elif "not_backed_by_clause:" in lowered:
             code = "evidence_relation_mismatch"
@@ -151,30 +389,15 @@ def contract_error_records(
             code = "schema_contract_violation"
         else:
             code = "contract_validation_error"
-        pointer_match = re.match(r"(\$[^:]+)", text)
-        clause_match = re.search(r"clause_id=([^:;]+)", text)
-        records.append({
-            "code": code,
-            "json_pointer": pointer_match.group(1) if pointer_match else None,
-            "schema_pointer": pointer_match.group(1) if pointer_match else None,
-            "clause_id": clause_match.group(1) if clause_match else None,
-            "raw_error": text,
-            "response_sha256": _response_sha256(response) if response is not None else None,
-            "allowed_values": (
-                [
-                    "explicit_normative_text", "template_structure", "fixed_statement",
-                    "sample_content", "source_content", "external_duty", "insufficient",
-                ] if "normative_basis" in lowered else None
-            ),
-            "matching_requirement_indexes": (
+        append_generic(
+            code=code, text=text,
+            pointer=pointer_match.group(1) if pointer_match else None,
+            clause_id=clause_match.group(1) if clause_match else None,
+            matching=(
                 relation_facts.get(clause_match.group(1), [])
                 if clause_match else None
             ),
-            "requirement_count": len(requirements) if isinstance(requirements, list) else None,
-            "semantic_review_required": code in {
-                "partial_clause_coverage", "requirement_relation_mismatch",
-            },
-        })
+        )
     return records
 
 
@@ -557,6 +780,8 @@ def validate_response(response: Any, chunk: dict[str, Any]) -> list[str]:
         requirement_clause_sets.append(clause_set)
         if not clause_set:
             errors.append(f"$.requirements[{index}].clause_ids: must_be_non_empty")
+        elif isinstance(clause_ids, list) and len(clause_ids) != len(clause_set):
+            errors.append(f"$.requirements[{index}].clause_ids: duplicate")
         unknown_clauses = sorted(clause_set - set(clause_map))
         if unknown_clauses:
             errors.append(
@@ -573,6 +798,9 @@ def validate_response(response: Any, chunk: dict[str, Any]) -> list[str]:
         }
         if not cited_evidence:
             errors.append(f"$.requirements[{index}].evidence_ids: must_be_non_empty")
+        raw_evidence_ids = item.get("evidence_ids")
+        if isinstance(raw_evidence_ids, list) and len(raw_evidence_ids) != len(cited_evidence):
+            errors.append(f"$.requirements[{index}].evidence_ids: duplicate")
         unknown_evidence = sorted(cited_evidence - evidence_ids)
         if unknown_evidence:
             errors.append(
@@ -592,6 +820,26 @@ def validate_response(response: Any, chunk: dict[str, Any]) -> list[str]:
         ]
         for clause_id in clause_map
     }
+
+    relation_analysis = (
+        analyze_requirement_relations(response, clauses)
+        if contract_version == HOST_REVIEW_CONTRACT_V3 else []
+    )
+    relation_by_index = {
+        int(item["requirement_index"]): item
+        for item in relation_analysis
+        if isinstance(item, dict) and isinstance(item.get("requirement_index"), int)
+    }
+    for fact in relation_analysis:
+        category = str(fact.get("category") or "")
+        code = _RELATION_CATEGORY_CODES.get(category)
+        if code is None or category == "execution":
+            continue
+        requirement_index = int(fact["requirement_index"])
+        details = ",".join(str(value) for value in fact.get("clause_ids", [])) or "none"
+        errors.append(
+            f"$.requirements[{requirement_index}]:{code}:clause_ids={details}"
+        )
 
     expected_clause_ids = [
         str(item.get("id")) for item in clauses if isinstance(item, dict)
@@ -650,7 +898,10 @@ def validate_response(response: Any, chunk: dict[str, Any]) -> list[str]:
                 errors.append(
                     f"$.clause_reviews[{review_index}].requirement_indexes: forbidden_in_contract_3.0"
                 )
-            valid_indexes = matching_requirement_indexes.get(clause_id, [])
+            valid_indexes = [
+                index for index in matching_requirement_indexes.get(clause_id, [])
+                if relation_by_index.get(index, {}).get("category") == "execution"
+            ]
             if isinstance(classification, str) and classification_requires_requirement(classification):
                 referenced_indexes.update(valid_indexes)
                 if not valid_indexes:
@@ -719,6 +970,19 @@ def validate_response(response: Any, chunk: dict[str, Any]) -> list[str]:
                     )
 
     unused_indexes = sorted(set(range(len(requirements))) - referenced_indexes)
+    if contract_version == HOST_REVIEW_CONTRACT_V3:
+        # Relation-specific errors above are authoritative for every known
+        # edge category.  Keep the legacy aggregate only for an unclassified
+        # relation (for example a requirement with no clause_ids), or for an
+        # executable relation that somehow remained unreferenced.  This keeps
+        # one machine-readable record per informational-only requirement
+        # instead of re-emitting the same comma-separated list.
+        unused_indexes = [
+            index for index in unused_indexes
+            if relation_by_index.get(index, {}).get("category") in {
+                None, "execution", "missing_clause_relation",
+            }
+        ]
     if unused_indexes:
         errors.append(
             "requirements_not_referenced_by_clause_review:" + ",".join(map(str, unused_indexes))

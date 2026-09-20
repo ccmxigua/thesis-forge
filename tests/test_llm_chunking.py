@@ -132,6 +132,12 @@ class HostAgentReviewTests(unittest.TestCase):
                 json.loads((review_dir / "merge-receipt.json").read_text())["request_body_sha256"],
                 request["provenance"]["request_sha256"],
             )
+            receipt = json.loads((review_dir / "merge-receipt.json").read_text())
+            ledger = json.loads((review_dir / "semantic-review-ledger.json").read_text())
+            self.assertEqual(receipt["aggregate_sha256"], engine.sha256_json(merged))
+            self.assertEqual(receipt["semantic_review_ledger_sha256"], engine.sha256_json(ledger))
+            self.assertEqual(ledger["response_sha256"], receipt["aggregate_sha256"])
+            self.assertEqual(metadata["semantic_review_ledger_sha256"], receipt["semantic_review_ledger_sha256"])
 
     def test_merge_rejects_chunk_provenance_hash_domain_mismatch(self) -> None:
         clauses = [{

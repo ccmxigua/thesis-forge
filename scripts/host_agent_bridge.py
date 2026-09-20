@@ -183,6 +183,7 @@ from host_review_contract import (  # noqa: E402
     SUPPORTED_HOST_REVIEW_CONTRACTS,
     contract_error_records,
     provenance_error_records,
+    analyze_requirement_relations,
     _response_sha256,
     summarize_contract_errors as _shared_summarize_contract_errors,
     validate_response as _shared_validate_response,
@@ -617,10 +618,48 @@ def _structured_contract_repair_guidance(
                 "keep classification and cited evidence unchanged unless the current evidence independently requires a semantic re-review."
             )
         elif code == "requirement_relation_mismatch":
+            if contract_version == HOST_REVIEW_CONTRACT_V3:
+                rule = (
+                    f"At {pointer}, regenerate the authoritative requirements[].clause_ids relation from the current chunk. "
+                    "Do not emit or maintain a reverse index in clause_reviews. If an executable clause truly has no "
+                    "evidence-backed requirement, add only that requirement and preserve every existing review and requirement."
+                )
+            else:
+                rule = (
+                    f"At {pointer}, do not copy or repair a neighboring relation. The deterministic matching requirement indexes are "
+                    f"{matching if isinstance(matching, list) else 'unknown'}; regenerate the complete relation from the current chunk."
+                )
+        elif code == "informational_requirement_forbidden":
             rule = (
-                f"At {pointer}, do not copy or repair a neighboring relation. The deterministic matching requirement indexes are "
-                f"{matching if isinstance(matching, list) else 'unknown'}; regenerate the complete relation from the current chunk. "
-                "In contract 3.0, if an executable clause has no matching requirement, add the missing evidence-backed requirement (including a declarations requirement for any fixed_declaration_candidate) while preserving every existing requirement and review unchanged."
+                f"At {pointer}, this is a code-owned projection: the bridge will remove the requirement object only after "
+                "recomputing that every linked clause review is informational. Keep each clause_review classification, reason, "
+                "evidence, and source wording unchanged. Do not reclassify the clause, invent a requirement, or edit a "
+                "clause-to-requirement reverse index; if no other repair is required, return the parent object unchanged."
+            )
+        elif code == "mixed_execution_classification_relation":
+            rule = (
+                f"At {pointer}, do not remove or broaden this requirement: its linked clauses mix executable and non-executable classifications. "
+                "Preserve the clauses and classifications and return the response unchanged unless the current evidence supports a genuine semantic re-review."
+            )
+        elif code == "missing_clause_review":
+            rule = (
+                f"At {pointer}, do not infer a missing or duplicate clause review. Preserve the authoritative clause set and fail closed until every linked clause has exactly one current review."
+            )
+        elif code == "unknown_clause_relation":
+            rule = (
+                f"At {pointer}, do not repair an unknown clause_id by guessing a neighboring clause. Use only the exact clause IDs in the current chunk and fail closed otherwise."
+            )
+        elif code == "non_requirement_classification_relation":
+            rule = (
+                f"At {pointer}, do not delete or invent a requirement for an unresolved, unsupported, external, or other non-informational classification. Preserve the semantic state and fail closed."
+            )
+        elif code == "unused_executable_requirement":
+            rule = (
+                f"At {pointer}, preserve this executable requirement and re-check its exact evidence-backed clause binding. Do not delete an executable requirement as a mechanical cleanup."
+            )
+        elif code == "missing_derived_requirement":
+            rule = (
+                f"At {pointer}, add one evidence-backed requirement only if the current executable clause has no authoritative requirement edge; preserve all existing requirements and reviews."
             )
         elif code == "partial_clause_coverage":
             rule = (
@@ -673,12 +712,26 @@ def _structured_contract_repair_guidance(
                 f"At {pointer}, resolve validator code {code} using only the supplied schema and evidence; "
                 "do not guess or reuse a prior response."
             )
-        if contract_version == HOST_REVIEW_CONTRACT_V3 and "requirement indexes" in rule:
-            rule = rule.replace("requirement indexes", "code-derived reverse relation")
         if rule not in seen:
             seen.add(rule)
             lines.append(f"- {rule}")
     return "\n".join(lines) or "- Re-read the current chunk contract and regenerate the complete JSON object."
+
+
+def _strip_v2_relation_guidance(text: str) -> str:
+    """Remove legacy reverse-index prose from a contract-3.0 prompt."""
+    kept: list[str] = []
+    for line in text.splitlines():
+        lowered = line.lower()
+        if (
+            "requirement_indexes" in lowered
+            or "zero-based index" in lowered
+            or "review/index pair" in lowered
+            or re.search(r"\brequirement indexes?\b", lowered)
+        ):
+            continue
+        kept.append(line)
+    return "\n".join(kept)
 
 
 def _semantic_retry_view(response: Any) -> dict[str, Any] | None:
@@ -690,33 +743,31 @@ def _semantic_retry_view(response: Any) -> dict[str, Any] | None:
         if not isinstance(item, dict):
             requirements.append({"invalid": item})
             continue
-        requirements.append({
-            key: copy.deepcopy(item.get(key))
-            for key in (
-                "role", "properties", "clause_ids", "evidence_ids", "existing_requirement_id",
-                "applicability", "input_prerequisites", "verification",
-            )
-            if key in item
-        })
+        # Keep every requirement field in the semantic projection.  The
+        # identity matcher still keys by role/clause/evidence identity, but
+        # retry authorization must also see field_key, confidence, reason,
+        # custom payload fields, and any future contract additions.
+        requirements.append(copy.deepcopy(item))
     reviews: list[dict[str, Any]] = []
     for item in response.get("clause_reviews", []) if isinstance(response.get("clause_reviews"), list) else []:
         if not isinstance(item, dict):
             reviews.append({"invalid": item})
             continue
-        reviews.append({
-            key: copy.deepcopy(item.get(key))
-            for key in (
-                "clause_id", "classification", "normative_basis", "obligations",
-                "requirement_indexes",
-            )
-            if key in item
-        })
+        reviews.append(copy.deepcopy(item))
+    top_level = {
+        key: copy.deepcopy(value)
+        for key, value in response.items()
+        if key not in {
+            "requirements", "clause_reviews", "provenance", "contract_version", "unsupported_items",
+        }
+    }
     return {
         "contract_version": response.get("contract_version"),
         "requirements": requirements,
         "clause_reviews": reviews,
         "unsupported_items": sorted(response.get("unsupported_items") or [])
         if isinstance(response.get("unsupported_items"), list) else response.get("unsupported_items"),
+        "top_level": top_level,
     }
 
 
@@ -813,6 +864,7 @@ def _retry_change_paths(previous: Any, current: Any) -> list[str]:
     )
     visit(before.get("contract_version"), after.get("contract_version"), "$.contract_version")
     visit(before.get("unsupported_items"), after.get("unsupported_items"), "$.unsupported_items")
+    visit(before.get("top_level"), after.get("top_level"), "$.top_level")
     return changed
 
 
@@ -892,7 +944,15 @@ def _retry_changes_allowed(
 
     if (
         contract_version == HOST_REVIEW_CONTRACT_V3
-        and "requirement_relation_mismatch" in codes
+        and _v3_informational_projection_allowed(
+            previous_response, current_response, records, changed_paths, chunk=chunk,
+        )
+    ):
+        return True
+
+    if (
+        contract_version == HOST_REVIEW_CONTRACT_V3
+        and bool(codes & {"requirement_relation_mismatch", "missing_derived_requirement"})
         and _v3_relation_addition_allowed(
             previous_response, current_response, records, changed_paths,
         )
@@ -1082,6 +1142,7 @@ def _v3_incomplete_completion_allowed(
     if not codes <= {
         "empty_requirement_properties",
         "contract_validation_error",
+        "missing_derived_requirement",
         "requirement_relation_mismatch",
         "schema_contract_violation",
         "unknown_property",
@@ -1280,7 +1341,9 @@ def _v3_relation_addition_allowed(
 
     missing_clause_ids: set[str] = set()
     for record in records:
-        if not isinstance(record, dict) or record.get("code") != "requirement_relation_mismatch":
+        if not isinstance(record, dict) or record.get("code") not in {
+            "requirement_relation_mismatch", "missing_derived_requirement",
+        }:
             continue
         match = re.search(r"\$\.clause_reviews\[(\d+)\]", str(record.get("json_pointer") or ""))
         raw_error = str(record.get("raw_error") or "")
@@ -1326,6 +1389,67 @@ def _v3_relation_addition_allowed(
     return True
 
 
+def _v3_informational_projection_allowed(
+    previous_response: Any,
+    current_response: Any,
+    records: list[dict[str, Any]],
+    changed_paths: list[str],
+    *,
+    chunk: dict[str, Any] | None = None,
+) -> bool:
+    """Allow only the separately audited informational-only requirement projection.
+
+    This is deliberately not part of the generic retry semantic-change
+    whitelist.  The previous response must prove the exact informational-only
+    set, and the current response must equal that response with only that set
+    removed by an order-preserving mask.  Provenance is excluded from the
+    comparison because the bridge binds it after local contract validation.
+    """
+    if changed_paths != ["$.requirements"]:
+        return False
+    if not isinstance(previous_response, dict) or not isinstance(current_response, dict):
+        return False
+    if not records or any(
+        not isinstance(record, dict)
+        or record.get("code") != "informational_requirement_forbidden"
+        for record in records
+    ):
+        return False
+    previous_requirements = previous_response.get("requirements")
+    current_requirements = current_response.get("requirements")
+    if not isinstance(previous_requirements, list) or not isinstance(current_requirements, list):
+        return False
+    analysis = analyze_requirement_relations(
+        previous_response,
+        chunk.get("clauses") if isinstance(chunk, dict) else None,
+    )
+    info_indexes = {
+        int(item["requirement_index"])
+        for item in analysis
+        if isinstance(item, dict) and item.get("category") == "informational_only"
+    }
+    record_indexes = {
+        int(record["requirement_index"])
+        for record in records
+        if isinstance(record.get("requirement_index"), int)
+    }
+    if not info_indexes or info_indexes != record_indexes:
+        return False
+    expected_requirements = [
+        item for index, item in enumerate(previous_requirements)
+        if index not in info_indexes
+    ]
+    if current_requirements != expected_requirements:
+        return False
+    previous_without_requirements = copy.deepcopy(previous_response)
+    current_without_requirements = copy.deepcopy(current_response)
+    previous_without_requirements.pop("requirements", None)
+    current_without_requirements.pop("requirements", None)
+    previous_without_requirements.pop("provenance", None)
+    current_without_requirements.pop("provenance", None)
+    return previous_without_requirements == current_without_requirements
+
+
 def _v3_relation_completion_response(
     previous_response: Any,
     current_response: Any,
@@ -1346,7 +1470,9 @@ def _v3_relation_completion_response(
     if chunk is None or not isinstance(previous_response, dict) or not isinstance(current_response, dict):
         return None, None
     if not records or any(
-        not isinstance(record, dict) or record.get("code") != "requirement_relation_mismatch"
+        not isinstance(record, dict) or record.get("code") not in {
+            "requirement_relation_mismatch", "missing_derived_requirement",
+        }
         for record in records
     ):
         return None, None
@@ -1524,7 +1650,7 @@ def _apply_safe_mechanical_repairs(
         return None, []
     allowed_codes = {
         "unknown_property", "evidence_relation_mismatch",
-        "empty_requirement_properties", "requirement_relation_mismatch",
+        "empty_requirement_properties", "informational_requirement_forbidden",
         "applicability_fact_namespace", "partial_clause_coverage",
     }
     if any(
@@ -1535,6 +1661,119 @@ def _apply_safe_mechanical_repairs(
         return None, []
     repaired = copy.deepcopy(response)
     repairs: list[dict[str, Any]] = []
+
+    informational_records = [
+        record for record in error_records
+        if isinstance(record, dict)
+        and record.get("code") == "informational_requirement_forbidden"
+    ]
+    if informational_records:
+        # This is the only relation projection that is currently safe to do
+        # mechanically.  Recompute the complete relation from the current
+        # response and chunk; never trust an index embedded in an error string.
+        analysis_clauses = (
+            chunk.get("clauses") if isinstance(chunk, dict) else None
+        )
+        relation_analysis = analyze_requirement_relations(repaired, analysis_clauses)
+        relation_by_index = {
+            int(item["requirement_index"]): item
+            for item in relation_analysis
+            if isinstance(item, dict) and isinstance(item.get("requirement_index"), int)
+        }
+        candidate_indexes: set[int] = set()
+        for record in informational_records:
+            requirement_index = record.get("requirement_index")
+            if not isinstance(requirement_index, int):
+                match = re.fullmatch(
+                    r"\$\.requirements\[(\d+)\]", str(record.get("json_pointer") or "")
+                )
+                if match is None:
+                    return None, []
+                requirement_index = int(match.group(1))
+            candidate_indexes.add(requirement_index)
+        actual_informational_indexes = {
+            index for index, fact in relation_by_index.items()
+            if fact.get("category") == "informational_only"
+        }
+        if not candidate_indexes or candidate_indexes != actual_informational_indexes:
+            return None, []
+        requirements = repaired.get("requirements")
+        if not isinstance(requirements, list):
+            return None, []
+        authoritative_clauses = (
+            analysis_clauses if isinstance(analysis_clauses, list) else []
+        )
+        clause_counts: dict[str, int] = {}
+        for clause in authoritative_clauses:
+            if isinstance(clause, dict) and clause.get("id"):
+                clause_id = str(clause["id"])
+                clause_counts[clause_id] = clause_counts.get(clause_id, 0) + 1
+        reviews = repaired.get("clause_reviews")
+        if not isinstance(reviews, list):
+            return None, []
+        review_counts: dict[str, int] = {}
+        review_classes: dict[str, list[str]] = {}
+        for review in reviews:
+            if not isinstance(review, dict) or not review.get("clause_id"):
+                continue
+            clause_id = str(review["clause_id"])
+            review_counts[clause_id] = review_counts.get(clause_id, 0) + 1
+            review_classes.setdefault(clause_id, []).append(
+                str(review.get("classification") or "")
+            )
+        removed_requirement_fingerprints: list[str] = []
+        for index in sorted(candidate_indexes):
+            if index < 0 or index >= len(requirements) or not isinstance(requirements[index], dict):
+                return None, []
+            requirement = requirements[index]
+            raw_clause_ids = requirement.get("clause_ids")
+            if not isinstance(raw_clause_ids, list) or not raw_clause_ids:
+                return None, []
+            clause_ids = [str(value) for value in raw_clause_ids]
+            if len(clause_ids) != len(set(clause_ids)):
+                return None, []
+            for clause_id in clause_ids:
+                if authoritative_clauses and clause_counts.get(clause_id) != 1:
+                    return None, []
+                if review_counts.get(clause_id) != 1 or review_classes.get(clause_id) != ["informational"]:
+                    return None, []
+            removed_requirement_fingerprints.append(_response_sha256(requirement))
+            repairs.append({
+                "code": "informational_requirement_forbidden",
+                "rule_id": "remove_informational_only_requirement_v1",
+                "removed_requirement_index": index,
+                "removed_clause_ids": clause_ids,
+                "removed_requirement": copy.deepcopy(requirement),
+                "removed_requirement_sha256": removed_requirement_fingerprints[-1],
+                "linked_classifications": {
+                    clause_id: list(review_classes[clause_id]) for clause_id in clause_ids
+                },
+                "reason": "every linked clause review is exactly informational",
+            })
+        original_count = len(requirements)
+        retained_index_map: dict[str, int | None] = {}
+        repaired_requirements: list[dict[str, Any]] = []
+        for index, requirement in enumerate(requirements):
+            if index in candidate_indexes:
+                retained_index_map[str(index)] = None
+                continue
+            retained_index_map[str(index)] = len(repaired_requirements)
+            repaired_requirements.append(requirement)
+        repaired["requirements"] = repaired_requirements
+        repairs.append({
+            "code": "informational_requirement_forbidden",
+            "rule_id": "remove_informational_only_requirement_v1",
+            "removed_requirement_indexes": sorted(candidate_indexes),
+            "removed_requirement_count": len(candidate_indexes),
+            "before_requirement_count": original_count,
+            "after_requirement_count": len(repaired["requirements"]),
+            "projection": "ordered_mask",
+            "original_index_to_repaired_index": retained_index_map,
+            "removed_requirement_fingerprints": removed_requirement_fingerprints,
+            "source_response_sha256": _response_sha256(response),
+            "repaired_response_sha256": _response_sha256(repaired),
+        })
+        return repaired, repairs
 
     # The source clause explicitly says the continuation caption may be
     # omitted. If the model nevertheless emits the boolean continuation flag
@@ -1690,63 +1929,11 @@ def _apply_safe_mechanical_repairs(
                 current = current[position]
         return current
 
-    relation_records = [
-        record for record in error_records
-        if isinstance(record, dict) and record.get("code") == "requirement_relation_mismatch"
-    ]
-    if len(relation_records) > 1:
-        return None, []
-    ordered_records = [
-        record for record in error_records
-        if not isinstance(record, dict) or record.get("code") != "requirement_relation_mismatch"
-    ] + relation_records
-    for record in ordered_records:
+    for record in error_records:
         pointer = record.get("json_pointer")
         raw_error = str(record.get("raw_error") or "")
         unknown_match = re.search(r"unknown property ['\"]([^'\"]+)['\"]", raw_error)
         evidence_match = re.search(r"not_backed_by_clause:([^;\s]+)", raw_error)
-        if record.get("code") == "requirement_relation_mismatch":
-            relation_match = re.fullmatch(
-                r"requirements_not_referenced_by_clause_review:(\d+)", raw_error,
-            )
-            requirements = repaired.get("requirements")
-            reviews = repaired.get("clause_reviews")
-            if (
-                relation_match is None
-                or not isinstance(requirements, list)
-                or not isinstance(reviews, list)
-            ):
-                return None, []
-            requirement_index = int(relation_match.group(1))
-            if requirement_index >= len(requirements) or not isinstance(
-                requirements[requirement_index], dict
-            ):
-                return None, []
-            requirement = requirements[requirement_index]
-            clause_ids = requirement.get("clause_ids")
-            if not isinstance(clause_ids, list) or not clause_ids:
-                return None, []
-            review_by_clause = {
-                str(review.get("clause_id")): review
-                for review in reviews
-                if isinstance(review, dict) and review.get("clause_id")
-            }
-            if any(
-                clause_id not in review_by_clause
-                or classification_requires_requirement(
-                    str(review_by_clause[clause_id].get("classification"))
-                )
-                for clause_id in map(str, clause_ids)
-            ):
-                return None, []
-            del requirements[requirement_index]
-            repairs.append({
-                "code": "requirement_relation_mismatch",
-                "removed_requirement_index": requirement_index,
-                "removed_clause_ids": [str(value) for value in clause_ids],
-                "reason": "all linked clause reviews are non-requirement classifications",
-            })
-            continue
         if not isinstance(pointer, str):
             return None, []
         target = resolve_pointer(pointer)
@@ -1994,10 +2181,7 @@ def _host_prompt(*, request_path: Path, chunk_path: Path,
         # The v3 packet removes the reverse relation from the model-facing
         # schema.  Do not leave v2 repair prose in the prompt, because a retry
         # must not reintroduce the duplicate model-maintained index.
-        repair_guidance = "\n".join(
-            line for line in repair_guidance.splitlines()
-            if "requirement_indexes" not in line
-        )
+        repair_guidance = _strip_v2_relation_guidance(repair_guidance)
     if retry_hint:
         retry_guidance = (
             _structured_contract_repair_guidance(
@@ -2006,10 +2190,7 @@ def _host_prompt(*, request_path: Path, chunk_path: Path,
             if retry_error_records else _contract_repair_guidance(retry_hint, include_base=False)
         )
         if contract_version == HOST_REVIEW_CONTRACT_V3:
-            retry_guidance = "\n".join(
-                line for line in retry_guidance.splitlines()
-                if "requirement_indexes" not in line
-            )
+            retry_guidance = _strip_v2_relation_guidance(retry_guidance)
         retry_text = (
             "\nThis is a retry after the previous attempt was rejected locally. "
             "Do not discuss the failure; return a newly generated valid JSON object. "
@@ -2022,7 +2203,21 @@ def _host_prompt(*, request_path: Path, chunk_path: Path,
         if contract_version == HOST_REVIEW_CONTRACT_V3 else
         "Maintain requirement_indexes exactly as required by the contract and verify every index against requirements[index].clause_ids."
     )
+    retry_codes = {
+        str(item.get("code")) for item in (retry_error_records or [])
+        if isinstance(item, dict)
+    }
+    v3_relation_addition_retry = (
+        contract_version == HOST_REVIEW_CONTRACT_V3
+        and bool(retry_codes & {"requirement_relation_mismatch", "missing_derived_requirement"})
+    )
     if retry_parent_response_path is not None:
+        requirement_change_rule = (
+            "For an executable clause explicitly identified by the validator as missing an authoritative requirement edge, "
+            "the retry may add only that evidence-backed requirement; preserve every existing requirement and review unchanged."
+            if v3_relation_addition_retry else
+            "Do not split, merge, add, drop, or reorder requirements, and do not reclassify a clause."
+        )
         parent_text = f"""The rejected parent response is available only as a repair baseline at:
 {retry_parent_response_path}
 Read that file on this retry. The current chunk packet and cited evidence remain
@@ -2030,8 +2225,7 @@ the semantic authority. Preserve every non-error semantic field from the parent
 response exactly: clause IDs, classifications, obligations, requirement count,
 roles, clause_ids, evidence_ids, applicability, prerequisites, verification,
 and unrelated properties. Apply only the minimum mechanical edits explicitly
-identified by the structured validator records above. Do not split, merge, add,
-drop, or reorder requirements, and do not reclassify a clause. Return the full
+identified by the structured validator records above. {requirement_change_rule} Return the full
 response object, not a patch. The bridge will reject any unapproved semantic
 drift. Parent response sha256: {retry_parent_response_sha256 or 'unavailable'}."""
     else:
@@ -2041,13 +2235,23 @@ drift. Parent response sha256: {retry_parent_response_sha256 or 'unavailable'}."
             if retry_parent_response_sha256 else "There is no prior response to reuse."
         )
     retry_invariant = (
-        """\nFINAL RETRY INVARIANT: copy every clause_review classification, obligation,
+        (
+            """\nFINAL RETRY INVARIANT: copy every clause_review classification, obligation,
+requirement identity, clause_ids, and evidence_ids from the repair baseline exactly. The
+only permitted requirement-list difference is one new, evidence-backed requirement
+for the validator-identified executable clause. Do not turn an unresolved or
+informational review into executable. If a safe local repair is not possible
+without changing semantics, return the parent object unchanged and let the
+bridge fail closed."""
+        ) if v3_relation_addition_retry else (
+            """\nFINAL RETRY INVARIANT: copy every clause_review classification, obligation,
 requirement identity, clause_ids, evidence_ids, and requirement count from the
 repair baseline exactly. The only permitted differences are the exact property
 paths named by the structured validator records above. If a review is already
-classified executable, repair its missing relation only; do not turn an unresolved or informational review into executable. If a safe local repair is
-not possible without changing semantics, return the parent object unchanged
-and let the bridge fail closed."""
+classified executable, repair its missing relation only; do not turn an unresolved or informational review into executable. If a safe local repair is not possible
+without changing semantics, return the parent object unchanged and let the
+bridge fail closed."""
+        )
         if retry_parent_response_path is not None else ""
     )
     return f"""You are the current Host Agent for one fresh thesis-format semantic-review run.
@@ -2427,6 +2631,7 @@ def run_host_agent_chunk(
         raise ValueError("current Host Agent chunk has no local response schema")
     response = normalize_native_response(raw_response, response_schema)
     mechanical_repairs: list[dict[str, Any]] = []
+    mechanical_repair_revalidation: dict[str, Any] | None = None
     contract_errors = validate_host_agent_response(response, chunk)
     if contract_errors:
         error_records = contract_error_records(
@@ -2439,7 +2644,21 @@ def run_host_agent_chunk(
             remaining_errors = validate_host_agent_response(repaired_response, chunk)
             if not remaining_errors:
                 response = repaired_response
+                mechanical_repair_revalidation = {
+                    "status": "passed",
+                    "remaining_error_count": 0,
+                    "remaining_error_codes": [],
+                }
             else:
+                mechanical_repair_revalidation = {
+                    "status": "failed",
+                    "remaining_error_count": len(remaining_errors),
+                    "remaining_error_codes": sorted({
+                        str(error.get("code") or "unknown")
+                        for error in remaining_errors
+                        if isinstance(error, dict)
+                    }),
+                }
                 error = ValueError(
                     "local response contract validation failed before provenance binding: "
                     + _summarize_contract_errors(remaining_errors)
@@ -2505,11 +2724,23 @@ def run_host_agent_chunk(
         "model_packet_sha256": sha256_file(model_packet_path),
         "raw_envelope_path": str(raw_envelope_path.resolve()),
         "raw_response_path": str(raw_response_path.resolve()),
+        "raw_response_sha256": _response_sha256(raw_response),
+        "accepted_response_sha256": _response_sha256(response),
+        "mechanical_repair_policy": (
+            "remove_informational_only_requirement_v1 is the only relation projection; "
+            "all other relation categories fail closed"
+        ),
         "finished_at": datetime.now(timezone.utc).isoformat(),
         "retry_parent_response_sha256": retry_parent_response_sha256,
     }
     if mechanical_repairs:
         audit["mechanical_repairs"] = mechanical_repairs
+        audit["mechanical_repair_count"] = len(mechanical_repairs)
+        audit["mechanical_repair_revalidation"] = mechanical_repair_revalidation or {
+            "status": "not_run",
+            "remaining_error_count": None,
+            "remaining_error_codes": [],
+        }
     audit["provenance_observed"] = isinstance(observed_provenance, dict)
     audit["provenance_mismatch_fields"] = provenance_mismatch_fields
     audit["provenance_binding"] = provenance_binding
@@ -2934,7 +3165,16 @@ def run_bridge(
                             raise change_error
                         if semantic_changes:
                             audit["semantic_retry_changes"] = semantic_changes
-                            audit["semantic_retry_change_policy"] = "mechanical_only"
+                            if all(
+                                isinstance(record, dict)
+                                and record.get("code") == "informational_requirement_forbidden"
+                                for record in retry_error_records
+                            ):
+                                audit["semantic_retry_change_policy"] = (
+                                    "code_owned_informational_projection"
+                                )
+                            else:
+                                audit["semantic_retry_change_policy"] = "mechanical_only"
                 response = _read_json(
                     attempt_response_path,
                     label=f"Host Agent response {index} attempt {attempt}",
@@ -3019,6 +3259,15 @@ def run_bridge(
                                 ),
                                 response_schema,
                             )
+                            if _response_sha256(previous_response) == _response_sha256(current_response):
+                                with lifecycle_lock:
+                                    chunk_lifecycle[index].setdefault(
+                                        "no_progress_events", []
+                                    ).append({
+                                        "attempt": attempt,
+                                        "response_sha256": _response_sha256(current_response),
+                                        "reason": "retry_response_identical_to_parent",
+                                    })
                             change_error, semantic_changes = _retry_semantic_change_error(
                                 previous_response,
                                 current_response,

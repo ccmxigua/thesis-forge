@@ -160,6 +160,20 @@ PENDING_SEMANTIC_ROLES = {
 CONTENT_INSTANCE_ROLES = set(ALL_TEXT_ROLES) | PENDING_SEMANTIC_ROLES
 ALLOWED_REQUIREMENT_ROLES = set(ALL_TEXT_ROLES) | TOP_LEVEL_REQUIREMENT_ROLES | PENDING_SEMANTIC_ROLES
 
+# ``merge_llm_primary`` has a few narrow, evidence-context guard rails that
+# may change an accepted review disposition before the deterministic spec is
+# compiled.  They are not generic semantic inference and must not be reported
+# as if no transformation happened.  Keep the policy versioned so a future
+# guard cannot silently acquire authority merely by being added to the merge
+# function.
+MERGE_SEMANTIC_TRANSFORM_POLICY_VERSION = "merge-semantic-guards-v1"
+AUTHORIZED_MERGE_SEMANTIC_TRANSFORMS = {
+    "non_normative_sample_content": "registered_evidence_context_guard_v1",
+    "physical_spine_clearance_annotation": "registered_evidence_context_guard_v1",
+    "manual_empty_requirement_normalization": "registered_contract_boundary_v1",
+    "declaration_placeholder_only_normalization": "registered_declaration_boundary_v1",
+}
+
 
 def _requires_external_artifact_verification(text: str) -> bool:
     """Return true for obligations a DOCX file cannot itself satisfy or prove."""
@@ -1449,12 +1463,12 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
                 "When the current packet exposes fixed_declaration_candidates, treat them as deterministic exact evidence groupings. If any candidate clause is classified executable/covered/verify_existing, emit one declarations requirement covering its clause_ids, copy the cited heading/body text exactly, and preserve the supplied declaration anchor; never leave an executable fixed-declaration clause without a derived declarations requirement.",
                 "Never identify a declaration by institution or school name in the execution contract. The current input evidence is the only source of fixed declaration text; if it is not available, classify the clause as unresolved or requires_source_content.",
                 "The source_continuity_context is orientation-only: do not emit clause_reviews or requirements for its clause IDs, and do not cite its evidence unless that evidence is also present in the current chunk. It shows adjacent source clauses so a fixed declaration split at a chunk boundary can retain one semantic item and one verified insertion anchor.",
-                "Declaration continuity rule: when the current clause is a continuation of a fixed declaration shown in source_continuity_context, keep the same semantic declaration item and before_role as the continuation. Never create competing declaration anchors merely because fragments arrived in different chunks. If identity or placement cannot be established from current evidence and continuity context, classify the clause as unresolved or external_compliance with requirement_indexes: [] instead of guessing.",
+                "Declaration continuity rule: when the current clause is a continuation of a fixed declaration shown in source_continuity_context, keep the same semantic declaration item and before_role as the continuation. Never create competing declaration anchors merely because fragments arrived in different chunks. If identity or placement cannot be established from current evidence and continuity context, classify the clause as unresolved or external_compliance without emitting a requirement.",
                 "Generic author-name, date, signature, or location lines (for example 作者姓名 or 年 月 日于某校) are metadata/signature material, not an executable declarations requirement by themselves. Keep them non-executable unless current evidence contains an explicit fixed declaration heading/body that they complete.",
                 "For declarations.properties.before_role use exactly declaration_anchor_preference, which is the deterministic placement selected from the current target structure; it must also be one of declaration_anchor_candidates. The value declarations is a requirement role, not an insertion anchor. If the current chunk is a continuation and the earlier heading evidence is outside this chunk, omit heading rather than shortening a body paragraph into a guessed heading; the deterministic merger will combine it with the same semantic item from the earlier chunk.",
                 "A cover requirement declares document structure independently of instance metadata. Bind fields deterministically to thesis_profile.cover_metadata; when the complete confirmed metadata record is absent, preserve required cover fields with the neutral placeholder configured by cover.missing_value_placeholder (default ——). Never infer identity, degree, supervisor, security approval, physical cover color, or spine compliance.",
                 "Administrative approval/marking tables are not ordinary cover fields. Represent them under cover.non_public_administration with an explicit conditional applicability on thesis_profile.security_level using operator equals or in (not_equals is not an accepted executable binding), public_policy:'blank', and source_region. If the current chunk contains only this administrative region, cover.fields may be an empty array; never duplicate administrative fields into ordinary cover.fields. Bind 审批表编号 only to approval_number and 批准日期 only to approval_date; never substitute classification_number or completion_date. When one visible 保密期限 label describes an explicit two-ended date range, preserve two distinct fields in source order: first embargo_start, then embargo_until; do not collapse both endpoints into embargo_until. For public theses keep this administrative region blank/conditional and do not require absent approval data.",
-                "Atomic coverage gate: split each clause into independently verifiable obligations. A covered, executable, or verify_existing review is valid only when every obligation in the cited clause is represented by the referenced requirement properties and its verification contract. If any length bound, language target, exception, prohibited-content, semantic, or placement obligation remains unresolved, classify the clause as unresolved, requires_source_content, requires_metadata, unsupported_backend, or unverifiable with requirement_indexes: []; never mark a partial requirement as full clause coverage.",
+                "Atomic coverage gate: split each clause into independently verifiable obligations. A covered, executable, or verify_existing review is valid only when every obligation in the cited clause is represented by the referenced requirement properties and its verification contract. If any length bound, language target, exception, prohibited-content, semantic, or placement obligation remains unresolved, classify the clause as unresolved, requires_source_content, requires_metadata, unsupported_backend, or unverifiable without emitting a requirement; never mark a partial requirement as full clause coverage.",
                 "A single clause may support multiple requirements when it contains obligations for different roles. In that case, repeat the exact clause_id and its cited evidence_ids in each semantically matching requirement; for example, a continuation-table clause may support both a table continuation requirement and a table_caption position/alignment requirement. Do not hide one role's obligation inside another role or reclassify the clause merely because one role is incomplete.",
                 "Role boundary for equations: use the top-level equations role for document-level equation layout properties declared by equationLayoutSpec, such as same_line, no_lines, alignment, number_alignment, number_parentheses, center_tab_twips, or right_tab_twips. Use the text role equation only for an exact equation/content occurrence. Never put style or an invented layout key in the equation role; if no declared equations property represents the cited rule, preserve the clause as non-executable rather than guessing.",
                 "Do not replace one field with a merely similar field (for example approval date with completion date, classification number with approval number, or Chinese abstract with English abstract). Preserve the original target language, unit, modal words, exceptions, and scope. A value that is not present in the current chunk is not evidence that it is absent from the whole run; use the supplied evidence_context and runtime context, and defer when still unknown.",
@@ -1468,13 +1482,10 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
                 "Use input_prerequisites for required metadata, source content, template resources, or runtime services. Keys must use the registered namespace for their kind: metadata uses thesis_profile., source_content uses source_inventory., template_resource uses template_profile., and runtime uses runtime. (for example runtime.anchor_inventory, never runtime_context.*). Do not fabricate missing inputs.",
                 "Use verification to declare the minimum evidence mode: static_docx, word_render, pdf_render, manual, or external.",
                 "Resolve each clause through its evidence_ids and the matching evidence_context entry; the evidence map is authoritative for source text, runs, styles, location, and neighboring context.",
-                "requirement_indexes are zero-based indexes into this response's requirements array. They MUST be [] for informational, requires_metadata, requires_source_content, external_compliance, not_applicable, unsupported_backend, unsupported, unverifiable, unresolved, or ignored reviews; only covered, executable, and verify_existing may reference requirements.",
                 "Use verify_existing only when an existing_requirement_id is being reused and the emitted role, properties, evidence_ids, and source text are an exact evidence-backed match. If the evidence occurrence differs, emit a new requirement or use a non-executable classification; do not force an existing_requirement_id.",
                 "Every emitted requirement must be referenced by at least one covered, executable, or verify_existing clause_review; do not emit unused requirement objects. Every such clause review reference must point to a semantically matching emitted requirement.",
                 "Every emitted requirement MUST contain at least one non-null property in its role-specific properties object. A field_key identifies a content instance but is not an executable payload; do not emit properties: {} or use field_key alone. For text and cover-field roles, copy the exact evidence-backed text into properties.text; for style/layout roles, emit the declared nested style or layout property.",
-                "Mechanical reference gate: for every covered, executable, or verify_existing clause_review, each requirement_indexes entry must point to a requirements[index] whose clause_ids contains that exact review clause_id. Check every clause/index pair independently; never carry an adjacent clause's index, merge unrelated clause references, or change clause_ids merely to make validation pass.",
                 "Mechanical response gate: classification is not normative_basis. Never put informational, executable, or any classification string into normative_basis; use only the enum values declared by response_schema and omit the field when no declared basis is supported.",
-                "Mechanical response gate: requirement_indexes MUST be [] for every non-executable classification, including informational, requires_metadata, requires_source_content, external_compliance, not_applicable, unsupported_backend, unsupported, unverifiable, unresolved, and ignored.",
                 "Mechanical response gate: require_after_role and keyword constraints must remain at the exact nested path declared by the selected role_properties_schema. Do not create a top-level keywords_zh/keywords_en role or move nested properties into a different role.",
                 "Mechanical response gate: on retry after local rejection, regenerate the complete object from this chunk. Never auto-correct an invalid enum, invent missing evidence, change a semantic classification without evidence, or reuse a prior response. Apply only mechanical schema corrections explicitly required by the validator, such as omitting an invalid optional field or using [] for a non-executable classification.",
                 "Mechanical retry gate: a partial_clause_coverage error does not authorize changing classification, obligations, clause_ids, or requirement count. Preserve the baseline classification and complete the missing role-specific requirement only when the current evidence and declared schema support it; otherwise return the baseline unchanged and let the bridge fail closed.",
@@ -1518,6 +1529,11 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
         }
         review_properties = request["response_schema"]["properties"]["clause_reviews"]["items"]["properties"]
         if contract_version == HOST_REVIEW_CONTRACT_V2:
+            request["instructions"].extend([
+                "Contract 2.1 uses clause_reviews[].requirement_indexes as a model-authored zero-based reverse relation into this response's requirements array.",
+                "For every covered, executable, or verify_existing clause_review, each requirement_indexes entry must point to a requirement whose clause_ids contains that exact clause_id; check every clause/index pair independently.",
+                "requirement_indexes MUST be [] for informational, requires_metadata, requires_source_content, external_compliance, not_applicable, unsupported_backend, unsupported, unverifiable, unresolved, or ignored reviews.",
+            ])
             review_properties["requirement_indexes"] = {
                 "type": "array", "items": {"type": "integer", "minimum": 0},
                 "uniqueItems": True,
@@ -1526,10 +1542,6 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
             # The reverse relation is a derived compatibility view produced by
             # the code after validation.  It is deliberately absent from the
             # model-facing schema so the model cannot maintain two indexes.
-            request["instructions"] = [
-                line for line in request["instructions"]
-                if "requirement_indexes" not in line
-            ]
             request["instructions"].extend([
                 "Contract 3.0 has one authoritative relation: requirements[].clause_ids. Do not emit clause_reviews[].requirement_indexes; the bridge derives that reverse view after validation.",
                 "For a covered, executable, or verify_existing clause, emit at least one requirement whose clause_ids contains that exact clause_id. For every non-executable classification, emit no requirement for that clause.",
@@ -1666,13 +1678,14 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
         "input": "validated_host_review_response",
         "input_response_sha256": input_response_sha256,
         "input_rule_spec_sha256": input_rule_spec_sha256,
-        "semantic_inference": "disabled",
+        "semantic_inference": "disabled_for_unauthorized_changes",
+        "semantic_transformation_policy_version": MERGE_SEMANTIC_TRANSFORM_POLICY_VERSION,
+        "authorized_semantic_transforms": copy.deepcopy(AUTHORIZED_MERGE_SEMANTIC_TRANSFORMS),
         "allowed_transformations": [
             "derive_contract_3_reverse_relation",
             "project_authoritative_existing_requirement_payload",
             "normalize_registered_content_instances",
-            "record_non_normative_sample_guard",
-            "record_manual_or_external_verification_boundary",
+            "apply_versioned_registered_semantic_guard",
         ],
         "unauthorized_change_action": "blocking_conflict",
         "post_merge_gate": "validate_spec_and_compliance_summary",
@@ -1698,7 +1711,8 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
         audit.append({
             "type": "existing_requirement_payload_projection",
             "rule_id": "authoritative_existing_requirement_payload",
-            "semantic_inference": "disabled",
+            "semantic_inference": "disabled_for_unauthorized_changes",
+            "authorization": "deterministic_existing_requirement_projection_v1",
             "repairs": existing_payload_repairs,
             "action": "replace_model_payload_with_exact_deterministic_baseline",
         })
@@ -1780,6 +1794,9 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
             audit.append({
                 "type": "normative_scope_guard",
                 "guard": "non_normative_sample_content",
+                "policy_version": MERGE_SEMANTIC_TRANSFORM_POLICY_VERSION,
+                "authorization": AUTHORIZED_MERGE_SEMANTIC_TRANSFORMS["non_normative_sample_content"],
+                "semantic_inference": "deterministic_guard",
                 "changes": sample_content_changes,
             })
         # Word emits the modern drawing and its VML fallback as separate
@@ -1807,6 +1824,9 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
             audit.append({
                 "type": "evidence_context_reclassification",
                 "guard": "physical_spine_clearance_annotation",
+                "policy_version": MERGE_SEMANTIC_TRANSFORM_POLICY_VERSION,
+                "authorization": AUTHORIZED_MERGE_SEMANTIC_TRANSFORMS["physical_spine_clearance_annotation"],
+                "semantic_inference": "deterministic_guard",
                 "changes": spine_changes,
             })
         # A manual-only observation is not an executable formatting rule.  In
@@ -1839,6 +1859,9 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
                     ).strip()
             audit.append({
                 "type": "manual_empty_requirement_normalization",
+                "policy_version": MERGE_SEMANTIC_TRANSFORM_POLICY_VERSION,
+                "authorization": AUTHORIZED_MERGE_SEMANTIC_TRANSFORMS["manual_empty_requirement_normalization"],
+                "semantic_inference": "deterministic_contract_boundary",
                 "response_indexes": sorted(manual_empty_indexes),
                 "action": "removed_from_execution_and_preserved_as_unverifiable",
             })
@@ -1893,6 +1916,9 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
                     })
             audit.append({
                 "type": "declaration_placeholder_only_normalization",
+                "policy_version": MERGE_SEMANTIC_TRANSFORM_POLICY_VERSION,
+                "authorization": AUTHORIZED_MERGE_SEMANTIC_TRANSFORMS["declaration_placeholder_only_normalization"],
+                "semantic_inference": "deterministic_declaration_boundary",
                 "response_indexes": sorted(placeholder_only_declaration_indexes),
                 "changes": changes,
                 "action": "removed_from_execution_and_preserved_as_informational_source_content",

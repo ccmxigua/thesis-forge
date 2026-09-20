@@ -570,6 +570,43 @@ class HostAgentBridgeTests(unittest.TestCase):
             previous_response=previous, current_response=current,
         ))
 
+    def test_v3_retry_allows_only_proven_informational_projection(self) -> None:
+        previous = {
+            "contract_version": "3.0",
+            "requirements": [
+                {"role": "body_text", "properties": {"text": "保留"}, "clause_ids": ["C1"]},
+                {"role": "body_text", "properties": {"text": "删除一"}, "clause_ids": ["C2"]},
+                {"role": "body_text", "properties": {"text": "删除二"}, "clause_ids": ["C3"]},
+            ],
+            "clause_reviews": [
+                {"clause_id": "C1", "classification": "executable"},
+                {"clause_id": "C2", "classification": "informational"},
+                {"clause_id": "C3", "classification": "informational"},
+            ],
+            "unsupported_items": [],
+            "reported_conflicts": [],
+        }
+        current = json.loads(json.dumps(previous))
+        current["requirements"] = [json.loads(json.dumps(previous["requirements"][0]))]
+        records = [
+            {"code": "informational_requirement_forbidden", "requirement_index": 1},
+            {"code": "informational_requirement_forbidden", "requirement_index": 2},
+        ]
+        changed = bridge._retry_change_paths(previous, current)
+        self.assertEqual(changed, ["$.requirements"])
+        self.assertTrue(bridge._retry_changes_allowed(
+            records, changed, contract_version="3.0",
+            previous_response=previous, current_response=current,
+            chunk={"clauses": [{"id": f"C{i}"} for i in range(1, 4)]},
+        ))
+        current["requirements"][0]["properties"]["text"] = "改动了保留项"
+        changed = bridge._retry_change_paths(previous, current)
+        self.assertFalse(bridge._retry_changes_allowed(
+            records, changed, contract_version="3.0",
+            previous_response=previous, current_response=current,
+            chunk={"clauses": [{"id": f"C{i}"} for i in range(1, 4)]},
+        ))
+
     def test_v3_retry_restores_omitted_baseline_requirements_before_accepting_additions(self) -> None:
         previous = {
             "contract_version": "3.0",
@@ -777,26 +814,112 @@ class HostAgentBridgeTests(unittest.TestCase):
             previous_response=previous, current_response=current, chunk=chunk,
         ))
 
-    def test_mechanical_repair_removes_requirement_only_for_non_requirement_review(self) -> None:
+    def test_mechanical_repair_removes_informational_only_requirement(self) -> None:
         response = {
             "requirements": [{
                 "role": "body_text", "properties": {"text": "签名"},
                 "clause_ids": ["C1"], "evidence_ids": ["E1"],
             }],
             "clause_reviews": [{
-                "clause_id": "C1", "classification": "external_compliance",
+                "clause_id": "C1", "classification": "informational",
             }],
         }
         repaired, repairs = bridge._apply_safe_mechanical_repairs(
             response,
             [{
-                "code": "requirement_relation_mismatch",
+                "code": "informational_requirement_forbidden",
+                "requirement_index": 0,
                 "raw_error": "requirements_not_referenced_by_clause_review:0",
             }],
         )
         self.assertEqual(repaired["requirements"], [])
         self.assertEqual(repairs[0]["removed_clause_ids"], ["C1"])
+        self.assertEqual(repairs[0]["removed_requirement"]["clause_ids"], ["C1"])
+        self.assertEqual(
+            repairs[0]["removed_requirement_sha256"],
+            bridge._response_sha256(response["requirements"][0]),
+        )
         self.assertEqual(len(response["requirements"]), 1)
+
+    def test_mechanical_repair_removes_batch_informational_requirements_by_mask(self) -> None:
+        response = {
+            "requirements": [
+                {"role": "body_text", "properties": {"text": "一"}, "clause_ids": ["C1"]},
+                {"role": "body_text", "properties": {"text": "二"}, "clause_ids": ["C2"]},
+                {"role": "body_text", "properties": {"text": "三"}, "clause_ids": ["C3"]},
+                {"role": "body_text", "properties": {"text": "四"}, "clause_ids": ["C4"]},
+            ],
+            "clause_reviews": [
+                {"clause_id": "C1", "classification": "informational"},
+                {"clause_id": "C2", "classification": "informational"},
+                {"clause_id": "C3", "classification": "executable"},
+                {"clause_id": "C4", "classification": "informational"},
+            ],
+        }
+        repaired, repairs = bridge._apply_safe_mechanical_repairs(
+            response,
+            [
+                {"code": "informational_requirement_forbidden", "requirement_index": 0},
+                {"code": "informational_requirement_forbidden", "requirement_index": 1},
+                {"code": "informational_requirement_forbidden", "requirement_index": 3},
+            ],
+        )
+        self.assertEqual(
+            [item["clause_ids"] for item in repaired["requirements"]], [["C3"]]
+        )
+        self.assertEqual(repairs[-1]["removed_requirement_indexes"], [0, 1, 3])
+        self.assertEqual(repairs[-1]["projection"], "ordered_mask")
+        self.assertEqual(
+            repairs[-1]["original_index_to_repaired_index"],
+            {"0": None, "1": None, "2": 0, "3": None},
+        )
+        self.assertEqual(
+            repairs[-1]["removed_requirement_fingerprints"],
+            [
+                bridge._response_sha256(response["requirements"][0]),
+                bridge._response_sha256(response["requirements"][1]),
+                bridge._response_sha256(response["requirements"][3]),
+            ],
+        )
+        self.assertEqual(
+            repairs[-1]["source_response_sha256"],
+            bridge._response_sha256(response),
+        )
+        self.assertEqual(
+            repairs[-1]["repaired_response_sha256"],
+            bridge._response_sha256(repaired),
+        )
+        self.assertEqual(len(response["requirements"]), 4)
+
+    def test_mechanical_repair_never_removes_mixed_or_noninformational_relations(self) -> None:
+        cases = [
+            (
+                [{"role": "body_text", "properties": {"text": "混合"}, "clause_ids": ["C1", "C2"]}],
+                [
+                    {"clause_id": "C1", "classification": "informational"},
+                    {"clause_id": "C2", "classification": "executable"},
+                ],
+            ),
+            (
+                [{"role": "body_text", "properties": {"text": "外部"}, "clause_ids": ["C1"]}],
+                [{"clause_id": "C1", "classification": "external_compliance"}],
+            ),
+            (
+                [{"role": "body_text", "properties": {"text": "缺审查"}, "clause_ids": ["C1"]}],
+                [],
+            ),
+        ]
+        for requirements, reviews in cases:
+            response = {"requirements": requirements, "clause_reviews": reviews}
+            repaired, repairs = bridge._apply_safe_mechanical_repairs(
+                response,
+                [{
+                    "code": "informational_requirement_forbidden",
+                    "requirement_index": 0,
+                }],
+            )
+            self.assertIsNone(repaired)
+            self.assertEqual(repairs, [])
 
     def test_mechanical_repair_normalizes_explicitly_optional_continuation_caption(self) -> None:
         response = {

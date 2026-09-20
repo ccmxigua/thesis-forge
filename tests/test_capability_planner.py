@@ -13,6 +13,8 @@ from pathlib import Path
 from docx import Document
 
 from scripts.format_spec_validation import load_and_validate
+from scripts.requirements_engine import build_llm_request
+from scripts.semantic_contract import attach_request_provenance
 
 ROOT = Path(__file__).resolve().parents[1]
 PY = sys.executable
@@ -504,6 +506,70 @@ class CapabilityPlannerTest(unittest.TestCase):
         report = {"findings": [{"code": "capability.requirement_unknown", "blocking": True}]}
         self.assertTrue(self.pipeline.capability_gate_blocked(report, "full"))
         self.assertFalse(self.pipeline.capability_gate_blocked(report, "supported_subset"))
+
+    def test_semantic_contract_gate_blocks_invalid_response_before_capability(self) -> None:
+        clauses = [{"id": "C1", "text": "正文使用宋体", "evidence_ids": ["E1"]}]
+        evidence = {"evidence": [{"id": "E1", "text": "正文使用宋体", "kind": "paragraph"}]}
+        request = build_llm_request(
+            [], clauses, evidence, {}, "full", contract_version="3.0",
+        )
+        invalid = {
+            "contract_version": "3.0",
+            "requirements": [{
+                "role": "body_text", "properties": {"text": "正文使用宋体"},
+                "clause_ids": ["C1"], "evidence_ids": ["E1"],
+                "confidence": 0.9, "reason": "错误地为 informational 条款生成 requirement",
+            }],
+            "clause_reviews": [{
+                "clause_id": "C1", "classification": "informational",
+                "reason": "这是示例内容，不是格式义务",
+            }],
+            "unsupported_items": [], "reported_conflicts": [],
+        }
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            request_path = td / "llm-request.json"
+            response_path = td / "llm-response.json"
+            request_path.write_text(json.dumps(request, ensure_ascii=False), encoding="utf-8")
+            response_path.write_text(json.dumps(invalid, ensure_ascii=False), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "before capability planning"):
+                self.pipeline.validate_semantic_contract_gate(
+                    response_path=response_path,
+                    request_path=request_path,
+                    require_provenance=False,
+                )
+
+    def test_semantic_contract_gate_requires_current_provenance_for_release(self) -> None:
+        clauses = [{"id": "C1", "text": "正文使用宋体", "evidence_ids": ["E1"]}]
+        evidence = {"evidence": [{"id": "E1", "text": "正文使用宋体", "kind": "paragraph"}]}
+        request = build_llm_request(
+            [], clauses, evidence, {}, "full", contract_version="3.0",
+        )
+        request = attach_request_provenance(
+            request, source_sha256="a" * 64, evidence_doc=evidence,
+            clauses=clauses, run_id="run-current",
+        )
+        response = {
+            "contract_version": "3.0", "requirements": [],
+            "clause_reviews": [{
+                "clause_id": "C1", "classification": "informational",
+                "reason": "这是示例内容，不是格式义务",
+            }],
+            "unsupported_items": [], "reported_conflicts": [],
+            "provenance": {**request["provenance"], "run_id": "old-run"},
+        }
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            request_path = td / "llm-request.json"
+            response_path = td / "llm-response.json"
+            request_path.write_text(json.dumps(request, ensure_ascii=False), encoding="utf-8")
+            response_path.write_text(json.dumps(response, ensure_ascii=False), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "before capability planning"):
+                self.pipeline.validate_semantic_contract_gate(
+                    response_path=response_path,
+                    request_path=request_path,
+                    require_provenance=True,
+                )
 
     def test_pipeline_runs_preflight_before_style_and_records_subset_gaps(self) -> None:
         with tempfile.TemporaryDirectory() as td:

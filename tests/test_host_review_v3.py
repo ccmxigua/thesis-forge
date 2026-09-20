@@ -100,6 +100,8 @@ class HostReviewV3Tests(unittest.TestCase):
         reviews_schema = self.request["response_schema"]["properties"]["clause_reviews"]["items"]
         self.assertNotIn("requirement_indexes", reviews_schema["properties"])
         self.assertNotIn("Maintain requirement_indexes exactly", str(self.request["instructions"]))
+        self.assertNotIn("zero-based index", str(self.request["instructions"]))
+        self.assertNotIn("review/index pair", str(self.request["instructions"]))
         # The schema itself, rather than prose, is the enforcement boundary.
         self.assertEqual(validate_response(self._informational_response(), self.request), [])
 
@@ -111,6 +113,14 @@ class HostReviewV3Tests(unittest.TestCase):
         response["clause_reviews"][0]["requirement_indexes"] = [0]
         errors = validate_response(response, self.request)
         self.assertTrue(any("forbidden_in_contract_3.0" in error for error in errors))
+
+    def test_v3_rejects_duplicate_requirement_edges_and_evidence_ids(self) -> None:
+        response = self._executable_response()
+        response["requirements"][0]["clause_ids"] = ["C1", "C1"]
+        response["requirements"][0]["evidence_ids"] = ["E1", "E1"]
+        errors = validate_response(response, self.request)
+        self.assertIn("$.requirements[0].clause_ids: duplicate", errors)
+        self.assertIn("$.requirements[0].evidence_ids: duplicate", errors)
 
     def test_retry_prompt_does_not_reintroduce_v2_relation_instructions(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -130,6 +140,8 @@ class HostReviewV3Tests(unittest.TestCase):
         self.assertIn("Do not emit clause_reviews.requirement_indexes", prompt)
         self.assertNotIn("Maintain requirement_indexes exactly", prompt)
         self.assertNotIn("requirement_indexes: []", prompt)
+        self.assertNotIn("zero-based index", prompt)
+        self.assertNotIn("review/index pair", prompt)
         self.assertIn("rejected parent response sha256", prompt)
 
     def test_ledger_is_deterministic_and_does_not_infer_obligations(self) -> None:
@@ -232,8 +244,113 @@ class HostReviewV3Tests(unittest.TestCase):
         )
         self.assertEqual(
             [record["code"] for record in records],
-            ["requirement_relation_mismatch", "requirement_relation_mismatch"],
+            ["missing_derived_requirement", "unused_executable_requirement"],
         )
+
+    def test_informational_requirement_relation_is_explicitly_forbidden(self) -> None:
+        response = self._informational_response()
+        response["requirements"] = [{
+            "role": "body_text",
+            "properties": {"text": "正文使用宋体"},
+            "clause_ids": ["C1"],
+            "evidence_ids": ["E1"],
+            "reason": "incorrectly emitted for an informational clause",
+        }]
+        errors = validate_response(response, self.request)
+        self.assertTrue(
+            any("informational_requirement_forbidden" in error for error in errors),
+            errors,
+        )
+        records = contract_error_records(errors, response=response, chunk=self.request)
+        info_records = [
+            record for record in records
+            if record["code"] == "informational_requirement_forbidden"
+        ]
+        self.assertTrue(info_records, records)
+        self.assertEqual(info_records[0]["requirement_index"], 0)
+        self.assertTrue(info_records[0]["mechanically_removable"])
+
+    def test_aggregate_unused_relation_is_split_into_nine_current_facts(self) -> None:
+        clauses = [{"id": f"C{i}", "text": f"说明{i}"} for i in range(1, 10)]
+        response = {
+            "requirements": [
+                {"clause_ids": [f"C{i}"], "properties": {"text": f"说明{i}"}}
+                for i in range(1, 10)
+            ],
+            "clause_reviews": [
+                {"clause_id": f"C{i}", "classification": "informational"}
+                for i in range(1, 10)
+            ],
+        }
+        raw_error = "requirements_not_referenced_by_clause_review:" + ",".join(
+            str(i) for i in range(9)
+        )
+        records = contract_error_records([raw_error], response=response, chunk={"clauses": clauses})
+        self.assertEqual(len(records), 9)
+        self.assertEqual(
+            [record["requirement_index"] for record in records], list(range(9))
+        )
+        self.assertTrue(all(
+            record["code"] == "informational_requirement_forbidden"
+            and record["mechanically_removable"]
+            for record in records
+        ))
+
+    def test_v3_relation_error_codes_cover_mixed_missing_unknown_and_nonrequirement(self) -> None:
+        def build_case(clause_ids: list[str], requirements: list[dict], reviews: list[dict]) -> tuple[list[str], list[dict]]:
+            clauses = [
+                {"id": clause_id, "text": f"说明 {clause_id}", "evidence_ids": [f"E{index}"]}
+                for index, clause_id in enumerate(clause_ids, start=1)
+            ]
+            evidence = {
+                "evidence": [
+                    {"id": f"E{index}", "text": f"说明 {clause_id}", "kind": "paragraph"}
+                    for index, clause_id in enumerate(clause_ids, start=1)
+                ]
+            }
+            request = build_llm_request(
+                [], clauses, evidence, {}, "full", contract_version=HOST_REVIEW_CONTRACT_V3,
+            )
+            response = {
+                "contract_version": HOST_REVIEW_CONTRACT_V3,
+                "requirements": requirements,
+                "clause_reviews": reviews,
+                "unsupported_items": [],
+                "reported_conflicts": [],
+            }
+            errors = validate_response(response, request)
+            return errors, contract_error_records(errors, response=response, chunk=request)
+
+        _, mixed_records = build_case(
+            ["C1", "C2"],
+            [{"role": "body_text", "properties": {"text": "混合"}, "clause_ids": ["C1", "C2"], "evidence_ids": ["E1", "E2"], "confidence": 0.9, "reason": "混合"}],
+            [
+                {"clause_id": "C1", "classification": "executable", "reason": "执行"},
+                {"clause_id": "C2", "classification": "informational", "reason": "说明"},
+            ],
+        )
+        self.assertIn("mixed_execution_classification_relation", {item["code"] for item in mixed_records})
+
+        _, missing_records = build_case(
+            ["C1", "C2"],
+            [{"role": "body_text", "properties": {"text": "缺审查"}, "clause_ids": ["C1", "C2"], "evidence_ids": ["E1", "E2"], "confidence": 0.9, "reason": "缺审查"}],
+            [{"clause_id": "C1", "classification": "informational", "reason": "说明"}],
+        )
+        self.assertIn("missing_clause_review", {item["code"] for item in missing_records})
+
+        _, unknown_records = build_case(
+            ["C1"],
+            [{"role": "body_text", "properties": {"text": "未知"}, "clause_ids": ["C404"], "evidence_ids": ["E1"], "confidence": 0.9, "reason": "未知"}],
+            [{"clause_id": "C1", "classification": "informational", "reason": "说明"}],
+        )
+        self.assertIn("unknown_clause_relation", {item["code"] for item in unknown_records})
+
+        _, nonrequirement_records = build_case(
+            ["C1"],
+            [{"role": "body_text", "properties": {"text": "未解决"}, "clause_ids": ["C1"], "evidence_ids": ["E1"], "confidence": 0.9, "reason": "未解决"}],
+            [{"clause_id": "C1", "classification": "unresolved", "reason": "需要确认"}],
+        )
+        self.assertIn("non_requirement_classification_relation", {item["code"] for item in nonrequirement_records})
 
     def test_unbacked_evidence_is_structured_as_evidence_relation_error(self) -> None:
         records = contract_error_records(

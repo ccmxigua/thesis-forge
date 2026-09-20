@@ -685,17 +685,6 @@ def _semantic_retry_view(response: Any) -> dict[str, Any] | None:
             )
             if key in item
         })
-    # Sort by identity fields that must remain stable across a mechanical
-    # retry.  Sorting by the complete requirement made a legal property-only
-    # repair look like a list-wide semantic rewrite when the repaired
-    # properties changed the lexical order.
-    requirements.sort(key=lambda item: json.dumps({
-        key: item.get(key)
-        for key in (
-            "role", "clause_ids", "evidence_ids", "existing_requirement_id",
-        )
-        if key in item
-    }, ensure_ascii=False, sort_keys=True))
     reviews: list[dict[str, Any]] = []
     for item in response.get("clause_reviews", []) if isinstance(response.get("clause_reviews"), list) else []:
         if not isinstance(item, dict):
@@ -709,7 +698,6 @@ def _semantic_retry_view(response: Any) -> dict[str, Any] | None:
             )
             if key in item
         })
-    reviews.sort(key=lambda item: str(item.get("clause_id") or ""))
     return {
         "contract_version": response.get("contract_version"),
         "requirements": requirements,
@@ -749,7 +737,69 @@ def _retry_change_paths(previous: Any, current: Any) -> list[str]:
         if left != right:
             changed.append(path)
 
-    visit(before, after, "$")
+    # Requirements and clause reviews are semantically keyed collections, not
+    # positional lists.  Match them by their authoritative identity before
+    # diffing the payload.  This keeps a legal property-only repair tied to the
+    # response's real JSON pointer, so validator records such as
+    # ``requirements[2]`` cannot be confused with a sorted comparison index.
+    def requirement_identity(item: Any) -> str | None:
+        if not isinstance(item, dict):
+            return None
+        identity = {
+            key: item.get(key)
+            for key in (
+                "role", "clause_ids", "evidence_ids", "existing_requirement_id",
+            )
+            if key in item
+        }
+        if not identity:
+            return None
+        return json.dumps(identity, ensure_ascii=False, sort_keys=True)
+
+    def review_identity(item: Any) -> str | None:
+        if not isinstance(item, dict) or not item.get("clause_id"):
+            return None
+        return str(item["clause_id"])
+
+    def keyed_changes(
+        left: list[Any], right: list[Any], path: str, identity_fn: Any,
+    ) -> None:
+        left_map: dict[str, list[Any]] = {}
+        right_map: dict[str, list[tuple[int, Any]]] = {}
+        for item in left:
+            identity = identity_fn(item)
+            if identity is None:
+                changed.append(path)
+                return
+            left_map.setdefault(identity, []).append(item)
+        for index, item in enumerate(right):
+            identity = identity_fn(item)
+            if identity is None:
+                changed.append(path)
+                return
+            right_map.setdefault(identity, []).append((index, item))
+        if set(left_map) != set(right_map) or any(
+            len(left_map[key]) != len(right_map[key]) for key in left_map
+        ):
+            changed.append(path)
+            return
+        for identity, right_items in right_map.items():
+            for current_index, right_item in right_items:
+                left_item = left_map[identity].pop(0)
+                visit(left_item, right_item, f"{path}[{current_index}]")
+
+    # Keep the same root ordering used by the old projection for stable error
+    # messages: reviews, requirements, then the remaining top-level fields.
+    keyed_changes(
+        before.get("clause_reviews", []), after.get("clause_reviews", []),
+        "$.clause_reviews", review_identity,
+    )
+    keyed_changes(
+        before.get("requirements", []), after.get("requirements", []),
+        "$.requirements", requirement_identity,
+    )
+    visit(before.get("contract_version"), after.get("contract_version"), "$.contract_version")
+    visit(before.get("unsupported_items"), after.get("unsupported_items"), "$.unsupported_items")
     return changed
 
 
@@ -763,8 +813,10 @@ def _retry_changes_allowed(
         return True
     codes = {str(item.get("code")) for item in records if isinstance(item, dict)}
     empty_payload_repair = "empty_requirement_properties" in codes
-    previous_view = _semantic_retry_view(previous_response) if empty_payload_repair else None
-    current_view = _semantic_retry_view(current_response) if empty_payload_repair else None
+    unknown_payload_repair = "unknown_property" in codes
+    payload_repair = empty_payload_repair or unknown_payload_repair
+    previous_view = _semantic_retry_view(previous_response) if payload_repair else None
+    current_view = _semantic_retry_view(current_response) if payload_repair else None
     previous_requirements = (
         previous_view.get("requirements", [])
         if previous_view is not None
@@ -858,6 +910,52 @@ def _retry_changes_allowed(
                     else None
                 )
                 if before == {} and isinstance(after, dict) and after:
+                    continue
+        if unknown_payload_repair and chunk is not None and path.endswith(
+            ".properties.text"
+        ):
+            # ``run_host_agent_chunk`` may first delete one or more
+            # validator-named unknown properties and then fill the now-empty
+            # text-capable role with the one exact cited evidence string.
+            # The retry audit compares the raw parent with the accepted,
+            # mechanically repaired child, so this paired text addition must
+            # be admitted only when the complete before/after payload proves
+            # that no semantic value was invented.
+            match = re.fullmatch(
+                r"\$\.requirements\[(\d+)\]\.properties\.text", path,
+            )
+            if match:
+                index = int(match.group(1))
+                root = f"$.requirements[{index}].properties"
+                removed_names = {
+                    unknown_path.removeprefix(root + ".")
+                    for unknown_path in unknown_property_paths
+                    if unknown_path.startswith(root + ".")
+                }
+                before = (
+                    previous_requirements[index].get("properties")
+                    if index < len(previous_requirements)
+                    else None
+                )
+                after = (
+                    current_requirements[index].get("properties")
+                    if index < len(current_requirements)
+                    else None
+                )
+                current_requirement = (
+                    current_requirements[index]
+                    if index < len(current_requirements)
+                    else None
+                )
+                exact_text = _exact_cited_text(current_requirement, chunk)
+                if (
+                    removed_names
+                    and isinstance(before, dict)
+                    and set(before) == removed_names
+                    and isinstance(after, dict)
+                    and exact_text is not None
+                    and after == {"text": exact_text}
+                ):
                     continue
         if "fixed_text_evidence_mismatch" in codes and (
             ".body_parts" in path or ".heading" in path

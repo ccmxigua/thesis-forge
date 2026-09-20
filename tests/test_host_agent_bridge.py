@@ -777,6 +777,60 @@ class HostAgentBridgeTests(unittest.TestCase):
         self.assertEqual(repaired["requirements"][0]["properties"]["text"], "标题")
         self.assertIn("style", response["requirements"][0]["properties"])
 
+    def test_retry_allows_exact_text_fill_after_unknown_property_removal(self) -> None:
+        previous = {
+            "contract_version": "3.0",
+            "requirements": [{
+                "role": "abstract_title_zh",
+                "properties": {"style": "three_line"},
+                "clause_ids": ["C1"],
+                "evidence_ids": ["E1"],
+            }],
+            "clause_reviews": [{"clause_id": "C1", "classification": "executable"}],
+            "unsupported_items": [],
+        }
+        current = json.loads(json.dumps(previous))
+        current["requirements"][0]["properties"] = {"text": "摘  要"}
+        records = [{
+            "code": "unknown_property",
+            "json_pointer": "$.requirements[0].properties",
+            "raw_error": "unknown property 'style'",
+        }]
+        chunk = {
+            "evidence_context": {"E1": {"text": "摘  要"}},
+            "requirement_contract": {
+                "role_properties_schema": {
+                    "abstract_title_zh": {"$ref": "#/$defs/roleSpec"},
+                },
+            },
+        }
+        changed = bridge._retry_change_paths(previous, current)
+        self.assertEqual(
+            changed,
+            [
+                "$.requirements[0].properties.style",
+                "$.requirements[0].properties.text",
+            ],
+        )
+        self.assertTrue(bridge._retry_changes_allowed(
+            records,
+            changed,
+            contract_version="3.0",
+            previous_response=previous,
+            current_response=current,
+            chunk=chunk,
+        ))
+        current["requirements"][0]["properties"]["text"] = "猜测标题"
+        changed = bridge._retry_change_paths(previous, current)
+        self.assertFalse(bridge._retry_changes_allowed(
+            records,
+            changed,
+            contract_version="3.0",
+            previous_response=previous,
+            current_response=current,
+            chunk=chunk,
+        ))
+
     def test_mixed_contract_errors_are_not_mechanically_repaired(self) -> None:
         response = {"requirements": [{"properties": {"style": {}}}]}
         repaired, repairs = bridge._apply_safe_mechanical_repairs(

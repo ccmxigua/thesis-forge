@@ -1114,9 +1114,18 @@ def _main(argv: list[str]) -> int:
     if args.capability_registry:
         capability_cmd += ["--registry", str(args.capability_registry.resolve())]
         manifest["inputs"]["capability_registry"] = file_record(args.capability_registry)
-    if args.source_inventory:
-        capability_cmd += ["--source-inventory", str(args.source_inventory.resolve())]
-        manifest["inputs"]["source_inventory"] = file_record(args.source_inventory)
+    source_inventory_path = args.source_inventory
+    # A TeX source already produced a source-bound semantic metadata artifact
+    # in this fresh run.  Use it as the default source inventory so registered
+    # applicability facts (for example source_inventory.english_text) are
+    # evaluated against the current source instead of becoming unknown merely
+    # because the caller omitted a redundant CLI flag.  Explicit inventory
+    # input remains authoritative when supplied.
+    if source_inventory_path is None and metadata_path.is_file():
+        source_inventory_path = metadata_path
+    if source_inventory_path:
+        capability_cmd += ["--source-inventory", str(source_inventory_path.resolve())]
+        manifest["inputs"]["source_inventory"] = file_record(source_inventory_path)
     if args.template_profile and not args.neutral_reference_docx:
         capability_cmd += ["--template-profile", str(args.template_profile.resolve())]
     if args.template_fixed_values:

@@ -542,6 +542,10 @@ def _contract_repair_guidance(
         targeted.append(
             "For each input_prerequisite, use the namespace required by its kind: thesis_profile. for metadata, source_inventory. for source content, template_profile. for template resources, and runtime. for runtime services. Replace runtime_context.* with the registered runtime.* key; do not invent or remap a missing input."
         )
+    if "applicability" in text and "does not match" in text and ".fact" in text:
+        targeted.append(
+            "For an explicit condition such as '论文中出现英文时需要使用Times New Roman字体', use the registered fact source_inventory.english_text with operator present and value null. Change only the invalid fact namespace; preserve status, operator, value, exceptions, requirement identity, and all semantic fields. Do not invent a different source key or turn a missing fact into false."
+        )
     if "non_public_administration" in text:
         targeted.append(
             "Keep the administrative region under cover.non_public_administration and bind applicability to thesis_profile.security_level with operator equals or in selecting restricted/classified. Do not use not_equals, move the fields to ordinary cover.fields, or guess approval values."
@@ -643,6 +647,14 @@ def _structured_contract_repair_guidance(
                 "thesis_profile. for metadata, source_inventory. for source content, "
                 "template_profile. for template resources, and runtime. for runtime services. "
                 "Do not emit runtime_context.* or invent a replacement path."
+            )
+        elif code == "applicability_fact_namespace":
+            rule = (
+                f"At {pointer}, replace only an invalid human-language fact with its registered "
+                "namespaced source fact. For the explicit English-text presence rule, use "
+                "source_inventory.english_text with operator present and value null; preserve "
+                "the condition status, exceptions, requirement identity, and all other fields. "
+                "Do not invent a key or reinterpret a missing fact as false."
             )
         elif code == "cover_binding_violation":
             rule = (
@@ -1363,6 +1375,7 @@ def _apply_safe_mechanical_repairs(
     allowed_codes = {
         "unknown_property", "evidence_relation_mismatch",
         "empty_requirement_properties", "requirement_relation_mismatch",
+        "applicability_fact_namespace",
     }
     if any(
         not isinstance(record, dict)
@@ -1372,6 +1385,77 @@ def _apply_safe_mechanical_repairs(
         return None, []
     repaired = copy.deepcopy(response)
     repairs: list[dict[str, Any]] = []
+
+    # A small, explicit compiler rule handles the one registered source fact
+    # that can be derived without a semantic decision. The model often writes
+    # the natural-language condition from the clause verbatim. When the
+    # clause itself explicitly says that English text uses Times New Roman,
+    # the only safe normalization is the registered presence fact; arbitrary
+    # fact renames remain fail-closed.
+    applicability_records = [
+        record for record in error_records
+        if isinstance(record, dict)
+        and record.get("code") == "applicability_fact_namespace"
+    ]
+    if applicability_records and len(applicability_records) != len(error_records):
+        return None, []
+    for record in applicability_records:
+        pointer = record.get("json_pointer")
+        match = re.fullmatch(
+            r"\$\.requirements\[(\d+)\]\.applicability\.conditions\[(\d+)\]\.fact",
+            str(pointer or ""),
+        )
+        if match is None or not isinstance(chunk, dict):
+            return None, []
+        requirement_index, condition_index = (int(value) for value in match.groups())
+        requirements = repaired.get("requirements")
+        clauses = chunk.get("clauses")
+        if (
+            not isinstance(requirements, list)
+            or requirement_index >= len(requirements)
+            or not isinstance(requirements[requirement_index], dict)
+            or not isinstance(clauses, list)
+        ):
+            return None, []
+        requirement = requirements[requirement_index]
+        applicability = requirement.get("applicability")
+        conditions = applicability.get("conditions") if isinstance(applicability, dict) else None
+        if (
+            not isinstance(applicability, dict)
+            or applicability.get("status") != "conditional"
+            or not isinstance(conditions, list)
+            or condition_index >= len(conditions)
+            or not isinstance(conditions[condition_index], dict)
+        ):
+            return None, []
+        condition = conditions[condition_index]
+        clause_ids = {str(value) for value in requirement.get("clause_ids", [])}
+        linked_text = " ".join(
+            str(clause.get("text") or clause.get("source_text_full") or "")
+            for clause in clauses
+            if isinstance(clause, dict) and str(clause.get("id")) in clause_ids
+        )
+        if (
+            not re.search(r"论文中出现英文", linked_text)
+            or not re.search(r"Times\s+New\s+Roman", linked_text, re.I)
+            or requirement.get("role") != "body_text"
+            or not isinstance(requirement.get("properties"), dict)
+            or not isinstance(requirement["properties"].get("font"), dict)
+            or requirement["properties"]["font"].get("latin") != "Times New Roman"
+            or condition.get("operator") != "present"
+            or condition.get("value") is not None
+        ):
+            return None, []
+        condition["fact"] = "source_inventory.english_text"
+        repairs.append({
+            "code": "applicability_fact_namespace",
+            "json_pointer": str(pointer),
+            "replacement": "source_inventory.english_text",
+            "rule_id": "explicit_english_presence_times_new_roman",
+            "source_clause_ids": sorted(clause_ids),
+        })
+    if applicability_records:
+        return repaired, repairs
 
     def resolve_pointer(pointer: str) -> Any:
         if not isinstance(pointer, str) or not pointer.startswith("$"):

@@ -46,6 +46,7 @@ class SemanticContractTest(unittest.TestCase):
         self.assertEqual(result["degree_display"], "学术学位工学硕士学位论文")
         self.assertTrue(result["abstract_zh"])
         self.assertTrue(result["abstract_en"])
+        self.assertTrue(result["english_text"])
         self.assertEqual(result["keywords_zh"], ["交通流预测", "时空图卷积网络", "注意力机制", "深度学习", "智能交通系统"])
         self.assertEqual(result["keywords_en"], ["traffic flow prediction", "spatio-temporal graph convolutional network", "attention mechanism", "deep learning", "intelligent transportation system"])
         self.assertEqual(result["college"], result["school"])

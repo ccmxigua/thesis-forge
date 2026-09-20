@@ -1464,6 +1464,7 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
                 "For page numbering, identify the body start with first_heading_1, heading_text, or section_index.",
                 "LLM output is declarative only and must never contain OOXML edits or executable code.",
                 "Use applicability for explicit conditions/exceptions; never hide a condition in free text when it changes whether the requirement applies.",
+                "For the explicit clause '论文中出现英文时需要使用Times New Roman字体', bind applicability.conditions to fact source_inventory.english_text with operator present and value null. This is a registered source fact, not free-form prose; do not invent another fact name or treat a missing source fact as false.",
                 "Use input_prerequisites for required metadata, source content, template resources, or runtime services. Keys must use the registered namespace for their kind: metadata uses thesis_profile., source_content uses source_inventory., template_resource uses template_profile., and runtime uses runtime. (for example runtime.anchor_inventory, never runtime_context.*). Do not fabricate missing inputs.",
                 "Use verification to declare the minimum evidence mode: static_docx, word_render, pdf_render, manual, or external.",
                 "Resolve each clause through its evidence_ids and the matching evidence_context entry; the evidence map is authoritative for source text, runs, styles, location, and neighboring context.",

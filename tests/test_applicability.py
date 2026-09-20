@@ -67,6 +67,21 @@ class ApplicabilityTests(unittest.TestCase):
         self.assertEqual(false_result["result"], "true")
         self.assertEqual(zero_result["result"], "true")
 
+    def test_registered_english_text_fact_is_evaluated_from_source_inventory(self) -> None:
+        result = evaluate_applicability(
+            {
+                "status": "conditional",
+                "conditions": [{
+                    "fact": "source_inventory.english_text",
+                    "operator": "present",
+                    "value": None,
+                }],
+            },
+            source_inventory={"english_text": True},
+        )
+        self.assertEqual(result["result"], "true")
+        self.assertEqual(result["evaluated"][0]["actual"], True)
+
     def test_false_condition_is_recorded_with_observed_value(self) -> None:
         result = evaluate_applicability(
             {

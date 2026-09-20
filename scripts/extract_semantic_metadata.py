@@ -470,6 +470,21 @@ def extract(path: Path, encoding: str = "utf-8") -> dict[str, Any]:
     degree_category = _value(text, ("degreecategory", "degree_category"))
     degree_display = _value(text, ("degreedisplay", "degreetype"))
     degree_display_en = _value(text, ("degreedisplayen", "degreetypeen"))
+    abstract_zh = _environment(text, ("abstract",))
+    abstract_en = _abstract_english(text)
+    keywords_zh = _keywords(text, False)
+    keywords_en = _keywords(text, True)
+    # This is deliberately a one-way source fact.  We only publish the key
+    # when an explicit English source block/field was extracted; absence does
+    # not prove that the whole thesis contains no English and therefore must
+    # remain an unknown fact to the capability gate.
+    explicit_english_text = any((
+        title_en, subtitle_en, author_en, advisor_en, co_advisor_en, school_en,
+        major_en, first_discipline_en, second_discipline_en,
+        research_direction_en, confidentiality_level_en, submit_date_en,
+        defense_date_en, degree_conferral_date_en, degree_display_en,
+        abstract_en, keywords_en,
+    ))
     figures = len(re.findall(r"\\includegraphics(?:\[[^]]*\])?\s*\{", text))
     # Count semantic table objects, not nested tabular layout environments.
     tables = len(re.findall(r"\\begin\{(?:table|longtable)\*?\}", text))
@@ -537,15 +552,16 @@ def extract(path: Path, encoding: str = "utf-8") -> dict[str, Any]:
         "confidentiality": confidentiality_level,
         "submit_date_cn": submit_date,
         "degree_type": degree_display,
-        "abstract_zh": _environment(text, ("abstract",)),
-        "abstract_en": _abstract_english(text),
-        "keywords_zh": _keywords(text, False),
-        "keywords_en": _keywords(text, True),
+        "abstract_zh": abstract_zh,
+        "abstract_en": abstract_en,
+        "keywords_zh": keywords_zh,
+        "keywords_en": keywords_en,
         "has_appendices": bool(re.search(r"\\appendix\b|\\begin\{appendices\}", text, re.I)),
         "has_figure_list": bool(re.search(r"\\listoffigures\b", text, re.I)),
         "has_table_list": bool(re.search(r"\\listoftables\b", text, re.I)),
         "has_symbol_list": bool(re.search(r"\\listofsymbols\b|\\printsymbols\b", text, re.I)),
         "inventory": {"figures": figures, "tables": tables, "display_equations": equations},
+        **({"english_text": True} if explicit_english_text else {}),
     }
 
 

@@ -944,6 +944,78 @@ class HostAgentBridgeTests(unittest.TestCase):
             ["unknown_property"] * 5 + ["empty_requirement_properties"],
         )
 
+    def test_english_presence_fact_is_compiled_only_from_explicit_clause(self) -> None:
+        response = {
+            "requirements": [{
+                "role": "body_text",
+                "properties": {"font": {"latin": "Times New Roman"}},
+                "clause_ids": ["C1"],
+                "applicability": {
+                    "status": "conditional",
+                    "conditions": [{
+                        "fact": "English text appears in the thesis",
+                        "operator": "present",
+                        "value": None,
+                    }],
+                    "exceptions": None,
+                },
+            }],
+        }
+        repaired, repairs = bridge._apply_safe_mechanical_repairs(
+            response,
+            [{
+                "code": "applicability_fact_namespace",
+                "json_pointer": "$.requirements[0].applicability.conditions[0].fact",
+                "raw_error": (
+                    "$.requirements[0].applicability.conditions[0].fact: "
+                    "does not match the registered fact namespace"
+                ),
+            }],
+            chunk={
+                "clauses": [{
+                    "id": "C1",
+                    "text": "论文中出现英文时需要使用Times New Roman字体",
+                }],
+            },
+        )
+        self.assertEqual(
+            repaired["requirements"][0]["applicability"]["conditions"][0]["fact"],
+            "source_inventory.english_text",
+        )
+        self.assertEqual(repairs[0]["rule_id"], "explicit_english_presence_times_new_roman")
+        self.assertEqual(
+            response["requirements"][0]["applicability"]["conditions"][0]["fact"],
+            "English text appears in the thesis",
+        )
+
+    def test_english_presence_fact_is_not_guessed_for_other_conditions(self) -> None:
+        response = {
+            "requirements": [{
+                "role": "body_text",
+                "properties": {"font": {"latin": "Times New Roman"}},
+                "clause_ids": ["C1"],
+                "applicability": {
+                    "status": "conditional",
+                    "conditions": [{
+                        "fact": "some prose condition",
+                        "operator": "present",
+                        "value": None,
+                    }],
+                },
+            }],
+        }
+        repaired, repairs = bridge._apply_safe_mechanical_repairs(
+            response,
+            [{
+                "code": "applicability_fact_namespace",
+                "json_pointer": "$.requirements[0].applicability.conditions[0].fact",
+                "raw_error": "does not match the registered fact namespace",
+            }],
+            chunk={"clauses": [{"id": "C1", "text": "正文采用小四号字体"}]},
+        )
+        self.assertIsNone(repaired)
+        self.assertEqual(repairs, [])
+
     def test_bridge_retries_locally_rejected_contract_in_a_new_session(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             review_dir, chunk = self._packet(Path(td) / "requirements")

@@ -123,6 +123,12 @@ def contract_error_records(
             code = "empty_requirement_properties"
         elif "must equal a complete cited source-evidence text" in lowered:
             code = "fixed_text_evidence_mismatch"
+        elif (
+            ".applicability.conditions" in lowered
+            and ".fact" in lowered
+            and "does not match" in lowered
+        ):
+            code = "applicability_fact_namespace"
         elif "non_public_administration" in lowered:
             code = "cover_binding_violation"
         elif "input_prerequisites" in lowered and (

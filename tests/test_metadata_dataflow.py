@@ -155,6 +155,17 @@ class MetadataDataflowTest(unittest.TestCase):
             )
             metadata_index = capability_step["command"].index("--metadata")
             self.assertEqual(Path(capability_step["command"][metadata_index + 1]).resolve(), profile_path.resolve())
+            source_inventory_index = capability_step["command"].index("--source-inventory")
+            self.assertEqual(
+                Path(capability_step["command"][source_inventory_index + 1]).resolve(),
+                (work / "semantic-metadata.json").resolve(),
+            )
+            semantic_metadata = json.loads((work / "semantic-metadata.json").read_text(encoding="utf-8"))
+            self.assertTrue(semantic_metadata["english_text"])
+            self.assertEqual(
+                Path(manifest["inputs"]["source_inventory"]["path"]).resolve(),
+                (work / "semantic-metadata.json").resolve(),
+            )
             self.assertEqual(manifest["metadata_status"], profile["metadata_status"])
             self.assertTrue(capability_path.exists())
 

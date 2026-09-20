@@ -922,6 +922,7 @@ def main(argv: list[str]) -> int:
         "format_spec": artifact_record(args.format_spec),
         "clauses": artifact_record(args.clauses) if args.clauses else None,
         "registry": artifact_record(args.registry),
+        "source_inventory": artifact_record(args.source_inventory) if args.source_inventory else None,
         "metadata": artifact_record(args.metadata) if args.metadata else None,
         "runtime_inventory": (
             artifact_record(args.runtime_inventory) if args.runtime_inventory else None

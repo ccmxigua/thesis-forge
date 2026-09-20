@@ -243,6 +243,17 @@ class HostReviewV3Tests(unittest.TestCase):
         )
         self.assertEqual(records[0]["code"], "evidence_relation_mismatch")
 
+    def test_invalid_applicability_fact_namespace_is_structured(self) -> None:
+        records = contract_error_records(
+            [
+                "$.requirements[0].applicability.conditions[0].fact: "
+                "does not match '^(thesis_profile|source_inventory|template_profile|runtime)\\\\.'",
+            ],
+            response=self._executable_response(),
+            chunk=self.request,
+        )
+        self.assertEqual(records[0]["code"], "applicability_fact_namespace")
+
     def test_equation_role_rejects_unsupported_numbering_without_normalizing(self) -> None:
         response = self._executable_response()
         response["requirements"][0]["role"] = "equations"

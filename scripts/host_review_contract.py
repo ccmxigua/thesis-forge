@@ -284,7 +284,19 @@ def _abstract_obligation_gaps(
             gaps.append("abstract_zh.max_chars")
     if "第三人称" in text and properties.get("abstract_zh.require_third_person") is not True:
         gaps.append("abstract_zh.require_third_person")
-    if re.search(r"目的|方法|成果|结论|创新性", text):
+    # Do not treat every occurrence of ``方法`` as a required abstract
+    # section.  Template prose often says that a thesis presents a "新方法"
+    # (new method) while the independent section obligation is stated later
+    # in a phrase such as ``其内容包括：目的意义、研究方法、研究成果和结论``.
+    # The former is a substantive/novelty description, not a section list.
+    section_list_signal = (
+        bool(re.search(r"(?:其)?内容包括", text))
+        or bool(re.search(
+            r"(?:包含|包括).{0,80}目的.{0,80}方法.{0,80}成果.{0,80}结论",
+            text,
+        ))
+    )
+    if section_list_signal:
         required_sections = properties.get("abstract_zh.required_sections")
         section_text = set(required_sections) if isinstance(required_sections, list) else set()
         expected_sections = {

@@ -41,6 +41,83 @@ class RootCauseGuardTests(unittest.TestCase):
         self.assertTrue(any("partial_clause_coverage" in error for error in errors), errors)
         self.assertTrue(any("abstract_zh.min_chars" in error for error in errors), errors)
 
+    def test_abstract_novelty_phrase_is_not_a_section_list(self) -> None:
+        clauses = [
+            {
+                "id": "C00066",
+                "text": (
+                    "中文摘要是论文内容的简要陈述，一般以第三人称语气撰写，"
+                    "300～1000字，体现出论文的新理论、新方法、新技术等"
+                ),
+                "evidence_ids": ["E59"],
+            },
+            {
+                "id": "C00067",
+                "text": "其内容包括：目的意义、研究方法、研究成果和结论。",
+                "evidence_ids": ["E59"],
+            },
+        ]
+        evidence = {
+            "evidence": [{"id": "E59", "text": "同一来源段落", "kind": "paragraph"}],
+        }
+        request = engine.build_llm_request([], clauses, evidence, {}, "full")
+        response = {
+            "contract_version": "2.1",
+            "requirements": [
+                {
+                    "role": "content_constraints",
+                    "properties": {
+                        "abstract_zh": {
+                            "required": True,
+                            "min_chars": 300,
+                            "max_chars": 1000,
+                            "require_third_person": True,
+                        },
+                    },
+                    "clause_ids": ["C00066"],
+                    "evidence_ids": ["E59"],
+                    "confidence": 0.9,
+                    "reason": "摘要基本限制",
+                },
+                {
+                    "role": "content_constraints",
+                    "properties": {
+                        "abstract_zh": {
+                            "required": True,
+                            "required_sections": [
+                                "purpose", "methods", "results", "conclusions",
+                            ],
+                        },
+                    },
+                    "clause_ids": ["C00067"],
+                    "evidence_ids": ["E59"],
+                    "confidence": 0.9,
+                    "reason": "摘要章节要求",
+                },
+            ],
+            "clause_reviews": [
+                {
+                    "clause_id": "C00066",
+                    "classification": "executable",
+                    "requirement_indexes": [0],
+                    "reason": "基本限制已表示",
+                },
+                {
+                    "clause_id": "C00067",
+                    "classification": "executable",
+                    "requirement_indexes": [1],
+                    "reason": "章节清单已表示",
+                },
+            ],
+            "unsupported_items": [],
+            "reported_conflicts": [],
+        }
+        errors = validate_response(response, request)
+        self.assertFalse(
+            any("C00066" in error and "required_sections" in error for error in errors),
+            errors,
+        )
+
     def test_ambiguous_english_translation_cannot_be_executable(self) -> None:
         request = _request("The following English is not correct. The Chinese abstract should be 300 to 1,000 words.")
         response = {

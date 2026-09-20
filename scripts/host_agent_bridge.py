@@ -188,6 +188,7 @@ from host_review_contract import (  # noqa: E402
 )
 from host_review_schema import (  # noqa: E402
     native_output_schema,
+    normalize_native_response,
     require_native_schema,
 )
 from host_runtime import (  # noqa: E402
@@ -1132,8 +1133,9 @@ def run_host_agent_chunk(
             "route": "unobservable",
             "fallback_used": None,
         }
+    raw_response = copy.deepcopy(response)
     expected_provenance = chunk.get("provenance")
-    observed_provenance = response.get("provenance") if isinstance(response, dict) else None
+    observed_provenance = raw_response.get("provenance") if isinstance(raw_response, dict) else None
     provenance_mismatch_fields: list[str] = []
     if isinstance(expected_provenance, dict):
         if isinstance(observed_provenance, dict):
@@ -1150,7 +1152,7 @@ def run_host_agent_chunk(
         raise ValueError(f"refusing to overwrite existing raw Host Agent response: {raw_response_path}")
     atomic_write_text(
         raw_response_path,
-        json.dumps(response, ensure_ascii=False, indent=2) + "\n",
+        json.dumps(raw_response, ensure_ascii=False, indent=2) + "\n",
     )
     # The model-facing packet deliberately omits trusted identity fields.  A
     # native bridge may therefore bind a response that omits ``provenance``
@@ -1163,6 +1165,10 @@ def run_host_agent_chunk(
             "Host Agent response provenance conflict: "
             + ", ".join(provenance_mismatch_fields)
         )
+    response_schema = chunk.get("response_schema")
+    if not isinstance(response_schema, dict):
+        raise ValueError("current Host Agent chunk has no local response schema")
+    response = normalize_native_response(raw_response, response_schema)
     contract_errors = validate_host_agent_response(response, chunk)
     if contract_errors:
         error = ValueError(
@@ -1601,9 +1607,12 @@ def run_bridge(
                         f"{response_path.stem}.attempt-{attempt - 1:02d}.raw{response_path.suffix}"
                     )
                     if previous_raw_path.is_file():
-                        previous_response = _read_json(
+                        previous_response = normalize_native_response(
+                            _read_json(
                             previous_raw_path,
                             label=f"Host Agent previous raw response {index} attempt {attempt - 1}",
+                            ),
+                            chunk.get("response_schema") if isinstance(chunk.get("response_schema"), dict) else {},
                         )
                         current_response = _read_json(
                             attempt_response_path,

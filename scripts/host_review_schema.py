@@ -143,6 +143,101 @@ def native_output_schema(response_schema: dict[str, Any]) -> dict[str, Any]:
     return _project_native_schema(local_schema)
 
 
+def _resolve_schema_ref(schema: dict[str, Any], root: dict[str, Any]) -> dict[str, Any]:
+    current = schema
+    seen: set[str] = set()
+    while isinstance(current, dict) and isinstance(current.get("$ref"), str):
+        reference = current["$ref"]
+        if reference in seen or not reference.startswith("#/$defs/"):
+            break
+        seen.add(reference)
+        name = reference.removeprefix("#/$defs/")
+        target = root.get("$defs", {}).get(name)
+        if not isinstance(target, dict):
+            break
+        current = target
+    return current
+
+
+def _schema_shape_matches(schema: dict[str, Any], value: Any, root: dict[str, Any]) -> bool:
+    schema = _resolve_schema_ref(schema, root)
+    if isinstance(schema.get("anyOf"), list):
+        return any(
+            isinstance(item, dict) and _schema_shape_matches(item, value, root)
+            for item in schema["anyOf"]
+        )
+    schema_type = schema.get("type")
+    if schema_type == "object":
+        return isinstance(value, dict)
+    if schema_type == "array":
+        return isinstance(value, list)
+    if schema_type == "string":
+        return isinstance(value, str)
+    if schema_type == "boolean":
+        return isinstance(value, bool)
+    if schema_type == "number":
+        return isinstance(value, (int, float)) and not isinstance(value, bool)
+    if schema_type == "integer":
+        return isinstance(value, int) and not isinstance(value, bool)
+    if schema_type == "null":
+        return value is None
+    return True
+
+
+def _schema_for_value(schema: dict[str, Any], value: Any, root: dict[str, Any]) -> dict[str, Any]:
+    resolved = _resolve_schema_ref(schema, root)
+    variants = resolved.get("anyOf")
+    if isinstance(variants, list):
+        for variant in variants:
+            if isinstance(variant, dict) and _schema_shape_matches(variant, value, root):
+                return _resolve_schema_ref(variant, root)
+    return resolved
+
+
+def normalize_native_response(
+    response: Any, response_schema: dict[str, Any],
+) -> Any:
+    """Canonicalize provider-required nullable optionals before local checks.
+
+    Native strict schemas encode local optional properties as required nullable
+    properties.  A ``null`` at a property that is optional in the local
+    contract means exactly "omitted"; removing it restores the local contract
+    without changing any non-null semantic value.  Required nulls and values
+    in unconstrained requirement ``properties`` objects are preserved for the
+    normal fail-closed validator.
+    """
+    root = response_schema
+
+    def normalize(value: Any, schema: Any) -> Any:
+        if not isinstance(schema, dict):
+            return copy.deepcopy(value)
+        if value is None:
+            return None
+        resolved = _schema_for_value(schema, value, root)
+        if isinstance(value, dict):
+            properties = resolved.get("properties")
+            if not isinstance(properties, dict):
+                return copy.deepcopy(value)
+            required = set(resolved.get("required", []) or [])
+            normalized: dict[str, Any] = {}
+            for key, child in value.items():
+                child_schema = properties.get(key)
+                if child is None and key not in required:
+                    continue
+                if isinstance(child_schema, dict):
+                    normalized[key] = normalize(child, child_schema)
+                else:
+                    normalized[key] = copy.deepcopy(child)
+            return normalized
+        if isinstance(value, list):
+            item_schema = resolved.get("items")
+            if isinstance(item_schema, dict):
+                return [normalize(item, item_schema) for item in value]
+        return copy.deepcopy(value)
+
+    return normalize(response, response_schema)
+
+
 def native_schema_support_errors(schema: Any, path: str = "$") -> list[str]:
     """Reject schema constructs that native structured output cannot accept.
 

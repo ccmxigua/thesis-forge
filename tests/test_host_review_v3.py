@@ -22,6 +22,7 @@ from host_review_schema import (  # noqa: E402
     native_schema_support_errors,
     applicability_value_schema,
     native_output_schema,
+    normalize_native_response,
 )
 from requirements_engine import build_llm_request  # noqa: E402
 from semantic_contract import attach_request_provenance  # noqa: E402
@@ -246,6 +247,26 @@ class HostReviewV3Tests(unittest.TestCase):
         self.assertEqual(records[0]["code"], "provenance_validation_error")
         self.assertTrue(records[0]["invocation_integrity_required"])
         self.assertFalse(records[0]["semantic_review_required"])
+
+    def test_native_nullable_optionals_are_omitted_before_local_validation(self) -> None:
+        response = self._executable_response()
+        response["requirements"][0].update({
+            "existing_requirement_id": None,
+            "field_key": None,
+            "applicability": None,
+            "input_prerequisites": None,
+        })
+        response["requirements"][0]["verification"]["checker_ids"] = None
+        response["clause_reviews"][0]["obligations"] = None
+        normalized = normalize_native_response(response, self.request["response_schema"])
+        requirement = normalized["requirements"][0]
+        self.assertNotIn("existing_requirement_id", requirement)
+        self.assertNotIn("field_key", requirement)
+        self.assertNotIn("applicability", requirement)
+        self.assertNotIn("input_prerequisites", requirement)
+        self.assertNotIn("checker_ids", requirement["verification"])
+        self.assertNotIn("obligations", normalized["clause_reviews"][0])
+        self.assertEqual(validate_response(normalized, self.request), [])
 
     def test_exact_duplicate_requirements_are_explicitly_recorded(self) -> None:
         response = self._executable_response()

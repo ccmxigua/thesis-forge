@@ -486,6 +486,44 @@ class HostAgentBridgeTests(unittest.TestCase):
             )
         )
 
+    def test_unknown_property_is_removed_deterministically_without_semantic_retry(self) -> None:
+        response = {
+            "requirements": [{"properties": {"style": {"name": "bad"}, "text": "标题"}}],
+        }
+        repaired, repairs = bridge._apply_safe_mechanical_repairs(
+            response,
+            [{
+                "code": "unknown_property",
+                "json_pointer": "$.requirements[0].properties",
+                "raw_error": "$.requirements[0].properties: unknown property 'style'",
+            }],
+        )
+        self.assertEqual(repairs[0]["removed_property"], "style")
+        self.assertIsNotNone(repaired)
+        self.assertNotIn("style", repaired["requirements"][0]["properties"])
+        self.assertEqual(repaired["requirements"][0]["properties"]["text"], "标题")
+        self.assertIn("style", response["requirements"][0]["properties"])
+
+    def test_mixed_contract_errors_are_not_mechanically_repaired(self) -> None:
+        response = {"requirements": [{"properties": {"style": {}}}]}
+        repaired, repairs = bridge._apply_safe_mechanical_repairs(
+            response,
+            [
+                {
+                    "code": "unknown_property",
+                    "json_pointer": "$.requirements[0].properties",
+                    "raw_error": "unknown property 'style'",
+                },
+                {
+                    "code": "requirement_relation_mismatch",
+                    "json_pointer": "$.requirements",
+                    "raw_error": "requirements_not_referenced_by_clause_review:0",
+                },
+            ],
+        )
+        self.assertIsNone(repaired)
+        self.assertEqual(repairs, [])
+
     def test_bridge_retries_locally_rejected_contract_in_a_new_session(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             review_dir, chunk = self._packet(Path(td) / "requirements")

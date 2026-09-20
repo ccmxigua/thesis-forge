@@ -798,6 +798,67 @@ def _retry_semantic_change_error(
     return error, changed_paths
 
 
+def _apply_safe_mechanical_repairs(
+    response: Any, error_records: list[dict[str, Any]],
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    """Apply only validator-directed, semantics-preserving JSON repairs.
+
+    An unknown property is a provider/schema boundary error, not a semantic
+    decision.  Removing exactly the named key from exactly the validator's
+    object is deterministic and avoids spending a second model turn that may
+    regenerate classifications or requirement relations.  Any mixed error
+    set is left for the normal retry path; this helper never guesses how to
+    repair a semantic or relation failure.
+    """
+    if not isinstance(response, dict) or not error_records:
+        return None, []
+    if any(
+        not isinstance(record, dict)
+        or record.get("code") != "unknown_property"
+        for record in error_records
+    ):
+        return None, []
+    repaired = copy.deepcopy(response)
+    repairs: list[dict[str, Any]] = []
+
+    def resolve_pointer(pointer: str) -> Any:
+        if not isinstance(pointer, str) or not pointer.startswith("$"):
+            return None
+        tokens = re.findall(r"\.([A-Za-z_][A-Za-z0-9_]*)|\[(\d+)\]", pointer[1:])
+        current: Any = repaired
+        for key, index in tokens:
+            if key:
+                if not isinstance(current, dict) or key not in current:
+                    return None
+                current = current[key]
+            else:
+                if not isinstance(current, list):
+                    return None
+                position = int(index)
+                if position >= len(current):
+                    return None
+                current = current[position]
+        return current
+
+    for record in error_records:
+        pointer = record.get("json_pointer")
+        raw_error = str(record.get("raw_error") or "")
+        match = re.search(r"unknown property ['\"]([^'\"]+)['\"]", raw_error)
+        if not isinstance(pointer, str) or match is None:
+            return None, []
+        target = resolve_pointer(pointer)
+        property_name = match.group(1)
+        if not isinstance(target, dict) or property_name not in target:
+            return None, []
+        del target[property_name]
+        repairs.append({
+            "code": "unknown_property",
+            "json_pointer": pointer,
+            "removed_property": property_name,
+        })
+    return repaired, repairs
+
+
 # Compatibility name for callers that imported the bridge directly.  The
 # shared host-independent implementation is now authoritative.
 validate_host_agent_response = _shared_validate_response
@@ -1362,16 +1423,35 @@ def run_host_agent_chunk(
     if not isinstance(response_schema, dict):
         raise ValueError("current Host Agent chunk has no local response schema")
     response = normalize_native_response(raw_response, response_schema)
+    mechanical_repairs: list[dict[str, Any]] = []
     contract_errors = validate_host_agent_response(response, chunk)
     if contract_errors:
-        error = ValueError(
-            "local response contract validation failed before provenance binding: "
-            + _summarize_contract_errors(contract_errors)
-        )
-        error.error_records = contract_error_records(  # type: ignore[attr-defined]
+        error_records = contract_error_records(
             contract_errors, response=response, chunk=chunk,
         )
-        raise error
+        repaired_response, mechanical_repairs = _apply_safe_mechanical_repairs(
+            response, error_records,
+        )
+        if repaired_response is not None:
+            remaining_errors = validate_host_agent_response(repaired_response, chunk)
+            if not remaining_errors:
+                response = repaired_response
+            else:
+                error = ValueError(
+                    "local response contract validation failed before provenance binding: "
+                    + _summarize_contract_errors(remaining_errors)
+                )
+                error.error_records = contract_error_records(  # type: ignore[attr-defined]
+                    remaining_errors, response=response, chunk=chunk,
+                )
+                raise error
+        else:
+            error = ValueError(
+                "local response contract validation failed before provenance binding: "
+                + _summarize_contract_errors(contract_errors)
+            )
+            error.error_records = error_records  # type: ignore[attr-defined]
+            raise error
     if not isinstance(expected_provenance, dict):
         raise ValueError("current Host Agent chunk has no bindable provenance")
     response["provenance"] = copy.deepcopy(expected_provenance)
@@ -1425,6 +1505,8 @@ def run_host_agent_chunk(
         "finished_at": datetime.now(timezone.utc).isoformat(),
         "retry_parent_response_sha256": retry_parent_response_sha256,
     }
+    if mechanical_repairs:
+        audit["mechanical_repairs"] = mechanical_repairs
     audit["provenance_observed"] = isinstance(observed_provenance, dict)
     audit["provenance_mismatch_fields"] = provenance_mismatch_fields
     audit["provenance_binding"] = provenance_binding

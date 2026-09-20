@@ -25,6 +25,24 @@ SUPPORTED_HOST_REVIEW_CONTRACTS = {
 }
 
 
+def requirement_payload_errors(item: Any, index: int) -> list[str]:
+    """Reject requirements that contain no executable semantic payload.
+
+    ``properties`` is intentionally a role-specific union in the native
+    provider schema.  The provider can therefore return a structurally valid
+    empty object, but an empty object cannot describe a style, text, layout,
+    or cover requirement.  Keeping this check here makes the local contract
+    the final authority instead of silently accepting an identity-only
+    ``field_key`` or a model placeholder.
+    """
+    if not isinstance(item, dict):
+        return []
+    properties = item.get("properties")
+    if isinstance(properties, dict) and properties:
+        return []
+    return [f"$.requirements[{index}].properties: must_include_semantic_payload"]
+
+
 def _response_sha256(response: Any) -> str:
     return hashlib.sha256(
         json.dumps(response, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -94,6 +112,8 @@ def contract_error_records(
             code = "requirement_relation_mismatch"
         elif "partial_clause_coverage" in lowered:
             code = "partial_clause_coverage"
+        elif "must_include_semantic_payload" in lowered:
+            code = "empty_requirement_properties"
         elif "unknown property" in lowered:
             code = "unknown_property"
         elif "unsupported_schema_keyword" in lowered:
@@ -424,6 +444,7 @@ def validate_response(response: Any, chunk: dict[str, Any]) -> list[str]:
         role = item.get("role")
         if role not in allowed_roles:
             errors.append(f"$.requirements[{index}].role: unknown_or_disallowed_role")
+        errors.extend(requirement_payload_errors(item, index))
         role_schema = role_schemas.get(role) if isinstance(role_schemas, dict) else None
         if isinstance(role_schema, dict):
             try:

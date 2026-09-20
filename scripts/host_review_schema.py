@@ -168,7 +168,17 @@ def _schema_shape_matches(schema: dict[str, Any], value: Any, root: dict[str, An
         )
     schema_type = schema.get("type")
     if schema_type == "object":
-        return isinstance(value, dict)
+        if not isinstance(value, dict):
+            return False
+        # Several role schemas are object-shaped.  Use their closed property
+        # names to select the right local branch when normalizing the native
+        # provider's required-nullable projection.  Without this check the
+        # first object branch (usually roleSpec) wins for every role, leaving
+        # nulls from page/cover/declaration-specific fields in the response.
+        declared = schema.get("properties")
+        if isinstance(declared, dict) and schema.get("additionalProperties") is False:
+            return all(key in declared for key in value)
+        return True
     if schema_type == "array":
         return isinstance(value, list)
     if schema_type == "string":
@@ -203,8 +213,10 @@ def normalize_native_response(
     properties.  A ``null`` at a property that is optional in the local
     contract means exactly "omitted"; removing it restores the local contract
     without changing any non-null semantic value.  Required nulls and values
-    in unconstrained requirement ``properties`` objects are preserved for the
-    normal fail-closed validator.
+    in unconstrained branches are preserved for the normal fail-closed
+    validator.  Requirement ``properties`` is represented by the union of the
+    registered role schemas, so nullable provider fields can be normalized
+    without turning an arbitrary object into an accepted semantic payload.
     """
     root = response_schema
 
@@ -348,7 +360,18 @@ def build_host_review_response_schema(
                     "existing_requirement_id": {"type": "string", "minLength": 1},
                     "role": {"enum": sorted(allowed_requirement_roles)},
                     "field_key": {"type": "string", "minLength": 1},
-                    "properties": {"type": "object", "minProperties": 1},
+                    # The role is selected by the sibling ``role`` field and
+                    # is checked again by the host-independent validator.
+                    # A bare object schema projects to
+                    # ``additionalProperties: false`` with no fields, which
+                    # only permits ``{}`` and makes real style/text
+                    # properties impossible to emit.
+                    "properties": {
+                        "anyOf": [
+                            {"$ref": f"#/$defs/{role_schema_names[role]}"}
+                            for role in sorted(role_schema_names)
+                        ]
+                    },
                     "clause_ids": {"type": "array", "items": {"type": "string"}},
                     "evidence_ids": {"type": "array", "items": {"type": "string"}},
                     "confidence": {"type": "number"},

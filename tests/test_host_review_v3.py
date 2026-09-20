@@ -223,6 +223,10 @@ class HostReviewV3Tests(unittest.TestCase):
         native_schema = native_output_schema(self.request["response_schema"])
         self.assertEqual(native_schema_support_errors(native_schema), [])
         self.assertNotIn("provenance", native_schema["properties"])
+        requirement_properties = native_schema["properties"]["requirements"]["items"]["properties"]["properties"]
+        self.assertGreaterEqual(len(requirement_properties["anyOf"]), 2)
+        self.assertTrue(all("$ref" in variant for variant in requirement_properties["anyOf"]))
+        self.assertNotEqual(requirement_properties, {"type": "object", "properties": {}})
         font_schema = native_schema["$defs"]["fontSpec"]
         self.assertEqual(set(font_schema["required"]), set(font_schema["properties"]))
         serialized_native_schema = json.dumps(native_schema)
@@ -236,6 +240,27 @@ class HostReviewV3Tests(unittest.TestCase):
         value_schema = conditions_array["items"]["properties"]["value"]
         self.assertNotEqual(value_schema, {})
         self.assertEqual(native_schema_support_errors(value_schema), [])
+
+    def test_empty_requirement_properties_fail_closed_with_targeted_error(self) -> None:
+        response = self._executable_response()
+        response["requirements"][0]["properties"] = {}
+        errors = validate_response(response, self.request)
+        self.assertTrue(
+            any("must_include_semantic_payload" in error for error in errors),
+            errors,
+        )
+        records = contract_error_records(errors, response=response, chunk=self.request)
+        self.assertTrue(
+            any(record["code"] == "empty_requirement_properties" for record in records),
+            records,
+        )
+
+    def test_native_nullable_role_properties_are_normalized_before_local_validation(self) -> None:
+        response = self._executable_response()
+        response["requirements"][0]["properties"]["paragraph"] = None
+        normalized = normalize_native_response(response, self.request["response_schema"])
+        self.assertNotIn("paragraph", normalized["requirements"][0]["properties"])
+        self.assertEqual(validate_response(normalized, self.request), [])
 
     def test_applicability_value_domain_covers_scalars_and_in_lists(self) -> None:
         schema = applicability_value_schema()

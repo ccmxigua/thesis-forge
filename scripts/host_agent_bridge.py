@@ -381,6 +381,7 @@ _BASE_CONTRACT_REPAIR_RULES = (
     "Only covered, executable, and verify_existing clause reviews may contain requirement_indexes; every other classification must use an empty array.",
     "Every executable/covered/verify_existing requirement reference must be a zero-based index of a semantically matching emitted requirement whose clause_ids contains that exact review clause_id; check every review/index pair independently. Never carry an adjacent clause's index, change clause_ids to make validation pass, or emit an unused requirement.",
     "Do not move nested properties to a top-level requirement role: a nested key such as require_after_role is legal only where the supplied role schema places it.",
+    "Every emitted requirement must contain at least one non-null property in its role-specific properties object. A field_key identifies a content instance but is not an executable payload; do not emit properties: {} or use field_key alone. For text and cover-field roles, copy the exact evidence-backed text into properties.text; for style/layout roles, emit the declared nested style or layout property.",
     "Do not fabricate evidence or guess a semantic classification. Make only the mechanical schema corrections required by the supplied error, then regenerate the complete response from the current chunk.",
     "Administrative approval/marking tables belong under cover.non_public_administration, must be conditional on thesis_profile.security_level, and must be blank for public theses. Bind approval-number and approval-date labels to approval_number and approval_date; never substitute classification_number or completion_date.",
     "A clause can be executable only when every independently verifiable obligation is represented. Preserve language targets, units, limits, exceptions, and prohibited-content requirements; a partial requirement must be classified non-executable with requirement_indexes: [] rather than promoted to full coverage.",
@@ -448,6 +449,10 @@ def _contract_repair_guidance(
     if "require_after_role" in text or "unknown_or_disallowed_role" in text or "additionalproperties" in text:
         targeted.append(
             "Re-read the exact role_properties_schema for each requirement and place each property only at its declared nesting level; do not create a keywords_zh/keywords_en role when the schema expects content_constraints.properties.keywords_zh/keywords_en."
+        )
+    if "must_include_semantic_payload" in text or "empty_requirement_properties" in text:
+        targeted.append(
+            "Every requirement must have a non-empty role-specific properties object. A field_key alone is only an identity and cannot replace the payload. For a text or cover-field requirement, copy the exact evidence-backed text into properties.text; for a style/layout requirement, include the declared nested property. Do not invent a value or silently drop the requirement."
         )
     if "before_role" in text or "declarations" in text and "enum" in text:
         targeted.append(
@@ -518,6 +523,11 @@ def _structured_contract_repair_guidance(
             rule = (
                 f"At {pointer}, remove only the unsupported property named by the schema error; "
                 "do not move it, rename it, or invent a replacement."
+            )
+        elif code == "empty_requirement_properties":
+            rule = (
+                f"At {pointer}, emit a non-empty role-specific properties object. "
+                "field_key alone is not an executable payload; copy exact evidence-backed text into properties.text or emit the declared style/layout property, without guessing."
             )
         elif code == "schema_contract_violation":
             rule = (
@@ -614,11 +624,23 @@ def _retry_change_paths(previous: Any, current: Any) -> list[str]:
 
 def _retry_changes_allowed(
     records: list[dict[str, Any]], changed_paths: list[str], *, contract_version: str,
+    previous_response: Any = None, current_response: Any = None,
 ) -> bool:
     """Allow only explicitly mechanical contract corrections on a retry."""
     if not changed_paths:
         return True
     codes = {str(item.get("code")) for item in records if isinstance(item, dict)}
+    empty_payload_repair = "empty_requirement_properties" in codes
+    previous_requirements = (
+        _semantic_retry_view(previous_response).get("requirements", [])
+        if empty_payload_repair and _semantic_retry_view(previous_response) is not None
+        else []
+    )
+    current_requirements = (
+        _semantic_retry_view(current_response).get("requirements", [])
+        if empty_payload_repair and _semantic_retry_view(current_response) is not None
+        else []
+    )
     for path in changed_paths:
         if path.endswith(".normative_basis") and "normative_basis_invalid" in codes:
             continue
@@ -628,6 +650,22 @@ def _retry_changes_allowed(
         if path.endswith(".requirement_indexes") and contract_version == HOST_REVIEW_CONTRACT_V2:
             if "requirement_relation_mismatch" in codes:
                 continue
+        if empty_payload_repair and ".properties" in path:
+            match = re.match(r"\$\.requirements\[(\d+)\]\.properties(?:\.|$)", path)
+            if match:
+                index = int(match.group(1))
+                before = (
+                    previous_requirements[index].get("properties")
+                    if index < len(previous_requirements)
+                    else None
+                )
+                after = (
+                    current_requirements[index].get("properties")
+                    if index < len(current_requirements)
+                    else None
+                )
+                if before == {} and isinstance(after, dict) and after:
+                    continue
         # Semantic fields, requirement properties, obligations, and
         # classifications are never silently changed by a mechanical retry.
         return False
@@ -1625,6 +1663,8 @@ def run_bridge(
                             retry_error_records,
                             semantic_changes,
                             contract_version=contract_version,
+                            previous_response=previous_response,
+                            current_response=current_response,
                         ):
                             change_error = ValueError(
                                 "retry changed semantic fields and requires explicit semantic re-review: "

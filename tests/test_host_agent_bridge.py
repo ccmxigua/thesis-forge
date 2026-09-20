@@ -340,6 +340,41 @@ class HostAgentBridgeTests(unittest.TestCase):
         self.assertIn("matching requirement indexes are [1]", retry)
         self.assertIn("Do not copy a neighboring clause's index", retry)
 
+    def test_retry_guidance_requires_payload_instead_of_field_key_only(self) -> None:
+        retry = bridge._contract_repair_guidance(
+            "local response contract validation failed: "
+            "$.requirements[0].properties: must_include_semantic_payload",
+            include_base=False,
+        )
+        self.assertIn("non-empty role-specific properties object", retry)
+        self.assertIn("field_key alone", retry)
+        self.assertIn("properties.text", retry)
+
+    def test_retry_allows_only_completion_of_an_empty_requirement_payload(self) -> None:
+        previous = self._executable_response({"provenance": {}})
+        previous["requirements"][0]["properties"] = {}
+        current = self._executable_response({"provenance": {}})
+        records = [{"code": "empty_requirement_properties"}]
+        self.assertTrue(
+            bridge._retry_changes_allowed(
+                records,
+                ["$.requirements[0].properties.font"],
+                contract_version="2.1",
+                previous_response=previous,
+                current_response=current,
+            )
+        )
+        current["requirements"][0]["properties"]["font"]["size_pt"] = 11
+        self.assertFalse(
+            bridge._retry_changes_allowed(
+                records,
+                ["$.requirements[0].properties.font.size_pt"],
+                contract_version="2.1",
+                previous_response=current,
+                current_response=current,
+            )
+        )
+
     def test_bridge_retries_locally_rejected_contract_in_a_new_session(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             review_dir, chunk = self._packet(Path(td) / "requirements")

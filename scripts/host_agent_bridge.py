@@ -317,6 +317,10 @@ def compact_model_packet(chunk: dict[str, Any]) -> dict[str, Any]:
         "declaration_anchor_preference": chunk.get(
             "declaration_anchor_preference"
         ),
+        "fixed_declaration_candidates": _fixed_declaration_candidates(
+            chunk.get("clauses"), compact_evidence,
+            anchor=chunk.get("declaration_anchor_preference"),
+        ),
         "evidence_context": compact_evidence,
         "document_structure": compact_structure,
         "page_evidence": chunk.get("page_evidence", {}),
@@ -342,6 +346,84 @@ def compact_model_packet(chunk: dict[str, Any]) -> dict[str, Any]:
             ],
         },
     }
+
+
+def _fixed_declaration_candidates(
+    clauses: Any, evidence_context: dict[str, Any], *, anchor: Any,
+) -> list[dict[str, Any]]:
+    """Derive exact fixed-declaration groups from the current evidence.
+
+    This is only an evidence grouping hint for the host model.  It never
+    invents declaration text, assigns a semantic role to arbitrary prose, or
+    changes a clause classification.  The final response validator still
+    requires the emitted declaration text to equal the cited evidence.
+    """
+    if not isinstance(clauses, list) or not isinstance(evidence_context, dict):
+        return []
+
+    def normalized(value: Any) -> str:
+        return re.sub(r"\s+", "", str(value or ""))
+
+    heading_pattern = re.compile(
+        r"(?:原创性|独创性|诚信|使用授权|版权授权|公开授权).{0,12}(?:声明|说明|书)$"
+        r"|^(?:声明|授权书)$"
+    )
+    boundary_pattern = re.compile(
+        r"^(?:摘\s*要|ABSTRACT|目\s*录|参考文献|第[一二三四五六七八九十\d]+章)$",
+        re.IGNORECASE,
+    )
+    signature_pattern = re.compile(
+        r"(?:签名|签字)|日期.{0,12}年?.{0,6}月?.{0,6}日?"
+    )
+
+    candidates: list[dict[str, Any]] = []
+    for start, clause in enumerate(clauses):
+        if not isinstance(clause, dict):
+            continue
+        heading_text = str(clause.get("text") or "")
+        if len(normalized(heading_text)) > 50 or not heading_pattern.search(normalized(heading_text)):
+            continue
+        body_clauses: list[dict[str, Any]] = []
+        for following in clauses[start + 1:]:
+            if not isinstance(following, dict):
+                continue
+            text = str(following.get("text") or "")
+            compact = normalized(text)
+            if boundary_pattern.match(compact):
+                break
+            evidence_ids = [str(value) for value in following.get("evidence_ids", [])]
+            evidence_texts = [
+                str(evidence_context[evidence_id].get("text") or "")
+                for evidence_id in evidence_ids
+                if isinstance(evidence_context.get(evidence_id), dict)
+            ]
+            source_text = evidence_texts[0] if evidence_texts else text
+            if compact and not signature_pattern.search(source_text):
+                body_clauses.append(following)
+        if not body_clauses:
+            continue
+        clauses_in_group = [clause, *body_clauses]
+        evidence_ids = [
+            str(value)
+            for item in clauses_in_group
+            for value in item.get("evidence_ids", [])
+        ]
+        candidates.append({
+            "kind": "exact_fixed_declaration",
+            "heading_clause_id": clause.get("id"),
+            "body_clause_ids": [item.get("id") for item in body_clauses],
+            "clause_ids": [item.get("id") for item in clauses_in_group],
+            "heading_evidence_ids": [str(value) for value in clause.get("evidence_ids", [])],
+            "body_evidence_ids": [
+                str(value)
+                for item in body_clauses
+                for value in item.get("evidence_ids", [])
+            ],
+            "evidence_ids": list(dict.fromkeys(evidence_ids)),
+            "before_role": anchor,
+            "policy": "copy exact cited heading/body text; do not paraphrase",
+        })
+    return candidates
 
 
 def _compact_runtime_context(value: Any) -> dict[str, Any] | None:
@@ -383,7 +465,8 @@ _BASE_CONTRACT_REPAIR_RULES = (
     "Do not move nested properties to a top-level requirement role: a nested key such as require_after_role is legal only where the supplied role schema places it.",
     "Every emitted requirement must contain at least one non-null property in its role-specific properties object. A field_key identifies a content instance but is not an executable payload; do not emit properties: {} or use field_key alone. For text and cover-field roles, copy the exact evidence-backed text into properties.text; for style/layout roles, emit the declared nested style or layout property.",
     "Do not fabricate evidence or guess a semantic classification. Make only the mechanical schema corrections required by the supplied error, then regenerate the complete response from the current chunk.",
-    "Administrative approval/marking tables belong under cover.non_public_administration, must be conditional on thesis_profile.security_level with an equals or in condition selecting restricted/classified theses, and must be blank for public theses. If the current chunk contains only this administrative region, cover.fields may be an empty array; never duplicate administrative fields into ordinary cover.fields. Do not use not_equals as the executable binding. Bind approval-number and approval-date labels to approval_number and approval_date; never substitute classification_number or completion_date.",
+    "Administrative approval/marking tables belong under cover.non_public_administration, must be conditional on thesis_profile.security_level with an equals or in condition selecting restricted/classified theses, and must be blank for public theses. If the current chunk contains only this administrative region, cover.fields may be an empty array; never duplicate administrative fields into ordinary cover.fields. Do not use not_equals as the executable binding. Bind approval-number and approval-date labels to approval_number and approval_date; never substitute classification_number or completion_date. When one visible 保密期限 label describes an explicit two-ended date range, preserve two distinct fields in source order: first embargo_start, then embargo_until; do not collapse both endpoints into embargo_until.",
+    "When the packet contains fixed_declaration_candidates, treat each candidate as an exact evidence grouping. If any candidate clause is classified executable/covered/verify_existing, emit one declarations requirement covering the candidate clause_ids, copy the cited heading/body text exactly, and preserve the supplied declaration anchor; never leave an executable declaration clause without a derived declarations requirement.",
     "Input prerequisite keys are namespace-bound by kind: metadata uses thesis_profile., source_content uses source_inventory., template_resource uses template_profile., and runtime uses runtime.; never emit runtime_context.* or invent an unregistered path.",
     "A clause can be executable only when every independently verifiable obligation is represented. Preserve language targets, units, limits, exceptions, and prohibited-content requirements; a partial requirement must be classified non-executable with requirement_indexes: [] rather than promoted to full coverage.",
     "Use only a verified runtime_context.runtime_inventory anchor. A zero-match, multi-match, or blocked anchor is not executable; never infer a nearby heading or use the declarations role as an insertion anchor.",
@@ -459,6 +542,10 @@ def _contract_repair_guidance(
         targeted.append(
             "Keep the administrative region under cover.non_public_administration and bind applicability to thesis_profile.security_level with operator equals or in selecting restricted/classified. Do not use not_equals, move the fields to ordinary cover.fields, or guess approval values."
         )
+    if "embargo" in text or "保密" in raw_text:
+        targeted.append(
+            "For an explicit two-ended confidentiality date range with one visible 保密期限 label, keep two fields in source order: the first binds embargo_start and the second binds embargo_until. Do not replace the first endpoint with a duplicate embargo_until."
+        )
     if "must_include_semantic_payload" in text or "empty_requirement_properties" in text:
         targeted.append(
             "Every requirement must have a non-empty role-specific properties object. A field_key alone is only an identity and cannot replace the payload. For a text or cover-field requirement, copy the exact evidence-backed text into properties.text; for a style/layout requirement, include the declared nested property. Do not invent a value or silently drop the requirement."
@@ -521,7 +608,8 @@ def _structured_contract_repair_guidance(
         elif code == "requirement_relation_mismatch":
             rule = (
                 f"At {pointer}, do not copy or repair a neighboring relation. The deterministic matching requirement indexes are "
-                f"{matching if isinstance(matching, list) else 'unknown'}; regenerate the complete relation from the current chunk."
+                f"{matching if isinstance(matching, list) else 'unknown'}; regenerate the complete relation from the current chunk. "
+                "In contract 3.0, if an executable clause has no matching requirement, add the missing evidence-backed requirement (including a declarations requirement for any fixed_declaration_candidate) while preserving every existing requirement and review unchanged."
             )
         elif code == "partial_clause_coverage":
             rule = (
@@ -706,6 +794,15 @@ def _retry_changes_allowed(
     def under(prefix: str, path: str) -> bool:
         return path == prefix or path.startswith(prefix + ".") or path.startswith(prefix + "[")
 
+    if (
+        contract_version == HOST_REVIEW_CONTRACT_V3
+        and "requirement_relation_mismatch" in codes
+        and _v3_relation_addition_allowed(
+            previous_response, current_response, records, changed_paths,
+        )
+    ):
+        return True
+
     for path in changed_paths:
         if path.endswith(".normative_basis") and "normative_basis_invalid" in codes:
             continue
@@ -746,6 +843,75 @@ def _retry_changes_allowed(
         # Semantic fields, requirement properties, obligations, and
         # classifications are never silently changed by a mechanical retry.
         return False
+    return True
+
+
+def _v3_relation_addition_allowed(
+    previous_response: Any,
+    current_response: Any,
+    records: list[dict[str, Any]],
+    changed_paths: list[str],
+) -> bool:
+    """Allow a retry to add only requirements missing for executable reviews.
+
+    Contract 3.0 makes ``requirements[].clause_ids`` authoritative.  A
+    missing relation therefore cannot be repaired by editing a reverse index;
+    the model must add the missing, evidence-backed requirement.  This guard
+    permits that narrow addition while requiring every prior requirement and
+    review to remain byte-for-byte semantically unchanged.
+    """
+    if not isinstance(previous_response, dict) or not isinstance(current_response, dict):
+        return False
+    if changed_paths != ["$.requirements"]:
+        return False
+    previous_requirements = previous_response.get("requirements")
+    current_requirements = current_response.get("requirements")
+    previous_reviews = previous_response.get("clause_reviews")
+    current_reviews = current_response.get("clause_reviews")
+    if not all(isinstance(value, list) for value in (
+        previous_requirements, current_requirements, previous_reviews, current_reviews,
+    )):
+        return False
+    if len(current_requirements) <= len(previous_requirements) or previous_reviews != current_reviews:
+        return False
+
+    remaining = [copy.deepcopy(item) for item in current_requirements]
+    for previous in previous_requirements:
+        match = next((index for index, candidate in enumerate(remaining) if candidate == previous), None)
+        if match is None:
+            return False
+        remaining.pop(match)
+    if not remaining:
+        return False
+
+    missing_clause_ids: set[str] = set()
+    for record in records:
+        if not isinstance(record, dict) or record.get("code") != "requirement_relation_mismatch":
+            continue
+        match = re.search(r"\$\.clause_reviews\[(\d+)\]", str(record.get("json_pointer") or ""))
+        if match is None:
+            return False
+        index = int(match.group(1))
+        if index >= len(previous_reviews) or not isinstance(previous_reviews[index], dict):
+            return False
+        clause_id = previous_reviews[index].get("clause_id")
+        if not isinstance(clause_id, str) or not clause_id:
+            return False
+        if previous_reviews[index].get("classification") not in {
+            "covered", "executable", "verify_existing",
+        }:
+            return False
+        missing_clause_ids.add(clause_id)
+    if not missing_clause_ids:
+        return False
+    for item in remaining:
+        if not isinstance(item, dict):
+            return False
+        clause_ids = item.get("clause_ids")
+        if not isinstance(clause_ids, list) or not clause_ids:
+            return False
+        if not set(map(str, clause_ids)) <= missing_clause_ids:
+            return False
     return True
 
 
@@ -1086,6 +1252,11 @@ allowed roles, the complete machine-readable requirement_contract and
 response_schema, declaration instructions, and structure summary. The trusted
 provenance remains in the bridge-owned request packet and is not a model input;
 the bridge will bind it only after the semantic contract passes.
+If the packet contains fixed_declaration_candidates, they are deterministic
+groupings of exact cited evidence. Any candidate clause classified executable,
+covered, or verify_existing must have one declarations requirement covering its
+candidate clause_ids; copy its heading/body text exactly and preserve the
+supplied declaration anchor.
 The requirement_contract and response_schema are authoritative. Follow their
 role-specific properties and nested schemas exactly; do not invent aliases or
 free-form replacements for fields such as applicability, input_prerequisites,

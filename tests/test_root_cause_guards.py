@@ -149,6 +149,44 @@ class RootCauseGuardTests(unittest.TestCase):
         self.assertTrue(any("ordinary cover.fields" in error for error in errors), errors)
         self.assertTrue(any("embargo range" in error for error in errors), errors)
 
+    def test_duplicate_confidentiality_label_can_bind_ordered_date_range(self) -> None:
+        request = _request("非公开学位论文保密期限起止日期")
+        response = {
+            "contract_version": "2.1",
+            "requirements": [{
+                "role": "cover",
+                "properties": {
+                    "institution": "Example",
+                    "fields": [{"id": "title_zh", "label": "论文题目",
+                                 "value_from": "thesis_profile.cover_metadata.title_zh",
+                                 "display_policy": "required", "order": 1}],
+                    "non_public_administration": {
+                        "applicability": {"status": "conditional", "conditions": [
+                            {"fact": "thesis_profile.security_level", "operator": "in",
+                             "value": ["restricted", "classified"]},
+                        ]},
+                        "fields": [
+                            {"id": "embargo_start", "label": "保密期限",
+                             "value_from": "thesis_profile.cover_metadata.embargo_start",
+                             "display_policy": "required", "order": 1},
+                            {"id": "embargo_until", "label": "保密期限",
+                             "value_from": "thesis_profile.cover_metadata.embargo_until",
+                             "display_policy": "required", "order": 2},
+                        ],
+                        "public_policy": "blank", "source_region": "official_admin_table",
+                    },
+                },
+                "clause_ids": ["C1"], "evidence_ids": ["E1"],
+                "confidence": 0.9, "reason": "明确的起止日期区间",
+            }],
+            "clause_reviews": [{
+                "clause_id": "C1", "classification": "executable",
+                "requirement_indexes": [0], "reason": "已覆盖",
+            }],
+            "unsupported_items": [], "reported_conflicts": [],
+        }
+        self.assertEqual(validate_response(response, request), [])
+
     def test_unknown_input_key_is_rejected_by_format_loader(self) -> None:
         spec = {
             "schema_version": "1.0",

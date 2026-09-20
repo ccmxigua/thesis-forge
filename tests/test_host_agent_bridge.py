@@ -486,6 +486,68 @@ class HostAgentBridgeTests(unittest.TestCase):
             )
         )
 
+    def test_v3_retry_allows_only_new_requirement_for_missing_executable_clause(self) -> None:
+        previous = {
+            "contract_version": "3.0",
+            "requirements": [{
+                "role": "cover_field_label", "properties": {"text": "标题"},
+                "clause_ids": ["C1"], "evidence_ids": ["E1"],
+            }],
+            "clause_reviews": [
+                {"clause_id": "C1", "classification": "executable"},
+                {"clause_id": "C2", "classification": "executable"},
+            ],
+            "unsupported_items": [],
+        }
+        current = json.loads(json.dumps(previous))
+        current["requirements"].append({
+            "role": "declarations", "properties": {
+                "before_role": "abstract_title_zh", "items": [{
+                    "id": "authorization", "heading": "授权书",
+                    "body_parts": ["固定正文"], "source_evidence_ids": ["E2"],
+                    "signature_placeholders": [],
+                }],
+            }, "clause_ids": ["C2"], "evidence_ids": ["E2"],
+        })
+        records = [{
+            "code": "requirement_relation_mismatch",
+            "json_pointer": "$.clause_reviews[1]",
+        }]
+        changed = bridge._retry_change_paths(previous, current)
+        self.assertEqual(changed, ["$.requirements"])
+        self.assertTrue(bridge._retry_changes_allowed(
+            records, changed, contract_version="3.0",
+            previous_response=previous, current_response=current,
+        ))
+
+        current["requirements"][0]["properties"]["text"] = "改过的旧要求"
+        changed = bridge._retry_change_paths(previous, current)
+        self.assertFalse(bridge._retry_changes_allowed(
+            records, changed, contract_version="3.0",
+            previous_response=previous, current_response=current,
+        ))
+
+    def test_fixed_declaration_candidate_is_derived_from_exact_chunk_evidence(self) -> None:
+        packet = bridge.compact_model_packet({
+            "contract_version": "3.0",
+            "clauses": [
+                {"id": "C1", "text": "学位论文使用授权书", "evidence_ids": ["E1"]},
+                {"id": "C2", "text": "本人同意提交电子版", "evidence_ids": ["E2"]},
+                {"id": "C3", "text": "学位论文作者暨授权人签字", "evidence_ids": ["E3"]},
+                {"id": "C4", "text": "摘要", "evidence_ids": ["E4"]},
+            ],
+            "evidence_context": {
+                "E1": {"id": "E1", "kind": "paragraph", "text": "学位论文使用授权书"},
+                "E2": {"id": "E2", "kind": "paragraph", "text": "本人同意提交电子版"},
+                "E3": {"id": "E3", "kind": "paragraph", "text": "学位论文作者暨授权人签字"},
+                "E4": {"id": "E4", "kind": "paragraph", "text": "摘要"},
+            },
+            "declaration_anchor_preference": "abstract_title_zh",
+            "requirement_contract": {},
+        })
+        self.assertEqual(packet["fixed_declaration_candidates"][0]["clause_ids"], ["C1", "C2"])
+        self.assertEqual(packet["fixed_declaration_candidates"][0]["before_role"], "abstract_title_zh")
+
     def test_unknown_property_is_removed_deterministically_without_semantic_retry(self) -> None:
         response = {
             "requirements": [{"properties": {"style": {"name": "bad"}, "text": "标题"}}],

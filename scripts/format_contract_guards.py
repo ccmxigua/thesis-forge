@@ -167,13 +167,29 @@ def cover_binding_errors(spec: dict[str, Any]) -> list[str]:
                 "$.cover.non_public_administration.fields: an embargo range must bind "
                 "both embargo_start and embargo_until"
             )
-        for index, field in enumerate(fields if isinstance(fields, list) else []):
+        admin_fields = fields if isinstance(fields, list) else []
+        embargo_until_indexes = [
+            index for index, item in enumerate(admin_fields)
+            if isinstance(item, dict) and item.get("id") == "embargo_until"
+        ]
+        for index, field in enumerate(admin_fields):
             if not isinstance(field, dict):
                 continue
             field_id = field.get("id")
             label = normalize_label(field.get("label"))
             expected = expected_by_label.get(label)
-            if expected and field_id != expected:
+            # Some official tables print one visible "保密期限" label over
+            # a two-ended date range.  Preserve that source label while
+            # binding the first endpoint to embargo_start and the later one
+            # to embargo_until.  The pair and its order are deterministic;
+            # this does not authorize a free-form semantic relabeling.
+            paired_range_start = (
+                label == "保密期限"
+                and field_id == "embargo_start"
+                and bool(embargo_until_indexes)
+                and index < min(embargo_until_indexes)
+            )
+            if expected and field_id != expected and not paired_range_start:
                 errors.append(
                     f"$.cover.non_public_administration.fields[{index}]: label {label!r} "
                     f"must bind to {expected!r}, not {field_id!r}"

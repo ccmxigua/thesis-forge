@@ -224,6 +224,9 @@ class HostReviewV3Tests(unittest.TestCase):
         self.assertNotIn("provenance", native_schema["properties"])
         font_schema = native_schema["$defs"]["fontSpec"]
         self.assertEqual(set(font_schema["required"]), set(font_schema["properties"]))
+        serialized_native_schema = json.dumps(native_schema)
+        self.assertNotIn('"uniqueItems"', serialized_native_schema)
+        self.assertNotIn('"minLength"', serialized_native_schema)
         conditions_schema = native_schema["$defs"]["applicabilitySpec"]["properties"]["conditions"]
         conditions_array = next(
             variant for variant in conditions_schema["anyOf"]

@@ -35,6 +35,19 @@ def applicability_value_schema() -> dict[str, Any]:
 
 _COMPOSITION_KEYS = {"$ref", "const", "enum", "anyOf", "allOf", "oneOf", "not", "if"}
 
+# OpenAI-compatible strict structured outputs accept the shape of JSON data,
+# but not every JSON-Schema validation keyword.  These constraints remain in
+# the local contract schema and are checked after the provider returns; they
+# are omitted only from the provider-facing projection.
+_NATIVE_UNSUPPORTED_KEYWORDS = frozenset({
+    "minLength", "maxLength", "pattern", "format",
+    "minimum", "maximum", "exclusiveMinimum", "exclusiveMaximum", "multipleOf",
+    "minItems", "maxItems", "uniqueItems", "contains",
+    "minProperties", "maxProperties", "propertyNames", "patternProperties",
+    "dependencies", "dependentRequired", "dependentSchemas",
+    "unevaluatedProperties", "unevaluatedItems",
+})
+
 
 def _nullable_native_schema(schema: dict[str, Any]) -> dict[str, Any]:
     """Make a formerly optional property legal in strict native output.
@@ -63,7 +76,15 @@ def _project_native_schema(node: Any) -> Any:
     if not isinstance(node, dict):
         return copy.deepcopy(node)
 
-    projected = copy.deepcopy(node)
+    projected = {
+        key: copy.deepcopy(value)
+        for key, value in node.items()
+        if key not in _NATIVE_UNSUPPORTED_KEYWORDS
+    }
+    # ``enum`` is supported by the native subset and is a portable equivalent
+    # for a single-value ``const`` assertion.
+    if "const" in projected and "enum" not in projected:
+        projected["enum"] = [projected.pop("const")]
     properties = projected.get("properties")
     if isinstance(properties, dict):
         original_required = set(projected.get("required", []) or [])

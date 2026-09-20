@@ -798,6 +798,14 @@ def _retry_changes_allowed(
 
     if (
         contract_version == HOST_REVIEW_CONTRACT_V3
+        and _v3_cover_contract_completion_allowed(
+            previous_response, current_response, records, changed_paths, chunk=chunk,
+        )
+    ):
+        return True
+
+    if (
+        contract_version == HOST_REVIEW_CONTRACT_V3
         and _v3_incomplete_completion_allowed(
             previous_response, current_response, records, changed_paths, chunk=chunk,
         )
@@ -965,6 +973,80 @@ def _v3_incomplete_completion_allowed(
         }:
             return False
     return bool(remaining)
+
+
+def _v3_cover_contract_completion_allowed(
+    previous_response: Any,
+    current_response: Any,
+    records: list[dict[str, Any]],
+    changed_paths: list[str],
+    *,
+    chunk: dict[str, Any] | None = None,
+) -> bool:
+    """Allow schema-directed cover completion after a role-branch mismatch.
+
+    Native unions can make a ``cover`` requirement resemble a different
+    object branch.  A retry may then replace the invalid cover payload with a
+    schema-valid one.  This is accepted only when the local validator reports
+    a cover/schema error, all requirement identities and clause reviews stay
+    unchanged, and every non-cover change is the exact evidence-text fill
+    handled by the mechanical payload rule.
+    """
+    if chunk is None or not isinstance(previous_response, dict) or not isinstance(current_response, dict):
+        return False
+    if not changed_paths or any(
+        re.fullmatch(r"\$\.requirements\[\d+\]\.properties(?:\..+)?", path) is None
+        for path in changed_paths
+    ):
+        return False
+    codes = {str(item.get("code")) for item in records if isinstance(item, dict)}
+    if "cover_binding_violation" not in codes:
+        return False
+    if not codes <= {
+        "contract_validation_error",
+        "schema_contract_violation",
+        "unknown_property",
+        "cover_binding_violation",
+        "empty_requirement_properties",
+    }:
+        return False
+    if previous_response.get("clause_reviews") != current_response.get("clause_reviews"):
+        return False
+    if validate_host_agent_response(current_response, chunk):
+        return False
+    previous_view = _semantic_retry_view(previous_response)
+    current_view = _semantic_retry_view(current_response)
+    if previous_view is None or current_view is None:
+        return False
+    previous_requirements = previous_view.get("requirements", [])
+    current_requirements = current_view.get("requirements", [])
+    if len(previous_requirements) != len(current_requirements):
+        return False
+    cover_changed = False
+    for path in changed_paths:
+        match = re.fullmatch(r"\$\.requirements\[(\d+)\]\.properties(?:\.(.+))?", path)
+        if match is None:
+            return False
+        index = int(match.group(1))
+        if index >= len(previous_requirements) or index >= len(current_requirements):
+            return False
+        previous = previous_requirements[index]
+        current = current_requirements[index]
+        for key in ("role", "clause_ids", "evidence_ids", "existing_requirement_id"):
+            if previous.get(key) != current.get(key):
+                return False
+        if current.get("role") == "cover":
+            cover_changed = True
+            continue
+        if path != f"$.requirements[{index}].properties.text":
+            return False
+        if previous.get("properties") != {}:
+            return False
+        if current.get("properties") != {
+            "text": _exact_cited_text(current, chunk),
+        }:
+            return False
+    return cover_changed
 
 
 def _v3_relation_addition_allowed(

@@ -581,6 +581,52 @@ class HostAgentBridgeTests(unittest.TestCase):
                 previous_response=previous, current_response=current, chunk=chunk,
             ))
 
+    def test_v3_retry_allows_schema_directed_cover_completion_only(self) -> None:
+        previous = {
+            "contract_version": "3.0",
+            "requirements": [{
+                "role": "cover", "properties": {
+                    "before_role": "document_start", "items": [],
+                }, "clause_ids": ["C1"], "evidence_ids": ["E1"],
+            }],
+            "clause_reviews": [{
+                "clause_id": "C1", "classification": "executable",
+            }],
+            "unsupported_items": [],
+        }
+        current = json.loads(json.dumps(previous))
+        current["requirements"][0]["properties"] = {
+            "institution": "——",
+            "fields": [{
+                "id": "title_zh", "label": "论文题目：",
+                "value_from": "thesis_profile.cover_metadata.title_zh",
+                "display_policy": "required", "order": 1,
+            }],
+            "before_role": "document_start",
+            "missing_value_policy": "placeholder",
+            "missing_value_placeholder": "——",
+            "layout_id": "linear",
+        }
+        records = [
+            {"code": "contract_validation_error", "json_pointer": "$.requirements[0].properties"},
+            {"code": "schema_contract_violation", "json_pointer": "$.requirements[0].properties"},
+            {"code": "unknown_property", "json_pointer": "$.requirements[0].properties"},
+            {"code": "cover_binding_violation", "json_pointer": "$.requirements[0].properties.fields"},
+        ]
+        changed = bridge._retry_change_paths(previous, current)
+        chunk = {"response_schema": {"type": "object"}}
+        with patch.object(bridge, "validate_host_agent_response", return_value=[]):
+            self.assertTrue(bridge._retry_changes_allowed(
+                records, changed, contract_version="3.0",
+                previous_response=previous, current_response=current, chunk=chunk,
+            ))
+        current["clause_reviews"][0]["classification"] = "not_applicable"
+        changed = bridge._retry_change_paths(previous, current)
+        self.assertFalse(bridge._retry_changes_allowed(
+            records, changed, contract_version="3.0",
+            previous_response=previous, current_response=current, chunk=chunk,
+        ))
+
     def test_mechanical_repair_removes_requirement_only_for_non_requirement_review(self) -> None:
         response = {
             "requirements": [{

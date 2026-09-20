@@ -1515,16 +1515,17 @@ def _apply_safe_mechanical_repairs(
     """Apply only validator-directed, semantics-preserving JSON repairs.
 
     Unknown properties, evidence IDs that are explicitly reported as not
-    backed by the authoritative clause relation, and empty role payloads whose
-    exact text is present in cited evidence are mechanical boundary errors.
-    The helper never invents a value or repairs a semantic classification.
+    backed by the authoritative clause relation, empty role payloads whose
+    exact text is present in cited evidence, and an explicit optional-caption
+    contradiction are mechanical boundary errors. The helper never invents a
+    value or repairs a semantic classification.
     """
     if not isinstance(response, dict) or not error_records:
         return None, []
     allowed_codes = {
         "unknown_property", "evidence_relation_mismatch",
         "empty_requirement_properties", "requirement_relation_mismatch",
-        "applicability_fact_namespace",
+        "applicability_fact_namespace", "partial_clause_coverage",
     }
     if any(
         not isinstance(record, dict)
@@ -1534,6 +1535,70 @@ def _apply_safe_mechanical_repairs(
         return None, []
     repaired = copy.deepcopy(response)
     repairs: list[dict[str, Any]] = []
+
+    # The source clause explicitly says the continuation caption may be
+    # omitted. If the model nevertheless emits the boolean continuation flag
+    # as required, the validator reports an exact, source-backed contradiction
+    # rather than a semantic ambiguity. Normalize only that registered
+    # contradiction; all other partial-coverage errors remain fail-closed.
+    partial_records = [
+        record for record in error_records
+        if isinstance(record, dict) and record.get("code") == "partial_clause_coverage"
+    ]
+    if partial_records:
+        if len(partial_records) != len(error_records) or not isinstance(chunk, dict):
+            return None, []
+        clauses = chunk.get("clauses")
+        reviews = repaired.get("clause_reviews")
+        requirements = repaired.get("requirements")
+        if not isinstance(clauses, list) or not isinstance(reviews, list) or not isinstance(requirements, list):
+            return None, []
+        clauses_by_id = {
+            str(clause.get("id")): clause
+            for clause in clauses
+            if isinstance(clause, dict) and clause.get("id")
+        }
+        for record in partial_records:
+            raw_error = str(record.get("raw_error") or "")
+            if not raw_error.endswith("partial_clause_coverage:table.continuation.optional_caption_marked_required"):
+                return None, []
+            match = re.fullmatch(r"\$\.clause_reviews\[(\d+)\]", str(record.get("json_pointer") or ""))
+            if match is None:
+                return None, []
+            review_index = int(match.group(1))
+            if review_index >= len(reviews) or not isinstance(reviews[review_index], dict):
+                return None, []
+            clause_id = str(reviews[review_index].get("clause_id") or "")
+            clause = clauses_by_id.get(clause_id)
+            clause_text = str((clause or {}).get("text") or (clause or {}).get("source_text_full") or "")
+            if not re.search(r"表", clause_text) or not re.search(r"续", clause_text):
+                return None, []
+            if not re.search(r"可省略|可略", clause_text):
+                return None, []
+            matched = 0
+            for requirement_index, requirement in enumerate(requirements):
+                if not isinstance(requirement, dict) or clause_id not in {
+                    str(value) for value in requirement.get("clause_ids", [])
+                }:
+                    continue
+                properties = requirement.get("properties")
+                continuation = properties.get("continuation") if isinstance(properties, dict) else None
+                if requirement.get("role") != "table" or not isinstance(continuation, dict):
+                    continue
+                if continuation.get("caption_required_on_continuation") is not True:
+                    return None, []
+                continuation["caption_required_on_continuation"] = False
+                matched += 1
+                repairs.append({
+                    "code": "partial_clause_coverage",
+                    "json_pointer": f"$.requirements[{requirement_index}].properties.continuation.caption_required_on_continuation",
+                    "replacement": False,
+                    "rule_id": "optional_continuation_caption_is_not_required",
+                    "source_clause_id": clause_id,
+                })
+            if matched != 1:
+                return None, []
+        return repaired, repairs
 
     # A small, explicit compiler rule handles the one registered source fact
     # that can be derived without a semantic decision. The model often writes

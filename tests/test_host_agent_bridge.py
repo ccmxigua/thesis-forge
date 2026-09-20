@@ -798,6 +798,41 @@ class HostAgentBridgeTests(unittest.TestCase):
         self.assertEqual(repairs[0]["removed_clause_ids"], ["C1"])
         self.assertEqual(len(response["requirements"]), 1)
 
+    def test_mechanical_repair_normalizes_explicitly_optional_continuation_caption(self) -> None:
+        response = {
+            "requirements": [{
+                "role": "table",
+                "properties": {"continuation": {
+                    "caption_suffix": "(续)",
+                    "repeat_header_row": True,
+                    "caption_required_on_continuation": True,
+                    "verification": "word_render",
+                }},
+                "clause_ids": ["C00243"],
+                "evidence_ids": ["E00174"],
+            }],
+            "clause_reviews": [{"clause_id": "C00243", "classification": "executable"}],
+        }
+        chunk = {"clauses": [{
+            "id": "C00243",
+            "text": "表序后跟表题(可省略)和“(续)”，居中置于表上方，续表均应重复表头",
+        }]}
+        repaired, repairs = bridge._apply_safe_mechanical_repairs(
+            response,
+            [{
+                "code": "partial_clause_coverage",
+                "json_pointer": "$.clause_reviews[0]",
+                "raw_error": "$.clause_reviews[0]: partial_clause_coverage:table.continuation.optional_caption_marked_required",
+            }],
+            chunk=chunk,
+        )
+        self.assertIsNotNone(repaired)
+        self.assertFalse(
+            repaired["requirements"][0]["properties"]["continuation"]["caption_required_on_continuation"]
+        )
+        self.assertEqual(repairs[0]["rule_id"], "optional_continuation_caption_is_not_required")
+        self.assertTrue(response["requirements"][0]["properties"]["continuation"]["caption_required_on_continuation"])
+
     def test_fixed_declaration_candidate_is_derived_from_exact_chunk_evidence(self) -> None:
         packet = bridge.compact_model_packet({
             "contract_version": "3.0",

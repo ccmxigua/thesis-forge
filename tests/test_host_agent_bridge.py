@@ -802,6 +802,51 @@ class HostAgentBridgeTests(unittest.TestCase):
         self.assertEqual(repairs[0]["filled_property"], "text")
         self.assertNotIn("text", response["requirements"][0]["properties"])
 
+    def test_unknown_layout_properties_are_removed_then_exact_text_is_filled(self) -> None:
+        response = {
+            "requirements": [{
+                "role": "cover_field_label", "evidence_ids": ["E1"],
+                "properties": {
+                    "style": "three_line",
+                    "remove_vertical_borders": False,
+                    "repeat_header_row": False,
+                    "allow_row_split": False,
+                    "keep_with_caption": False,
+                },
+            }],
+        }
+        records = [
+            {
+                "code": "unknown_property",
+                "json_pointer": "$.requirements[0].properties",
+                "raw_error": f"unknown property '{name}'",
+            }
+            for name in (
+                "style", "remove_vertical_borders", "repeat_header_row",
+                "allow_row_split", "keep_with_caption",
+            )
+        ]
+        repaired, repairs = bridge._apply_safe_mechanical_repairs(
+            response,
+            records,
+            chunk={
+                "evidence_context": {"E1": {"text": "论文题目（中文）"}},
+                "requirement_contract": {
+                    "role_properties_schema": {
+                        "cover_field_label": {"$ref": "#/$defs/roleSpec"},
+                    },
+                },
+            },
+        )
+        self.assertEqual(
+            repaired["requirements"][0]["properties"],
+            {"text": "论文题目（中文）"},
+        )
+        self.assertEqual(
+            [item["code"] for item in repairs],
+            ["unknown_property"] * 5 + ["empty_requirement_properties"],
+        )
+
     def test_bridge_retries_locally_rejected_contract_in_a_new_session(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             review_dir, chunk = self._packet(Path(td) / "requirements")

@@ -1329,6 +1329,47 @@ def _apply_safe_mechanical_repairs(
                 "json_pointer": pointer,
                 "removed_property": property_name,
             })
+            # A provider can put a role's layout-only fields into the
+            # generic properties object.  After the validator-directed
+            # removals, the only remaining safe completion is the one exact
+            # text supported by the cited evidence.  Do not synthesize this
+            # for a non-text role or when any other payload remains.
+            requirement_match = re.fullmatch(
+                r"\$\.requirements\[(\d+)\]\.properties", pointer,
+            )
+            requirements = repaired.get("requirements")
+            requirement_index = (
+                int(requirement_match.group(1))
+                if requirement_match is not None else None
+            )
+            requirement = (
+                requirements[requirement_index]
+                if isinstance(requirements, list)
+                and requirement_index is not None
+                and requirement_index < len(requirements)
+                and isinstance(requirements[requirement_index], dict)
+                else None
+            )
+            if (
+                isinstance(requirement, dict)
+                and isinstance(chunk, dict)
+                and isinstance(target, dict)
+                and all(value is None for value in target.values())
+            ):
+                exact_text = _exact_cited_text(requirement, chunk)
+                if exact_text is not None:
+                    target["text"] = exact_text
+                    repairs.append({
+                        "code": "empty_requirement_properties",
+                        "json_pointer": pointer,
+                        "filled_property": "text",
+                        "source_evidence_ids": [
+                            str(evidence_id)
+                            for evidence_id in requirement.get("evidence_ids", [])
+                        ],
+                        "value": exact_text,
+                        "after_unknown_property_removal": True,
+                    })
         elif record.get("code") == "evidence_relation_mismatch":
             if evidence_match is None or not isinstance(target, list):
                 return None, []

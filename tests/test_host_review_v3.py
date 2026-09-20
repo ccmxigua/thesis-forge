@@ -90,6 +90,12 @@ class HostReviewV3Tests(unittest.TestCase):
             "reported_conflicts": [],
         }
 
+    def test_request_explains_multi_role_clause_and_equation_role_boundary(self) -> None:
+        instructions = "\n".join(self.request["instructions"])
+        self.assertIn("A single clause may support multiple requirements", instructions)
+        self.assertIn("Role boundary for equations", instructions)
+        self.assertIn("partial_clause_coverage error does not authorize changing classification", instructions)
+
     def test_v3_schema_has_one_model_authoritative_relation(self) -> None:
         reviews_schema = self.request["response_schema"]["properties"]["clause_reviews"]["items"]
         self.assertNotIn("requirement_indexes", reviews_schema["properties"])

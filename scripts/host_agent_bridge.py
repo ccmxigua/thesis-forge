@@ -470,6 +470,9 @@ _BASE_CONTRACT_REPAIR_RULES = (
     "When the packet contains fixed_declaration_candidates, treat each candidate as an exact evidence grouping. If any candidate clause is classified executable/covered/verify_existing, emit one declarations requirement covering the candidate clause_ids, copy the cited heading/body text exactly, and preserve the supplied declaration anchor; never leave an executable declaration clause without a derived declarations requirement.",
     "Input prerequisite keys are namespace-bound by kind: metadata uses thesis_profile., source_content uses source_inventory., template_resource uses template_profile., and runtime uses runtime.; never emit runtime_context.* or invent an unregistered path.",
     "A clause can be executable only when every independently verifiable obligation is represented. Preserve language targets, units, limits, exceptions, and prohibited-content requirements; a partial requirement must be classified non-executable with requirement_indexes: [] rather than promoted to full coverage.",
+    "A single clause may support multiple requirements when it contains obligations for different roles. Repeat the exact clause_id and cited evidence_ids in each semantically matching requirement; a continuation-table clause may therefore bind both table continuation and table_caption position/alignment. Do not hide one role's obligation inside another role or change classification merely because one role is incomplete.",
+    "Role boundary for equations: use the top-level equations role for layout properties declared by equationLayoutSpec (same_line, no_lines, alignment, number_alignment, number_parentheses, center_tab_twips, or right_tab_twips). Use equation only for an exact equation/content occurrence. Never put style or an invented layout key in equation; if no declared equations property represents the rule, keep the clause non-executable rather than guessing.",
+    "A partial_clause_coverage error never authorizes changing classification, obligations, clause_ids, or requirement count on retry. Preserve the baseline and complete a missing role-specific requirement only when current evidence and the declared schema support it; otherwise return the baseline unchanged and let the bridge fail closed.",
     "Use only a verified runtime_context.runtime_inventory anchor. A zero-match, multi-match, or blocked anchor is not executable; never infer a nearby heading or use the declarations role as an insertion anchor.",
 )
 
@@ -575,9 +578,11 @@ def _contract_repair_guidance(
     if "partial_clause_coverage" in text or "abstract_target_or_translation_ambiguous" in text:
         targeted.append(
             "The rejected clause contains residual abstract obligations or an ambiguous language target. "
-            "Do not add a guessed min/max/semantic property or change Chinese abstract to English abstract; "
-            "return unresolved or another non-executable classification with requirement_indexes: [] until "
-            "the cited evidence resolves the target, unit, exception, and all independent obligations."
+            "Preserve the baseline classification, obligations, clause_ids, and requirement count. "
+            "When the current evidence and declared schema support a missing role-specific requirement, "
+            "complete that requirement and repeat the exact clause_id/evidence_ids for the additional role; "
+            "otherwise return the baseline unchanged. Do not add a guessed min/max/semantic property, "
+            "change Chinese abstract to English abstract, or reclassify merely to escape the coverage error."
         )
     if "item_length_metric:cjk_characters" in text:
         targeted.append(
@@ -772,6 +777,7 @@ def _retry_changes_allowed(
     )
     cover_property_prefixes: set[str] = set()
     exact_property_prefixes: set[str] = set()
+    unknown_property_paths: set[str] = set()
     for record in records:
         if not isinstance(record, dict):
             continue
@@ -792,6 +798,13 @@ def _retry_changes_allowed(
             match = re.match(r"^(\$\.requirements\[\d+\]\.properties)\.([^.\[]+)", pointer)
             if match:
                 exact_property_prefixes.add(f"{match.group(1)}.{match.group(2)}")
+        elif code == "unknown_property":
+            property_match = re.search(
+                r"unknown property ['\"]([^'\"]+)['\"]",
+                str(record.get("raw_error") or ""),
+            )
+            if property_match and pointer:
+                unknown_property_paths.add(f"{pointer}.{property_match.group(1)}")
 
     def under(prefix: str, path: str) -> bool:
         return path == prefix or path.startswith(prefix + ".") or path.startswith(prefix + "[")
@@ -850,6 +863,30 @@ def _retry_changes_allowed(
             ".body_parts" in path or ".heading" in path
         ):
             continue
+        if path in unknown_property_paths:
+            match = re.fullmatch(
+                r"\$\.requirements\[(\d+)\]\.properties\.([^\.\[]+)", path,
+            )
+            if match:
+                index = int(match.group(1))
+                property_name = match.group(2)
+                before = (
+                    previous_requirements[index].get("properties")
+                    if index < len(previous_requirements)
+                    else None
+                )
+                after = (
+                    current_requirements[index].get("properties")
+                    if index < len(current_requirements)
+                    else None
+                )
+                if (
+                    isinstance(before, dict)
+                    and property_name in before
+                    and isinstance(after, dict)
+                    and property_name not in after
+                ):
+                    continue
         if "cover_binding_violation" in codes and any(
             under(prefix, path) for prefix in cover_property_prefixes
         ):

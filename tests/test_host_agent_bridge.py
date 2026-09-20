@@ -301,6 +301,9 @@ class HostAgentBridgeTests(unittest.TestCase):
         self.assertIn("classification and normative_basis are different fields", prompt)
         self.assertIn("Only covered, executable, and verify_existing", prompt)
         self.assertIn("require_after_role", prompt)
+        self.assertIn("A single clause may support multiple requirements", prompt)
+        self.assertIn("Role boundary for equations", prompt)
+        self.assertIn("partial_clause_coverage error never authorizes changing classification", prompt)
         retry = bridge._host_prompt(
             request_path=Path("request.json"),
             chunk_path=Path("chunk.json"),
@@ -423,6 +426,46 @@ class HostAgentBridgeTests(unittest.TestCase):
                 current_response=current,
             )
         )
+
+    def test_retry_allows_empty_payload_fill_and_validator_named_property_removal(self) -> None:
+        previous = {
+            "contract_version": "3.0",
+            "requirements": [
+                {
+                    "role": "equations", "properties": {},
+                    "clause_ids": ["C1"], "evidence_ids": ["E1"],
+                },
+                {
+                    "role": "equation", "properties": {"style": "three_line"},
+                    "clause_ids": ["C2"], "evidence_ids": ["E2"],
+                },
+            ],
+            "clause_reviews": [
+                {"clause_id": "C1", "classification": "executable"},
+                {"clause_id": "C2", "classification": "executable"},
+            ],
+            "unsupported_items": [],
+        }
+        current = json.loads(json.dumps(previous))
+        current["requirements"][0]["properties"] = {"same_line": False}
+        current["requirements"][1]["properties"] = {}
+        records = [
+            {"code": "empty_requirement_properties", "json_pointer": "$.requirements[0].properties"},
+            {
+                "code": "unknown_property",
+                "json_pointer": "$.requirements[1].properties",
+                "raw_error": "unknown property 'style'",
+            },
+        ]
+        changed = bridge._retry_change_paths(previous, current)
+        self.assertEqual(
+            changed,
+            ["$.requirements[0].properties.same_line", "$.requirements[1].properties.style"],
+        )
+        self.assertTrue(bridge._retry_changes_allowed(
+            records, changed, contract_version="3.0",
+            previous_response=previous, current_response=current,
+        ))
 
     def test_retry_allows_only_exact_fixed_text_repair(self) -> None:
         records = [{"code": "fixed_text_evidence_mismatch"}]

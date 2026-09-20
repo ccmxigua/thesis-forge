@@ -114,6 +114,17 @@ def contract_error_records(
             code = "partial_clause_coverage"
         elif "must_include_semantic_payload" in lowered:
             code = "empty_requirement_properties"
+        elif "must equal a complete cited source-evidence text" in lowered:
+            code = "fixed_text_evidence_mismatch"
+        elif "non_public_administration" in lowered:
+            code = "cover_binding_violation"
+        elif "input_prerequisites" in lowered and (
+            "pattern" in lowered
+            or "namespace" in lowered
+            or "runtime_context" in lowered
+            or "does not match" in lowered
+        ):
+            code = "input_prerequisite_namespace"
         elif "unknown property" in lowered:
             code = "unknown_property"
         elif "unsupported_schema_keyword" in lowered:

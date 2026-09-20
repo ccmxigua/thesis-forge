@@ -383,7 +383,8 @@ _BASE_CONTRACT_REPAIR_RULES = (
     "Do not move nested properties to a top-level requirement role: a nested key such as require_after_role is legal only where the supplied role schema places it.",
     "Every emitted requirement must contain at least one non-null property in its role-specific properties object. A field_key identifies a content instance but is not an executable payload; do not emit properties: {} or use field_key alone. For text and cover-field roles, copy the exact evidence-backed text into properties.text; for style/layout roles, emit the declared nested style or layout property.",
     "Do not fabricate evidence or guess a semantic classification. Make only the mechanical schema corrections required by the supplied error, then regenerate the complete response from the current chunk.",
-    "Administrative approval/marking tables belong under cover.non_public_administration, must be conditional on thesis_profile.security_level, and must be blank for public theses. Bind approval-number and approval-date labels to approval_number and approval_date; never substitute classification_number or completion_date.",
+    "Administrative approval/marking tables belong under cover.non_public_administration, must be conditional on thesis_profile.security_level with an equals or in condition selecting restricted/classified theses, and must be blank for public theses. Do not use not_equals as the executable binding. Bind approval-number and approval-date labels to approval_number and approval_date; never substitute classification_number or completion_date.",
+    "Input prerequisite keys are namespace-bound by kind: metadata uses thesis_profile., source_content uses source_inventory., template_resource uses template_profile., and runtime uses runtime.; never emit runtime_context.* or invent an unregistered path.",
     "A clause can be executable only when every independently verifiable obligation is represented. Preserve language targets, units, limits, exceptions, and prohibited-content requirements; a partial requirement must be classified non-executable with requirement_indexes: [] rather than promoted to full coverage.",
     "Use only a verified runtime_context.runtime_inventory anchor. A zero-match, multi-match, or blocked anchor is not executable; never infer a nearby heading or use the declarations role as an insertion anchor.",
 )
@@ -449,6 +450,14 @@ def _contract_repair_guidance(
     if "require_after_role" in text or "unknown_or_disallowed_role" in text or "additionalproperties" in text:
         targeted.append(
             "Re-read the exact role_properties_schema for each requirement and place each property only at its declared nesting level; do not create a keywords_zh/keywords_en role when the schema expects content_constraints.properties.keywords_zh/keywords_en."
+        )
+    if "input_prerequisites" in text or "runtime_context" in text:
+        targeted.append(
+            "For each input_prerequisite, use the namespace required by its kind: thesis_profile. for metadata, source_inventory. for source content, template_profile. for template resources, and runtime. for runtime services. Replace runtime_context.* with the registered runtime.* key; do not invent or remap a missing input."
+        )
+    if "non_public_administration" in text:
+        targeted.append(
+            "Keep the administrative region under cover.non_public_administration and bind applicability to thesis_profile.security_level with operator equals or in selecting restricted/classified. Do not use not_equals, move the fields to ordinary cover.fields, or guess approval values."
         )
     if "must_include_semantic_payload" in text or "empty_requirement_properties" in text:
         targeted.append(
@@ -528,6 +537,24 @@ def _structured_contract_repair_guidance(
             rule = (
                 f"At {pointer}, emit a non-empty role-specific properties object. "
                 "field_key alone is not an executable payload; copy exact evidence-backed text into properties.text or emit the declared style/layout property, without guessing."
+            )
+        elif code == "fixed_text_evidence_mismatch":
+            rule = (
+                f"At {pointer}, replace only the fixed declaration text with the complete, exact cited evidence paragraph. "
+                "Do not split, paraphrase, shorten, or alter classifications, relations, anchors, or unrelated requirements."
+            )
+        elif code == "input_prerequisite_namespace":
+            rule = (
+                f"At {pointer}, use only the registered namespace for the prerequisite kind: "
+                "thesis_profile. for metadata, source_inventory. for source content, "
+                "template_profile. for template resources, and runtime. for runtime services. "
+                "Do not emit runtime_context.* or invent a replacement path."
+            )
+        elif code == "cover_binding_violation":
+            rule = (
+                f"At {pointer}, keep non-public administration under cover.non_public_administration "
+                "and bind it to thesis_profile.security_level with equals or in selecting restricted/classified; "
+                "do not use not_equals or move the fields to ordinary cover.fields."
             )
         elif code == "schema_contract_violation":
             rule = (
@@ -631,14 +658,16 @@ def _retry_changes_allowed(
         return True
     codes = {str(item.get("code")) for item in records if isinstance(item, dict)}
     empty_payload_repair = "empty_requirement_properties" in codes
+    previous_view = _semantic_retry_view(previous_response) if empty_payload_repair else None
+    current_view = _semantic_retry_view(current_response) if empty_payload_repair else None
     previous_requirements = (
-        _semantic_retry_view(previous_response).get("requirements", [])
-        if empty_payload_repair and _semantic_retry_view(previous_response) is not None
+        previous_view.get("requirements", [])
+        if previous_view is not None
         else []
     )
     current_requirements = (
-        _semantic_retry_view(current_response).get("requirements", [])
-        if empty_payload_repair and _semantic_retry_view(current_response) is not None
+        current_view.get("requirements", [])
+        if current_view is not None
         else []
     )
     for path in changed_paths:
@@ -666,10 +695,63 @@ def _retry_changes_allowed(
                 )
                 if before == {} and isinstance(after, dict) and after:
                     continue
+        if "fixed_text_evidence_mismatch" in codes and (
+            ".body_parts" in path or ".heading" in path
+        ):
+            continue
         # Semantic fields, requirement properties, obligations, and
         # classifications are never silently changed by a mechanical retry.
         return False
     return True
+
+
+def _retry_semantic_change_error(
+    previous_response: Any,
+    current_response: Any,
+    records: list[dict[str, Any]],
+    *,
+    contract_version: str,
+) -> tuple[ValueError | None, list[str]]:
+    """Reject semantic drift even when the retry response is still invalid.
+
+    The first implementation compared attempts only after the retry had
+    passed local validation.  That left an invalid second response free to
+    change classifications, bindings, or cover conditions before its final
+    contract error was recorded.  Raw-attempt comparison must happen before
+    another retry decision, while still allowing the narrow empty-payload
+    completion rule handled by ``_retry_changes_allowed``.
+    """
+    changed_paths = _retry_change_paths(previous_response, current_response)
+    if not changed_paths or _retry_changes_allowed(
+        records,
+        changed_paths,
+        contract_version=contract_version,
+        previous_response=previous_response,
+        current_response=current_response,
+    ):
+        return None, changed_paths
+    error = ValueError(
+        "retry changed semantic fields and requires explicit semantic re-review: "
+        + ", ".join(changed_paths[:12])
+    )
+    error.error_records = [{  # type: ignore[attr-defined]
+        "code": "semantic_retry_change",
+        "json_pointer": path,
+        "schema_pointer": path,
+        "clause_id": None,
+        "raw_error": str(error),
+        "response_sha256": _response_sha256(current_response),
+        "allowed_values": None,
+        "matching_requirement_indexes": None,
+        "requirement_count": (
+            len(current_response.get("requirements", []))
+            if isinstance(current_response, dict)
+            and isinstance(current_response.get("requirements"), list)
+            else None
+        ),
+        "semantic_review_required": True,
+    } for path in changed_paths]
+    return error, changed_paths
 
 
 # Compatibility name for callers that imported the bridge directly.  The
@@ -1656,34 +1738,13 @@ def run_bridge(
                             attempt_response_path,
                             label=f"Host Agent response {index} attempt {attempt}",
                         )
-                        semantic_changes = _retry_change_paths(
-                            previous_response, current_response,
-                        )
-                        if semantic_changes and not _retry_changes_allowed(
+                        change_error, semantic_changes = _retry_semantic_change_error(
+                            previous_response,
+                            current_response,
                             retry_error_records,
-                            semantic_changes,
                             contract_version=contract_version,
-                            previous_response=previous_response,
-                            current_response=current_response,
-                        ):
-                            change_error = ValueError(
-                                "retry changed semantic fields and requires explicit semantic re-review: "
-                                + ", ".join(semantic_changes[:12])
-                            )
-                            change_error.error_records = [{  # type: ignore[attr-defined]
-                                "code": "semantic_retry_change",
-                                "json_pointer": path,
-                                "schema_pointer": path,
-                                "clause_id": None,
-                                "raw_error": str(change_error),
-                                "response_sha256": _response_sha256(current_response),
-                                "allowed_values": None,
-                                "matching_requirement_indexes": None,
-                                "requirement_count": len(current_response.get("requirements", []))
-                                if isinstance(current_response, dict) and isinstance(current_response.get("requirements"), list)
-                                else None,
-                                "semantic_review_required": True,
-                            } for path in semantic_changes]
+                        )
+                        if change_error is not None:
                             with lifecycle_lock:
                                 chunk_lifecycle[index].setdefault("semantic_retry_changes", []).extend(
                                     semantic_changes
@@ -1747,6 +1808,53 @@ def run_bridge(
                 raise
             except (OSError, ValueError, RuntimeError) as exc:
                 controller.check()
+                previous_error_records = copy.deepcopy(retry_error_records)
+                if attempt > 1 and previous_error_records:
+                    previous_raw_path = response_path.with_name(
+                        f"{response_path.stem}.attempt-{attempt - 1:02d}.raw{response_path.suffix}"
+                    )
+                    current_raw_path = attempt_response_path.with_name(
+                        f"{attempt_response_path.stem}.raw{attempt_response_path.suffix}"
+                    )
+                    response_schema = chunk.get("response_schema")
+                    if (
+                        previous_raw_path.is_file()
+                        and current_raw_path.is_file()
+                        and isinstance(response_schema, dict)
+                    ):
+                        try:
+                            previous_response = normalize_native_response(
+                                _read_json(
+                                    previous_raw_path,
+                                    label=f"Host Agent previous raw response {index} attempt {attempt - 1}",
+                                ),
+                                response_schema,
+                            )
+                            current_response = normalize_native_response(
+                                _read_json(
+                                    current_raw_path,
+                                    label=f"Host Agent raw response {index} attempt {attempt}",
+                                ),
+                                response_schema,
+                            )
+                            change_error, semantic_changes = _retry_semantic_change_error(
+                                previous_response,
+                                current_response,
+                                previous_error_records,
+                                contract_version=contract_version,
+                            )
+                            if semantic_changes:
+                                with lifecycle_lock:
+                                    chunk_lifecycle[index].setdefault(
+                                        "semantic_retry_changes", []
+                                    ).extend(semantic_changes)
+                            if change_error is not None:
+                                exc = change_error
+                        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                            # The primary contract failure remains authoritative
+                            # when an attempt cannot be decoded for the
+                            # secondary retry-drift audit.
+                            pass
                 failures.append(str(exc))
                 error_records = getattr(exc, "error_records", None)
                 if isinstance(error_records, list):

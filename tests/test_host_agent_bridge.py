@@ -350,6 +350,33 @@ class HostAgentBridgeTests(unittest.TestCase):
         self.assertIn("field_key alone", retry)
         self.assertIn("properties.text", retry)
 
+    def test_retry_guidance_binds_prerequisites_and_admin_condition(self) -> None:
+        retry = bridge._contract_repair_guidance(
+            "local response contract validation failed: "
+            "$.requirements[0].input_prerequisites[0].key: does not match "
+            "'^(thesis_profile|source_inventory|template_profile|runtime)\\.'; "
+            "$.requirements[1].properties.non_public_administration.applicability: "
+            "must be conditional on thesis_profile.security_level",
+            include_base=False,
+        )
+        self.assertIn("runtime_context.*", retry)
+        self.assertIn("operator equals or in", retry)
+
+    def test_invalid_retry_cannot_change_classification_to_escape_a_contract_error(self) -> None:
+        previous = self._executable_response({"provenance": {}})
+        current = self._executable_response({"provenance": {}})
+        current["clause_reviews"][0]["classification"] = "informational"
+        current["clause_reviews"][0].pop("requirement_indexes", None)
+        change_error, changed = bridge._retry_semantic_change_error(
+            previous,
+            current,
+            [{"code": "input_prerequisite_namespace"}],
+            contract_version="2.1",
+        )
+        self.assertTrue(changed)
+        self.assertIsNotNone(change_error)
+        self.assertIn("semantic re-review", str(change_error))
+
     def test_retry_allows_only_completion_of_an_empty_requirement_payload(self) -> None:
         previous = self._executable_response({"provenance": {}})
         previous["requirements"][0]["properties"] = {}
@@ -372,6 +399,23 @@ class HostAgentBridgeTests(unittest.TestCase):
                 contract_version="2.1",
                 previous_response=current,
                 current_response=current,
+            )
+        )
+
+    def test_retry_allows_only_exact_fixed_text_repair(self) -> None:
+        records = [{"code": "fixed_text_evidence_mismatch"}]
+        self.assertTrue(
+            bridge._retry_changes_allowed(
+                records,
+                ["$.requirements[0].properties.items[0].body_parts[0]"],
+                contract_version="2.1",
+            )
+        )
+        self.assertFalse(
+            bridge._retry_changes_allowed(
+                records,
+                ["$.clause_reviews[0].classification"],
+                contract_version="2.1",
             )
         )
 

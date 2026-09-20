@@ -204,6 +204,17 @@ class HostReviewV3Tests(unittest.TestCase):
         self.assertEqual(response["clause_reviews"][0]["normative_basis"], "informational")
         self.assertEqual(len(next(record for record in records if record["code"] == "normative_basis_invalid")["response_sha256"]), 64)
 
+    def test_fixed_declaration_text_errors_are_distinguished_from_semantic_errors(self) -> None:
+        records = contract_error_records(
+            [
+                "$.requirements[0].properties.items[0].body_parts[0]: "
+                "must equal a complete cited source-evidence text; do not paraphrase",
+            ],
+            response=self._executable_response(),
+            chunk=self.request,
+        )
+        self.assertEqual(records[0]["code"], "fixed_text_evidence_mismatch")
+
     def test_equation_role_rejects_unsupported_numbering_without_normalizing(self) -> None:
         response = self._executable_response()
         response["requirements"][0]["role"] = "equations"
@@ -254,6 +265,57 @@ class HostReviewV3Tests(unittest.TestCase):
             any(record["code"] == "empty_requirement_properties" for record in records),
             records,
         )
+
+    def test_input_prerequisite_namespace_is_not_model_defined(self) -> None:
+        response = self._executable_response()
+        response["requirements"][0]["input_prerequisites"] = [{
+            "kind": "runtime",
+            "key": "runtime_context.runtime_inventory.anchor_inventory.selected",
+            "required": True,
+            "reason": "anchor",
+        }]
+        errors = validate_response(response, self.request)
+        self.assertTrue(any("input_prerequisites" in error for error in errors), errors)
+        records = contract_error_records(errors, response=response, chunk=self.request)
+        self.assertTrue(
+            any(record["code"] == "input_prerequisite_namespace" for record in records),
+            records,
+        )
+
+    def test_non_public_administration_requires_positive_security_condition(self) -> None:
+        response = self._executable_response()
+        response["requirements"][0] = {
+            "role": "cover",
+            "properties": {
+                "institution": "北京体育大学",
+                "fields": [{
+                    "id": "title_zh",
+                    "label": "论文题目",
+                    "value_from": "thesis_profile.cover_metadata.title_zh",
+                    "display_policy": "if_present",
+                    "order": 1,
+                }],
+                "non_public_administration": {
+                    "applicability": {
+                        "status": "conditional",
+                        "conditions": [{
+                            "fact": "thesis_profile.security_level",
+                            "operator": "not_equals",
+                            "value": "public",
+                        }],
+                    },
+                    "fields": [],
+                    "public_policy": "blank",
+                    "source_region": "E1",
+                },
+            },
+            "clause_ids": ["C1"],
+            "evidence_ids": ["E1"],
+            "confidence": 0.9,
+            "reason": "cover",
+        }
+        errors = validate_response(response, self.request)
+        self.assertTrue(any("non_public_administration" in error for error in errors), errors)
 
     def test_native_nullable_role_properties_are_normalized_before_local_validation(self) -> None:
         response = self._executable_response()

@@ -99,7 +99,10 @@ def cover_binding_errors(spec: dict[str, Any]) -> list[str]:
         "申请密级", "密级", "保密期限", "保密起始日期", "保密开始日期",
         "审批表编号", "论文审批表编号", "审批表号", "批准日期", "批准时间",
     }
-    for index, field in enumerate(cover.get("fields", [])):
+    ordinary_fields = cover.get("fields", [])
+    if not isinstance(ordinary_fields, list):
+        ordinary_fields = []
+    for index, field in enumerate(ordinary_fields):
         if not isinstance(field, dict):
             continue
         field_id = field.get("id")
@@ -121,6 +124,11 @@ def cover_binding_errors(spec: dict[str, Any]) -> list[str]:
                 f"$.cover.fields[{index}].value_from: must bind to its own field id {field_id!r}"
             )
     admin = cover.get("non_public_administration")
+    if not ordinary_fields and not isinstance(admin, dict):
+        errors.append(
+            "$.cover.fields: must contain an ordinary cover field unless "
+            "cover.non_public_administration is present"
+        )
     if admin is not None and not isinstance(admin, dict):
         errors.append("$.cover.non_public_administration: must be an object")
     if isinstance(admin, dict):

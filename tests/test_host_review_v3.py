@@ -229,6 +229,14 @@ class HostReviewV3Tests(unittest.TestCase):
             ["requirement_relation_mismatch", "requirement_relation_mismatch"],
         )
 
+    def test_unbacked_evidence_is_structured_as_evidence_relation_error(self) -> None:
+        records = contract_error_records(
+            ["$.requirements[0].evidence_ids: not_backed_by_clause:E00035"],
+            response=self._executable_response(),
+            chunk=self.request,
+        )
+        self.assertEqual(records[0]["code"], "evidence_relation_mismatch")
+
     def test_equation_role_rejects_unsupported_numbering_without_normalizing(self) -> None:
         response = self._executable_response()
         response["requirements"][0]["role"] = "equations"
@@ -330,6 +338,40 @@ class HostReviewV3Tests(unittest.TestCase):
         }
         errors = validate_response(response, self.request)
         self.assertTrue(any("non_public_administration" in error for error in errors), errors)
+
+    def test_admin_only_cover_requirement_does_not_duplicate_admin_fields(self) -> None:
+        response = self._executable_response()
+        response["requirements"][0] = {
+            "role": "cover",
+            "properties": {
+                "institution": "北京体育大学",
+                "fields": [],
+                "non_public_administration": {
+                    "applicability": {
+                        "status": "conditional",
+                        "conditions": [{
+                            "fact": "thesis_profile.security_level",
+                            "operator": "in",
+                            "value": ["restricted", "classified"],
+                        }],
+                    },
+                    "fields": [{
+                        "id": "security_marking",
+                        "label": "申请密级",
+                        "value_from": "thesis_profile.cover_metadata.security_marking",
+                        "display_policy": "blank_when_public",
+                        "order": 1,
+                    }],
+                    "public_policy": "blank",
+                    "source_region": "E1",
+                },
+            },
+            "clause_ids": ["C1"],
+            "evidence_ids": ["E1"],
+            "confidence": 0.9,
+            "reason": "The current chunk contains only the conditional administrative region.",
+        }
+        self.assertEqual(validate_response(response, self.request), [])
 
     def test_native_nullable_role_properties_are_normalized_before_local_validation(self) -> None:
         response = self._executable_response()

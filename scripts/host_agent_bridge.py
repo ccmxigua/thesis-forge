@@ -383,7 +383,7 @@ _BASE_CONTRACT_REPAIR_RULES = (
     "Do not move nested properties to a top-level requirement role: a nested key such as require_after_role is legal only where the supplied role schema places it.",
     "Every emitted requirement must contain at least one non-null property in its role-specific properties object. A field_key identifies a content instance but is not an executable payload; do not emit properties: {} or use field_key alone. For text and cover-field roles, copy the exact evidence-backed text into properties.text; for style/layout roles, emit the declared nested style or layout property.",
     "Do not fabricate evidence or guess a semantic classification. Make only the mechanical schema corrections required by the supplied error, then regenerate the complete response from the current chunk.",
-    "Administrative approval/marking tables belong under cover.non_public_administration, must be conditional on thesis_profile.security_level with an equals or in condition selecting restricted/classified theses, and must be blank for public theses. Do not use not_equals as the executable binding. Bind approval-number and approval-date labels to approval_number and approval_date; never substitute classification_number or completion_date.",
+    "Administrative approval/marking tables belong under cover.non_public_administration, must be conditional on thesis_profile.security_level with an equals or in condition selecting restricted/classified theses, and must be blank for public theses. If the current chunk contains only this administrative region, cover.fields may be an empty array; never duplicate administrative fields into ordinary cover.fields. Do not use not_equals as the executable binding. Bind approval-number and approval-date labels to approval_number and approval_date; never substitute classification_number or completion_date.",
     "Input prerequisite keys are namespace-bound by kind: metadata uses thesis_profile., source_content uses source_inventory., template_resource uses template_profile., and runtime uses runtime.; never emit runtime_context.* or invent an unregistered path.",
     "A clause can be executable only when every independently verifiable obligation is represented. Preserve language targets, units, limits, exceptions, and prohibited-content requirements; a partial requirement must be classified non-executable with requirement_indexes: [] rather than promoted to full coverage.",
     "Use only a verified runtime_context.runtime_inventory anchor. A zero-match, multi-match, or blocked anchor is not executable; never infer a nearby heading or use the declarations role as an insertion anchor.",
@@ -803,18 +803,20 @@ def _apply_safe_mechanical_repairs(
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
     """Apply only validator-directed, semantics-preserving JSON repairs.
 
-    An unknown property is a provider/schema boundary error, not a semantic
-    decision.  Removing exactly the named key from exactly the validator's
-    object is deterministic and avoids spending a second model turn that may
-    regenerate classifications or requirement relations.  Any mixed error
-    set is left for the normal retry path; this helper never guesses how to
-    repair a semantic or relation failure.
+    Unknown properties and evidence IDs that are explicitly reported as not
+    backed by the authoritative clause relation are mechanical boundary
+    errors. Removing exactly the named key or exact unbacked evidence ID from
+    exactly the validator's object avoids a second model turn that may
+    regenerate classifications or requirement relations. Any other error set
+    is left for the normal retry path; this helper never guesses how to repair
+    a semantic failure.
     """
     if not isinstance(response, dict) or not error_records:
         return None, []
+    allowed_codes = {"unknown_property", "evidence_relation_mismatch"}
     if any(
         not isinstance(record, dict)
-        or record.get("code") != "unknown_property"
+        or record.get("code") not in allowed_codes
         for record in error_records
     ):
         return None, []
@@ -843,19 +845,35 @@ def _apply_safe_mechanical_repairs(
     for record in error_records:
         pointer = record.get("json_pointer")
         raw_error = str(record.get("raw_error") or "")
-        match = re.search(r"unknown property ['\"]([^'\"]+)['\"]", raw_error)
-        if not isinstance(pointer, str) or match is None:
+        unknown_match = re.search(r"unknown property ['\"]([^'\"]+)['\"]", raw_error)
+        evidence_match = re.search(r"not_backed_by_clause:([^;\s]+)", raw_error)
+        if not isinstance(pointer, str):
             return None, []
         target = resolve_pointer(pointer)
-        property_name = match.group(1)
-        if not isinstance(target, dict) or property_name not in target:
-            return None, []
-        del target[property_name]
-        repairs.append({
-            "code": "unknown_property",
-            "json_pointer": pointer,
-            "removed_property": property_name,
-        })
+        if record.get("code") == "unknown_property":
+            if unknown_match is None:
+                return None, []
+            property_name = unknown_match.group(1)
+            if not isinstance(target, dict) or property_name not in target:
+                return None, []
+            del target[property_name]
+            repairs.append({
+                "code": "unknown_property",
+                "json_pointer": pointer,
+                "removed_property": property_name,
+            })
+        else:
+            if evidence_match is None or not isinstance(target, list):
+                return None, []
+            evidence_id = evidence_match.group(1)
+            if evidence_id not in target:
+                return None, []
+            target[:] = [item for item in target if item != evidence_id]
+            repairs.append({
+                "code": "evidence_relation_mismatch",
+                "json_pointer": pointer,
+                "removed_evidence_id": evidence_id,
+            })
     return repaired, repairs
 
 

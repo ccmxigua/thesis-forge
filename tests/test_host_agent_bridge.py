@@ -524,6 +524,25 @@ class HostAgentBridgeTests(unittest.TestCase):
         self.assertIsNone(repaired)
         self.assertEqual(repairs, [])
 
+    def test_unbacked_evidence_id_is_removed_deterministically(self) -> None:
+        response = {
+            "requirements": [{
+                "evidence_ids": ["E1", "E2"],
+                "clause_ids": ["C1"],
+            }],
+        }
+        repaired, repairs = bridge._apply_safe_mechanical_repairs(
+            response,
+            [{
+                "code": "evidence_relation_mismatch",
+                "json_pointer": "$.requirements[0].evidence_ids",
+                "raw_error": "$.requirements[0].evidence_ids: not_backed_by_clause:E2",
+            }],
+        )
+        self.assertEqual(repairs[0]["removed_evidence_id"], "E2")
+        self.assertEqual(repaired["requirements"][0]["evidence_ids"], ["E1"])
+        self.assertEqual(response["requirements"][0]["evidence_ids"], ["E1", "E2"])
+
     def test_bridge_retries_locally_rejected_contract_in_a_new_session(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             review_dir, chunk = self._packet(Path(td) / "requirements")

@@ -110,6 +110,11 @@ def contract_error_records(
             code = "normative_basis_invalid"
         elif "requirement_index_not_backed_by_clause" in lowered:
             code = "requirement_relation_mismatch"
+        elif (
+            "executable_review_requires_derived_requirement" in lowered
+            or "requirements_not_referenced_by_clause_review" in lowered
+        ):
+            code = "requirement_relation_mismatch"
         elif "partial_clause_coverage" in lowered:
             code = "partial_clause_coverage"
         elif "must_include_semantic_payload" in lowered:

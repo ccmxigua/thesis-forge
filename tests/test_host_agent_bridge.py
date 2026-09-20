@@ -333,6 +333,8 @@ class HostAgentBridgeTests(unittest.TestCase):
         self.assertIn("/tmp/parent-response.raw.json", retry_with_baseline)
         self.assertIn("Preserve every non-error semantic field", retry_with_baseline)
         self.assertIn("Do not split, merge, add", retry_with_baseline)
+        self.assertIn("FINAL RETRY INVARIANT", retry_with_baseline)
+        self.assertIn("do not turn an unresolved or informational review into executable", retry_with_baseline)
 
     def test_retry_guidance_targets_exact_invalid_property_without_contradiction(self) -> None:
         retry = bridge._contract_repair_guidance(

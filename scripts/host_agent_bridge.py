@@ -981,6 +981,16 @@ drift. Parent response sha256: {retry_parent_response_sha256 or 'unavailable'}."
             "there is no prior response file to reuse."
             if retry_parent_response_sha256 else "There is no prior response to reuse."
         )
+    retry_invariant = (
+        """\nFINAL RETRY INVARIANT: copy every clause_review classification, obligation,
+requirement identity, clause_ids, evidence_ids, and requirement count from the
+repair baseline exactly. The only permitted differences are the exact property
+paths named by the structured validator records above. If a review is already
+classified executable, repair its missing relation only; do not turn an unresolved or informational review into executable. If a safe local repair is
+not possible without changing semantics, return the parent object unchanged
+and let the bridge fail closed."""
+        if retry_parent_response_path is not None else ""
+    )
     return f"""You are the current Host Agent for one fresh thesis-format semantic-review run.
 
 Return exactly ONE JSON object and nothing else. Do not use Markdown fences,
@@ -1029,6 +1039,7 @@ with requirements, clause_reviews, unsupported_items, and reported_conflicts.
 Mechanical contract checklist (apply before returning JSON):
 {repair_guidance}
 {retry_text}
+{retry_invariant}
 """
 
 

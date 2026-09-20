@@ -176,6 +176,7 @@ if str(SCRIPTS) not in sys.path:
 
 from host_adapters import codex as codex_adapter  # noqa: E402
 from host_adapters import openclaw as openclaw_adapter  # noqa: E402
+from compliance import classification_requires_requirement  # noqa: E402
 from host_review_contract import (  # noqa: E402
     HOST_REVIEW_CONTRACT_V2,
     HOST_REVIEW_CONTRACT_V3,
@@ -750,6 +751,7 @@ def _retry_change_paths(previous: Any, current: Any) -> list[str]:
 def _retry_changes_allowed(
     records: list[dict[str, Any]], changed_paths: list[str], *, contract_version: str,
     previous_response: Any = None, current_response: Any = None,
+    chunk: dict[str, Any] | None = None,
 ) -> bool:
     """Allow only explicitly mechanical contract corrections on a retry."""
     if not changed_paths:
@@ -793,6 +795,14 @@ def _retry_changes_allowed(
 
     def under(prefix: str, path: str) -> bool:
         return path == prefix or path.startswith(prefix + ".") or path.startswith(prefix + "[")
+
+    if (
+        contract_version == HOST_REVIEW_CONTRACT_V3
+        and _v3_incomplete_completion_allowed(
+            previous_response, current_response, records, changed_paths, chunk=chunk,
+        )
+    ):
+        return True
 
     if (
         contract_version == HOST_REVIEW_CONTRACT_V3
@@ -844,6 +854,117 @@ def _retry_changes_allowed(
         # classifications are never silently changed by a mechanical retry.
         return False
     return True
+
+
+def _role_supports_exact_text(requirement: Any, chunk: dict[str, Any]) -> bool:
+    if not isinstance(requirement, dict):
+        return False
+    role = requirement.get("role")
+    contract = chunk.get("requirement_contract")
+    if not isinstance(role, str) or not isinstance(contract, dict):
+        return False
+    role_schemas = contract.get("role_properties_schema")
+    if not isinstance(role_schemas, dict):
+        return False
+    role_schema = role_schemas.get(role)
+    if not isinstance(role_schema, dict):
+        return False
+    if role_schema.get("$ref") == "#/$defs/roleSpec":
+        return True
+    properties = role_schema.get("properties")
+    return isinstance(properties, dict) and "text" in properties
+
+
+def _exact_cited_text(requirement: Any, chunk: dict[str, Any]) -> str | None:
+    if not isinstance(requirement, dict) or not _role_supports_exact_text(requirement, chunk):
+        return None
+    evidence_ids = requirement.get("evidence_ids")
+    evidence_context = chunk.get("evidence_context")
+    if not isinstance(evidence_ids, list) or not isinstance(evidence_context, dict):
+        return None
+    values = sorted({
+        str(evidence_context.get(str(evidence_id), {}).get("text"))
+        for evidence_id in evidence_ids
+        if isinstance(evidence_context.get(str(evidence_id)), dict)
+        and str(evidence_context[str(evidence_id)].get("text") or "").strip()
+    })
+    return values[0] if len(values) == 1 else None
+
+
+def _v3_incomplete_completion_allowed(
+    previous_response: Any,
+    current_response: Any,
+    records: list[dict[str, Any]],
+    changed_paths: list[str],
+    *,
+    chunk: dict[str, Any] | None = None,
+) -> bool:
+    """Allow a retry to complete an otherwise truncated v3 response.
+
+    This is narrower than a general semantic retry: the first response must
+    contain no clause reviews, the second response must pass the complete
+    current-chunk validator, every first-attempt requirement must survive with
+    only an exact evidence-derived text fill allowed, and the remaining
+    requirements/reviews must be the missing completion.  Classification,
+    obligations, and existing non-empty properties are never rewritten here.
+    """
+    if chunk is None or changed_paths != ["$.clause_reviews", "$.requirements"]:
+        return False
+    if not isinstance(previous_response, dict) or not isinstance(current_response, dict):
+        return False
+    previous_requirements = previous_response.get("requirements")
+    current_requirements = current_response.get("requirements")
+    previous_reviews = previous_response.get("clause_reviews")
+    current_reviews = current_response.get("clause_reviews")
+    if not all(isinstance(value, list) for value in (
+        previous_requirements, current_requirements, previous_reviews, current_reviews,
+    )):
+        return False
+    if previous_reviews or not current_reviews or len(current_requirements) <= len(previous_requirements):
+        return False
+    codes = {str(item.get("code")) for item in records if isinstance(item, dict)}
+    if not codes <= {
+        "empty_requirement_properties",
+        "contract_validation_error",
+        "requirement_relation_mismatch",
+    }:
+        return False
+    if not any(
+        "clause_reviews_must_cover_each_chunk_clause_exactly_once" in str(item.get("raw_error") or "")
+        for item in records if isinstance(item, dict)
+    ):
+        return False
+    if validate_host_agent_response(current_response, chunk):
+        return False
+
+    # Match every initial requirement by its authoritative identity.  The
+    # only tolerated difference is filling an entirely empty role payload
+    # with the one exact cited evidence text.
+    remaining = [copy.deepcopy(item) for item in current_requirements]
+    identity_keys = ("role", "clause_ids", "evidence_ids", "existing_requirement_id")
+    for previous in previous_requirements:
+        if not isinstance(previous, dict):
+            return False
+        match_index = next(
+            (
+                index for index, candidate in enumerate(remaining)
+                if isinstance(candidate, dict)
+                and all(candidate.get(key) == previous.get(key) for key in identity_keys)
+            ),
+            None,
+        )
+        if match_index is None:
+            return False
+        current = remaining.pop(match_index)
+        previous_properties = previous.get("properties")
+        current_properties = current.get("properties")
+        if previous_properties == current_properties:
+            continue
+        if previous_properties != {} or current_properties != {
+            "text": _exact_cited_text(current, chunk),
+        }:
+            return False
+    return bool(remaining)
 
 
 def _v3_relation_addition_allowed(
@@ -921,6 +1042,7 @@ def _retry_semantic_change_error(
     records: list[dict[str, Any]],
     *,
     contract_version: str,
+    chunk: dict[str, Any] | None = None,
 ) -> tuple[ValueError | None, list[str]]:
     """Reject semantic drift even when the retry response is still invalid.
 
@@ -938,6 +1060,7 @@ def _retry_semantic_change_error(
         contract_version=contract_version,
         previous_response=previous_response,
         current_response=current_response,
+        chunk=chunk,
     ):
         return None, changed_paths
     error = ValueError(
@@ -971,15 +1094,15 @@ def _apply_safe_mechanical_repairs(
     """Apply only validator-directed, semantics-preserving JSON repairs.
 
     Unknown properties, evidence IDs that are explicitly reported as not
-    backed by the authoritative clause relation, and all-null style/text
-    payloads whose exact value is present in cited evidence are mechanical
-    boundary errors. The helper never invents a value or repairs a semantic
-    classification.
+    backed by the authoritative clause relation, and empty role payloads whose
+    exact text is present in cited evidence are mechanical boundary errors.
+    The helper never invents a value or repairs a semantic classification.
     """
     if not isinstance(response, dict) or not error_records:
         return None, []
     allowed_codes = {
-        "unknown_property", "evidence_relation_mismatch", "empty_requirement_properties",
+        "unknown_property", "evidence_relation_mismatch",
+        "empty_requirement_properties", "requirement_relation_mismatch",
     }
     if any(
         not isinstance(record, dict)
@@ -1009,11 +1132,63 @@ def _apply_safe_mechanical_repairs(
                 current = current[position]
         return current
 
-    for record in error_records:
+    relation_records = [
+        record for record in error_records
+        if isinstance(record, dict) and record.get("code") == "requirement_relation_mismatch"
+    ]
+    if len(relation_records) > 1:
+        return None, []
+    ordered_records = [
+        record for record in error_records
+        if not isinstance(record, dict) or record.get("code") != "requirement_relation_mismatch"
+    ] + relation_records
+    for record in ordered_records:
         pointer = record.get("json_pointer")
         raw_error = str(record.get("raw_error") or "")
         unknown_match = re.search(r"unknown property ['\"]([^'\"]+)['\"]", raw_error)
         evidence_match = re.search(r"not_backed_by_clause:([^;\s]+)", raw_error)
+        if record.get("code") == "requirement_relation_mismatch":
+            relation_match = re.fullmatch(
+                r"requirements_not_referenced_by_clause_review:(\d+)", raw_error,
+            )
+            requirements = repaired.get("requirements")
+            reviews = repaired.get("clause_reviews")
+            if (
+                relation_match is None
+                or not isinstance(requirements, list)
+                or not isinstance(reviews, list)
+            ):
+                return None, []
+            requirement_index = int(relation_match.group(1))
+            if requirement_index >= len(requirements) or not isinstance(
+                requirements[requirement_index], dict
+            ):
+                return None, []
+            requirement = requirements[requirement_index]
+            clause_ids = requirement.get("clause_ids")
+            if not isinstance(clause_ids, list) or not clause_ids:
+                return None, []
+            review_by_clause = {
+                str(review.get("clause_id")): review
+                for review in reviews
+                if isinstance(review, dict) and review.get("clause_id")
+            }
+            if any(
+                clause_id not in review_by_clause
+                or classification_requires_requirement(
+                    str(review_by_clause[clause_id].get("classification"))
+                )
+                for clause_id in map(str, clause_ids)
+            ):
+                return None, []
+            del requirements[requirement_index]
+            repairs.append({
+                "code": "requirement_relation_mismatch",
+                "removed_requirement_index": requirement_index,
+                "removed_clause_ids": [str(value) for value in clause_ids],
+                "reason": "all linked clause reviews are non-requirement classifications",
+            })
+            continue
         if not isinstance(pointer, str):
             return None, []
         target = resolve_pointer(pointer)
@@ -1064,37 +1239,19 @@ def _apply_safe_mechanical_repairs(
                 evidence_context.get(str(evidence_id))
                 for evidence_id in evidence_ids
             ]
-            style_values = sorted({
-                str(item.get("style_name")).strip()
-                for item in evidence_items
-                if isinstance(item, dict) and str(item.get("style_name") or "").strip()
-            })
-            text_values = sorted({
-                str(item.get("text"))
-                for item in evidence_items
-                if isinstance(item, dict) and str(item.get("text") or "").strip()
-            })
-            if "style" in target and len(style_values) == 1:
-                target["style"] = style_values[0]
-                repairs.append({
-                    "code": "empty_requirement_properties",
-                    "json_pointer": pointer,
-                    "filled_property": "style",
-                    "source_evidence_ids": [
-                        str(evidence_id)
-                        for evidence_id, item in zip(evidence_ids, evidence_items)
-                        if isinstance(item, dict) and item.get("style_name") == style_values[0]
-                    ],
-                    "value": style_values[0],
-                })
-            elif "text" in target and len(text_values) == 1:
-                target["text"] = text_values[0]
+            exact_text = _exact_cited_text(requirement, chunk)
+            if exact_text is not None:
+                target["text"] = exact_text
                 repairs.append({
                     "code": "empty_requirement_properties",
                     "json_pointer": pointer,
                     "filled_property": "text",
-                    "source_evidence_ids": [str(evidence_id) for evidence_id in evidence_ids],
-                    "value": text_values[0],
+                    "source_evidence_ids": [
+                        str(evidence_id)
+                        for evidence_id, item in zip(evidence_ids, evidence_items)
+                        if isinstance(item, dict) and item.get("text") == exact_text
+                    ],
+                    "value": exact_text,
                 })
             else:
                 return None, []
@@ -2153,6 +2310,7 @@ def run_bridge(
                             current_response,
                             retry_error_records,
                             contract_version=contract_version,
+                            chunk=chunk,
                         )
                         if change_error is not None:
                             with lifecycle_lock:
@@ -2252,6 +2410,7 @@ def run_bridge(
                                 current_response,
                                 previous_error_records,
                                 contract_version=contract_version,
+                                chunk=chunk,
                             )
                             if semantic_changes:
                                 with lifecycle_lock:

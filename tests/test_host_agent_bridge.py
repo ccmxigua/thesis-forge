@@ -527,6 +527,81 @@ class HostAgentBridgeTests(unittest.TestCase):
             previous_response=previous, current_response=current,
         ))
 
+    def test_v3_retry_allows_bounded_completion_of_truncated_response(self) -> None:
+        previous = {
+            "contract_version": "3.0",
+            "requirements": [{
+                "role": "cover_field_label", "properties": {},
+                "clause_ids": ["C1"], "evidence_ids": ["E1"],
+            }],
+            "clause_reviews": [], "unsupported_items": [],
+        }
+        current = {
+            "contract_version": "3.0",
+            "requirements": [{
+                "role": "cover_field_label", "properties": {"text": "标题"},
+                "clause_ids": ["C1"], "evidence_ids": ["E1"],
+            }, {
+                "role": "body_text", "properties": {"text": "正文"},
+                "clause_ids": ["C2"], "evidence_ids": ["E2"],
+            }],
+            "clause_reviews": [
+                {"clause_id": "C1", "classification": "executable"},
+                {"clause_id": "C2", "classification": "informational"},
+            ],
+            "unsupported_items": [],
+        }
+        records = [
+            {"code": "empty_requirement_properties"},
+            {
+                "code": "contract_validation_error",
+                "raw_error": "clause_reviews_must_cover_each_chunk_clause_exactly_once",
+            },
+            {
+                "code": "requirement_relation_mismatch",
+                "raw_error": "requirements_not_referenced_by_clause_review:0",
+            },
+        ]
+        chunk = {
+            "evidence_context": {
+                "E1": {"text": "标题"}, "E2": {"text": "正文"},
+            },
+            "requirement_contract": {
+                "role_properties_schema": {
+                    "cover_field_label": {"$ref": "#/$defs/roleSpec"},
+                    "body_text": {"$ref": "#/$defs/roleSpec"},
+                },
+            },
+        }
+        changed = bridge._retry_change_paths(previous, current)
+        self.assertEqual(changed, ["$.clause_reviews", "$.requirements"])
+        with patch.object(bridge, "validate_host_agent_response", return_value=[]):
+            self.assertTrue(bridge._retry_changes_allowed(
+                records, changed, contract_version="3.0",
+                previous_response=previous, current_response=current, chunk=chunk,
+            ))
+
+    def test_mechanical_repair_removes_requirement_only_for_non_requirement_review(self) -> None:
+        response = {
+            "requirements": [{
+                "role": "body_text", "properties": {"text": "签名"},
+                "clause_ids": ["C1"], "evidence_ids": ["E1"],
+            }],
+            "clause_reviews": [{
+                "clause_id": "C1", "classification": "external_compliance",
+            }],
+        }
+        repaired, repairs = bridge._apply_safe_mechanical_repairs(
+            response,
+            [{
+                "code": "requirement_relation_mismatch",
+                "raw_error": "requirements_not_referenced_by_clause_review:0",
+            }],
+        )
+        self.assertEqual(repaired["requirements"], [])
+        self.assertEqual(repairs[0]["removed_clause_ids"], ["C1"])
+        self.assertEqual(len(response["requirements"]), 1)
+
     def test_fixed_declaration_candidate_is_derived_from_exact_chunk_evidence(self) -> None:
         packet = bridge.compact_model_packet({
             "contract_version": "3.0",
@@ -605,11 +680,11 @@ class HostAgentBridgeTests(unittest.TestCase):
         self.assertEqual(repaired["requirements"][0]["evidence_ids"], ["E1"])
         self.assertEqual(response["requirements"][0]["evidence_ids"], ["E1", "E2"])
 
-    def test_all_null_style_payload_is_filled_from_exact_evidence(self) -> None:
+    def test_empty_role_payload_is_filled_from_exact_evidence_text(self) -> None:
         response = {
             "requirements": [{
                 "role": "abstract_title_zh", "evidence_ids": ["E1"],
-                "properties": {"style": None, "top_border_pt": None},
+                "properties": {},
             }],
         }
         repaired, repairs = bridge._apply_safe_mechanical_repairs(
@@ -619,13 +694,20 @@ class HostAgentBridgeTests(unittest.TestCase):
                 "json_pointer": "$.requirements[0].properties",
                 "raw_error": "must_include_semantic_payload",
             }],
-            chunk={"evidence_context": {
-                "E1": {"style_name": "heading 1", "text": "摘 要"},
-            }},
+            chunk={
+                "evidence_context": {
+                    "E1": {"style_name": "heading 1", "text": "摘 要"},
+                },
+                "requirement_contract": {
+                    "role_properties_schema": {
+                        "abstract_title_zh": {"$ref": "#/$defs/roleSpec"},
+                    },
+                },
+            },
         )
-        self.assertEqual(repaired["requirements"][0]["properties"]["style"], "heading 1")
-        self.assertEqual(repairs[0]["filled_property"], "style")
-        self.assertIsNone(response["requirements"][0]["properties"]["style"])
+        self.assertEqual(repaired["requirements"][0]["properties"]["text"], "摘 要")
+        self.assertEqual(repairs[0]["filled_property"], "text")
+        self.assertNotIn("text", response["requirements"][0]["properties"])
 
     def test_bridge_retries_locally_rejected_contract_in_a_new_session(self) -> None:
         with tempfile.TemporaryDirectory() as td:

@@ -473,6 +473,7 @@ _BASE_CONTRACT_REPAIR_RULES = (
     "A single clause may support multiple requirements when it contains obligations for different roles. Repeat the exact clause_id and cited evidence_ids in each semantically matching requirement; a continuation-table clause may therefore bind both table continuation and table_caption position/alignment. Do not hide one role's obligation inside another role or change classification merely because one role is incomplete.",
     "Role boundary for equations: use the top-level equations role for layout properties declared by equationLayoutSpec (same_line, no_lines, alignment, number_alignment, number_parentheses, center_tab_twips, or right_tab_twips). Use equation only for an exact equation/content occurrence. Never put style or an invented layout key in equation; if no declared equations property represents the rule, keep the clause non-executable rather than guessing.",
     "A partial_clause_coverage error never authorizes changing classification, obligations, clause_ids, or requirement count on retry. Preserve the baseline and complete a missing role-specific requirement only when current evidence and the declared schema support it; otherwise return the baseline unchanged and let the bridge fail closed.",
+    "When a contract-3.0 retry reports executable_review_requires_derived_requirement, preserve every requirement from the rejected response and add only the missing, evidence-backed requirements for the named executable clauses; never drop verify_existing requirements or replace the baseline requirement set.",
     "Use only a verified runtime_context.runtime_inventory anchor. A zero-match, multi-match, or blocked anchor is not executable; never infer a nearby heading or use the declarations role as an insertion anchor.",
 )
 
@@ -1282,8 +1283,21 @@ def _v3_relation_addition_allowed(
         if not isinstance(record, dict) or record.get("code") != "requirement_relation_mismatch":
             continue
         match = re.search(r"\$\.clause_reviews\[(\d+)\]", str(record.get("json_pointer") or ""))
+        raw_error = str(record.get("raw_error") or "")
         if match is None:
-            return False
+            legacy_match = re.fullmatch(
+                r"requirements_not_referenced_by_clause_review:(\d+)", raw_error,
+            )
+            if legacy_match is None:
+                return False
+            requirement_index = int(legacy_match.group(1))
+            if requirement_index >= len(previous_requirements):
+                return False
+            clause_ids = previous_requirements[requirement_index].get("clause_ids")
+            if not isinstance(clause_ids, list) or not clause_ids:
+                return False
+            missing_clause_ids.update(str(value) for value in clause_ids)
+            continue
         index = int(match.group(1))
         if index >= len(previous_reviews) or not isinstance(previous_reviews[index], dict):
             return False
@@ -1293,6 +1307,10 @@ def _v3_relation_addition_allowed(
         if previous_reviews[index].get("classification") not in {
             "covered", "executable", "verify_existing",
         }:
+            return False
+        if raw_error and "executable_review_requires_derived_requirement" not in raw_error and not re.fullmatch(
+            r"requirements_not_referenced_by_clause_review:\d+", raw_error,
+        ):
             return False
         missing_clause_ids.add(clause_id)
     if not missing_clause_ids:
@@ -1306,6 +1324,137 @@ def _v3_relation_addition_allowed(
         if not set(map(str, clause_ids)) <= missing_clause_ids:
             return False
     return True
+
+
+def _v3_relation_completion_response(
+    previous_response: Any,
+    current_response: Any,
+    records: list[dict[str, Any]],
+    *,
+    chunk: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Restore omitted baseline requirements while accepting a narrow retry.
+
+    A contract-3.0 retry may correctly add requirements for executable reviews
+    that were missing from the first response, but the model may also omit
+    unrelated ``verify_existing`` requirements while doing so.  The safe
+    deterministic operation is to preserve the first response and append only
+    genuinely new, evidence-backed requirements for the validator-identified
+    missing clauses.  Any changed baseline item, changed review, or new item
+    outside those clauses remains fail-closed.
+    """
+    if chunk is None or not isinstance(previous_response, dict) or not isinstance(current_response, dict):
+        return None, None
+    if not records or any(
+        not isinstance(record, dict) or record.get("code") != "requirement_relation_mismatch"
+        for record in records
+    ):
+        return None, None
+    if previous_response.get("contract_version") != HOST_REVIEW_CONTRACT_V3:
+        return None, None
+    if previous_response.get("clause_reviews") != current_response.get("clause_reviews"):
+        return None, None
+    if previous_response.get("unsupported_items") != current_response.get("unsupported_items"):
+        return None, None
+    if previous_response.get("reported_conflicts") != current_response.get("reported_conflicts"):
+        return None, None
+    current_requirements = current_response.get("requirements")
+    previous_requirements = previous_response.get("requirements")
+    if not isinstance(previous_requirements, list) or not isinstance(current_requirements, list):
+        return None, None
+    if validate_host_agent_response(current_response, chunk):
+        return None, None
+
+    missing_clause_ids: set[str] = set()
+    previous_reviews = previous_response.get("clause_reviews")
+    if not isinstance(previous_reviews, list):
+        return None, None
+    for record in records:
+        pointer = str(record.get("json_pointer") or "")
+        raw_error = str(record.get("raw_error") or "")
+        review_match = re.search(r"\$\.clause_reviews\[(\d+)\]", pointer)
+        if review_match is not None:
+            review_index = int(review_match.group(1))
+            if review_index >= len(previous_reviews):
+                return None, None
+            review = previous_reviews[review_index]
+            if not isinstance(review, dict) or review.get("classification") not in {
+                "covered", "executable", "verify_existing",
+            }:
+                return None, None
+            clause_id = review.get("clause_id")
+            if not isinstance(clause_id, str) or not clause_id:
+                return None, None
+            if "executable_review_requires_derived_requirement" not in raw_error:
+                return None, None
+            missing_clause_ids.add(clause_id)
+            continue
+        legacy_match = re.fullmatch(
+            r"requirements_not_referenced_by_clause_review:(\d+)", raw_error,
+        )
+        if legacy_match is None:
+            return None, None
+        requirement_index = int(legacy_match.group(1))
+        if requirement_index >= len(previous_requirements):
+            return None, None
+        clause_ids = previous_requirements[requirement_index].get("clause_ids")
+        if not isinstance(clause_ids, list) or not clause_ids:
+            return None, None
+        missing_clause_ids.update(str(value) for value in clause_ids)
+    if not missing_clause_ids:
+        return None, None
+
+    def identity(item: Any) -> str | None:
+        if not isinstance(item, dict):
+            return None
+        return json.dumps({
+            key: item.get(key)
+            for key in ("role", "clause_ids", "evidence_ids", "existing_requirement_id")
+            if key in item
+        }, ensure_ascii=False, sort_keys=True)
+
+    previous_by_identity: dict[str, list[dict[str, Any]]] = {}
+    for item in previous_requirements:
+        key = identity(item)
+        if key is None:
+            return None, None
+        previous_by_identity.setdefault(key, []).append(item)
+    additions: list[dict[str, Any]] = []
+    consumed_previous: dict[str, int] = {}
+    for item in current_requirements:
+        key = identity(item)
+        if key is None:
+            return None, None
+        candidates = previous_by_identity.get(key, [])
+        consumed = consumed_previous.get(key, 0)
+        if consumed < len(candidates):
+            if item != candidates[consumed]:
+                return None, None
+            consumed_previous[key] = consumed + 1
+            continue
+        clause_ids = item.get("clause_ids") if isinstance(item, dict) else None
+        if (
+            not isinstance(item, dict)
+            or item.get("existing_requirement_id")
+            or not isinstance(clause_ids, list)
+            or not clause_ids
+            or not set(map(str, clause_ids)) <= missing_clause_ids
+        ):
+            return None, None
+        additions.append(copy.deepcopy(item))
+    if not additions:
+        return None, None
+
+    repaired = copy.deepcopy(current_response)
+    repaired["requirements"] = copy.deepcopy(previous_requirements) + additions
+    if validate_host_agent_response(repaired, chunk):
+        return None, None
+    return repaired, {
+        "rule_id": "preserve_baseline_add_missing_v3_requirements",
+        "missing_clause_ids": sorted(missing_clause_ids),
+        "preserved_requirement_count": len(previous_requirements),
+        "added_requirement_count": len(additions),
+    }
 
 
 def _retry_semantic_change_error(
@@ -2690,6 +2839,21 @@ def run_bridge(
                             attempt_response_path,
                             label=f"Host Agent response {index} attempt {attempt}",
                         )
+                        relation_repair, relation_repair_audit = _v3_relation_completion_response(
+                            previous_response,
+                            current_response,
+                            retry_error_records,
+                            chunk=chunk,
+                        )
+                        if relation_repair is not None:
+                            atomic_write_text(
+                                attempt_response_path,
+                                json.dumps(relation_repair, ensure_ascii=False, indent=2) + "\n",
+                            )
+                            current_response = relation_repair
+                            audit.setdefault("semantic_retry_repairs", []).append(
+                                relation_repair_audit
+                            )
                         change_error, semantic_changes = _retry_semantic_change_error(
                             previous_response,
                             current_response,

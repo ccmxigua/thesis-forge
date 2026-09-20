@@ -186,7 +186,10 @@ from host_review_contract import (  # noqa: E402
     summarize_contract_errors as _shared_summarize_contract_errors,
     validate_response as _shared_validate_response,
 )
-from host_review_schema import require_native_schema  # noqa: E402
+from host_review_schema import (  # noqa: E402
+    native_output_schema,
+    require_native_schema,
+)
 from host_runtime import (  # noqa: E402
     HostAdapterUnavailable,
     HostRuntimeError,
@@ -1068,8 +1071,9 @@ def run_host_agent_chunk(
         response_schema = chunk.get("response_schema")
         if not isinstance(response_schema, dict) or not response_schema:
             raise ValueError("current Host Agent chunk has no response schema")
-        require_native_schema(response_schema)
-        _write_json(output_schema_path, response_schema)
+        provider_schema = native_output_schema(response_schema)
+        require_native_schema(provider_schema)
+        _write_json(output_schema_path, provider_schema)
         command = codex_adapter.build_command(
             binary=codex_bin,
             prompt_path=prompt_path,

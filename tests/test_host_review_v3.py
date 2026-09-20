@@ -21,6 +21,7 @@ from host_review_contract import (  # noqa: E402
 from host_review_schema import (  # noqa: E402
     native_schema_support_errors,
     applicability_value_schema,
+    native_output_schema,
 )
 from requirements_engine import build_llm_request  # noqa: E402
 from semantic_contract import attach_request_provenance  # noqa: E402
@@ -218,11 +219,17 @@ class HostReviewV3Tests(unittest.TestCase):
         self.assertTrue(any("unsupported_schema_keyword:contains" in error for error in validate_instance([], schema)))
 
     def test_native_response_schema_has_no_provider_empty_schema(self) -> None:
-        self.assertEqual(native_schema_support_errors(self.request["response_schema"]), [])
-        value_schema = (
-            self.request["response_schema"]["$defs"]["applicabilitySpec"]
-            ["properties"]["conditions"]["items"]["properties"]["value"]
+        native_schema = native_output_schema(self.request["response_schema"])
+        self.assertEqual(native_schema_support_errors(native_schema), [])
+        self.assertNotIn("provenance", native_schema["properties"])
+        font_schema = native_schema["$defs"]["fontSpec"]
+        self.assertEqual(set(font_schema["required"]), set(font_schema["properties"]))
+        conditions_schema = native_schema["$defs"]["applicabilitySpec"]["properties"]["conditions"]
+        conditions_array = next(
+            variant for variant in conditions_schema["anyOf"]
+            if variant.get("type") == "array"
         )
+        value_schema = conditions_array["items"]["properties"]["value"]
         self.assertNotEqual(value_schema, {})
         self.assertEqual(native_schema_support_errors(value_schema), [])
 

@@ -36,6 +36,92 @@ def applicability_value_schema() -> dict[str, Any]:
 _COMPOSITION_KEYS = {"$ref", "const", "enum", "anyOf", "allOf", "oneOf", "not", "if"}
 
 
+def _nullable_native_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Make a formerly optional property legal in strict native output.
+
+    OpenAI-compatible structured outputs require every object property to be
+    listed in ``required``.  Optionality is therefore represented by a
+    nullable value instead of by omitting the property.  This transformation
+    is only for the provider-facing projection; the local contract schema
+    keeps the original optional-property semantics.
+    """
+    projected = copy.deepcopy(schema)
+    variants = projected.get("anyOf")
+    if isinstance(variants, list):
+        if not any(isinstance(item, dict) and item.get("type") == "null" for item in variants):
+            variants.append({"type": "null"})
+        return projected
+    if projected.get("type") == "null":
+        return projected
+    return {"anyOf": [projected, {"type": "null"}]}
+
+
+def _project_native_schema(node: Any) -> Any:
+    """Compile a local JSON Schema node to strict native-output form."""
+    if isinstance(node, list):
+        return [_project_native_schema(item) for item in node]
+    if not isinstance(node, dict):
+        return copy.deepcopy(node)
+
+    projected = copy.deepcopy(node)
+    properties = projected.get("properties")
+    if isinstance(properties, dict):
+        original_required = set(projected.get("required", []) or [])
+        native_properties: dict[str, Any] = {}
+        for name, child in properties.items():
+            child_projection = _project_native_schema(child)
+            if name not in original_required:
+                child_projection = _nullable_native_schema(child_projection)
+            native_properties[name] = child_projection
+        projected["properties"] = native_properties
+        projected["required"] = list(native_properties)
+        projected["additionalProperties"] = False
+    elif projected.get("type") == "object":
+        # An object with no declared fields is still made explicit so the
+        # provider never sees an underspecified object placeholder.
+        projected.setdefault("properties", {})
+        projected["required"] = list(projected["properties"])
+        projected["additionalProperties"] = False
+
+    if isinstance(projected.get("$defs"), dict):
+        projected["$defs"] = {
+            name: _project_native_schema(child)
+            for name, child in projected["$defs"].items()
+        }
+    if isinstance(projected.get("items"), dict):
+        projected["items"] = _project_native_schema(projected["items"])
+    if isinstance(projected.get("additionalProperties"), dict):
+        projected["additionalProperties"] = _project_native_schema(
+            projected["additionalProperties"]
+        )
+    for key in ("anyOf", "allOf", "oneOf"):
+        if isinstance(projected.get(key), list):
+            projected[key] = [_project_native_schema(child) for child in projected[key]]
+    for key in ("not", "if", "then", "else"):
+        if isinstance(projected.get(key), dict):
+            projected[key] = _project_native_schema(projected[key])
+    return projected
+
+
+def native_output_schema(response_schema: dict[str, Any]) -> dict[str, Any]:
+    """Return the strict schema sent to a native structured-output provider.
+
+    ``provenance`` is deliberately absent: it is trusted invocation metadata
+    bound by the bridge after the provider returns, never authored by the
+    model.  All other optional fields are represented as required nullable
+    fields in the provider projection.
+    """
+    local_schema = copy.deepcopy(response_schema)
+    properties = local_schema.get("properties")
+    if isinstance(properties, dict) and "provenance" in properties:
+        properties.pop("provenance")
+        local_schema["required"] = [
+            name for name in local_schema.get("required", [])
+            if name != "provenance"
+        ]
+    return _project_native_schema(local_schema)
+
+
 def native_schema_support_errors(schema: Any, path: str = "$") -> list[str]:
     """Reject schema constructs that native structured output cannot accept.
 
@@ -55,7 +141,14 @@ def native_schema_support_errors(schema: Any, path: str = "$") -> list[str]:
         # and composition forms are intentionally exempt because they carry
         # an explicit assertion without a separate type keyword.
         errors.append(f"{path}: native_schema_missing_type")
-    for name, child in (schema.get("properties") or {}).items():
+    properties = schema.get("properties")
+    if isinstance(properties, dict):
+        required = schema.get("required")
+        if not isinstance(required, list) or set(required) != set(properties):
+            errors.append(f"{path}: native_schema_required_must_cover_properties")
+        if schema.get("additionalProperties") is not False:
+            errors.append(f"{path}: native_schema_additional_properties_must_be_false")
+    for name, child in (properties or {}).items():
         errors.extend(native_schema_support_errors(child, f"{path}.properties.{name}"))
     for name, child in (schema.get("$defs") or {}).items():
         errors.extend(native_schema_support_errors(child, f"{path}.$defs.{name}"))

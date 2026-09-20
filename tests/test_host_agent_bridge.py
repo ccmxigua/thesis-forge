@@ -570,6 +570,62 @@ class HostAgentBridgeTests(unittest.TestCase):
             previous_response=previous, current_response=current,
         ))
 
+    def test_v3_relation_completion_restores_requirements_after_reason_rewrite(self) -> None:
+        previous = {
+            "contract_version": "3.0",
+            "requirements": [
+                {
+                    "role": "heading_2",
+                    "properties": {"text": "5.1 研究结论"},
+                    "clause_ids": ["C1"],
+                    "evidence_ids": ["E1"],
+                    "confidence": 0.98,
+                    "reason": "原始解释",
+                },
+            ],
+            "clause_reviews": [
+                {"clause_id": "C1", "classification": "executable"},
+                {"clause_id": "C2", "classification": "executable"},
+            ],
+            "unsupported_items": [],
+            "reported_conflicts": [],
+        }
+        current = json.loads(json.dumps(previous))
+        current["requirements"][0]["reason"] = "重试后的同义解释"
+        current["requirements"].append({
+            "role": "heading_3",
+            "properties": {"text": "5.1.1 研究结论"},
+            "clause_ids": ["C2"],
+            "evidence_ids": ["E2"],
+            "confidence": 0.97,
+            "reason": "新增 requirement 的解释",
+        })
+        records = [{
+            "code": "missing_derived_requirement",
+            "json_pointer": "$.clause_reviews[1]",
+            "raw_error": "$.clause_reviews[1]: executable_review_requires_derived_requirement",
+        }]
+        with patch.object(bridge, "validate_host_agent_response", return_value=[]):
+            repaired, audit = bridge._v3_relation_completion_response(
+                previous, current, records, chunk={},
+            )
+        self.assertIsNotNone(repaired)
+        self.assertEqual(repaired["requirements"][0]["reason"], "原始解释")
+        self.assertEqual(
+            [item["clause_ids"] for item in repaired["requirements"]],
+            [["C1"], ["C2"]],
+        )
+        self.assertEqual(audit["preserved_requirement_count"], 1)
+        self.assertEqual(audit["added_requirement_count"], 1)
+
+        current["requirements"][0]["properties"]["text"] = "改过的旧 requirement"
+        with patch.object(bridge, "validate_host_agent_response", return_value=[]):
+            repaired, audit = bridge._v3_relation_completion_response(
+                previous, current, records, chunk={},
+            )
+        self.assertIsNone(repaired)
+        self.assertIsNone(audit)
+
     def test_v3_retry_allows_only_proven_informational_projection(self) -> None:
         previous = {
             "contract_version": "3.0",

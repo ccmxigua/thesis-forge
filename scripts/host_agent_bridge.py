@@ -1389,6 +1389,23 @@ def _v3_relation_addition_allowed(
     return True
 
 
+def _retry_requirement_semantic_payload(requirement: Any) -> Any:
+    """Return the execution payload used to compare a preserved requirement.
+
+    ``reason`` explains why the model selected a role/property; it is not an
+    execution binding.  A retry that only rephrases that explanation must not
+    turn an otherwise safe relation completion into semantic drift.  Every
+    executable field remains in this projection, so role, clause/evidence
+    identity, properties, applicability, prerequisites, verification,
+    confidence, and future contract fields still have to remain unchanged.
+    """
+    if not isinstance(requirement, dict):
+        return requirement
+    payload = copy.deepcopy(requirement)
+    payload.pop("reason", None)
+    return payload
+
+
 def _v3_informational_projection_allowed(
     previous_response: Any,
     current_response: Any,
@@ -1554,7 +1571,9 @@ def _v3_relation_completion_response(
         candidates = previous_by_identity.get(key, [])
         consumed = consumed_previous.get(key, 0)
         if consumed < len(candidates):
-            if item != candidates[consumed]:
+            if _retry_requirement_semantic_payload(item) != _retry_requirement_semantic_payload(
+                candidates[consumed]
+            ):
                 return None, None
             consumed_previous[key] = consumed + 1
             continue

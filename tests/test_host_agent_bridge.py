@@ -581,6 +581,53 @@ class HostAgentBridgeTests(unittest.TestCase):
                 previous_response=previous, current_response=current, chunk=chunk,
             ))
 
+    def test_v3_retry_discards_only_unbound_truncated_placeholder(self) -> None:
+        previous = {
+            "contract_version": "3.0",
+            "requirements": [{
+                "role": "body_text", "properties": {"style": "three_line"},
+                "clause_ids": [], "evidence_ids": [], "reason": "",
+            }],
+            "clause_reviews": [], "unsupported_items": [],
+        }
+        current = {
+            "contract_version": "3.0",
+            "requirements": [{
+                "role": "cover_field_label", "properties": {"text": "标题"},
+                "clause_ids": ["C1"], "evidence_ids": ["E1"],
+            }],
+            "clause_reviews": [{
+                "clause_id": "C1", "classification": "executable",
+            }],
+            "unsupported_items": [],
+        }
+        records = [
+            {"code": "contract_validation_error", "raw_error": "$.requirements[0].reason: is shorter than 1 characters"},
+            {"code": "unknown_property", "raw_error": "$.requirements[0].properties: unknown property 'style'"},
+            {"code": "schema_contract_violation", "raw_error": "$.requirements[0].clause_ids: must_be_non_empty"},
+            {"code": "schema_contract_violation", "raw_error": "$.requirements[0].evidence_ids: must_be_non_empty"},
+            {"code": "contract_validation_error", "raw_error": "clause_reviews_must_cover_each_chunk_clause_exactly_once"},
+        ]
+        chunk = {
+            "evidence_context": {"E1": {"text": "标题"}},
+            "requirement_contract": {
+                "role_properties_schema": {
+                    "cover_field_label": {"$ref": "#/$defs/roleSpec"},
+                },
+            },
+        }
+        changed = bridge._retry_change_paths(previous, current)
+        with patch.object(bridge, "validate_host_agent_response", return_value=[]):
+            self.assertTrue(bridge._retry_changes_allowed(
+                records, changed, contract_version="3.0",
+                previous_response=previous, current_response=current, chunk=chunk,
+            ))
+        previous["requirements"][0]["clause_ids"] = ["C0"]
+        self.assertFalse(bridge._retry_changes_allowed(
+            records, changed, contract_version="3.0",
+            previous_response=previous, current_response=current, chunk=chunk,
+        ))
+
     def test_v3_retry_allows_schema_directed_cover_completion_only(self) -> None:
         previous = {
             "contract_version": "3.0",

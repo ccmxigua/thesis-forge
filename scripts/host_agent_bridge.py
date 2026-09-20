@@ -916,7 +916,7 @@ def _v3_incomplete_completion_allowed(
     requirements/reviews must be the missing completion.  Classification,
     obligations, and existing non-empty properties are never rewritten here.
     """
-    if chunk is None or changed_paths != ["$.clause_reviews", "$.requirements"]:
+    if chunk is None:
         return False
     if not isinstance(previous_response, dict) or not isinstance(current_response, dict):
         return False
@@ -928,13 +928,15 @@ def _v3_incomplete_completion_allowed(
         previous_requirements, current_requirements, previous_reviews, current_reviews,
     )):
         return False
-    if previous_reviews or not current_reviews or len(current_requirements) <= len(previous_requirements):
+    if previous_reviews or not current_reviews or len(current_requirements) < len(previous_requirements):
         return False
     codes = {str(item.get("code")) for item in records if isinstance(item, dict)}
     if not codes <= {
         "empty_requirement_properties",
         "contract_validation_error",
         "requirement_relation_mismatch",
+        "schema_contract_violation",
+        "unknown_property",
     }:
         return False
     if not any(
@@ -943,6 +945,39 @@ def _v3_incomplete_completion_allowed(
     ):
         return False
     if validate_host_agent_response(current_response, chunk):
+        return False
+
+    unbound_placeholder = (
+        len(previous_requirements) == 1
+        and any(
+            "clause_ids: must_be_non_empty" in str(item.get("raw_error") or "")
+            for item in records if isinstance(item, dict)
+        )
+        and any(
+            "evidence_ids: must_be_non_empty" in str(item.get("raw_error") or "")
+            for item in records if isinstance(item, dict)
+        )
+        and any(
+            ".reason: is shorter than 1 characters" in str(item.get("raw_error") or "")
+            for item in records if isinstance(item, dict)
+        )
+    )
+    root_completion = (
+        set(changed_paths) == {"$.clause_reviews", "$.requirements"}
+        and len(changed_paths) == 2
+    )
+    placeholder_replacement = (
+        unbound_placeholder
+        and "$.clause_reviews" in changed_paths
+        and all(
+            path.startswith("$.requirements[0].")
+            for path in changed_paths
+            if path != "$.clause_reviews"
+        )
+    )
+    if not root_completion and not placeholder_replacement:
+        return False
+    if len(current_requirements) == len(previous_requirements) and not unbound_placeholder:
         return False
 
     # Match every initial requirement by its authoritative identity.  The
@@ -962,6 +997,14 @@ def _v3_incomplete_completion_allowed(
             None,
         )
         if match_index is None:
+            if (
+                unbound_placeholder
+                and previous.get("clause_ids") == []
+                and previous.get("evidence_ids") == []
+                and not str(previous.get("reason") or "").strip()
+                and not previous.get("existing_requirement_id")
+            ):
+                continue
             return False
         current = remaining.pop(match_index)
         previous_properties = previous.get("properties")

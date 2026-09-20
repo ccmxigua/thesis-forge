@@ -1653,6 +1653,83 @@ b&=2\notag
             self.assertIn("missing_reason", reasons)
             self.assertIn("invalid_confidence", reasons)
 
+    def test_existing_requirement_payload_is_projected_from_authoritative_baseline(self) -> None:
+        clause = {
+            "id": "C1",
+            "text": "论文中出现英文时需要使用Times New Roman字体",
+            "evidence_ids": ["E1"],
+        }
+        baseline = {
+            "schema_version": "1.0",
+            "roles": {},
+            "page": {},
+            "content_instances": [],
+            "requirements": [{
+                "id": "R00012",
+                "role": "body_text",
+                "properties": {"font": {"latin": "Times New Roman"}},
+                "evidence_ids": ["E1"],
+                "clause_ids": ["C1"],
+                "source_text": clause["text"],
+                "resolved_by": "rule",
+                "confidence": 0.98,
+            }],
+        }
+        response = {
+            "contract_version": "3.0",
+            "requirements": [{
+                "existing_requirement_id": "R00012",
+                "role": "body_text",
+                "properties": {
+                    "font": {
+                        "cjk": "宋体", "latin": "Times New Roman", "size_pt": 12,
+                        "bold": False, "italic": False,
+                    },
+                    "paragraph": {"alignment": "justify", "first_line_indent_chars": 2.0},
+                    "style_hint": "Body Text",
+                },
+                "clause_ids": ["C1"],
+                "evidence_ids": ["E1"],
+                "confidence": 0.98,
+                "reason": "英文正文的字体由现有确定性要求覆盖。",
+                "applicability": {
+                    "status": "conditional",
+                    "conditions": [{
+                        "fact": "source_inventory.english_text",
+                        "operator": "present", "value": None,
+                    }],
+                    "exceptions": [],
+                },
+                "verification": {"mode": "static_docx", "checks": ["核验英文正文。"]},
+            }],
+            "clause_reviews": [{
+                "clause_id": "C1", "classification": "verify_existing",
+                "reason": "现有要求与当前条款完全匹配。",
+            }],
+            "unsupported_items": [],
+            "reported_conflicts": [],
+        }
+        spec, conflicts, audit = requirements_engine.merge_llm_primary(
+            Path("synthetic-source"), baseline, [clause], response, {"E1"},
+        )
+        hard_types = {"llm_contract", "llm_internal_conflict", "completeness"}
+        self.assertFalse(any(item.get("type") in hard_types for item in conflicts), conflicts)
+        requirement = spec["requirements"][0]
+        self.assertEqual(requirement["properties"], baseline["requirements"][0]["properties"])
+        self.assertEqual(requirement["applicability"], response["requirements"][0]["applicability"])
+        self.assertTrue(any(item.get("type") == "existing_requirement_payload_projection" for item in audit))
+
+        unsafe = json.loads(json.dumps(response))
+        unsafe["requirements"][0]["clause_ids"] = ["C2"]
+        _projected, repairs = requirements_engine._project_authoritative_existing_payloads(
+            unsafe, {"R00012": baseline["requirements"][0]}, {"C1": clause},
+        )
+        self.assertEqual(repairs, [])
+        self.assertEqual(
+            unsafe["requirements"][0]["properties"],
+            response["requirements"][0]["properties"],
+        )
+
     def test_complete_21_review_is_applied_independently_of_baseline_mode(self) -> None:
         """rule_only/known_template select a baseline, not a review contract."""
         for mode in ("rule_only", "known_template"):

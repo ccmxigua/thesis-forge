@@ -1435,7 +1435,7 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
                 "Treat every supplied clause as in scope for completeness review.",
                 "Return formatting requirements supported by cited clause_ids and evidence_ids.",
                 "Every requirement object MUST include a non-empty reason explaining why its role and properties are supported by the cited clause/evidence.",
-                "When a clause exactly supports an existing deterministic requirement, set existing_requirement_id and preserve that requirement's role, properties, and evidence_ids exactly.",
+                "When a clause exactly supports an existing deterministic requirement, set existing_requirement_id and preserve that requirement's role, properties, and evidence_ids exactly. Copy only the supplied candidate payload; do not expand it with shared role defaults, inherited body styles, or other properties from the surrounding schema.",
                 "Do not invent values. Use unresolved_clause_ids when evidence is insufficient.",
                 "Classify every clause exactly once in clause_reviews and provide a non-empty reason.",
                 "Prefer executable, verify_existing, not_applicable, external_compliance, informational, requires_metadata, requires_source_content, unsupported_backend, or unverifiable.",
@@ -1573,6 +1573,77 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
     }
 
 
+def _project_authoritative_existing_payloads(
+    response: dict[str, Any],
+    existing_requirement_map: dict[str, dict[str, Any]],
+    clause_map: dict[str, dict[str, Any]],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Project safe existing-requirement payloads from the deterministic baseline.
+
+    A host model can understand that an existing requirement applies while
+    still expanding its properties with shared role defaults.  The existing
+    requirement ID is a code-owned reference, so once role, exact clause set,
+    exact evidence set, and canonical source text all match, its payload must
+    come from the authoritative baseline rather than from model restatement.
+    Any mismatch leaves the response untouched and lets the normal merge gate
+    fail closed.
+    """
+    projected = copy.deepcopy(response)
+    requirements = projected.get("requirements")
+    if not isinstance(requirements, list):
+        return projected, []
+    repairs: list[dict[str, Any]] = []
+    for index, item in enumerate(requirements):
+        if not isinstance(item, dict):
+            continue
+        existing_id = item.get("existing_requirement_id")
+        if not isinstance(existing_id, str) or not existing_id:
+            continue
+        existing = existing_requirement_map.get(existing_id)
+        if not isinstance(existing, dict):
+            continue
+        if item.get("role") != existing.get("role"):
+            continue
+        clause_ids = {str(value) for value in item.get("clause_ids", [])}
+        baseline_clause_ids = {str(value) for value in existing.get("clause_ids", [])}
+        evidence_ids = {str(value) for value in item.get("evidence_ids", [])}
+        baseline_evidence_ids = {str(value) for value in existing.get("evidence_ids", [])}
+        if not clause_ids or clause_ids != baseline_clause_ids or evidence_ids != baseline_evidence_ids:
+            continue
+        source_parts = [
+            str(clause_map[clause_id].get("text", ""))
+            for clause_id in sorted(clause_ids)
+            if clause_id in clause_map
+        ]
+        if len(source_parts) != len(clause_ids) or not all(source_parts):
+            continue
+        expected_source = " | ".join(source_parts)
+        if (
+            not expected_source
+            or _normalized_exact_text(existing.get("source_text"))
+            != _normalized_exact_text(expected_source)
+        ):
+            continue
+        baseline_properties = existing.get("properties")
+        model_properties = item.get("properties")
+        if not isinstance(baseline_properties, dict) or not isinstance(model_properties, dict):
+            continue
+        if model_properties == baseline_properties:
+            continue
+        item["properties"] = copy.deepcopy(baseline_properties)
+        repairs.append({
+            "response_index": index,
+            "existing_requirement_id": existing_id,
+            "role": existing.get("role"),
+            "clause_ids": sorted(clause_ids),
+            "evidence_ids": sorted(evidence_ids),
+            "before_properties_sha256": sha256_json(model_properties),
+            "after_properties_sha256": sha256_json(baseline_properties),
+            "rule_id": "authoritative_existing_requirement_payload",
+        })
+    return projected, repairs
+
+
 def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dict[str, Any]],
                       response: dict[str, Any], evidence_ids: set[str], *,
                       expected_provenance: dict[str, Any] | None = None,
@@ -1591,13 +1662,14 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
     audit: list[dict[str, Any]] = []
     audit.append({
         "type": "merge_transformation_policy",
-        "policy_version": "host-review-merge-2",
+        "policy_version": "host-review-merge-3",
         "input": "validated_host_review_response",
         "input_response_sha256": input_response_sha256,
         "input_rule_spec_sha256": input_rule_spec_sha256,
         "semantic_inference": "disabled",
         "allowed_transformations": [
             "derive_contract_3_reverse_relation",
+            "project_authoritative_existing_requirement_payload",
             "normalize_registered_content_instances",
             "record_non_normative_sample_guard",
             "record_manual_or_external_verification_boundary",
@@ -1611,10 +1683,25 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
     conflicts.extend({"type": "llm_contract", "reason": error}
                      for error in (contract_errors or []))
     contract_version = response.get("contract_version") if isinstance(response, dict) else None
+    existing_requirement_map = {
+        item.get("id"): item for item in rule_spec.get("requirements", [])
+        if isinstance(item, dict) and item.get("id")
+    }
     projected_response = (
         project_compatibility_indexes(response, clauses)
         if contract_version == HOST_REVIEW_CONTRACT_V3 else response
     )
+    projected_response, existing_payload_repairs = _project_authoritative_existing_payloads(
+        projected_response, existing_requirement_map, clause_map,
+    )
+    if existing_payload_repairs:
+        audit.append({
+            "type": "existing_requirement_payload_projection",
+            "rule_id": "authoritative_existing_requirement_payload",
+            "semantic_inference": "disabled",
+            "repairs": existing_payload_repairs,
+            "action": "replace_model_payload_with_exact_deterministic_baseline",
+        })
     reviews = copy.deepcopy(projected_response.get("clause_reviews") or []) if isinstance(projected_response, dict) else []
     requirements = projected_response.get("requirements") or [] if isinstance(projected_response, dict) else []
     if contract_version == HOST_REVIEW_CONTRACT_V3:
@@ -1625,10 +1712,6 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
             "action": "derived_after_contract_validation_for_compatibility_only",
         })
     manual_empty_indexes: set[int] = set()
-    existing_requirement_map = {
-        item.get("id"): item for item in rule_spec.get("requirements", [])
-        if isinstance(item, dict) and item.get("id")
-    }
     review_map: dict[str, dict[str, Any]] = {}
     if not isinstance(response, dict) or contract_version not in SUPPORTED_HOST_REVIEW_CONTRACTS:
         conflicts.append({
@@ -2073,6 +2156,9 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
             req["reason"] = reason.strip()
             if field_instance_ids:
                 req["field_instance_ids"] = field_instance_ids
+            for field in ("applicability", "input_prerequisites", "verification"):
+                if field in item:
+                    req[field] = copy.deepcopy(item[field])
             collect_shared_role_props(role, req["properties"], field_instance_ids)
             spec["requirements"].append(req)
             emitted_requirement_ids.add(str(req["id"]))

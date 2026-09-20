@@ -11,6 +11,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from format_spec_validation import load_and_validate  # noqa: E402
 from host_review_contract import validate_response  # noqa: E402
 from apply_format_spec import compile_cover_contract  # noqa: E402
+from evidence_context_guards import sample_content_guard  # noqa: E402
 import requirements_engine as engine  # noqa: E402
 
 
@@ -21,6 +22,38 @@ def _request(clause_text: str, evidence_id: str = "E1") -> dict:
 
 
 class RootCauseGuardTests(unittest.TestCase):
+    def test_sample_content_context_uses_document_structure_not_broad_order_window(self) -> None:
+        clauses = [
+            {
+                "id": "C_APPENDIX_HEADING",
+                "text": "附录A 示例数据",
+                "source_kind": "paragraph",
+                "location": {"part": "document", "child_index": 10, "order": 10},
+            },
+            {
+                "id": "C_APPENDIX_CELL",
+                "text": "2024年度数据",
+                "source_kind": "table_cell",
+                "location": {
+                    "part": "document", "table_child_index": 11, "order": 11,
+                },
+            },
+            {
+                "id": "C_SPINE_CELL",
+                "text": "论文题目",
+                "source_kind": "table_cell",
+                "location": {
+                    "part": "document", "table_child_index": 100, "order": 30,
+                },
+            },
+        ]
+
+        self.assertEqual(
+            sample_content_guard(clauses[1], clauses)["kind"],
+            "appendix_sample_content",
+        )
+        self.assertIsNone(sample_content_guard(clauses[2], clauses))
+
     def test_partial_chinese_abstract_cannot_claim_full_coverage(self) -> None:
         request = _request("中文摘要一般300～1000字，使用第三人称，包含目的、方法、成果、结论和创新性，不加评论。")
         response = {

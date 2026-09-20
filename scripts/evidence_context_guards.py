@@ -98,7 +98,17 @@ def sample_content_guard(
 
 
 def bounded_clause_context(clause: dict[str, Any], clauses: list[dict[str, Any]]) -> str:
-    """Collect direct and same-part nearby evidence without fuzzy matching."""
+    """Collect direct and structurally nearby evidence without fuzzy matching.
+
+    ``location.order`` is a flattened evidence order, not a document-layout
+    boundary: a table can move the next paragraph many order units away while
+    an unrelated appendix heading can still fall inside a broad numeric
+    window.  Use the native document/table position when it is available and
+    keep the order fallback deliberately narrow.  This prevents a distant
+    ``附录`` instruction from reclassifying an unrelated cover or spine sample
+    while retaining context for a sample cell immediately under an appendix
+    heading.
+    """
     pieces = [
         str(clause.get("text") or ""),
         str(clause.get("source_text_full") or ""),
@@ -108,18 +118,35 @@ def bounded_clause_context(clause: dict[str, Any], clauses: list[dict[str, Any]]
     location = clause.get("location") or {}
     part = location.get("part")
     order = location.get("order")
-    if isinstance(order, int):
-        for candidate in clauses:
-            candidate_location = candidate.get("location") or {}
-            if candidate_location.get("part") != part:
+    structural_positions = [
+        value for key in ("child_index", "table_child_index")
+        if isinstance((value := location.get(key)), int)
+    ]
+    for candidate in clauses:
+        candidate_location = candidate.get("location") or {}
+        if candidate_location.get("part") != part:
+            continue
+        candidate_positions = [
+            value for key in ("child_index", "table_child_index")
+            if isinstance((value := candidate_location.get(key)), int)
+        ]
+        if structural_positions and candidate_positions:
+            if min(
+                abs(left - right)
+                for left in structural_positions
+                for right in candidate_positions
+            ) > 12:
                 continue
+        elif isinstance(order, int):
             candidate_order = candidate_location.get("order")
-            if not isinstance(candidate_order, int) or abs(candidate_order - order) > 20:
+            if not isinstance(candidate_order, int) or abs(candidate_order - order) > 8:
                 continue
-            pieces.extend([
-                str(candidate.get("text") or ""),
-                str(candidate.get("source_text_full") or ""),
-            ])
+        else:
+            continue
+        pieces.extend([
+            str(candidate.get("text") or ""),
+            str(candidate.get("source_text_full") or ""),
+        ])
     return " ".join(piece for piece in pieces if piece)
 
 

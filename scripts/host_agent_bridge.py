@@ -591,7 +591,17 @@ def _semantic_retry_view(response: Any) -> dict[str, Any] | None:
             )
             if key in item
         })
-    requirements.sort(key=lambda item: json.dumps(item, ensure_ascii=False, sort_keys=True))
+    # Sort by identity fields that must remain stable across a mechanical
+    # retry.  Sorting by the complete requirement made a legal property-only
+    # repair look like a list-wide semantic rewrite when the repaired
+    # properties changed the lexical order.
+    requirements.sort(key=lambda item: json.dumps({
+        key: item.get(key)
+        for key in (
+            "role", "clause_ids", "evidence_ids", "existing_requirement_id",
+        )
+        if key in item
+    }, ensure_ascii=False, sort_keys=True))
     reviews: list[dict[str, Any]] = []
     for item in response.get("clause_reviews", []) if isinstance(response.get("clause_reviews"), list) else []:
         if not isinstance(item, dict):
@@ -670,6 +680,32 @@ def _retry_changes_allowed(
         if current_view is not None
         else []
     )
+    cover_property_prefixes: set[str] = set()
+    exact_property_prefixes: set[str] = set()
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        code = str(record.get("code") or "")
+        pointer = str(record.get("json_pointer") or "")
+        if code == "cover_binding_violation":
+            match = re.match(r"^(\$\.requirements\[\d+\]\.properties)\.([^.\[]+)", pointer)
+            if match:
+                root = match.group(1)
+                field = match.group(2)
+                cover_property_prefixes.add(f"{root}.{field}")
+                # Administrative bindings may require moving a field between
+                # the ordinary fields array and the dedicated conditional
+                # region.  Permit only those two declared property roots.
+                if field == "fields":
+                    cover_property_prefixes.add(f"{root}.non_public_administration")
+        elif code == "contract_validation_error":
+            match = re.match(r"^(\$\.requirements\[\d+\]\.properties)\.([^.\[]+)", pointer)
+            if match:
+                exact_property_prefixes.add(f"{match.group(1)}.{match.group(2)}")
+
+    def under(prefix: str, path: str) -> bool:
+        return path == prefix or path.startswith(prefix + ".") or path.startswith(prefix + "[")
+
     for path in changed_paths:
         if path.endswith(".normative_basis") and "normative_basis_invalid" in codes:
             continue
@@ -697,6 +733,14 @@ def _retry_changes_allowed(
                     continue
         if "fixed_text_evidence_mismatch" in codes and (
             ".body_parts" in path or ".heading" in path
+        ):
+            continue
+        if "cover_binding_violation" in codes and any(
+            under(prefix, path) for prefix in cover_property_prefixes
+        ):
+            continue
+        if "contract_validation_error" in codes and any(
+            under(prefix, path) for prefix in exact_property_prefixes
         ):
             continue
         # Semantic fields, requirement properties, obligations, and
@@ -875,6 +919,7 @@ def _host_prompt(*, request_path: Path, chunk_path: Path,
                  chunk_count: int, attempt: int = 1,
                  retry_hint: str | None = None,
                  retry_parent_response_sha256: str | None = None,
+                 retry_parent_response_path: Path | None = None,
                  retry_error_records: list[dict[str, Any]] | None = None,
                  provenance: dict[str, Any] | None = None) -> str:
     contract_version = HOST_REVIEW_CONTRACT_V2
@@ -918,10 +963,24 @@ def _host_prompt(*, request_path: Path, chunk_path: Path,
         if contract_version == HOST_REVIEW_CONTRACT_V3 else
         "Maintain requirement_indexes exactly as required by the contract and verify every index against requirements[index].clause_ids."
     )
-    parent_text = (
-        f"The rejected parent response sha256 was {retry_parent_response_sha256}; do not copy it or make an unrelated semantic change."
-        if retry_parent_response_sha256 else "There is no prior response to reuse."
-    )
+    if retry_parent_response_path is not None:
+        parent_text = f"""The rejected parent response is available only as a repair baseline at:
+{retry_parent_response_path}
+Read that file on this retry. The current chunk packet and cited evidence remain
+the semantic authority. Preserve every non-error semantic field from the parent
+response exactly: clause IDs, classifications, obligations, requirement count,
+roles, clause_ids, evidence_ids, applicability, prerequisites, verification,
+and unrelated properties. Apply only the minimum mechanical edits explicitly
+identified by the structured validator records above. Do not split, merge, add,
+drop, or reorder requirements, and do not reclassify a clause. Return the full
+response object, not a patch. The bridge will reject any unapproved semantic
+drift. Parent response sha256: {retry_parent_response_sha256 or 'unavailable'}."""
+    else:
+        parent_text = (
+            f"The rejected parent response sha256 was {retry_parent_response_sha256}; "
+            "there is no prior response file to reuse."
+            if retry_parent_response_sha256 else "There is no prior response to reuse."
+        )
     return f"""You are the current Host Agent for one fresh thesis-format semantic-review run.
 
 Return exactly ONE JSON object and nothing else. Do not use Markdown fences,
@@ -957,8 +1016,9 @@ cited evidence, use a run-local semantic item id, and use blank signature
 placeholders only; never invent resource_id, version, or sha256.
 
 Do not consult, copy, or repair any previous response, build directory,
-school-specific resource, or conversation memory. The current chunk JSON is
-the only semantic source. Do not modify project files. The runner will save
+school-specific resource, or conversation memory, except for the explicit
+immutable repair baseline named above when this is a retry. The current chunk
+JSON is the only semantic source. Do not modify project files. The runner will save
 your JSON as:
 {response_path}
 
@@ -1121,6 +1181,7 @@ def run_host_agent_chunk(
     codex_model: str | None = None,
     structured_output_mode: str = "prompt_only",
     retry_parent_response_sha256: str | None = None,
+    retry_parent_response_path: Path | None = None,
     retry_error_records: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     if controller is not None:
@@ -1138,6 +1199,7 @@ def run_host_agent_chunk(
             attempt=attempt,
             retry_hint=retry_hint,
             retry_parent_response_sha256=retry_parent_response_sha256,
+            retry_parent_response_path=retry_parent_response_path,
             retry_error_records=retry_error_records,
             provenance=chunk.get("provenance") if isinstance(chunk.get("provenance"), dict) else None,
         ),
@@ -1690,6 +1752,13 @@ def run_bridge(
                             {"attempt": attempt, "status": "running", "started_at": attempt_started},
                         ],
                     )
+                retry_parent_response_path = None
+                if attempt > 1:
+                    candidate_parent_path = response_path.with_name(
+                        f"{response_path.stem}.attempt-{attempt - 1:02d}.raw{response_path.suffix}"
+                    )
+                    if candidate_parent_path.is_file():
+                        retry_parent_response_path = candidate_parent_path
                 audit = run_host_agent_chunk(
                     request_path=request_path,
                     chunk_path=chunks_path,
@@ -1715,6 +1784,7 @@ def run_bridge(
                     retry_parent_response_sha256=(
                         chunk_lifecycle[index].get("retry_parent_response_sha256")
                     ),
+                    retry_parent_response_path=retry_parent_response_path,
                     retry_error_records=copy.deepcopy(retry_error_records),
                     retry_hint=(
                         "local contract validation failed; repair the response: "

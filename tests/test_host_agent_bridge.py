@@ -314,6 +314,26 @@ class HostAgentBridgeTests(unittest.TestCase):
         self.assertIn("Remove normative_basis", retry)
         self.assertIn("never replace it with another guessed value", retry)
 
+        retry_with_baseline = bridge._host_prompt(
+            request_path=Path("request.json"),
+            chunk_path=Path("chunk.json"),
+            response_path=Path("response.json"),
+            run_id="run-1",
+            chunk_index=1,
+            chunk_count=1,
+            attempt=2,
+            retry_hint="cover_binding_violation",
+            retry_parent_response_sha256="a" * 64,
+            retry_parent_response_path=Path("/tmp/parent-response.raw.json"),
+            retry_error_records=[{
+                "code": "cover_binding_violation",
+                "json_pointer": "$.requirements[0].properties.fields[2]",
+            }],
+        )
+        self.assertIn("/tmp/parent-response.raw.json", retry_with_baseline)
+        self.assertIn("Preserve every non-error semantic field", retry_with_baseline)
+        self.assertIn("Do not split, merge, add", retry_with_baseline)
+
     def test_retry_guidance_targets_exact_invalid_property_without_contradiction(self) -> None:
         retry = bridge._contract_repair_guidance(
             "local response contract validation failed: "
@@ -416,6 +436,51 @@ class HostAgentBridgeTests(unittest.TestCase):
                 records,
                 ["$.clause_reviews[0].classification"],
                 contract_version="2.1",
+            )
+        )
+
+    def test_retry_allows_only_targeted_cover_binding_repair(self) -> None:
+        previous = {
+            "contract_version": "3.0",
+            "requirements": [{
+                "role": "cover",
+                "properties": {
+                    "institution": "——",
+                    "fields": [{"id": "security_marking", "label": "密级"}],
+                },
+                "clause_ids": ["C1"],
+                "evidence_ids": ["E1"],
+            }],
+            "clause_reviews": [{
+                "clause_id": "C1", "classification": "executable",
+                "normative_basis": "template_structure",
+            }],
+            "unsupported_items": [],
+        }
+        current = json.loads(json.dumps(previous))
+        current["requirements"][0]["properties"]["fields"] = []
+        current["requirements"][0]["properties"]["non_public_administration"] = {
+            "fields": [{"id": "security_marking", "label": "密级"}],
+        }
+        records = [{
+            "code": "cover_binding_violation",
+            "json_pointer": "$.requirements[0].properties.fields[0]",
+        }]
+        changed = bridge._retry_change_paths(previous, current)
+        self.assertTrue(changed)
+        self.assertTrue(
+            bridge._retry_changes_allowed(
+                records, changed, contract_version="3.0",
+                previous_response=previous, current_response=current,
+            )
+        )
+
+        current["clause_reviews"][0]["classification"] = "not_applicable"
+        changed = bridge._retry_change_paths(previous, current)
+        self.assertFalse(
+            bridge._retry_changes_allowed(
+                records, changed, contract_version="3.0",
+                previous_response=previous, current_response=current,
             )
         )
 

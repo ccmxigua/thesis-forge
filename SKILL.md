@@ -41,6 +41,27 @@ OpenAI, Grok, Claude, or any other specific vendor.
 - Fail closed when a clause is missing, ambiguous, unsupported, stale, or not
   backed by the supplied evidence. Never fill gaps with a plausible guess.
 
+## Explicit semantic issue acknowledgements
+
+When a user confirms that an unresolved clause is a real semantic ambiguity but
+does not provide its authoritative interpretation, record that acknowledgement
+in a run-bound `semantic-issue-confirmation` sidecar and pass it with
+`--semantic-issue-confirmations`. The pipeline validates the clause, question,
+evidence, case, run, and source hashes and writes a bound
+`semantic-issue-ledger.json` and a separate
+`semantic-issue-confirmation-receipt.json`. This is an audit disposition, not a Host Agent
+classification: the original question and `unresolved` review remain intact,
+and no requirement or formatting property is created.
+
+The acknowledgement may let analysis and explicit `supported_subset` previews
+continue, while the report remains marked
+`analysis_ready_with_confirmed_semantic_issues`. Full compliance, submission
+readiness, release, and real batch execution remain blocked with
+`confirmed_semantic_issues` until an authoritative interpretation is supplied.
+Other unresolved clauses are unaffected. Never add a global rule for a clause
+ID from one run, and never use `--allow-unresolved` as a substitute for this
+bound record.
+
 ## Requirements input normalization
 
 The written requirements input may be an OOXML `.docx` or a legacy binary Word

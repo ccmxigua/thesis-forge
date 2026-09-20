@@ -40,6 +40,7 @@ from docx_semantics import (
     iter_document_nodes,
 )
 from format_spec_validation import load_and_validate
+from semantic_issue_confirmation import validate_bound_ledger_for_spec
 from compliance import annotate_satisfied_inputs, finalize_records, report as compliance_report
 from role_registry import find_existing_style, generated_style, role_config, role_names, structural_detector, style_aliases
 from resource_registry import resource_items
@@ -106,14 +107,26 @@ def load_json(path: Path) -> dict[str, Any]:
     return data
 
 
-def format_spec_blockers(spec: dict[str, Any], compliance_mode: str = "full") -> list[str]:
+def format_spec_blockers(
+    spec: dict[str, Any], compliance_mode: str = "full",
+    confirmed_semantic_issue_ids: set[str] | None = None,
+) -> list[str]:
     """Identify concrete apply-time blockers for the selected compliance mode."""
+    confirmed_semantic_issue_ids = confirmed_semantic_issue_ids or set()
     completeness = spec.get("completeness") if isinstance(spec.get("completeness"), dict) else {}
+    unresolved_clause_ids = set(completeness.get("unresolved_clause_ids") or [])
+    relief_ids = confirmed_semantic_issue_ids if compliance_mode == "supported_subset" else set()
+    remaining_unresolved = unresolved_clause_ids - relief_ids
     blockers = []
-    if spec.get("status") == "needs_clarification": blockers.append("status_needs_clarification")
-    if completeness.get("unresolved_clause_ids"): blockers.append("unresolved_clauses")
+    if spec.get("status") == "needs_clarification" and (
+        compliance_mode == "full" or remaining_unresolved
+    ):
+        blockers.append("status_needs_clarification")
+    if remaining_unresolved: blockers.append("unresolved_clauses")
     if completeness.get("missing_clause_ids"): blockers.append("missing_clauses")
     if spec.get("blocking_errors"): blockers.append("blocking_errors")
+    if compliance_mode == "full" and confirmed_semantic_issue_ids:
+        blockers.append("confirmed_semantic_issues")
     if compliance_mode == "full" and completeness.get("unsupported_items"):
         blockers.append("unsupported_items")
     records = spec.get("clause_compliance") if isinstance(spec.get("clause_compliance"), list) else []
@@ -2591,6 +2604,8 @@ def main(argv: list[str]) -> int:
                    help="capability-preflight report used to distinguish supplied inputs from missing inputs")
     p.add_argument("--preview-placeholders", action="store_true",
                    help="opt-in supported-subset preview: continue past unresolved requirement semantics while keeping submission_ready false")
+    p.add_argument("--semantic-issue-ledger", type=Path,
+                   help="run-bound user acknowledgement ledger for unresolved semantic clauses")
     args = p.parse_args(argv)
     spec = load_json(args.format_spec)
     validation_errors = load_and_validate(spec, Path(__file__).resolve().parents[1] / "schema" / "format-spec.schema.json")
@@ -2605,7 +2620,23 @@ def main(argv: list[str]) -> int:
         for role, role_spec in spec.get("roles", {}).items()
     }
     compliance_mode = args.compliance_mode or spec.get("compliance_mode", "supported_subset")
-    blockers = format_spec_blockers(spec, compliance_mode)
+    semantic_issue_ledger = None
+    confirmed_semantic_issue_ids: set[str] = set()
+    semantic_issue_confirmations: list[dict[str, Any]] = []
+    semantic_issue_binding: dict[str, Any] | None = None
+    if args.semantic_issue_ledger:
+        try:
+            semantic_issue_ledger = load_json(args.semantic_issue_ledger)
+            confirmed_semantic_issue_ids = validate_bound_ledger_for_spec(
+                semantic_issue_ledger, spec,
+            )
+            semantic_issue_confirmations = copy.deepcopy(
+                semantic_issue_ledger.get("confirmations", [])
+            )
+            semantic_issue_binding = copy.deepcopy(semantic_issue_ledger.get("binding"))
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            raise SystemExit(f"invalid semantic issue ledger: {exc}") from exc
+    blockers = format_spec_blockers(spec, compliance_mode, confirmed_semantic_issue_ids)
     preview_bypassed_blockers = []
     if args.preview_placeholders:
         if compliance_mode != "supported_subset":
@@ -3091,7 +3122,10 @@ def main(argv: list[str]) -> int:
         if compliance.get("overall_status") in {"passed", "supported_subset_passed"}:
             compliance["overall_status"] = "content_pending"
     effective_submission_ready = bool(
-        submission_audit["submission_ready"] and not metadata_pending and not content_pending
+        submission_audit["submission_ready"]
+        and not metadata_pending
+        and not content_pending
+        and not confirmed_semantic_issue_ids
     )
     legacy_role_coverage = not missing_required and not content_pending
     if compliance_mode == "supported_subset" and not source_clause_records:
@@ -3100,16 +3134,25 @@ def main(argv: list[str]) -> int:
             "content_pending" if content_pending
             else ("supported_subset_passed" if not findings and legacy_role_coverage else "failed")
         )
+    if confirmed_semantic_issue_ids:
+        compliance["docx_fully_compliant"] = False
+        compliance["overall_status"] = "confirmed_semantic_issues"
+        compliance["confirmed_semantic_issues"] = sorted(confirmed_semantic_issue_ids)
+        compliance["semantic_issue_binding"] = semantic_issue_binding
+        compliance["semantic_issue_confirmations"] = semantic_issue_confirmations
     report = {"valid": not findings, "fully_covered": (compliance["docx_fully_compliant"] if source_clause_records else legacy_role_coverage),
               "pipeline_valid": not findings,
               "format_ready": (not findings and bool(compliance.get("format_ready"))
                                and bool(property_receipt_audit.get("valid"))),
-              "supported_subset_valid": not findings and compliance["overall_status"] in {"passed", "supported_subset_passed", "input_pending"},
+              "supported_subset_valid": not findings and compliance["overall_status"] in {"passed", "supported_subset_passed", "input_pending", "confirmed_semantic_issues"},
               "serialized_docx_valid": submission_audit["serialized_docx_valid"],
               "render_validation": submission_audit["render_validation"],
               "submission_ready": effective_submission_ready,
-              "submission_status": ("content_pending" if content_pending
-                                    else ("cover_metadata_pending" if metadata_pending else submission_audit["status"])),
+              "submission_status": (
+                  "confirmed_semantic_issues" if confirmed_semantic_issue_ids
+                  else ("content_pending" if content_pending
+                        else ("cover_metadata_pending" if metadata_pending else submission_audit["status"]))
+              ),
               "overall_status": compliance["overall_status"],
               "docx_fully_compliant": compliance["docx_fully_compliant"],
               "compliance_mode": compliance_mode,
@@ -3139,6 +3182,12 @@ def main(argv: list[str]) -> int:
               "declaration_changes": declaration_changes,
               "submission_audit": submission_audit,
               "unsupported_items": spec.get("completeness", {}).get("unsupported_items", []),
+              "confirmed_semantic_issues": sorted(confirmed_semantic_issue_ids),
+              "semantic_issue_binding": semantic_issue_binding,
+              "semantic_issue_confirmations": semantic_issue_confirmations,
+              "semantic_issue_ledger": (
+                  str(args.semantic_issue_ledger.resolve()) if args.semantic_issue_ledger else None
+              ),
               "preview_placeholders": bool(args.preview_placeholders),
               "preview_bypassed_blockers": preview_bypassed_blockers,
               "output_docx": str(args.output)}

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import fnmatch
 import hashlib
 import json
@@ -27,6 +28,7 @@ from input_resolver import (
 from format_contract_guards import (
     cover_binding_errors, input_prerequisite_errors, verification_checker_errors,
 )
+from semantic_issue_confirmation import validate_bound_ledger_for_spec
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_REGISTRY = ROOT / "resources" / "backend-capabilities.default.json"
@@ -44,6 +46,7 @@ CATEGORY_PRIORITY = {
     "input_prerequisite_satisfied": 0,
     "supported": 0,
     "external_not_applicable": 0,
+    "confirmed_semantic_issue": 0,
 }
 
 # Labels that commonly occur as standalone cover/table fragments.  A clause
@@ -568,10 +571,38 @@ def plan_capabilities(spec: dict[str, Any], registry: dict[str, Any], compliance
                       extracted_clauses: list[dict[str, Any]] | None = None,
                       metadata: dict[str, Any] | None = None,
                       template_fixed_values: dict[str, Any] | None = None,
-                      runtime_inventory: dict[str, Any] | None = None) -> dict[str, Any]:
+                      runtime_inventory: dict[str, Any] | None = None,
+                      semantic_issue_ledger: dict[str, Any] | None = None) -> dict[str, Any]:
     requirements = []
     findings = []
     by_id: dict[str, dict[str, Any]] = {}
+    confirmed_semantic_issue_ids = (
+        validate_bound_ledger_for_spec(
+            semantic_issue_ledger, spec, clauses=extracted_clauses or []
+        )
+        if semantic_issue_ledger is not None else set()
+    )
+    semantic_issue_confirmations = (
+        copy.deepcopy(semantic_issue_ledger.get("confirmations", []))
+        if semantic_issue_ledger is not None else []
+    )
+    confirmation_by_clause = {
+        str(item["clause_id"]): item for item in semantic_issue_confirmations
+    }
+    semantic_issue_binding = (
+        copy.deepcopy(semantic_issue_ledger.get("binding"))
+        if semantic_issue_ledger is not None else None
+    )
+    extracted_clause_id_set = {
+        str(item.get("id")) for item in (extracted_clauses or [])
+        if isinstance(item, dict) and item.get("id")
+    }
+    if not confirmed_semantic_issue_ids <= extracted_clause_id_set:
+        unknown = sorted(confirmed_semantic_issue_ids - extracted_clause_id_set)
+        raise ValueError(
+            "semantic issue ledger contains clauses outside the extracted clause set: "
+            + ", ".join(unknown)
+        )
     # The planner is also called directly by tests and by recovery tooling,
     # so it must not rely on the outer format-spec loader having run first.
     # Reject deterministic contract violations here as well, without trying
@@ -691,7 +722,57 @@ def plan_capabilities(spec: dict[str, Any], registry: dict[str, Any], compliance
         )
         findings.append(issue)
         finding_categories.append("runtime_manual_unverifiable")
+    confirmed_issue_findings: list[dict[str, Any]] = []
     for record in compliance_records:
+        clause_id = str(record.get("clause_id") or "")
+        if clause_id in confirmed_semantic_issue_ids:
+            confirmation = confirmation_by_clause[clause_id]
+            clause_source = next((item for item in (extracted_clauses or [])
+                                  if isinstance(item, dict)
+                                  and str(item.get("id")) == clause_id), record)
+            issue = finding(
+                "capability.confirmed_semantic_issue", "capability_preflight",
+                "error" if compliance_mode == "full" else "warning",
+                compliance_mode == "full",
+                f"Clause {clause_id} is acknowledged as a semantic issue and remains unresolved.",
+                [evidence("clause_id", clause_id),
+                 evidence("evidence_ids", record.get("evidence_ids", [])),
+                 evidence("scope", "analysis_only"),
+                 evidence("disposition", "confirmed_semantic_issue")],
+            )
+            clause = {
+                "clause_id": clause_id,
+                "requirement_ids": record.get("requirement_ids", []),
+                "evidence_ids": record.get("evidence_ids", []),
+                "scope": record.get("scope"),
+                "source_status": record.get("status"),
+                "reason": record.get("reason") or "confirmed semantic issue",
+                "disposition": "confirmed_semantic_issue",
+                "category": "confirmed_semantic_issue",
+                "input_status": "not_applicable",
+                "binding_status": "bound",
+                "output_status": "pending_semantic_clarification",
+                "input_diagnosis": "semantic_issue_confirmed",
+                "source_binding": _clause_source_binding(clause_source),
+                "category_source": "semantic_issue_confirmation",
+                "semantic_issue": {
+                    "scope": "analysis_only",
+                    "disposition": "confirmed_semantic_issue",
+                    "finding_code": issue["code"],
+                    "question_id": confirmation["question_id"],
+                    "evidence_ids": copy.deepcopy(confirmation["evidence_ids"]),
+                    "reason": confirmation["reason"],
+                    "clause_sha256": confirmation["clause_sha256"],
+                    "question_sha256": confirmation["question_sha256"],
+                    "source_binding": copy.deepcopy(semantic_issue_ledger["source_binding"]),
+                    "binding": copy.deepcopy(semantic_issue_binding),
+                },
+                "findings": [issue],
+            }
+            clauses.append(clause)
+            findings.append(issue)
+            confirmed_issue_findings.append(issue)
+            continue
         rid_items = [by_id[rid] for rid in record.get("requirement_ids", []) if rid in by_id]
         status = record.get("status")
         disposition, category = _clause_classification(record, rid_items)
@@ -831,15 +912,22 @@ def plan_capabilities(spec: dict[str, Any], registry: dict[str, Any], compliance
         ],
         "policy": "false_is_not_applicable; unknown_is_fail_closed",
     }
+    if blocking_findings:
+        report_status = "blocked"
+    elif confirmed_semantic_issue_ids:
+        report_status = "analysis_ready_with_confirmed_semantic_issues"
+    else:
+        report_status = "gaps_present" if unique_gaps else "ready"
     return {
         "schema_version": "1.0", "stage": "capability_preflight", "backend": registry["backend"],
         "compliance_mode": compliance_mode,
-            "status": "blocked" if blocking_findings else ("gaps_present" if unique_gaps else "ready"),
+            "status": report_status,
         "execution_ready": not blocking_findings,
         "inputs": {"source_inventory_provided": source_inventory is not None,
                    "template_profile_provided": template_profile is not None,
                    "metadata_provided": metadata is not None,
-                   "runtime_inventory_provided": runtime_inventory is not None},
+                   "runtime_inventory_provided": runtime_inventory is not None,
+                   "semantic_issue_ledger_provided": semantic_issue_ledger is not None},
         "summary": {"requirements": len(requirements), "clauses": len(clauses),
                     "extracted_clauses": len(expected_clause_ids),
                     "reviewed_extracted_clauses": len(reviewed_clause_ids & expected_clause_ids),
@@ -862,8 +950,14 @@ def plan_capabilities(spec: dict[str, Any], registry: dict[str, Any], compliance
                     "clause_backend_capability_gaps": clause_counts["backend_capability_gap"],
                     "clause_input_prerequisites": clause_counts["input_prerequisite"],
                     "clause_runtime_manual_unverifiable": clause_counts["runtime_manual_unverifiable"],
-                    "clause_external_not_applicable": clause_counts["external_not_applicable"]},
+                    "clause_external_not_applicable": clause_counts["external_not_applicable"],
+                    "confirmed_semantic_issues": len(confirmed_semantic_issue_ids),
+                    "confirmed_semantic_issue_blockers": len(confirmed_issue_findings)
+                    if compliance_mode == "full" else 0},
         "requirements": requirements, "clauses": clauses, "findings": findings,
+        "confirmed_semantic_issues": sorted(confirmed_semantic_issue_ids),
+        "semantic_issue_binding": semantic_issue_binding,
+        "semantic_issue_confirmations": semantic_issue_confirmations,
         "applicability": applicability,
     }
 
@@ -880,6 +974,8 @@ def main(argv: list[str]) -> int:
                         help="normalized thesis metadata used to satisfy explicit metadata-only cover fields")
     parser.add_argument("--runtime-inventory", type=Path,
                         help="deterministic runtime/source anchor inventory for runtime prerequisites")
+    parser.add_argument("--semantic-issue-ledger", type=Path,
+                        help="run-bound user acknowledgement ledger for unresolved semantic clauses")
     parser.add_argument("--template-fixed-values", type=Path,
                         help="validated school/template fixed-value contract")
     parser.add_argument("--template-school",
@@ -905,13 +1001,17 @@ def main(argv: list[str]) -> int:
         if fixed_contract and args.template_school else None
     )
     format_spec = read_json(args.format_spec)
+    semantic_issue_ledger = (
+        read_json(args.semantic_issue_ledger) if args.semantic_issue_ledger else None
+    )
     report = plan_capabilities(format_spec, registry, args.compliance_mode,
                                read_json(args.source_inventory) if args.source_inventory else None,
                                read_json(args.template_profile) if args.template_profile else None,
                                read_json(args.clauses) if args.clauses else None,
                                read_json(args.metadata) if args.metadata else None,
                                selected_fixed_values,
-                               read_json(args.runtime_inventory) if args.runtime_inventory else None)
+                               read_json(args.runtime_inventory) if args.runtime_inventory else None,
+                               semantic_issue_ledger)
     # Keep the diagnostic self-describing when it is copied out of a work
     # directory.  The manifest remains the stage authority, but this report
     # must not be mistaken for a preparation-stage spec or another run's
@@ -926,6 +1026,9 @@ def main(argv: list[str]) -> int:
         "metadata": artifact_record(args.metadata) if args.metadata else None,
         "runtime_inventory": (
             artifact_record(args.runtime_inventory) if args.runtime_inventory else None
+        ),
+        "semantic_issue_ledger": (
+            artifact_record(args.semantic_issue_ledger) if args.semantic_issue_ledger else None
         ),
     }
     write_json(args.out, report)

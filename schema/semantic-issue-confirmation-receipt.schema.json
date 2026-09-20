@@ -1,0 +1,109 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.local/thesis-latex2docx/semantic-issue-confirmation-receipt.schema.json",
+  "title": "Bound semantic issue confirmation receipt",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "receipt_type",
+    "status",
+    "case_id",
+    "scope",
+    "disposition",
+    "source_binding",
+    "binding",
+    "confirmed_clause_ids",
+    "confirmations",
+    "ledger_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "receipt_type": {"const": "semantic_issue_confirmation"},
+    "status": {"const": "bound"},
+    "case_id": {"type": "string", "minLength": 1},
+    "scope": {"const": "analysis_only"},
+    "disposition": {"const": "confirmed_semantic_issue"},
+    "source_binding": {
+      "type": "object",
+      "required": [
+        "run_id",
+        "case_id",
+        "source_sha256",
+        "evidence_sha256",
+        "clause_sha256",
+        "request_sha256"
+      ],
+      "properties": {
+        "run_id": {"type": "string", "minLength": 1},
+        "case_id": {"type": "string", "minLength": 1},
+        "source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "evidence_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "clause_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "request_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      },
+      "additionalProperties": false
+    },
+    "binding": {
+      "type": "object",
+      "required": [
+        "run_id",
+        "case_id",
+        "source_sha256",
+        "evidence_sha256",
+        "clause_sha256",
+        "request_sha256",
+        "questions_sha256",
+        "clauses_sha256"
+      ],
+      "properties": {
+        "run_id": {"type": "string", "minLength": 1},
+        "case_id": {"type": "string", "minLength": 1},
+        "source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "evidence_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "clause_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "request_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "questions_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "clauses_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "input_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      },
+      "additionalProperties": false
+    },
+    "confirmed_clause_ids": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "confirmations": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": [
+          "clause_id",
+          "question_id",
+          "evidence_ids",
+          "reason",
+          "clause_sha256",
+          "question_sha256"
+        ],
+        "properties": {
+          "clause_id": {"type": "string", "minLength": 1},
+          "question_id": {"type": "string", "minLength": 1},
+          "evidence_ids": {
+            "type": "array",
+            "minItems": 1,
+            "uniqueItems": true,
+            "items": {"type": "string", "minLength": 1}
+          },
+          "reason": {"type": "string", "minLength": 1},
+          "clause_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "question_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "ledger_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  },
+  "additionalProperties": false
+}

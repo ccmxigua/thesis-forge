@@ -19,6 +19,11 @@ from pipeline_finding import evidence, finding
 from region_graph import compile_region_graph
 from section_model import compile_section_plan
 from semantic_contract import sha256_json
+from semantic_issue_confirmation import (
+    bind_confirmations,
+    build_confirmation_receipt,
+    confirmed_clause_ids,
+)
 from artifact_io import atomic_write_text, paths_alias
 from process_runner import run_process
 
@@ -382,26 +387,39 @@ def run_step(
     return result
 
 
-def requirement_blockers(spec: dict[str, Any], questions: list[Any], compliance_mode: str = "full",
-                         satisfied_clause_ids: set[str] | None = None) -> list[str]:
+def requirement_blockers(
+    spec: dict[str, Any], questions: list[Any], compliance_mode: str = "full",
+    satisfied_clause_ids: set[str] | None = None,
+    confirmed_semantic_issue_ids: set[str] | None = None,
+) -> list[str]:
     """Return conditions that make the selected compliance mode unsafe."""
     satisfied_clause_ids = satisfied_clause_ids or set()
+    confirmed_semantic_issue_ids = confirmed_semantic_issue_ids or set()
+    analysis_relief_ids = (
+        confirmed_semantic_issue_ids if compliance_mode == "supported_subset" else set()
+    )
+    excluded_ids = satisfied_clause_ids | analysis_relief_ids
     completeness = spec.get("completeness") if isinstance(spec.get("completeness"), dict) else {}
     blockers = []
-    if spec.get("status") == "needs_clarification": blockers.append("status_needs_clarification")
-    unresolved_ids = set(completeness.get("unresolved_clause_ids") or []) - satisfied_clause_ids
+    unresolved_ids = set(completeness.get("unresolved_clause_ids") or []) - excluded_ids
+    if spec.get("status") == "needs_clarification" and (
+        compliance_mode == "full" or unresolved_ids
+    ):
+        blockers.append("status_needs_clarification")
     if unresolved_ids: blockers.append("unresolved_clauses")
     if completeness.get("missing_clause_ids"): blockers.append("missing_clauses")
     if spec.get("blocking_errors"): blockers.append("blocking_errors")
     if questions:
         remaining_questions = [item for item in questions
                                if isinstance(item, dict)
-                               and str(item.get("clause_id")) not in satisfied_clause_ids]
+                               and str(item.get("clause_id")) not in excluded_ids]
         if remaining_questions or not all(isinstance(item, dict) for item in questions):
             blockers.append("open_questions")
+    if compliance_mode == "full" and confirmed_semantic_issue_ids:
+        blockers.append("confirmed_semantic_issues")
     records = spec.get("clause_compliance") if isinstance(spec.get("clause_compliance"), list) else []
     records = [item for item in records
-               if str(item.get("clause_id")) not in satisfied_clause_ids]
+               if str(item.get("clause_id")) not in excluded_ids]
     if compliance_mode == "full":
         if not records:
             blockers.append("missing_clause_compliance")
@@ -439,6 +457,8 @@ def record_capability_summary(manifest: dict[str, Any], summary: dict[str, Any])
         "clause_input_prerequisites", summary.get("input_prerequisites", 0))
     manifest["capability_runtime_manual_unverifiable"] = summary.get(
         "clause_runtime_manual_unverifiable", summary.get("runtime_manual_unverifiable", 0))
+    manifest["capability_confirmed_semantic_issues"] = summary.get(
+        "confirmed_semantic_issues", 0)
     manifest["capability_external_not_applicable"] = summary.get(
         "clause_external_not_applicable", summary.get("external_not_applicable", 0))
     manifest["capability_clause_gaps"] = summary.get("clause_gaps", summary.get("gaps", 0))
@@ -665,6 +685,13 @@ def _main(argv: list[str]) -> int:
                    help="explicit non-release test mode; permits full semantic compilation without a native call receipt")
     p.add_argument("--preview-placeholders", action="store_true",
                    help="opt-in supported-subset preview: continue past unresolved requirement semantics while keeping the artifact non-submission-ready")
+    p.add_argument(
+        "--semantic-issue-confirmations", type=Path,
+        help=(
+            "run-bound user acknowledgements for unresolved semantic clauses; "
+            "supported_subset may continue, full compliance remains blocked"
+        ),
+    )
     p.add_argument("--render-report", type=Path,
                    help="optional accepted Microsoft Word/PDF render evidence JSON")
     p.add_argument("--template-profile", type=Path,
@@ -693,6 +720,8 @@ def _main(argv: list[str]) -> int:
         p.error("--host-review-chunk-size must be a positive integer")
     if args.preview_placeholders and args.compliance_mode != "supported_subset":
         p.error("--preview-placeholders requires --compliance-mode supported_subset")
+    if args.semantic_issue_confirmations and not args.semantic_issue_confirmations.is_file():
+        p.error(f"semantic issue confirmation file does not exist: {args.semantic_issue_confirmations}")
     if bool(args.template_fixed_values) != bool(args.template_school):
         p.error("--template-fixed-values and --template-school must be supplied together")
     if args.neutral_reference_docx and (args.style_template or args.template_profile):
@@ -717,6 +746,8 @@ def _main(argv: list[str]) -> int:
     assembly_plan_path = work / "assembly-plan.json"
     assembly_report_path = work / "assembly-execution.json"
     source_role_map_path = work / "source-role-map.json"
+    semantic_issue_ledger_path = work / "semantic-issue-ledger.json"
+    semantic_issue_receipt_path = work / "semantic-issue-confirmation-receipt.json"
     requirements_source = args.requirements.resolve()
     requirements_suffix = requirements_source.suffix.lower()
     if not requirements_source.is_file():
@@ -1091,6 +1122,43 @@ def _main(argv: list[str]) -> int:
     spec["compliance_mode"] = args.compliance_mode
     write_json(requirements_dir / "format-spec.json", spec)
     questions = read_json(requirements_dir / "questions.json")
+    semantic_issue_ledger: dict[str, Any] | None = None
+    confirmed_semantic_issue_ids: set[str] = set()
+    if args.semantic_issue_confirmations:
+        try:
+            confirmation_input = read_json(args.semantic_issue_confirmations)
+            expected_case_id = args.case_id or extraction_manifest.get("case_id")
+            semantic_issue_ledger = bind_confirmations(
+                confirmation_input,
+                spec,
+                questions,
+                clauses,
+                expected_case_id=str(expected_case_id) if expected_case_id else None,
+                expected_run_id=str(spec.get("run_id") or "") or None,
+            )
+            write_json(semantic_issue_ledger_path, semantic_issue_ledger)
+            semantic_issue_receipt = build_confirmation_receipt(semantic_issue_ledger)
+            write_json(semantic_issue_receipt_path, semantic_issue_receipt)
+            confirmed_semantic_issue_ids = confirmed_clause_ids(semantic_issue_ledger)
+            manifest["inputs"]["semantic_issue_confirmations"] = file_record(
+                args.semantic_issue_confirmations.resolve()
+            )
+            manifest["semantic_issue_ledger"] = file_record(semantic_issue_ledger_path)
+            manifest["semantic_issue_receipt"] = file_record(semantic_issue_receipt_path)
+            manifest["semantic_issue_binding"] = semantic_issue_ledger["binding"]
+            manifest["semantic_issue_confirmations"] = semantic_issue_ledger["confirmations"]
+            manifest["confirmed_semantic_issue_ids"] = sorted(confirmed_semantic_issue_ids)
+            manifest["semantic_issue_scope"] = semantic_issue_ledger["scope"]
+            manifest["semantic_issue_disposition"] = semantic_issue_ledger["disposition"]
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            manifest.update(
+                status="failed",
+                reason="semantic issue confirmation binding failed",
+                semantic_issue_confirmation_error=str(exc),
+            )
+            write_json(manifest_path, manifest)
+            print(json.dumps(manifest, ensure_ascii=False))
+            return 3
 
     # Capability preflight, assembly metadata input, and official-template
     # audit all consume this exact validated work artifact.  Raw semantic JSON
@@ -1139,6 +1207,8 @@ def _main(argv: list[str]) -> int:
         capability_cmd += ["--metadata", str(canonical_profile_path)]
     if isinstance(runtime_inventory, dict):
         capability_cmd += ["--runtime-inventory", str(runtime_inventory_path)]
+    if semantic_issue_ledger is not None:
+        capability_cmd += ["--semantic-issue-ledger", str(semantic_issue_ledger_path)]
     capability_result = run_step("capability_preflight", capability_cmd, steps)
     capability_report = read_json(capability_report_path) if capability_report_path.exists() else None
     manifest["capability_preflight"] = str(capability_report_path)
@@ -1155,7 +1225,13 @@ def _main(argv: list[str]) -> int:
         if item.get("category") == "supported"
         and (item.get("metadata_fields") or item.get("template_fixed_fields"))
     }
-    blockers = requirement_blockers(spec, questions, args.compliance_mode, satisfied_clause_ids)
+    blockers = requirement_blockers(
+        spec,
+        questions,
+        args.compliance_mode,
+        satisfied_clause_ids,
+        confirmed_semantic_issue_ids,
+    )
     if args.preview_placeholders:
         preview_blockers = sorted(set(blockers) & PREVIEW_PLACEHOLDER_BLOCKERS)
         blockers = [item for item in blockers if item not in PREVIEW_PLACEHOLDER_BLOCKERS]
@@ -1283,6 +1359,8 @@ def _main(argv: list[str]) -> int:
         # apply_format_spec retains its legacy interface; the profile gate is
         # run independently below so generation cannot self-certify it.
         manifest["inputs"]["template_profile"] = str(args.template_profile.resolve())
+    if semantic_issue_ledger is not None:
+        apply_cmd += ["--semantic-issue-ledger", str(semantic_issue_ledger_path)]
     if args.require_submission_ready:
         apply_cmd.append("--require-submission-ready")
     result = run_step("apply_and_validate", apply_cmd, steps)
@@ -1374,6 +1452,8 @@ def _main(argv: list[str]) -> int:
             write_json(manifest_path, manifest); print(json.dumps(manifest, ensure_ascii=False)); return 6
 
     final_submission_ready = bool(report.get("submission_ready"))
+    if confirmed_semantic_issue_ids:
+        final_submission_ready = False
     if official_template_submission_ready is not None:
         final_submission_ready = final_submission_ready and official_template_submission_ready
     final_format_ready = bool(
@@ -1389,7 +1469,11 @@ def _main(argv: list[str]) -> int:
                         official_template_structure_valid=official_template_structure_valid,
                         official_template_audit_status=official_template_audit_status)
         write_json(manifest_path, manifest); print(json.dumps(manifest, ensure_ascii=False)); return 12
-    manifest.update(status="completed", finished_at=datetime.now(timezone.utc).isoformat(),
+    final_status = (
+        "completed_with_confirmed_semantic_issues"
+        if confirmed_semantic_issue_ids else "completed"
+    )
+    manifest.update(status=final_status, finished_at=datetime.now(timezone.utc).isoformat(),
                     output_artifact=file_record(args.output),
                     format_spec=str(requirements_dir / "format-spec.json"), style_map=str(style_map),
                     capability_preflight=str(capability_report_path),
@@ -1419,8 +1503,12 @@ def _main(argv: list[str]) -> int:
                     official_template_audit_status=official_template_audit_status,
                     format_ready=final_format_ready,
                     submission_ready=final_submission_ready,
-                    submission_status=report.get("submission_status") or (
-                        "submission_ready" if final_submission_ready else "not_submission_ready"
+                    submission_status=(
+                        "confirmed_semantic_issues" if confirmed_semantic_issue_ids else (
+                            report.get("submission_status") or (
+                                "submission_ready" if final_submission_ready else "not_submission_ready"
+                            )
+                        )
                     ),
                     official_template_audit=(
                         str((apply_dir / "template-audit.json").resolve())
@@ -1435,7 +1523,7 @@ def _main(argv: list[str]) -> int:
     )
     record_capability_summary(manifest, capability_report.get("summary", {}))
     write_json(manifest_path, manifest)
-    print(json.dumps({"status": "completed", "output": str(args.output), "work_dir": str(work),
+    print(json.dumps({"status": manifest["status"], "output": str(args.output), "work_dir": str(work),
                       "manifest": str(manifest_path)}, ensure_ascii=False))
     return 0
 

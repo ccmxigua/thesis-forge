@@ -242,6 +242,67 @@ class BatchAcceptanceTests(unittest.TestCase):
             self.assertTrue(accepted["accepted"], accepted)
             self.assertEqual(accepted["status"], "accepted_review_draft")
 
+    def test_review_draft_accepts_receipts_bound_to_manual_review_items(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            result = self._result(root, render=False, compliance_mode="supported_subset")
+            manifest_path = Path(result["fresh_run"]["pipeline_manifest"])
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            case_root = root / "case"
+            work = case_root / "work"
+            apply_dir = work / "application"
+            manual = work / "manual-review-items.json"
+            manual.write_text(json.dumps({
+                "schema_version": "1.0",
+                "policy": "review_draft_only",
+                "binding": {"run_id": "fresh-run"},
+                "submission_ready": False,
+                "items": [{
+                    "marker_id": "MR-0001",
+                    "source_codes": ["property_receipt:PR-R00001-0001"],
+                }],
+                "summary": {"total": 1},
+            }), encoding="utf-8")
+            (apply_dir / "manual-review-markers.json").write_text(json.dumps({
+                "schema_version": "1.0", "policy": "review_draft",
+                "markers": [{"marker_id": "MR-0001"}],
+            }), encoding="utf-8")
+            validation = json.loads((apply_dir / "validation-report.json").read_text(encoding="utf-8"))
+            validation.update({
+                "valid": True,
+                "format_ready": False,
+                "review_draft_ready": True,
+                "review_draft_package_valid": True,
+                "submission_ready": False,
+                "property_receipt_audit": {
+                    "valid": False,
+                    "review_draft_manual_review": True,
+                    "manual_review_receipt_ids": ["PR-R00001-0001"],
+                },
+            })
+            (apply_dir / "validation-report.json").write_text(
+                json.dumps(validation), encoding="utf-8"
+            )
+            comparison = apply_dir / "format-comparison.json"
+            comparison.write_text(json.dumps({"status": "review_draft_pending"}), encoding="utf-8")
+            manifest.update({
+                "status": "draft_manual_review",
+                "output_policy": "review_draft",
+                "execution_compliance_mode": "supported_subset",
+                "submission_ready": False,
+                "case_id": "case",
+                "requirements_extraction": {"run_id": "fresh-run"},
+                "manual_review_items": str(manual),
+                "validation_report": str(apply_dir / "validation-report.json"),
+                "format_comparison": str(comparison),
+                "review_draft_ready": True,
+                "code_fingerprint": batch.runtime_code_fingerprint(),
+            })
+            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            accepted = batch.case_acceptance(result, root=root)
+            self.assertTrue(accepted["accepted"], accepted)
+            self.assertTrue(accepted["checks"]["property_receipts_manual_review"]["ledger_covered"])
+
 
 if __name__ == "__main__":
     unittest.main()

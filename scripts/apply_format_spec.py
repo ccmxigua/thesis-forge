@@ -2177,6 +2177,86 @@ def manual_review_constraint_items(constraints: dict[str, Any]) -> list[dict[str
     return items
 
 
+def manual_review_validation_items(
+    findings: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Convert post-application findings into explicit draft-only review items.
+
+    A review draft may continue past a finding only when the finding remains
+    visible, is bound to this exact validation result, and is still a release
+    gate.  The finding is never rewritten as a successful check; the source
+    validation report keeps the original object and values.
+    """
+    items: list[dict[str, Any]] = []
+    for finding in findings:
+        if not isinstance(finding, dict):
+            continue
+        fingerprint = hashlib.sha256(
+            json.dumps(finding, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
+        ).hexdigest()[:16]
+        role = str(finding.get("role") or "document")
+        property_name = str(finding.get("property") or finding.get("failure_type") or "validation")
+        reason = str(finding.get("reason") or "该项未通过当前运行的确定性后验检查。")
+        actual = finding.get("template_value")
+        expected = finding.get("required_value")
+        source_text = f"{role}.{property_name}"
+        if actual is not None or expected is not None:
+            source_text += f"（实际={actual!r}；要求={expected!r}）"
+        items.append({
+            "source_type": "post_application_validation",
+            "source_code": f"validation_finding:{fingerprint}",
+            "source_codes": [f"validation_finding:{fingerprint}"],
+            "category": "format_validation",
+            "clause_ids": [str(value) for value in finding.get("clause_ids", [])]
+            if isinstance(finding.get("clause_ids"), list) else [],
+            "requirement_ids": [str(value) for value in finding.get("requirement_ids", [])]
+            if isinstance(finding.get("requirement_ids"), list) else [],
+            "question_ids": [],
+            "evidence_ids": [],
+            "source_text": source_text,
+            "reason": reason,
+            "action": "请人工核对该项；修正源文档或格式规则后，以 submission 模式重新开始一轮新运行。",
+            "placeholder_text": f"【待人工处理：{role}.{property_name}】",
+            "original_blocking": True,
+            "release_gate": True,
+        })
+    return items
+
+
+def manual_review_receipt_items(
+    receipts: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Expose every non-verified property receipt as a draft review gate."""
+    items: list[dict[str, Any]] = []
+    for receipt in receipts:
+        if not isinstance(receipt, dict) or receipt.get("status") == "verified":
+            continue
+        receipt_id = str(receipt.get("receipt_id") or "unknown")
+        property_path = str(receipt.get("property_path") or "property")
+        source_code = f"property_receipt:{receipt_id}"
+        items.append({
+            "source_type": "property_receipt",
+            "source_code": source_code,
+            "source_codes": [source_code],
+            "category": "property_receipt",
+            "clause_ids": [str(value) for value in receipt.get("clause_ids", [])],
+            "requirement_ids": [str(receipt.get("requirement_id"))]
+            if receipt.get("requirement_id") else [],
+            "question_ids": [],
+            "evidence_ids": [],
+            "source_text": f"{receipt.get('role', 'role')}.{property_path}",
+            "reason": (
+                f"属性回执状态为 {receipt.get('status')!s}；"
+                f"实际={receipt.get('actual')!r}；要求={receipt.get('expected')!r}。"
+            ),
+            "action": "请人工核对 DOCX 中该属性并修正后，以 submission 模式重新开始一轮新运行。",
+            "placeholder_text": f"【待人工处理：{source_code}】",
+            "original_blocking": True,
+            "release_gate": True,
+        })
+    return items
+
+
 def audit_content_constraints(doc: Document, constraints: dict[str, Any], mappings: dict[str, Any]) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
     positions = {p._p: i for i, p in enumerate(doc.paragraphs)}
@@ -3110,9 +3190,12 @@ def main(argv: list[str]) -> int:
                 manual_review_document_ledger = add_manual_review_items(
                     manual_review_document_ledger, normalized_constraint_items,
                 )
-    manual_review_markers = append_manual_review_markers(
-        doc, manual_review_document_ledger if args.output_policy == "review_draft" else None,
-    )
+    # Findings are collected against the document before review markers are
+    # appended.  This prevents the marker page itself from manufacturing role
+    # coverage or changing the semantic audit.  The complete ledger and its
+    # visible red page are added after all post-serialization findings are
+    # known below.
+    manual_review_markers: list[dict[str, Any]] = []
     # Structural generators can insert content before already formatted
     # paragraphs.  Resolve stable node ids only after all such mutations.
     # lxml may hand out distinct Python proxy objects for the same underlying
@@ -3286,29 +3369,9 @@ def main(argv: list[str]) -> int:
             if key in expected_page.get("margins_pt", {}):
                 actual = round(getattr(section, attr).pt, 3); expected = expected_page["margins_pt"][key]
                 if abs(actual-expected) > .05: findings.append({"role": "page", "property": f"margins_pt.{key}", "template_value": actual, "required_value": expected})
+    raw_validation_findings = copy.deepcopy(findings)
     manual_review_findings: list[dict[str, Any]] = []
-    if args.output_policy == "review_draft":
-        manual_review_findings = [
-            item for item in findings if item.get("verification") == "manual"
-        ]
-        # These are intentionally retained in the report and visible marker
-        # list, but they are not deterministic serialization failures.  A
-        # review draft can proceed; submission mode still sees them as hard
-        # findings because this filtering is scoped to review_draft only.
-        findings = [
-            item for item in findings if item.get("verification") != "manual"
-        ]
-    write("manual-review-markers.json", {
-        "schema_version": "1.0",
-        "policy": args.output_policy,
-        "ledger": str(args.manual_review_items.resolve()) if args.manual_review_items else None,
-        "visual_policy": (
-            manual_review_document_ledger.get("visual_policy")
-            if isinstance(manual_review_document_ledger, dict) else None
-        ),
-        "markers": manual_review_markers,
-        "format_constraint_findings": manual_review_findings,
-    })
+    manual_review_receipts: list[dict[str, Any]] = []
     missing_required = [item for item in coverage
                         if item["expectation"] == "required" and item["status"] == "missing"]
     serialized_docx_sha256 = hashlib.sha256(args.output.read_bytes()).hexdigest()
@@ -3386,6 +3449,105 @@ def main(argv: list[str]) -> int:
             } | set(role_results),
         ),
     )
+    if args.output_policy == "review_draft":
+        late_review_items = manual_review_validation_items(raw_validation_findings)
+        manual_review_receipts = manual_review_receipt_items(property_receipts)
+        late_review_items.extend(manual_review_receipts)
+        if not render_report or render_report.get("status") not in {"accepted", "passed"}:
+            render_status = (
+                str(render_report.get("status"))
+                if isinstance(render_report, dict) and render_report.get("status")
+                else "not_run"
+            )
+            late_review_items.append({
+                "source_type": "render_validation",
+                "source_code": f"render_validation:{render_status}",
+                "source_codes": [f"render_validation:{render_status}"],
+                "category": "render_validation",
+                "clause_ids": [], "requirement_ids": [],
+                "question_ids": [], "evidence_ids": [],
+                "source_text": "docx.render_validation",
+                "reason": "当前运行没有获得可接受的 Word/PDF 渲染验收证据。",
+                "action": "请在人工确认后补充 Word/PDF 渲染证据，再以 submission 模式重新开始一轮新运行。",
+                "placeholder_text": "【待人工处理：docx.render_validation】",
+                "original_blocking": True,
+                "release_gate": True,
+            })
+        if manual_review_document_ledger is None:
+            manual_review_document_ledger = {
+                "schema_version": "1.0",
+                "policy": "review_draft_only",
+                "binding": {},
+                "submission_ready": False,
+                "items": [],
+                "summary": {},
+            }
+        manual_review_document_ledger = add_manual_review_items(
+            copy.deepcopy(manual_review_document_ledger), late_review_items,
+        )
+        if args.manual_review_items:
+            ledger_errors = load_and_validate(
+                manual_review_document_ledger,
+                Path(__file__).resolve().parents[1] / "schema" / "manual-review-ledger.schema.json",
+            )
+            if ledger_errors:
+                raise SystemExit(
+                    "invalid generated manual-review ledger schema:\n" + "\n".join(ledger_errors)
+                )
+            write_manual_review_ledger(args.manual_review_items, manual_review_document_ledger)
+        manual_review_markers = append_manual_review_markers(
+            check, manual_review_document_ledger,
+        )
+        staged_output = sibling_temp(args.output)
+        try:
+            check.save(staged_output)
+            canonicalize_docx_zip(staged_output)
+            commit_files([(staged_output, args.output)])
+        finally:
+            staged_output.unlink(missing_ok=True)
+        write("manual-review-markers.json", {
+            "schema_version": "1.0",
+            "policy": args.output_policy,
+            "ledger": str(args.manual_review_items.resolve()) if args.manual_review_items else None,
+            "visual_policy": manual_review_document_ledger.get("visual_policy"),
+            "markers": manual_review_markers,
+            "format_constraint_findings": raw_validation_findings,
+        })
+        # The marker page is part of the final review artifact.  Rebind every
+        # property receipt to that final serialized DOCX instead of leaving a
+        # receipt that hashes only the pre-marker intermediate.
+        serialized_docx_sha256 = hashlib.sha256(args.output.read_bytes()).hexdigest()
+        property_receipts = build_property_receipts(
+            receipt_requirements, mappings, actual_by_role,
+            serialized_docx_sha256=serialized_docx_sha256,
+            role_results=role_results,
+            verification_methods=verification_methods,
+            applicable_roles={
+                item["role"] for item in coverage
+                if item.get("status") == "present" or item.get("expectation") == "required"
+            } | set(role_results),
+        )
+        property_receipt_audit = audit_property_receipts(
+            property_receipts,
+            expected_receipt_ids=expected_receipt_ids(
+                receipt_requirements,
+                applicable_roles={
+                    item["role"] for item in coverage
+                    if item.get("status") == "present" or item.get("expectation") == "required"
+                } | set(role_results),
+            ),
+        )
+        property_receipt_audit["review_draft_manual_review"] = bool(manual_review_receipts)
+        property_receipt_audit["manual_review_receipt_ids"] = [
+            str(item.get("receipt_id"))
+            for item in property_receipts
+            if item.get("status") != "verified"
+        ]
+        # Report the original findings only through the explicit manual-review
+        # channel.  They remain in manual_review_findings and in the ledger;
+        # they are not changed into successful validation results.
+        manual_review_findings = raw_validation_findings
+        findings = []
     write("property-receipts.json", {
         "schema_version": "1.0", "receipts": property_receipts,
     })
@@ -3487,6 +3649,8 @@ def main(argv: list[str]) -> int:
               ),
               "manual_review_markers": manual_review_markers,
               "manual_review_findings": manual_review_findings,
+              "manual_review_receipts": manual_review_receipt_items(property_receipts)
+              if args.output_policy == "review_draft" else [],
               "paragraphs_directly_formatted": applied_paragraphs,
               "numbered_paragraphs": numbering_changed, "header_footer_changes": header_footer_changed,
               "automatic_section_created": section_created,

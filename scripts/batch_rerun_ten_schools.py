@@ -607,7 +607,34 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
                 if validation.get("review_draft_package_valid") is not True and review_evidence.get("opc_package_valid") is not True:
                     blockers.append("review_draft_docx_package_not_verified")
                 receipt_audit = validation.get("property_receipt_audit")
-                if not isinstance(receipt_audit, dict) or receipt_audit.get("valid") is not True:
+                receipt_review_ok = False
+                if isinstance(receipt_audit, dict) and receipt_audit.get("valid") is True:
+                    receipt_review_ok = True
+                elif (
+                    isinstance(receipt_audit, dict)
+                    and receipt_audit.get("review_draft_manual_review") is True
+                    and isinstance(manual_ledger, dict)
+                ):
+                    manual_codes = {
+                        str(code)
+                        for item in manual_ledger.get("items", [])
+                        if isinstance(item, dict)
+                        for code in (item.get("source_codes") or [item.get("source_code")])
+                        if code
+                    }
+                    expected_receipt_codes = {
+                        f"property_receipt:{receipt_id}"
+                        for receipt_id in receipt_audit.get("manual_review_receipt_ids", [])
+                        if receipt_id
+                    }
+                    receipt_review_ok = bool(expected_receipt_codes) and expected_receipt_codes <= manual_codes
+                    if not receipt_review_ok:
+                        blockers.append("review_draft_property_receipt_items_missing_from_ledger")
+                    checks["property_receipts_manual_review"] = {
+                        "receipt_count": len(expected_receipt_codes),
+                        "ledger_covered": receipt_review_ok,
+                    }
+                if not receipt_review_ok:
                     blockers.append("review_draft_property_receipts_not_verified")
                 if validation.get("submission_ready") is True:
                     blockers.append("review_draft_validation_claims_submission_ready")

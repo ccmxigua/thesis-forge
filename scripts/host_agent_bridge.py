@@ -3949,6 +3949,25 @@ def _host_prompt(*, request_path: Path, chunk_path: Path,
         and "non_requirement_classification_relation" in retry_codes
     )
     if retry_parent_response_path is not None:
+        retry_parent_inline = None
+        try:
+            parent_response = json.loads(
+                retry_parent_response_path.read_text(encoding="utf-8")
+            )
+            if isinstance(parent_response, dict):
+                # The parent is a semantic repair baseline, not an identity
+                # source.  Keep the exact payload available in the prompt so
+                # a native agent cannot silently regenerate the whole response
+                # merely because it failed to open the sidecar file.
+                parent_response = copy.deepcopy(parent_response)
+                parent_response.pop("provenance", None)
+                retry_parent_inline = json.dumps(
+                    parent_response, ensure_ascii=False, indent=2,
+                )
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            # The path and hash remain in the prompt.  The bridge still fails
+            # closed if the retry changes unapproved semantic fields.
+            retry_parent_inline = None
         requirement_change_rule = (
             "For every distinct executable clause explicitly identified by the validator as missing an authoritative requirement edge, "
             "the retry must add one evidence-backed requirement for that clause. Preserve every existing non-placeholder "
@@ -3974,7 +3993,23 @@ the exact requirement-list projection explicitly authorized below. Apply only
 the minimum mechanical edits explicitly
 identified by the structured validator records above. {requirement_change_rule} Return the full
 response object, not a patch. The bridge will reject any unapproved semantic
-drift. Parent response sha256: {retry_parent_response_sha256 or 'unavailable'}."""
+drift. Parent response sha256: {retry_parent_response_sha256 or 'unavailable'}.
+Do not regenerate the response from the chunk when the baseline below is
+available. Start from this exact semantic payload, preserve its clause_reviews
+and top-level diagnostic fields, and apply only the validator-authorized
+minimum change. The embedded payload excludes bridge-owned provenance:
+"""
+        if retry_parent_inline is not None:
+            parent_text += (
+                "\n<immutable_parent_response_without_provenance>\n"
+                + retry_parent_inline
+                + "\n</immutable_parent_response_without_provenance>"
+            )
+        else:
+            parent_text += (
+                "\nThe embedded parent payload is unavailable; read the sidecar "
+                "path above and preserve it exactly."
+            )
     else:
         parent_text = (
             f"The rejected parent response sha256 was {retry_parent_response_sha256}; "

@@ -339,6 +339,43 @@ class HostAgentBridgeTests(unittest.TestCase):
         self.assertIn("FINAL RETRY INVARIANT", retry_with_baseline)
         self.assertIn("do not turn an unresolved or informational review into executable", retry_with_baseline)
 
+    def test_retry_prompt_embeds_parent_semantics_without_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            parent_path = Path(td) / "parent-response.raw.json"
+            parent_path.write_text(json.dumps({
+                "contract_version": "3.0",
+                "provenance": {"run_id": "must-not-be-copied"},
+                "requirements": [{
+                    "role": "body_text", "properties": {"font": {"cjk": "SimSun"}},
+                    "clause_ids": ["C1"], "evidence_ids": ["E1"],
+                    "reason": "preserve this semantic payload",
+                }],
+                "clause_reviews": [{
+                    "clause_id": "C1", "classification": "executable",
+                    "reason": "preserve this review",
+                }],
+                "unsupported_items": [], "reported_conflicts": [],
+            }, ensure_ascii=False), encoding="utf-8")
+            prompt = bridge._host_prompt(
+                request_path=Path(td) / "request.json",
+                chunk_path=Path(td) / "chunk.json",
+                response_path=Path(td) / "response.json",
+                run_id="run-1", chunk_index=1, chunk_count=1, attempt=2,
+                retry_hint="local contract validation failed",
+                retry_parent_response_sha256="a" * 64,
+                retry_parent_response_path=parent_path,
+                retry_error_records=[{
+                    "code": "missing_derived_requirement",
+                    "json_pointer": "$.clause_reviews[0]",
+                    "raw_error": "executable_review_requires_derived_requirement",
+                }],
+            )
+        self.assertIn("<immutable_parent_response_without_provenance>", prompt)
+        self.assertIn("preserve this semantic payload", prompt)
+        self.assertIn("preserve this review", prompt)
+        self.assertNotIn("must-not-be-copied", prompt)
+        self.assertIn("Do not regenerate the response from the chunk", prompt)
+
     def test_retry_guidance_targets_exact_invalid_property_without_contradiction(self) -> None:
         retry = bridge._contract_repair_guidance(
             "local response contract validation failed: "

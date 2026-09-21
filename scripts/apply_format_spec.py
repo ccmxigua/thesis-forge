@@ -2765,7 +2765,11 @@ def main(argv: list[str]) -> int:
                    help="run-bound user acknowledgement ledger for unresolved semantic clauses")
     args = p.parse_args(argv)
     spec = load_json(args.format_spec)
-    validation_errors = load_and_validate(spec, Path(__file__).resolve().parents[1] / "schema" / "format-spec.schema.json")
+    validation_errors = load_and_validate(
+        spec,
+        Path(__file__).resolve().parents[1] / "schema" / "format-spec.schema.json",
+        allow_missing_required_metadata=args.output_policy == "review_draft",
+    )
     if validation_errors: raise SystemExit("invalid format spec:\n" + "\n".join(validation_errors))
     explicit_raw = load_json(args.style_map) if args.style_map else {}
     source_mappings = explicit_raw.get("mappings", explicit_raw)
@@ -3031,6 +3035,44 @@ def main(argv: list[str]) -> int:
     )
     manual_review_document_ledger = manual_review_ledger
     if args.output_policy == "review_draft":
+        pending_cover_fields = cover_changes.get("metadata_pending_fields", [])
+        if pending_cover_fields:
+            if manual_review_document_ledger is None:
+                manual_review_document_ledger = {
+                    "schema_version": "1.0",
+                    "policy": "review_draft_only",
+                    "submission_ready": False,
+                    "items": [],
+                }
+            cover_items = []
+            for field_id in sorted(set(pending_cover_fields)):
+                source_code = f"missing_cover_metadata:{field_id}"
+                cover_items.append({
+                    "source_type": "input_prerequisite",
+                    "source_code": source_code,
+                    "source_codes": [source_code],
+                    "category": "input_prerequisite",
+                    "clause_ids": [],
+                    "requirement_ids": [],
+                    "question_ids": [],
+                    "evidence_ids": [],
+                    "source_text": f"封面字段 {field_id} 缺少已确认的 metadata",
+                    "reason": (
+                        f"当前运行没有提供 thesis_profile.cover_metadata.{field_id}；"
+                        "草稿使用中性占位符。"
+                    ),
+                    "action": "补充或确认该字段后，以 submission 模式重新开始一轮新运行。",
+                    "placeholder_text": f"【待提供：{field_id}】",
+                    "original_blocking": True,
+                    "release_gate": True,
+                })
+            manual_review_document_ledger = add_manual_review_items(
+                copy.deepcopy(manual_review_document_ledger), cover_items,
+            )
+            if args.manual_review_items:
+                write_manual_review_ledger(
+                    args.manual_review_items, manual_review_document_ledger,
+                )
         constraint_items = manual_review_constraint_items(
             resolve_profile_constraints(spec)
         )

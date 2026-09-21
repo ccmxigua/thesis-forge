@@ -158,7 +158,19 @@ def validate_instance(instance: Any, schema: dict[str, Any], root: dict[str, Any
     return errors
 
 
-def load_and_validate(instance: Any, schema_path: Path) -> list[str]:
+def load_and_validate(
+    instance: Any,
+    schema_path: Path,
+    *,
+    allow_missing_required_metadata: bool = False,
+) -> list[str]:
+    """Validate an instance and its cross-field contracts.
+
+    Required cover metadata remains fail-closed by default.  Review drafts may
+    explicitly opt into missing-field placeholders, but only for absent
+    required keys; malformed, blank, or misbound metadata is still rejected.
+    Submission/full callers must keep the default.
+    """
     schema = json.loads(schema_path.read_text(encoding="utf-8"))
     errors = validate_instance(instance, schema)
     roles = instance.get("roles", {}) if isinstance(instance, dict) else {}
@@ -271,8 +283,10 @@ def load_and_validate(instance: Any, schema_path: Path) -> list[str]:
             if field.get("value_from") != f"thesis_profile.cover_metadata.{field_id}":
                 errors.append(f"$.cover.fields[{i}].value_from: must bind to its own field id {field_id!r}")
             value = metadata_values.get(field_id)
-            if isinstance(metadata, dict) and field.get("display_policy") == "required" and (value in (None, "", []) or
-                    isinstance(value, str) and not value.strip()):
+            if (isinstance(metadata, dict)
+                    and field.get("display_policy") == "required"
+                    and field_id not in metadata
+                    and not allow_missing_required_metadata):
                 errors.append(f"$.cover.fields[{i}]: required metadata {field_id!r} is missing")
         if len(field_ids) != len(set(field_ids)):
             errors.append("$.cover.fields: field ids must be unique")

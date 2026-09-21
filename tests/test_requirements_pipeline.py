@@ -3092,6 +3092,62 @@ b&=2\notag
             self.assertIn("完成日期：——", texts)
             self.assertNotIn("专业：——", texts, "if_present fields stay absent rather than pretending to be supplied")
 
+    def test_review_draft_allows_missing_required_cover_metadata_and_records_red_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td); source = td / "source.docx"; output = td / "out.docx"; audit = td / "audit"
+            ledger_path = td / "manual-review-items.json"
+            doc = Document(); doc.styles.add_style("AbstractTitleCN", WD_STYLE_TYPE.PARAGRAPH)
+            doc.add_paragraph("摘 要", "AbstractTitleCN"); doc.save(source)
+            spec = self._fixed_text_cover_declaration_spec()
+            del spec["thesis_profile"]["cover_metadata"]["unit_code"]
+            spec_path = td / "review-draft.json"
+            spec_path.write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
+            ledger_path.write_text(json.dumps({
+                "schema_version": "1.0", "policy": "review_draft_only",
+                "binding": {
+                    "case_id": "test-case", "run_id": spec["run_id"],
+                    "source_sha256": "0" * 64, "clause_sha256": "1" * 64,
+                    "evidence_sha256": "2" * 64,
+                },
+                "submission_ready": False, "items": [], "summary": {},
+            }, ensure_ascii=False), encoding="utf-8")
+            result = run_raw(
+                "scripts/apply_format_spec.py", str(source), str(spec_path), str(output),
+                "--out-dir", str(audit), "--compliance-mode", "supported_subset",
+                "--output-policy", "review_draft", "--preview-placeholders",
+                "--manual-review-items", str(ledger_path),
+            )
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            report = json.loads((audit / "validation-report.json").read_text())
+            self.assertTrue(report["valid"], report["findings"])
+            self.assertFalse(report["submission_ready"])
+            self.assertEqual(report["submission_status"], "manual_review_required")
+            self.assertIn("unit_code", report["cover_metadata"]["pending_fields"])
+            ledger = json.loads(ledger_path.read_text())
+            item = next(item for item in ledger["items"] if item["source_code"] == "missing_cover_metadata:unit_code")
+            self.assertTrue(item["release_gate"])
+            self.assertEqual(item["placeholder_text"], "【待提供：unit_code】")
+            self.assertEqual(ledger["visual_policy"]["text_color"], "C00000")
+            marker_report = json.loads((audit / "manual-review-markers.json").read_text())
+            self.assertTrue(any(item["category"] == "input_prerequisite" for item in marker_report["markers"]))
+            self.assertIn("【待提供：unit_code】", "\n".join(p.text for p in Document(output).paragraphs))
+
+    def test_submission_still_rejects_missing_required_cover_metadata(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td); source = td / "source.docx"; output = td / "out.docx"; audit = td / "audit"
+            doc = Document(); doc.styles.add_style("AbstractTitleCN", WD_STYLE_TYPE.PARAGRAPH)
+            doc.add_paragraph("摘 要", "AbstractTitleCN"); doc.save(source)
+            spec = self._fixed_text_cover_declaration_spec()
+            del spec["thesis_profile"]["cover_metadata"]["unit_code"]
+            spec_path = td / "submission.json"
+            spec_path.write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
+            result = run_raw(
+                "scripts/apply_format_spec.py", str(source), str(spec_path), str(output),
+                "--out-dir", str(audit), "--compliance-mode", "supported_subset",
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("unit_code", result.stderr)
+
     def test_cover_starts_document_for_body_fragment_without_front_matter_or_abstract(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             td = Path(td); source = td / "fragment.docx"; output = td / "out.docx"; audit = td / "audit"

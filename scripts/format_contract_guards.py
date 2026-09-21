@@ -29,7 +29,7 @@ REGISTERED_COVER_FIELDS = frozenset({
 REGISTERED_SOURCE_ROOTS = frozenset({
     "inventory", "figures", "tables", "display_equations", "publications",
     "abstract", "body", "content", "document", "funding", "acknowledgments",
-    "bibliography",
+    "bibliography", "bibliography_entries",
     "source", "latex", "runtime", "english_text",
 })
 REGISTERED_TEMPLATE_ROOTS = frozenset({

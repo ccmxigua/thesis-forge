@@ -206,11 +206,17 @@ python3 scripts/thesis_format.py \
 
 The pipeline writes a run-bound `manual-review-items.json` sidecar and appends
 the corresponding `MR-0001`-style items to the DOCX in red text with a pale
-highlight. Missing thesis content is also rendered as a red `【待补充：…】`
-placeholder. The sidecar records the case/run identity and current source,
-clause, and evidence hashes; it does not rewrite the original clause review or
-invent a requirement/property. Deterministic format and package failures still
-stop the draft.
+highlight. Every uncertainty that is suitable for human handling is rendered
+through the same policy: semantic ambiguity, missing user/source input,
+backend capability gaps, runtime-manual checks, missing official templates, and
+unresolved style mappings receive a run-bound red placeholder (for example
+`【待提供：官方版式模板】`) and a machine-readable ledger item. Missing thesis
+content is also rendered as a red `【待补充：…】` placeholder. The ledger records
+the case/run identity, current source/clause/evidence hashes, and the fixed
+red-marker policy; it does not rewrite the original clause review or invent a
+requirement/property. Deterministic contract, structural, format, and package
+failures still stop the draft; a red marker never means that the requirement
+passed.
 
 `review_draft` is explicitly non-submission: it sets `submission_ready=false`,
 defers the strict official-template comparison and Word/PDF release audit, and

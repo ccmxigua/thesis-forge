@@ -17,10 +17,10 @@ from typing import Any
 
 try:
     from .format_spec_validation import load_and_validate
-    from .preprocess_tex import first_braced_macro
+    from .preprocess_tex import first_braced_macro, parse_bibitem_entries
 except ImportError:  # direct script execution
     from format_spec_validation import load_and_validate
-    from preprocess_tex import first_braced_macro
+    from preprocess_tex import first_braced_macro, parse_bibitem_entries
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -489,6 +489,10 @@ def extract(path: Path, encoding: str = "utf-8") -> dict[str, Any]:
     # Count semantic table objects, not nested tabular layout environments.
     tables = len(re.findall(r"\\begin\{(?:table|longtable)\*?\}", text))
     equations = len(re.findall(r"\\begin\{(?:equation|align|gather|multline|eqnarray)\*?\}", text))
+    bibliography_entries = [
+        {"key": key, "text": body}
+        for key, body in parse_bibitem_entries(text)
+    ]
     return {
         "schema_version": "1.0",
         "source_document": str(path.resolve()),
@@ -561,6 +565,7 @@ def extract(path: Path, encoding: str = "utf-8") -> dict[str, Any]:
         "has_table_list": bool(re.search(r"\\listoftables\b", text, re.I)),
         "has_symbol_list": bool(re.search(r"\\listofsymbols\b|\\printsymbols\b", text, re.I)),
         "inventory": {"figures": figures, "tables": tables, "display_equations": equations},
+        **({"bibliography_entries": bibliography_entries} if bibliography_entries else {}),
         **({"english_text": True} if explicit_english_text else {}),
     }
 

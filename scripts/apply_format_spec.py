@@ -40,6 +40,7 @@ from docx_semantics import (
     iter_document_nodes,
 )
 from format_spec_validation import load_and_validate
+from manual_review import add_manual_review_items, write_manual_review_ledger
 from semantic_issue_confirmation import validate_bound_ledger_for_spec
 from compliance import annotate_satisfied_inputs, finalize_records, report as compliance_report
 from role_registry import find_existing_style, generated_style, role_config, role_names, structural_detector, style_aliases
@@ -162,10 +163,15 @@ def append_manual_review_markers(
         source_text = " ".join(str(item.get("source_text") or "").split())[:480]
         reason = " ".join(str(item.get("reason") or "").split())[:480]
         action = " ".join(str(item.get("action") or "请人工核对并记录结果。").split())[:360]
+        placeholder = str(
+            item.get("placeholder_text")
+            or f"【待人工处理：{item.get('source_code') or item.get('category', '未命名项目')}】"
+        )
         text = (
             f"【{marker_id}｜人工待审｜{item.get('category', 'manual_review')}】\n"
             f"条款：{clauses}"
             + (f"；要求：{requirements}" if requirements else "")
+            + f"\n红色占位：{placeholder}"
             + f"\n原文/问题：{source_text}\n原因：{reason}\n处理：{action}"
         )
         paragraph = doc.add_paragraph(style=MANUAL_REVIEW_STYLE)
@@ -177,6 +183,7 @@ def append_manual_review_markers(
             "category": item.get("category"),
             "clause_ids": item.get("clause_ids", []),
             "requirement_ids": item.get("requirement_ids", []),
+            "placeholder_text": placeholder,
             "paragraph_text": text,
             "location": "document_end",
             "paragraph_index": sum(1 for _ in all_body_paragraphs(doc)) - 1,
@@ -3028,19 +3035,39 @@ def main(argv: list[str]) -> int:
             resolve_profile_constraints(spec)
         )
         if constraint_items:
-            manual_review_document_ledger = copy.deepcopy(manual_review_ledger or {})
-            document_items = list(manual_review_document_ledger.get("items", []))
-            next_index = len(document_items) + 1
+            normalized_constraint_items = []
             for item in constraint_items:
-                item = copy.deepcopy(item)
-                item.update({
-                    "marker_id": f"MR-{next_index:04d}",
-                    "status": "pending_manual_review",
-                    "marker_required": True,
-                })
-                document_items.append(item)
-                next_index += 1
-            manual_review_document_ledger["items"] = document_items
+                normalized = copy.deepcopy(item)
+                source_code = f"format_constraint:{normalized.get('source_text', 'unknown')}"
+                normalized.setdefault("source_code", source_code)
+                normalized.setdefault("source_codes", [source_code])
+                normalized.setdefault(
+                    "placeholder_text",
+                    f"【待人工处理：{normalized.get('source_text', '格式语义约束')}】",
+                )
+                normalized["release_gate"] = True
+                normalized_constraint_items.append(normalized)
+            if manual_review_ledger is not None:
+                manual_review_document_ledger = add_manual_review_items(
+                    copy.deepcopy(manual_review_ledger), normalized_constraint_items,
+                )
+                # These constraints are discovered from the exact current
+                # format-spec during application.  Keep the authoritative
+                # sidecar in sync with the visible red markers.
+                if args.manual_review_items:
+                    write_manual_review_ledger(
+                        args.manual_review_items, manual_review_document_ledger,
+                    )
+            else:
+                manual_review_document_ledger = {
+                    "schema_version": "1.0",
+                    "policy": "review_draft_only",
+                    "submission_ready": False,
+                    "items": [],
+                }
+                manual_review_document_ledger = add_manual_review_items(
+                    manual_review_document_ledger, normalized_constraint_items,
+                )
     manual_review_markers = append_manual_review_markers(
         doc, manual_review_document_ledger if args.output_policy == "review_draft" else None,
     )
@@ -3180,6 +3207,10 @@ def main(argv: list[str]) -> int:
         "schema_version": "1.0",
         "policy": args.output_policy,
         "ledger": str(args.manual_review_items.resolve()) if args.manual_review_items else None,
+        "visual_policy": (
+            manual_review_document_ledger.get("visual_policy")
+            if isinstance(manual_review_document_ledger, dict) else None
+        ),
         "markers": manual_review_markers,
     })
     findings.extend(numbering_issues)
@@ -3229,6 +3260,10 @@ def main(argv: list[str]) -> int:
         "schema_version": "1.0",
         "policy": args.output_policy,
         "ledger": str(args.manual_review_items.resolve()) if args.manual_review_items else None,
+        "visual_policy": (
+            manual_review_document_ledger.get("visual_policy")
+            if isinstance(manual_review_document_ledger, dict) else None
+        ),
         "markers": manual_review_markers,
         "format_constraint_findings": manual_review_findings,
     })

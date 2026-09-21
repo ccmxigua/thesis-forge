@@ -384,6 +384,21 @@ class RootCauseGuardTests(unittest.TestCase):
         errors = load_and_validate(spec, ROOT / "schema" / "format-spec.schema.json")
         self.assertFalse(any("unregistered input path" in error for error in errors), errors)
 
+    def test_registered_bibliography_entries_source_inventory_is_accepted(self) -> None:
+        spec = {
+            "schema_version": "1.0",
+            "requirements": [{
+                "id": "R1", "role": "bibliography_entry",
+                "properties": {"numbering": {"style": "decimal"}},
+                "clause_ids": ["C1"], "input_prerequisites": [{
+                    "kind": "source_content", "key": "source_inventory.bibliography_entries",
+                    "required": True, "reason": "verified inline bibliography inventory",
+                }],
+            }],
+        }
+        errors = load_and_validate(spec, ROOT / "schema" / "format-spec.schema.json")
+        self.assertFalse(any("unregistered input path" in error for error in errors), errors)
+
     def test_registered_cover_metadata_object_is_accepted(self) -> None:
         spec = {
             "schema_version": "1.0",

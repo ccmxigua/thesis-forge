@@ -86,6 +86,34 @@ class RunScopedResourceRegistryTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not present verbatim"):
             materialize_declaration_resources(changed, "run-source", evidence=evidence)
 
+    def test_promotes_exact_formatted_source_heading_from_body_parts(self) -> None:
+        spec = self._spec()
+        item = spec["declarations"]["items"][0]
+        item.pop("heading")
+        item["body_parts"] = ["本次输入的声明标题", "本次输入的第一段固定正文。"]
+        evidence = {"evidence": [
+            {"id": "E-current-1", "kind": "paragraph", "text": "本次输入的声明标题",
+             "runs": [{"text": "本次输入的声明标题", "format": {"bold": True, "size_pt": 16}}]},
+            {"id": "E-current-2", "kind": "paragraph", "text": "本次输入的第一段固定正文。",
+             "runs": [{"text": "本次输入的第一段固定正文。", "format": {"size_pt": 14}}]},
+        ]}
+        result = materialize_declaration_resources(spec, "run-promote", evidence=evidence)
+        resource = next(iter(result["resource_registry"]["items"].values()))
+        self.assertEqual(resource["heading"], "本次输入的声明标题")
+        self.assertEqual(resource["body_parts"], ["本次输入的第一段固定正文。"])
+
+    def test_does_not_guess_unformatted_first_body_paragraph_as_heading(self) -> None:
+        spec = self._spec()
+        item = spec["declarations"]["items"][0]
+        item.pop("heading")
+        item["body_parts"] = ["本次输入的声明标题", "本次输入的第一段固定正文。"]
+        evidence = {"evidence": [
+            {"id": "E-current-1", "kind": "paragraph", "text": "本次输入的声明标题", "runs": []},
+            {"id": "E-current-2", "kind": "paragraph", "text": "本次输入的第一段固定正文。", "runs": []},
+        ]}
+        with self.assertRaisesRegex(ValueError, "needs exact source-derived heading text"):
+            materialize_declaration_resources(spec, "run-no-guess", evidence=evidence)
+
     def test_fixed_text_digest_preserves_spaces_and_paragraph_boundaries(self) -> None:
         self.assertNotEqual(fixed_text_sha256("研究 成果"), fixed_text_sha256("研究成果"))
         self.assertNotEqual(fixed_text_sha256("第一段\n第二段"), fixed_text_sha256("第一段第二段"))

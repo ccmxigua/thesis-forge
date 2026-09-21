@@ -291,35 +291,54 @@ def _register_content_instance(
         return None, {"reason": "field_key_must_be_nonempty_string"}
     field_key = (explicit_key.strip() if isinstance(explicit_key, str) and explicit_key.strip()
                  else f"{role}:{_normalized_exact_text(text)}")
+    base_field_key = field_key
     normalized_text = _normalized_exact_text(text)
     style_properties = _style_properties_for_role(role, props)
-    for instance in instances:
-        if instance.get("role") != role or instance.get("field_key") != field_key:
-            continue
-        existing_text = str(instance.get("text") or "")
-        if _normalized_exact_text(existing_text) != normalized_text:
-            return None, {
-                "reason": "content_instance_identity_conflict",
-                "field_key": field_key,
-                "existing_text": existing_text,
-                "new_text": text,
-            }
-        if style_properties:
-            style_conflicts = _deep_merge(
-                instance.setdefault("style_properties", {}), style_properties
-            )
-            if style_conflicts:
-                property_name, old_value, new_value = style_conflicts[0]
+    variant_digest = hashlib.sha256(normalized_text.encode("utf-8")).hexdigest()[:16]
+    while True:
+        matched = False
+        for instance in instances:
+            if instance.get("role") != role or instance.get("field_key") != field_key:
+                continue
+            matched = True
+            existing_text = str(instance.get("text") or "")
+            if _normalized_exact_text(existing_text) == normalized_text:
+                if style_properties:
+                    style_conflicts = _deep_merge(
+                        instance.setdefault("style_properties", {}), style_properties
+                    )
+                    if style_conflicts:
+                        property_name, old_value, new_value = style_conflicts[0]
+                        return None, {
+                            "reason": "content_instance_style_conflict",
+                            "field_key": field_key,
+                            "property": property_name,
+                            "existing_value": old_value,
+                            "new_value": new_value,
+                        }
+                instance["clause_ids"] = sorted(set(instance.get("clause_ids") or []) | clause_ids)
+                instance["evidence_ids"] = sorted(set(instance.get("evidence_ids") or []) | cited_evidence)
+                return str(instance["id"]), None
+
+            existing_clause_ids = set(instance.get("clause_ids") or [])
+            existing_evidence_ids = set(instance.get("evidence_ids") or [])
+            if existing_clause_ids & clause_ids or existing_evidence_ids & cited_evidence:
                 return None, {
-                    "reason": "content_instance_style_conflict",
+                    "reason": "content_instance_identity_conflict",
                     "field_key": field_key,
-                    "property": property_name,
-                    "existing_value": old_value,
-                    "new_value": new_value,
+                    "existing_text": existing_text,
+                    "new_text": text,
                 }
-        instance["clause_ids"] = sorted(set(instance.get("clause_ids") or []) | clause_ids)
-        instance["evidence_ids"] = sorted(set(instance.get("evidence_ids") or []) | cited_evidence)
-        return str(instance["id"]), None
+
+            # Two exact labels can legitimately name the same semantic field
+            # when they come from disjoint source occurrences (BSU has both
+            # ``分类号：`` and ``中图分类号：``). Keep both literals and make
+            # the distinction deterministic from the exact new text. A
+            # same-clause or same-evidence disagreement remains blocking.
+            field_key = f"{base_field_key}::variant-{variant_digest}"
+            break
+        if not matched:
+            break
 
     instance_id = _cover_field_instance_id(role, field_key)
     source_text = " | ".join(

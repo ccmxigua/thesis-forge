@@ -6,6 +6,17 @@
   "properties": {
     "schema_version": {"const": "1.0"},
     "policy": {"const": "review_draft_only"},
+    "visual_policy": {
+      "type": "object",
+      "properties": {
+        "text_color": {"const": "C00000"},
+        "highlight": {"const": "FFF2CC"},
+        "bold": {"const": true},
+        "placeholder_prefix": {"const": "【待人工处理："},
+        "placeholder_suffix": {"const": "】"}
+      },
+      "additionalProperties": true
+    },
     "binding": {
       "type": "object",
       "required": ["case_id", "run_id", "source_sha256", "clause_sha256", "evidence_sha256"],
@@ -40,6 +51,8 @@
           "source_text": {"type": "string"},
           "reason": {"type": "string"},
           "action": {"type": "string"},
+          "placeholder_text": {"type": "string", "minLength": 1},
+          "release_gate": {"type": "boolean"},
           "original_blocking": {"type": "boolean"}
         },
         "additionalProperties": true

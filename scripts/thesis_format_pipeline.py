@@ -28,7 +28,11 @@ from semantic_issue_confirmation import (
     build_confirmation_receipt,
     confirmed_clause_ids,
 )
-from manual_review import build_manual_review_ledger, write_manual_review_ledger
+from manual_review import (
+    add_manual_review_items,
+    build_manual_review_ledger,
+    write_manual_review_ledger,
+)
 from artifact_io import atomic_write_text, paths_alias
 from process_runner import run_process
 
@@ -1335,9 +1339,30 @@ def _main(argv: list[str]) -> int:
         clause_file_record = file_record(requirements_dir / "requirement-clauses.json")
         evidence_context_path = requirements_dir / "evidence-context.json"
         evidence_file_record = file_record(evidence_context_path) if evidence_context_path.is_file() else {}
+        manual_review_release_gates: list[dict[str, Any]] = []
+        if not has_official_template:
+            baseline_kind = (
+                "中性参考文档"
+                if args.neutral_reference_docx
+                else "当前输入文档"
+            )
+            manual_review_release_gates.append({
+                "source_code": "official_template_missing",
+                "category": "input_prerequisite",
+                "source_text": "官方版式模板未提供",
+                "reason": (
+                    f"当前仅有{baseline_kind}作为生成基线，不能证明学校官方版式要求。"
+                ),
+                "action": "提供并绑定本校官方 DOCX 模板后，以 submission 模式重新开始一轮新运行。",
+                "placeholder_text": "【待提供：官方版式模板】",
+            })
+        manifest["manual_review_release_gates"] = [
+            gate["source_code"] for gate in manual_review_release_gates
+        ]
         manual_review_ledger = build_manual_review_ledger(
             capability_report,
             questions,
+            release_gates=manual_review_release_gates,
             binding={
                 "case_id": args.case_id or "standalone",
                 "run_id": spec.get("run_id"),
@@ -1354,6 +1379,11 @@ def _main(argv: list[str]) -> int:
                 "requirements_sha256": manifest["inputs"]["requirements"].get("sha256"),
                 "input_source_sha256": manifest["inputs"]["source"].get("sha256"),
                 "format_spec_sha256": file_record(requirements_dir / "format-spec.json").get("sha256"),
+                "official_template_sha256": (
+                    file_record(official_template_evidence).get("sha256")
+                    if official_template_evidence else None
+                ),
+                "official_template_source": manifest["inputs"].get("official_template_source"),
             },
         )
         # The ledger is a run product, but validate it against the checked-in
@@ -1491,6 +1521,38 @@ def _main(argv: list[str]) -> int:
         write_json(manifest_path, manifest); print(json.dumps(manifest, ensure_ascii=False)); return result.returncode
 
     style_result = read_json(style_map)
+    if args.output_policy == "review_draft" and style_result.get("status") == "needs_clarification":
+        style_gate = {
+            "source_type": "release_gate",
+            "source_code": "style_mapping_needs_clarification",
+            "source_codes": ["style_mapping_needs_clarification"],
+            "category": "runtime_manual_unverifiable",
+            "clause_ids": [],
+            "requirement_ids": [],
+            "question_ids": [],
+            "evidence_ids": [],
+            "source_text": "官方模板样式映射仍需人工确认",
+            "reason": "样式分析返回 needs_clarification，自动选择会把不确定的版式关系写入草稿。",
+            "action": "人工确认样式映射后，以 submission 模式重新开始一轮新运行。",
+            "placeholder_text": "【待人工确认：官方模板样式映射】",
+            "original_blocking": True,
+            "release_gate": True,
+        }
+        manual_review_ledger = add_manual_review_items(manual_review_ledger, [style_gate])
+        manual_review_schema_errors = load_and_validate(
+            manual_review_ledger, ROOT / "schema" / "manual-review-ledger.schema.json",
+        )
+        if manual_review_schema_errors:
+            manifest.update(
+                status="failed",
+                reason="manual review ledger schema validation failed after style analysis",
+                manual_review_ledger_errors=manual_review_schema_errors,
+            )
+            write_json(manifest_path, manifest)
+            print(json.dumps(manifest, ensure_ascii=False))
+            return 13
+        write_manual_review_ledger(manual_review_items_path, manual_review_ledger)
+        manifest["manual_review_summary"] = manual_review_ledger.get("summary", {})
     if (
         style_result.get("status") == "needs_clarification"
         and not args.allow_unresolved

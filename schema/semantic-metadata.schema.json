@@ -77,6 +77,18 @@
         "display_equations": {"type": "integer", "minimum": 0}
       },
       "additionalProperties": false
+    },
+    "bibliography_entries": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["key", "text"],
+        "properties": {
+          "key": {"type": "string", "minLength": 1},
+          "text": {"type": "string", "minLength": 1}
+        },
+        "additionalProperties": false
+      }
     }
   },
   "additionalProperties": true

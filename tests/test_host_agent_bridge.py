@@ -1547,6 +1547,26 @@ class HostAgentBridgeTests(unittest.TestCase):
         self.assertEqual(packet["fixed_declaration_candidates"][0]["clause_ids"], ["C1", "C2"])
         self.assertEqual(packet["fixed_declaration_candidates"][0]["before_role"], "abstract_title_zh")
 
+    def test_non_public_declaration_heading_is_derived_from_exact_chunk_evidence(self) -> None:
+        packet = bridge.compact_model_packet({
+            "contract_version": "3.0",
+            "clauses": [
+                {"id": "C1", "text": "非公开学位论文标注说明", "evidence_ids": ["E1"]},
+                {"id": "C2", "text": "根据北京体育大学有关规定，非公开学位论文须经批准方能标注。", "evidence_ids": ["E2"]},
+                {"id": "C3", "text": "摘要", "evidence_ids": ["E3"]},
+            ],
+            "evidence_context": {
+                "E1": {"id": "E1", "kind": "paragraph", "text": "非公开学位论文标注说明"},
+                "E2": {"id": "E2", "kind": "paragraph", "text": "根据北京体育大学有关规定，非公开学位论文须经批准方能标注。"},
+                "E3": {"id": "E3", "kind": "paragraph", "text": "摘要"},
+            },
+            "declaration_anchor_preference": "abstract_title_zh",
+            "requirement_contract": {},
+        })
+        candidate = packet["fixed_declaration_candidates"][0]
+        self.assertEqual(candidate["clause_ids"], ["C1", "C2"])
+        self.assertEqual(candidate["heading_evidence_ids"], ["E1"])
+
     def test_unknown_property_is_removed_deterministically_without_semantic_retry(self) -> None:
         response = {
             "requirements": [{"properties": {"style": {"name": "bad"}, "text": "标题"}}],

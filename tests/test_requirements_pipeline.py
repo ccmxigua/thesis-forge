@@ -2898,6 +2898,33 @@ b&=2\notag
             self.assertEqual(instance_audit["counts"]["applied"], 1)
             self.assertEqual(instance_audit["instances"][0]["status"], "applied")
 
+    def test_disjoint_literal_field_variants_are_kept_as_separate_instances(self) -> None:
+        instances = []
+        clause_map = {
+            "C1": {"text": "封面表一中的分类号标签"},
+            "C2": {"text": "封面表二中的中图分类号标签"},
+        }
+        first_id, first_error = requirements_engine._register_content_instance(
+            instances, {"field_key": "classification_number"}, "cover_field_label",
+            {"text": "分类号："}, {"C1"}, {"E1"}, clause_map, "exact source label",
+        )
+        second_id, second_error = requirements_engine._register_content_instance(
+            instances, {"field_key": "classification_number"}, "cover_field_label",
+            {"text": "中图分类号："}, {"C2"}, {"E2"}, clause_map, "exact source label",
+        )
+        self.assertIsNotNone(first_id)
+        self.assertIsNone(first_error)
+        self.assertIsNotNone(second_id)
+        self.assertIsNone(second_error)
+        self.assertEqual(len(instances), 2)
+        self.assertNotEqual(first_id, second_id)
+        self.assertTrue(instances[1]["field_key"].startswith("classification_number::variant-"))
+        _, overlap_error = requirements_engine._register_content_instance(
+            instances, {"field_key": "classification_number"}, "cover_field_label",
+            {"text": "另一种同源标签"}, {"C1"}, {"E1"}, clause_map, "conflicting source label",
+        )
+        self.assertEqual(overlap_error["reason"], "content_instance_identity_conflict")
+
 
     def test_legacy_unsupported_status_applies_when_no_concrete_blocker_exists(self) -> None:
         with tempfile.TemporaryDirectory() as td:

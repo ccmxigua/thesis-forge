@@ -54,6 +54,9 @@ class SemanticContractTest(unittest.TestCase):
         self.assertEqual(result["class_no"], result["classification_number"])
         self.assertEqual(result["submit_date_cn"], result["submit_date"])
         self.assertEqual(result["inventory"], {"figures": 3, "tables": 2, "display_equations": 6})
+        self.assertEqual(len(result["bibliography_entries"]), 10)
+        self.assertEqual(result["bibliography_entries"][0]["key"], "arellano1991")
+        self.assertTrue(result["bibliography_entries"][0]["text"])
 
     def test_explicit_first_and_second_discipline_macros_are_independent(self) -> None:
         with tempfile.TemporaryDirectory() as td:

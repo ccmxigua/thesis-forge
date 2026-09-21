@@ -49,6 +49,78 @@ def _body_parts(item: dict[str, Any]) -> list[str]:
     return []
 
 
+def _source_evidence_map(evidence: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    return {
+        str(candidate.get("id")): candidate
+        for candidate in (evidence.get("evidence") or [])
+        if isinstance(candidate, dict) and candidate.get("id")
+    }
+
+
+def _has_source_heading_format(candidate: dict[str, Any]) -> bool:
+    """Recognize a heading from explicit source formatting, never from prose."""
+    if candidate.get("kind") != "paragraph":
+        return False
+    style_text = " ".join(
+        str(candidate.get(name) or "")
+        for name in ("style_id", "style_name")
+    ).lower()
+    if "heading" in style_text or "title" in style_text:
+        return True
+    for run in candidate.get("runs") or []:
+        if not isinstance(run, dict):
+            continue
+        formatting = run.get("format")
+        if not isinstance(formatting, dict):
+            continue
+        if formatting.get("bold") is True:
+            return True
+        size_pt = formatting.get("size_pt")
+        if isinstance(size_pt, (int, float)) and not isinstance(size_pt, bool) and size_pt >= 16:
+            return True
+    return False
+
+
+def _promote_exact_source_heading(
+    item: dict[str, Any], source_evidence_ids: list[str], evidence: dict[str, Any] | None,
+) -> dict[str, Any]:
+    """Promote a body-first heading only when current evidence proves it structurally.
+
+    Some host responses preserve a fixed declaration heading in ``body_parts``
+    even though the evidence packet contains a separately formatted heading
+    paragraph.  This is a lossless structural normalization: the text must be
+    an exact cited evidence atom, the next body atom must also be cited, and
+    the source paragraph must carry explicit heading-like formatting. A plain
+    first paragraph is deliberately left invalid so the execution gate remains
+    fail-closed rather than guessing a semantic heading.
+    """
+    if not isinstance(evidence, dict) or item.get("heading"):
+        return item
+    body_parts = _body_parts(item)
+    if len(body_parts) < 2:
+        return item
+    evidence_items = _source_evidence_map(evidence)
+    normalized_first = _normalized(body_parts[0])
+    normalized_second = _normalized(body_parts[1])
+    matching_first = [
+        evidence_id for evidence_id in source_evidence_ids
+        if isinstance(evidence_items.get(evidence_id), dict)
+        and _normalized(evidence_items[evidence_id].get("text", "")) == normalized_first
+        and _has_source_heading_format(evidence_items[evidence_id])
+    ]
+    matching_second = {
+        evidence_id for evidence_id in source_evidence_ids
+        if isinstance(evidence_items.get(evidence_id), dict)
+        and _normalized(evidence_items[evidence_id].get("text", "")) == normalized_second
+    }
+    if not matching_first or not matching_second:
+        return item
+    promoted = copy.deepcopy(item)
+    promoted["heading"] = body_parts[0]
+    promoted["body_parts"] = body_parts[1:]
+    return promoted
+
+
 def _resource_digest(run_id: str, item_id: str, heading: str, body_parts: list[str]) -> str:
     material = "\0".join([run_id, item_id, heading, *body_parts])
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
@@ -268,20 +340,25 @@ def materialize_declaration_resources(
         if not isinstance(raw, dict):
             raise ValueError("each declaration item must be an object")
         item_id = raw.get("id")
-        heading = raw.get("heading")
-        body_parts = _body_parts(raw)
         if not isinstance(item_id, str) or not item_id.strip():
             raise ValueError("each declaration item needs a non-empty semantic id")
         if item_id in seen_ids:
             raise ValueError(f"duplicate declaration id: {item_id}")
-        if not isinstance(heading, str) or not heading.strip():
-            raise ValueError(f"declaration {item_id!r} needs exact source-derived heading text")
-        if not body_parts:
-            raise ValueError(f"declaration {item_id!r} needs exact source-derived body text")
         source_evidence_ids = sorted({
             str(value) for value in (raw.get("source_evidence_ids") or [])
             if isinstance(value, str) and value.strip()
         })
+        if evidence is not None:
+            source_evidence_ids = _bind_exact_declaration_evidence_ids(
+                spec, item_id, raw, source_evidence_ids, evidence,
+            )
+        raw = _promote_exact_source_heading(raw, source_evidence_ids, evidence)
+        heading = raw.get("heading")
+        body_parts = _body_parts(raw)
+        if not isinstance(heading, str) or not heading.strip():
+            raise ValueError(f"declaration {item_id!r} needs exact source-derived heading text")
+        if not body_parts:
+            raise ValueError(f"declaration {item_id!r} needs exact source-derived body text")
         if not source_evidence_ids:
             raise ValueError(f"declaration {item_id!r} needs source_evidence_ids")
         if evidence is not None:

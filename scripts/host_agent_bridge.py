@@ -372,6 +372,7 @@ def _fixed_declaration_candidates(
 
     heading_pattern = re.compile(
         r"(?:原创性|独创性|诚信|使用授权|版权授权|公开授权).{0,12}(?:声明|说明|书)$"
+        r"|^(?:非公开|不公开)学位论文标注说明$"
         r"|^(?:声明|授权书)$"
     )
     boundary_pattern = re.compile(

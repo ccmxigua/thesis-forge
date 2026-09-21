@@ -11,6 +11,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from format_spec_validation import load_and_validate  # noqa: E402
 from format_contract_guards import normalize_verification_checker_ids  # noqa: E402
 from host_review_contract import validate_response  # noqa: E402
+from compliance import build_clause_records  # noqa: E402
 from apply_format_spec import compile_cover_contract  # noqa: E402
 from evidence_context_guards import sample_content_guard  # noqa: E402
 import requirements_engine as engine  # noqa: E402
@@ -441,7 +442,10 @@ class RootCauseGuardTests(unittest.TestCase):
                 }, "clause_ids": ["C1"],
                 "verification": {
                     "mode": "static_docx",
-                    "checker_ids": ["declaration_anchor_binding", "fixed_declaration_text", "custom.unknown"],
+                    "checker_ids": [
+                        "declaration_anchor_binding", "fixed_declaration_text",
+                        "custom.unknown",
+                    ],
                 },
             }],
         }
@@ -461,6 +465,35 @@ class RootCauseGuardTests(unittest.TestCase):
         self.assertTrue(any("unregistered checker id 'custom.unknown'" in error for error in errors), errors)
         self.assertFalse(any("declaration_anchor_binding" in error for error in errors), errors)
         self.assertFalse(any("fixed_declaration_text" in error for error in errors), errors)
+        spec["requirements"][0]["verification"]["checker_ids"] = ["declaration_fixed_text"]
+        self.assertEqual(
+            normalize_verification_checker_ids(spec),
+            [{
+                "json_pointer": "$.requirements[0].verification.checker_ids[0]",
+                "from": "declaration_fixed_text",
+                "to": "declarations_fixed_text",
+            }],
+        )
+        self.assertEqual(
+            spec["requirements"][0]["verification"]["checker_ids"],
+            ["declarations_fixed_text"],
+        )
+
+    def test_accepted_requirement_survives_rejected_duplicate_relation(self) -> None:
+        records = build_clause_records(
+            [{"id": "C1", "evidence_ids": ["E1"]}],
+            {
+                "C1": {
+                    "classification": "covered",
+                    "requirement_indexes": [0, 1],
+                    "reason": "固定声明正文由已接受 requirement 覆盖。",
+                },
+            },
+            {0: ["R00001"]},
+            accepted_requirement_indexes={0},
+        )
+        self.assertEqual(records[0]["status"], "pending_execution")
+        self.assertEqual(records[0]["requirement_ids"], ["R00001"])
 
     def test_runtime_anchor_inventory_requires_one_unique_source_match(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

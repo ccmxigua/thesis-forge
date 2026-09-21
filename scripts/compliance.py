@@ -91,12 +91,22 @@ def build_clause_records(
         classification = review["classification"]
         state = normalized_state(classification)
         indexes = review.get("requirement_indexes") or []
-        requirement_ids = sorted({rid for i in indexes for rid in requirement_ids_by_index.get(i, [])})
+        # Contract 3.0 derives this reverse relation from every authored
+        # requirement edge.  A response may contain a duplicate candidate
+        # whose merge is rejected while another candidate still authoritatively
+        # covers the same clause.  Keep only accepted indexes for the output
+        # relation; one rejected duplicate must not invalidate an otherwise
+        # accepted requirement.
+        effective_indexes = (
+            [index for index in indexes if index in accepted_requirement_indexes]
+            if accepted_requirement_indexes is not None else list(indexes)
+        )
+        requirement_ids = sorted({
+            rid for i in effective_indexes
+            for rid in requirement_ids_by_index.get(i, [])
+        })
         mapping_blocked = False
         if classification_requires_requirement(classification):
-            if (accepted_requirement_indexes is not None
-                    and not set(indexes) <= accepted_requirement_indexes):
-                mapping_blocked = True
             if not requirement_ids:
                 mapping_blocked = True
         if mapping_blocked:

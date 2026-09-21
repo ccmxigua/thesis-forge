@@ -59,6 +59,7 @@ REGISTERED_CHECKER_IDS = frozenset({
 CHECKER_ID_ALIASES = {
     "declaration_anchor_binding": "docx.declarations_anchor",
     "fixed_declaration_text": "declarations_fixed_text",
+    "declaration_fixed_text": "declarations_fixed_text",
 }
 
 

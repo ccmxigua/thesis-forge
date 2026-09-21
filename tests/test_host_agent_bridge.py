@@ -1197,6 +1197,135 @@ class HostAgentBridgeTests(unittest.TestCase):
                 previous_response=previous, current_response=current, chunk=chunk,
             ))
 
+    def test_v3_retry_allows_truncated_completion_with_fixed_text_and_placeholder(self) -> None:
+        previous = {
+            "contract_version": "3.0",
+            "requirements": [
+                {
+                    "role": "declarations",
+                    "properties": {
+                        "before_role": "abstract_title_zh",
+                        "items": [{
+                            "id": "authorization",
+                            "body_parts": ["截短的固定声明正文"],
+                        }],
+                    },
+                    "clause_ids": ["C1"],
+                    "evidence_ids": ["E1"],
+                    "confidence": 0.9,
+                    "reason": "保留声明关系",
+                },
+                {
+                    "role": "heading_1",
+                    "properties": {"style": "three_line"},
+                    "clause_ids": [],
+                    "evidence_ids": [],
+                    "confidence": 0,
+                    "reason": "",
+                },
+            ],
+            "clause_reviews": [],
+            "unsupported_items": [],
+            "reported_conflicts": [],
+        }
+        current = {
+            "contract_version": "3.0",
+            "requirements": [
+                {
+                    "role": "declarations",
+                    "properties": {
+                        "before_role": "abstract_title_zh",
+                        "items": [{
+                            "id": "authorization",
+                            "body_parts": ["完整固定声明正文"],
+                        }],
+                    },
+                    "clause_ids": ["C1"],
+                    "evidence_ids": ["E1"],
+                    "confidence": 0.9,
+                    "reason": "保留声明关系",
+                },
+                {
+                    "role": "body_text",
+                    "properties": {"text": "正文"},
+                    "clause_ids": ["C2"],
+                    "evidence_ids": ["E2"],
+                    "confidence": 0.8,
+                    "reason": "补齐当前条款",
+                },
+            ],
+            "clause_reviews": [
+                {"clause_id": "C1", "classification": "executable"},
+                {"clause_id": "C2", "classification": "executable"},
+            ],
+            "unsupported_items": [],
+            "reported_conflicts": [],
+        }
+        records = [
+            {
+                "code": "contract_validation_error",
+                "json_pointer": "$.requirements[1].reason",
+                "raw_error": "$.requirements[1].reason: is shorter than 1 characters",
+            },
+            {
+                "code": "fixed_text_evidence_mismatch",
+                "json_pointer": "$.requirements[0].properties.items[0].body_parts[0]",
+                "raw_error": "must equal a complete cited source-evidence text",
+            },
+            {
+                "code": "unknown_property",
+                "json_pointer": "$.requirements[1].properties",
+                "raw_error": "unknown property 'style'",
+            },
+            {
+                "code": "schema_contract_violation",
+                "json_pointer": "$.requirements[1].clause_ids",
+                "raw_error": "must_be_non_empty",
+            },
+            {
+                "code": "schema_contract_violation",
+                "json_pointer": "$.requirements[1].evidence_ids",
+                "raw_error": "must_be_non_empty",
+            },
+            {
+                "code": "missing_clause_review",
+                "json_pointer": "$.requirements[0]",
+                "raw_error": "$.requirements[0]:missing_clause_review:clause_ids=C1",
+            },
+            {
+                "code": "contract_validation_error",
+                "raw_error": "clause_reviews_must_cover_each_chunk_clause_exactly_once",
+            },
+            {
+                "code": "requirement_relation_mismatch",
+                "json_pointer": "$.requirements[1]",
+                "raw_error": "requirements_not_referenced_by_clause_review:1",
+                "relation_category": "missing_clause_relation",
+            },
+        ]
+        chunk = {
+            "clauses": [{"id": "C1"}, {"id": "C2"}],
+            "evidence_context": {
+                "E1": {"text": "完整固定声明正文"},
+                "E2": {"text": "正文"},
+            },
+        }
+        changed = bridge._retry_change_paths(previous, current)
+        self.assertEqual(changed, ["$.clause_reviews", "$.requirements"])
+        with patch.object(bridge, "validate_host_agent_response", return_value=[]):
+            self.assertTrue(bridge._retry_changes_allowed(
+                records, changed, contract_version="3.0",
+                previous_response=previous, current_response=current, chunk=chunk,
+            ))
+
+        current["requirements"][0]["properties"]["items"][0]["body_parts"] = ["模型猜测正文"]
+        changed = bridge._retry_change_paths(previous, current)
+        with patch.object(bridge, "validate_host_agent_response", return_value=[]):
+            self.assertFalse(bridge._retry_changes_allowed(
+                records, changed, contract_version="3.0",
+                previous_response=previous, current_response=current, chunk=chunk,
+            ))
+
     def test_v3_retry_allows_only_validator_named_missing_clause_review(self) -> None:
         previous = {
             "contract_version": "3.0",

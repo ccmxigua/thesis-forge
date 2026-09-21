@@ -1446,7 +1446,9 @@ def _v3_incomplete_completion_allowed(
     if not codes <= {
         "empty_requirement_properties",
         "contract_validation_error",
+        "fixed_text_evidence_mismatch",
         "missing_derived_requirement",
+        "missing_clause_review",
         "requirement_relation_mismatch",
         "schema_contract_violation",
         "unknown_property",
@@ -1494,21 +1496,90 @@ def _v3_incomplete_completion_allowed(
     elif previous_response.get("unsupported_items") != current_response.get("unsupported_items"):
         return False
 
-    unbound_placeholder = (
-        len(previous_requirements) == 1
-        and any(
-            "clause_ids: must_be_non_empty" in str(item.get("raw_error") or "")
-            for item in records if isinstance(item, dict)
+    def has_meaningful_value(value: Any) -> bool:
+        if value is None:
+            return False
+        if isinstance(value, str):
+            return bool(value.strip())
+        if isinstance(value, list):
+            return any(has_meaningful_value(item) for item in value)
+        if isinstance(value, dict):
+            return any(has_meaningful_value(item) for item in value.values())
+        return True
+
+    unknown_placeholder_properties: dict[int, set[str]] = {}
+    for record in records:
+        if not isinstance(record, dict) or record.get("code") != "unknown_property":
+            continue
+        pointer = str(record.get("json_pointer") or "")
+        if not pointer:
+            pointer_match = re.search(
+                r"(\$\.requirements\[\d+\]\.properties)",
+                str(record.get("raw_error") or ""),
+            )
+            pointer = pointer_match.group(1) if pointer_match else ""
+        match = re.fullmatch(r"\$\.requirements\[(\d+)\]\.properties", pointer)
+        property_match = re.search(
+            r"unknown property ['\"]([^'\"]+)['\"]",
+            str(record.get("raw_error") or ""),
         )
-        and any(
-            "evidence_ids: must_be_non_empty" in str(item.get("raw_error") or "")
-            for item in records if isinstance(item, dict)
+        if match is not None and property_match is not None:
+            unknown_placeholder_properties.setdefault(int(match.group(1)), set()).add(
+                property_match.group(1)
+            )
+
+    def is_unbound_placeholder(requirement: Any, index: int) -> bool:
+        if not isinstance(requirement, dict):
+            return False
+        properties = copy.deepcopy(requirement.get("properties"))
+        if isinstance(properties, dict):
+            for property_name in unknown_placeholder_properties.get(index, set()):
+                properties.pop(property_name, None)
+        return (
+            isinstance(properties, dict)
+            and not has_meaningful_value(properties)
+            and not has_meaningful_value(requirement.get("clause_ids"))
+            and not has_meaningful_value(requirement.get("evidence_ids"))
+            and not has_meaningful_value(requirement.get("existing_requirement_id"))
+            and not has_meaningful_value(requirement.get("field_key"))
+            and not has_meaningful_value(requirement.get("reason"))
+            and requirement.get("confidence") in (None, 0, 0.0)
+            and not has_meaningful_value(requirement.get("applicability"))
+            and not has_meaningful_value(requirement.get("input_prerequisites"))
+            and not has_meaningful_value(requirement.get("verification"))
         )
-        and any(
-            ".reason: is shorter than 1 characters" in str(item.get("raw_error") or "")
-            for item in records if isinstance(item, dict)
-        )
-    )
+
+    placeholder_indexes = {
+        index for index, requirement in enumerate(previous_requirements)
+        if is_unbound_placeholder(requirement, index)
+    }
+    fixed_text_indexes = {
+        int(match.group(1))
+        for record in records
+        if isinstance(record, dict)
+        and record.get("code") == "fixed_text_evidence_mismatch"
+        for match in [re.match(
+            r"^\$\.requirements\[(\d+)\]\.properties(?:\.|$)",
+            str(record.get("json_pointer") or ""),
+        )]
+        if match is not None
+    }
+    placeholder_related_codes = {
+        "contract_validation_error", "empty_requirement_properties",
+        "requirement_relation_mismatch", "schema_contract_violation",
+        "unknown_property",
+    }
+    for record in records:
+        if not isinstance(record, dict):
+            return False
+        pointer = str(record.get("json_pointer") or "")
+        match = re.match(r"^\$\.requirements\[(\d+)\]", pointer)
+        if match is None:
+            continue
+        index = int(match.group(1))
+        if index in placeholder_indexes and record.get("code") not in placeholder_related_codes:
+            return False
+    unbound_placeholder = bool(placeholder_indexes)
     root_completion = (
         (
             set(changed_paths) == {"$.clause_reviews", "$.requirements"}
@@ -1537,9 +1608,15 @@ def _v3_incomplete_completion_allowed(
     # with the one exact cited evidence text.
     remaining = [copy.deepcopy(item) for item in current_requirements]
     identity_keys = ("role", "clause_ids", "evidence_ids", "existing_requirement_id")
-    for previous in previous_requirements:
+    for previous_index, previous in enumerate(previous_requirements):
         if not isinstance(previous, dict):
             return False
+        if previous_index in placeholder_indexes:
+            # An entirely unbound provider placeholder is not a semantic
+            # requirement.  The completion retry may remove it, but only
+            # when every validator record pointing at it is one of the
+            # explicitly mechanical placeholder errors checked above.
+            continue
         match_index = next(
             (
                 index for index, candidate in enumerate(remaining)
@@ -1563,9 +1640,14 @@ def _v3_incomplete_completion_allowed(
         current_properties = current.get("properties")
         if previous_properties == current_properties:
             continue
-        if previous_properties != {} or current_properties != {
-            "text": _exact_cited_text(current, chunk),
-        }:
+        fixed_text_repair = _v3_fixed_text_requirement_change_allowed(
+            previous, current, records, chunk=chunk,
+        ) if previous_index in fixed_text_indexes else False
+        exact_text_repair = (
+            previous_properties == {}
+            and current_properties == {"text": _exact_cited_text(current, chunk)}
+        )
+        if not fixed_text_repair and not exact_text_repair:
             return False
     return bool(remaining)
 

@@ -32,6 +32,7 @@ PY = sys.executable
 PANDOC_BIN = os.environ.get("PANDOC") or shutil.which("pandoc") or "pandoc"
 sys.path.insert(0, str(ROOT / "scripts"))
 import apply_format_spec
+import format_contract_guards
 import requirements_engine
 from resource_registry import materialize_declaration_resources
 
@@ -2373,6 +2374,171 @@ b&=2\notag
         self.assertEqual(spec["document_structure"]["ordered_roles"], ["body_text", "appendices"])
         self.assertEqual(spec["document_structure"]["ordered_role_groups"],
                          [["heading_references", "heading_acknowledgments"]])
+
+    def test_llm_primary_cover_variants_keep_schema_valid_without_renumbering(self) -> None:
+        clauses = [
+            {"id": "C1", "text": "封面主版字段。", "evidence_ids": ["E1"]},
+            {"id": "C2", "text": "封面另一版字段。", "evidence_ids": ["E2"]},
+            {"id": "C3", "text": "封面补充字段。", "evidence_ids": ["E3"]},
+        ]
+
+        def field(field_id: str, order: int) -> dict[str, object]:
+            return {
+                "id": field_id,
+                "label": field_id,
+                "value_from": f"thesis_profile.cover_metadata.{field_id}",
+                "display_policy": "required",
+                "order": order,
+            }
+
+        requirements = [
+            {
+                "role": "cover",
+                "properties": {
+                    "institution": "某大学",
+                    "fields": [field("classification_number", 1), field("title_zh", 5)],
+                },
+                "clause_ids": ["C1"], "evidence_ids": ["E1"],
+                "confidence": .99, "reason": "主版封面字段。",
+            },
+            {
+                "role": "cover",
+                "properties": {
+                    "institution": "某大学",
+                    "fields": [field("title_zh", 1), field("title_en", 2), field("author_name", 3)],
+                },
+                "clause_ids": ["C2"], "evidence_ids": ["E2"],
+                "confidence": .99, "reason": "另一版封面字段。",
+            },
+            {
+                "role": "cover",
+                "properties": {
+                    "institution": "某大学",
+                    "fields": [field("unit_code", 2)],
+                },
+                "clause_ids": ["C3"], "evidence_ids": ["E3"],
+                "confidence": .99, "reason": "补充封面字段。",
+            },
+        ]
+        response = {
+            "contract_version": "2.1",
+            "requirements": requirements,
+            "clause_reviews": [
+                {
+                    "clause_id": clause["id"], "classification": "executable",
+                    "requirement_indexes": [index], "reason": "有明确封面字段约束。",
+                }
+                for index, clause in enumerate(clauses)
+            ],
+            "unsupported_items": [], "reported_conflicts": [],
+        }
+        spec, conflicts, audit = requirements_engine.merge_llm_primary(
+            Path("synthetic-source"),
+            {"schema_version": "1.0", "roles": {}, "requirements": [], "content_instances": []},
+            clauses, response, {"E1", "E2", "E3"},
+        )
+
+        errors = requirements_engine.validate_spec(spec, {"E1", "E2", "E3"})
+        self.assertEqual(errors, [], errors)
+        self.assertEqual(len(spec["requirements"]), 3)
+        orders = [item["order"] for item in spec["cover"]["fields"]]
+        self.assertEqual(len(orders), len(set(orders)))
+        self.assertEqual(
+            next(item["order"] for item in spec["cover"]["fields"] if item["id"] == "title_zh"),
+            5,
+        )
+        self.assertTrue(
+            any(
+                item.get("type") == "llm_role_projection_conflict"
+                and "fields" in str(item.get("property"))
+                for item in conflicts
+            ),
+            conflicts,
+        )
+        self.assertEqual(sum(1 for item in audit if item.get("accepted")), 3)
+
+    def test_llm_primary_prefers_complete_non_public_cover_variant(self) -> None:
+        clauses = [
+            {"id": "C1", "text": "封面含非公开标记片段。", "evidence_ids": ["E1"]},
+            {"id": "C2", "text": "非公开行政表提供完整日期范围。", "evidence_ids": ["E2"]},
+        ]
+        cover_field = lambda field_id, label, order: {
+            "id": field_id,
+            "label": label,
+            "value_from": f"thesis_profile.cover_metadata.{field_id}",
+            "display_policy": "required",
+            "order": order,
+        }
+        requirements = [
+            {
+                "role": "cover",
+                "properties": {
+                    "institution": "某大学",
+                    "fields": [{
+                        "id": "title_zh", "label": "论文题目",
+                        "value_from": "thesis_profile.cover_metadata.title_zh",
+                        "display_policy": "required", "order": 1,
+                    }],
+                    "non_public_administration": {
+                        "applicability": {"status": "conditional", "conditions": [{
+                            "fact": "thesis_profile.security_level", "operator": "in",
+                            "value": ["restricted", "classified"],
+                        }]},
+                        "fields": [
+                            cover_field("security_marking", "密级", 3),
+                            cover_field("embargo_start", "保密期限", 2),
+                        ],
+                        "public_policy": "blank", "source_region": "片段",
+                    },
+                },
+                "clause_ids": ["C1"], "evidence_ids": ["E1"],
+                "confidence": .99, "reason": "行政片段。",
+            },
+            {
+                "role": "cover",
+                "properties": {
+                    "institution": "某大学", "fields": [],
+                    "non_public_administration": {
+                        "applicability": {"status": "conditional", "conditions": [{
+                            "fact": "thesis_profile.security_level", "operator": "in",
+                            "value": ["restricted", "classified"],
+                        }]},
+                        "fields": [
+                            cover_field("security_marking", "申请密级", 1),
+                            cover_field("embargo_start", "保密期限", 2),
+                            cover_field("embargo_until", "保密期限", 3),
+                            cover_field("approval_number", "审批表编号", 4),
+                            cover_field("approval_date", "批准日期", 5),
+                        ],
+                        "public_policy": "blank", "source_region": "完整表",
+                    },
+                },
+                "clause_ids": ["C2"], "evidence_ids": ["E2"],
+                "confidence": .99, "reason": "完整行政表。",
+            },
+        ]
+        response = {
+            "contract_version": "2.1", "requirements": requirements,
+            "clause_reviews": [
+                {"clause_id": clause["id"], "classification": "executable",
+                 "requirement_indexes": [index], "reason": "有明确行政字段约束。"}
+                for index, clause in enumerate(clauses)
+            ],
+            "unsupported_items": [], "reported_conflicts": [],
+        }
+        spec, conflicts, _audit = requirements_engine.merge_llm_primary(
+            Path("synthetic-source"),
+            {"schema_version": "1.0", "roles": {}, "requirements": [], "content_instances": []},
+            clauses, response, {"E1", "E2"},
+        )
+        admin = spec["cover"]["non_public_administration"]
+        self.assertEqual(
+            {item["id"] for item in admin["fields"]},
+            {"security_marking", "embargo_start", "embargo_until", "approval_number", "approval_date"},
+        )
+        self.assertEqual(format_contract_guards.cover_binding_errors(spec), [])
+        self.assertEqual(requirements_engine.validate_spec(spec, {"E1", "E2"}), [])
+        self.assertTrue(any("fields.variant" in str(item.get("property")) for item in conflicts), conflicts)
 
     def test_full_compliance_blocks_applicable_backend_gap(self) -> None:
         with tempfile.TemporaryDirectory() as td:

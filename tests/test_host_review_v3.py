@@ -95,6 +95,101 @@ class HostReviewV3Tests(unittest.TestCase):
         self.assertIn("A single clause may support multiple requirements", instructions)
         self.assertIn("Role boundary for equations", instructions)
         self.assertIn("partial_clause_coverage error does not authorize changing classification", instructions)
+        self.assertIn("executable_review_requires_all_obligations_covered", instructions)
+
+    def test_uncovered_obligation_retry_preserves_status_and_projects_relation(self) -> None:
+        clauses = [
+            {
+                "id": "C1", "text": "图题即图的名称，应简明，置于图序之后",
+                "evidence_ids": ["E1"], "source_kind": "paragraph",
+                "location": {}, "part_index": 0,
+            },
+            {
+                "id": "C2", "text": "图题应置于图下方",
+                "evidence_ids": ["E2"], "source_kind": "paragraph",
+                "location": {}, "part_index": 0,
+            },
+        ]
+        evidence = {
+            "evidence": [
+                {"id": "E1", "text": clauses[0]["text"], "kind": "paragraph"},
+                {"id": "E2", "text": clauses[1]["text"], "kind": "paragraph"},
+            ]
+        }
+        chunk = build_llm_request(
+            [], clauses, evidence, {}, "full", contract_version=HOST_REVIEW_CONTRACT_V3,
+        )
+        previous = {
+            "contract_version": HOST_REVIEW_CONTRACT_V3,
+            "requirements": [{
+                "role": "body_text", "properties": {"text": "图题要求"},
+                "clause_ids": ["C1", "C2"], "evidence_ids": ["E2"],
+                "confidence": 0.9, "reason": "图题位置要求。",
+            }],
+            "clause_reviews": [
+                {
+                    "clause_id": "C1", "classification": "executable",
+                    "reason": "图题标题位置可核验，简明性尚不能由当前执行器核验。",
+                    "obligations": [
+                        {"id": "title_after_number", "status": "covered", "reason": "位置可核验。"},
+                        {"id": "title_concise", "status": "unverifiable", "reason": "简明性需要语义判断。"},
+                    ],
+                },
+                {"clause_id": "C2", "classification": "executable", "reason": "位置可核验。"},
+            ],
+            "unsupported_items": [],
+            "reported_conflicts": [],
+        }
+        current = json.loads(json.dumps(previous, ensure_ascii=False))
+        current["clause_reviews"][0]["classification"] = "unverifiable"
+        current["requirements"][0]["clause_ids"] = ["C2"]
+        records = [{
+            "code": "executable_review_obligations_uncovered",
+            "json_pointer": "$.clause_reviews[0].obligations",
+            "raw_error": "$.clause_reviews[0].obligations: executable_review_requires_all_obligations_covered",
+        }]
+
+        self.assertEqual(validate_response(current, chunk), [])
+        repaired, audit = bridge._v3_uncovered_obligation_reclassification_response(
+            previous, current, records, chunk=chunk,
+        )
+        self.assertIsNotNone(repaired)
+        self.assertEqual(repaired["clause_reviews"][0]["classification"], "unverifiable")
+        self.assertEqual(
+            [item["status"] for item in repaired["clause_reviews"][0]["obligations"]],
+            ["covered", "unverifiable"],
+        )
+        self.assertEqual(repaired["requirements"][0]["clause_ids"], ["C2"])
+        self.assertEqual(audit["rule_id"], "preserve_uncovered_obligation_and_project_relation_v1")
+        self.assertTrue(bridge._v3_uncovered_obligation_reclassification_allowed(
+            previous, current, records, chunk=chunk,
+        ))
+
+        unsafe = json.loads(json.dumps(previous, ensure_ascii=False))
+        unsafe["clause_reviews"][0]["obligations"][1]["status"] = "covered"
+        unsafe["clause_reviews"][0]["classification"] = "executable"
+        self.assertEqual(validate_response(unsafe, chunk), [])
+        self.assertIsNone(
+            bridge._v3_uncovered_obligation_reclassification_response(
+                previous, unsafe, records, chunk=chunk,
+            )[0]
+        )
+        self.assertFalse(bridge._retry_changes_allowed(
+            records,
+            bridge._retry_change_paths(previous, unsafe),
+            contract_version=HOST_REVIEW_CONTRACT_V3,
+            previous_response=previous,
+            current_response=unsafe,
+            chunk=chunk,
+        ))
+
+    def test_uncovered_obligation_error_is_structured(self) -> None:
+        raw_error = "$.clause_reviews[0].obligations: executable_review_requires_all_obligations_covered"
+        records = contract_error_records(
+            [raw_error], response=self._executable_response(), chunk=self.request,
+        )
+        self.assertEqual(records[0]["code"], "executable_review_obligations_uncovered")
+        self.assertTrue(records[0]["semantic_review_required"])
 
     def test_v3_schema_has_one_model_authoritative_relation(self) -> None:
         reviews_schema = self.request["response_schema"]["properties"]["clause_reviews"]["items"]
@@ -221,6 +316,19 @@ class HostReviewV3Tests(unittest.TestCase):
         self.assertTrue(any(record["code"] == "normative_basis_invalid" for record in records))
         self.assertEqual(response["clause_reviews"][0]["normative_basis"], "informational")
         self.assertEqual(len(next(record for record in records if record["code"] == "normative_basis_invalid")["response_sha256"]), 64)
+
+    def test_duplicate_requirement_evidence_ids_are_a_bounded_mechanical_error(self) -> None:
+        response = self._executable_response()
+        response["requirements"][0]["evidence_ids"] = ["E1", "E1"]
+        errors = validate_response(response, self.request)
+        records = contract_error_records(errors, response=response, chunk=self.request)
+        self.assertEqual(
+            [
+                record["code"] for record in records
+                if "evidence_ids" in str(record["raw_error"])
+            ],
+            ["duplicate_evidence_ids"],
+        )
 
     def test_fixed_declaration_text_errors_are_distinguished_from_semantic_errors(self) -> None:
         records = contract_error_records(
@@ -351,6 +459,13 @@ class HostReviewV3Tests(unittest.TestCase):
             [{"clause_id": "C1", "classification": "unresolved", "reason": "需要确认"}],
         )
         self.assertIn("non_requirement_classification_relation", {item["code"] for item in nonrequirement_records})
+        nonrequirement_record = next(
+            item for item in nonrequirement_records
+            if item["code"] == "non_requirement_classification_relation"
+        )
+        self.assertEqual(nonrequirement_record["requirement_index"], 0)
+        self.assertEqual(nonrequirement_record["relation_category"], "non_requirement_classification")
+        self.assertEqual(nonrequirement_record["clause_ids"], ["C1"])
 
     def test_unbacked_evidence_is_structured_as_evidence_relation_error(self) -> None:
         records = contract_error_records(

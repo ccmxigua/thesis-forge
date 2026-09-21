@@ -20,7 +20,7 @@ from docx.enum.style import WD_STYLE_TYPE
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_BREAK, WD_LINE_SPACING
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
-from docx.shared import Mm, Pt
+from docx.shared import Mm, Pt, RGBColor
 from docx.text.paragraph import Paragraph
 from docx.text.run import Run
 
@@ -99,6 +99,89 @@ PLACEHOLDER_CONTENT_LABELS = {
     "bibliography_heading": "参考文献标题",
     "bibliography_entry": "参考文献条目",
 }
+
+MANUAL_REVIEW_STYLE = "Thesis Manual Review"
+MANUAL_REVIEW_PLACEHOLDER_STYLE = "Thesis Manual Review Placeholder"
+MANUAL_REVIEW_RED = RGBColor(0xC0, 0x00, 0x00)
+
+
+def ensure_manual_review_styles(doc: Document) -> None:
+    """Create non-heading styles used only by review-draft markers."""
+    for name, size, bold in (
+        (MANUAL_REVIEW_STYLE, 10.5, True),
+        (MANUAL_REVIEW_PLACEHOLDER_STYLE, 12, True),
+    ):
+        try:
+            style = doc.styles[name]
+        except KeyError:
+            style = doc.styles.add_style(name, WD_STYLE_TYPE.PARAGRAPH)
+            style.base_style = doc.styles["Normal"]
+        style.font.name = "宋体"
+        style.font.size = Pt(size)
+        style.font.bold = bold
+        style.font.color.rgb = MANUAL_REVIEW_RED
+
+
+def mark_manual_review_paragraph(paragraph: Paragraph) -> None:
+    """Apply visible red formatting without creating Word comments."""
+    for run in paragraph.runs:
+        run.font.color.rgb = MANUAL_REVIEW_RED
+        run.font.bold = True
+        shading = run._r.get_or_add_rPr().find(qn("w:shd"))
+        if shading is None:
+            shading = OxmlElement("w:shd")
+            run._r.get_or_add_rPr().append(shading)
+        shading.set(qn("w:fill"), "FFF2CC")
+
+
+def append_manual_review_markers(
+    doc: Document, ledger: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Append a visible, searchable review list and return marker receipts."""
+    if not isinstance(ledger, dict):
+        return []
+    items = ledger.get("items")
+    if not isinstance(items, list) or not items:
+        return []
+    ensure_manual_review_styles(doc)
+    page_break = doc.add_paragraph()
+    page_break.add_run().add_break(WD_BREAK.PAGE)
+    heading = doc.add_paragraph(style=MANUAL_REVIEW_STYLE)
+    heading.add_run("人工审查清单（草稿）")
+    mark_manual_review_paragraph(heading)
+    intro = doc.add_paragraph(style=MANUAL_REVIEW_STYLE)
+    intro.add_run("以下项目来自本次运行的条款、证据和能力审查。请逐项处理；本清单中的内容不能作为提交版正文。")
+    mark_manual_review_paragraph(intro)
+    receipts: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        marker_id = str(item.get("marker_id") or "MR-UNNUMBERED")
+        clauses = ", ".join(str(value) for value in item.get("clause_ids", [])) or "未绑定条款"
+        requirements = ", ".join(str(value) for value in item.get("requirement_ids", []))
+        source_text = " ".join(str(item.get("source_text") or "").split())[:480]
+        reason = " ".join(str(item.get("reason") or "").split())[:480]
+        action = " ".join(str(item.get("action") or "请人工核对并记录结果。").split())[:360]
+        text = (
+            f"【{marker_id}｜人工待审｜{item.get('category', 'manual_review')}】\n"
+            f"条款：{clauses}"
+            + (f"；要求：{requirements}" if requirements else "")
+            + f"\n原文/问题：{source_text}\n原因：{reason}\n处理：{action}"
+        )
+        paragraph = doc.add_paragraph(style=MANUAL_REVIEW_STYLE)
+        paragraph.paragraph_format.keep_together = True
+        paragraph.add_run(text)
+        mark_manual_review_paragraph(paragraph)
+        receipts.append({
+            "marker_id": marker_id,
+            "category": item.get("category"),
+            "clause_ids": item.get("clause_ids", []),
+            "requirement_ids": item.get("requirement_ids", []),
+            "paragraph_text": text,
+            "location": "document_end",
+            "paragraph_index": sum(1 for _ in all_body_paragraphs(doc)) - 1,
+        })
+    return receipts
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -181,8 +264,9 @@ def _insert_paragraph_after(anchor: Paragraph, text: str, style_name: str) -> Pa
 
 
 def insert_missing_content_placeholders(doc: Document, spec: dict[str, Any],
-                                        mappings: dict[str, Any]) -> list[dict[str, Any]]:
-    """Fill missing executable content roles with neutral, auditable placeholders.
+                                        mappings: dict[str, Any], *,
+                                        review_draft: bool = False) -> list[dict[str, Any]]:
+    """Fill missing executable content roles with auditable placeholders.
 
     Structural mapping failures remain failures: if a table cell or semantic
     object exists but was assigned to the wrong role, silently adding a dummy
@@ -190,6 +274,8 @@ def insert_missing_content_placeholders(doc: Document, spec: dict[str, Any],
     coverage gaps receive ``——``.  Existing placeholders are reported too, so
     a second run cannot accidentally turn a pending document into a ready one.
     """
+    if review_draft:
+        ensure_manual_review_styles(doc)
     body = list(all_body_paragraphs(doc))
     pending: dict[str, dict[str, Any]] = {}
 
@@ -197,10 +283,14 @@ def insert_missing_content_placeholders(doc: Document, spec: dict[str, Any],
         mapping = mappings.get(role)
         if not mapping:
             continue
-        count = sum(1 for paragraph in body
+        matching = [paragraph for paragraph in body
                     if paragraph.style.name == mapping["style_name"]
-                    and paragraph.text.strip() == NEUTRAL_CONTENT_PLACEHOLDER)
+                    and paragraph.text.strip() == NEUTRAL_CONTENT_PLACEHOLDER]
+        count = len(matching)
         if count:
+            if review_draft:
+                for paragraph in matching:
+                    mark_manual_review_paragraph(paragraph)
             pending[role] = {
                 "role": role,
                 "label": PLACEHOLDER_CONTENT_LABELS.get(role, role),
@@ -229,14 +319,22 @@ def insert_missing_content_placeholders(doc: Document, spec: dict[str, Any],
         mapping = mappings.get(role)
         if not mapping:
             continue
-        paragraph = doc.add_paragraph(NEUTRAL_CONTENT_PLACEHOLDER, mapping["style_name"])
+        marker_text = (
+            f"【待补充：{PLACEHOLDER_CONTENT_LABELS.get(role, role)}】"
+            if review_draft else NEUTRAL_CONTENT_PLACEHOLDER
+        )
+        marker_style = MANUAL_REVIEW_PLACEHOLDER_STYLE if review_draft else mapping["style_name"]
+        paragraph = doc.add_paragraph(style=marker_style)
+        paragraph.add_run(marker_text)
+        if review_draft:
+            mark_manual_review_paragraph(paragraph)
         pending[role] = {
             "role": role,
             "label": PLACEHOLDER_CONTENT_LABELS.get(role, role),
             "category": "thesis_content",
             "status": "pending_user_content",
-            "placeholder": NEUTRAL_CONTENT_PLACEHOLDER,
-            "style": mapping["style_name"],
+            "placeholder": marker_text,
+            "style": marker_style,
             "count": 1,
             "origin": "inserted_document_end",
             "reason": "required content role had no source content mapped",
@@ -2024,6 +2122,54 @@ def _manual_semantic_finding(key: str, property_name: str, reason: str) -> dict[
     }
 
 
+def manual_review_constraint_items(constraints: dict[str, Any]) -> list[dict[str, Any]]:
+    """Describe semantic checks that need a human but not a hard-stop draft.
+
+    These are deliberately derived from the current format spec rather than
+    being a global list of clause IDs.  The resulting visible markers are
+    therefore tied to this run's actual constraints and cannot silently
+    migrate to another school or source.
+    """
+    items: list[dict[str, Any]] = []
+    for key in ("abstract_zh", "abstract_en"):
+        rule = constraints.get(key, {})
+        if not isinstance(rule, dict):
+            continue
+        if rule.get("target") == "unresolved":
+            items.append({
+                "source_type": "format_constraint",
+                "category": "runtime_manual_unverifiable",
+                "source_text": f"{key}.target",
+                "reason": "摘要语言目标仍未由确定性规则解析。",
+                "action": "请人工确认目标语言和适用条款，再回填并重跑提交模式。",
+                "clause_ids": [], "requirement_ids": [], "question_ids": [], "evidence_ids": [],
+                "original_blocking": True,
+            })
+        for property_name in ("require_third_person", "required_sections", "exception_policy"):
+            if rule.get(property_name):
+                items.append({
+                    "source_type": "format_constraint",
+                    "category": "runtime_manual_unverifiable",
+                    "source_text": f"{key}.{property_name}",
+                    "reason": "该摘要语义约束不能由确定性 DOCX 格式检查证明。",
+                    "action": "请人工审查正文语义；不要把草稿标记直接当作合规证据。",
+                    "clause_ids": [], "requirement_ids": [], "question_ids": [], "evidence_ids": [],
+                    "original_blocking": True,
+                })
+        for object_kind in rule.get("prohibited_objects", []) if isinstance(rule.get("prohibited_objects"), list) else []:
+            if object_kind in {"chemical_equations", "nonpublic_symbols_and_terminology"}:
+                items.append({
+                    "source_type": "format_constraint",
+                    "category": "runtime_manual_unverifiable",
+                    "source_text": f"{key}.prohibited_objects.{object_kind}",
+                    "reason": "该语义禁用项不能安全地由关键词猜测。",
+                    "action": "请人工核对摘要内容；确认后再进入提交模式。",
+                    "clause_ids": [], "requirement_ids": [], "question_ids": [], "evidence_ids": [],
+                    "original_blocking": True,
+                })
+    return items
+
+
 def audit_content_constraints(doc: Document, constraints: dict[str, Any], mappings: dict[str, Any]) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
     positions = {p._p: i for i, p in enumerate(doc.paragraphs)}
@@ -2596,6 +2742,8 @@ def main(argv: list[str]) -> int:
                    help="treat zero matched paragraphs for critical roles as a validation error")
     p.add_argument("--compliance-mode", choices=["full", "supported_subset"], default=None,
                    help="override the format spec compliance mode")
+    p.add_argument("--output-policy", choices=["review_draft", "submission"], default="submission",
+                   help="review_draft permits visible manual-review markers; submission remains strict")
     p.add_argument("--render-report", type=Path,
                    help="optional accepted Word/PDF render evidence JSON for submission readiness")
     p.add_argument("--require-submission-ready", action="store_true",
@@ -2604,6 +2752,8 @@ def main(argv: list[str]) -> int:
                    help="capability-preflight report used to distinguish supplied inputs from missing inputs")
     p.add_argument("--preview-placeholders", action="store_true",
                    help="opt-in supported-subset preview: continue past unresolved requirement semantics while keeping submission_ready false")
+    p.add_argument("--manual-review-items", type=Path,
+                   help="run-bound manual-review ledger used to append red draft markers")
     p.add_argument("--semantic-issue-ledger", type=Path,
                    help="run-bound user acknowledgement ledger for unresolved semantic clauses")
     args = p.parse_args(argv)
@@ -2619,7 +2769,11 @@ def main(argv: list[str]) -> int:
         role: merge_role_style_defaults(defaults.get(role, {}), role_spec)
         for role, role_spec in spec.get("roles", {}).items()
     }
-    compliance_mode = args.compliance_mode or spec.get("compliance_mode", "supported_subset")
+    requested_compliance_mode = args.compliance_mode or spec.get("compliance_mode", "supported_subset")
+    compliance_mode = (
+        "supported_subset" if args.output_policy == "review_draft"
+        else requested_compliance_mode
+    )
     semantic_issue_ledger = None
     confirmed_semantic_issue_ids: set[str] = set()
     semantic_issue_confirmations: list[dict[str, Any]] = []
@@ -2638,9 +2792,10 @@ def main(argv: list[str]) -> int:
             raise SystemExit(f"invalid semantic issue ledger: {exc}") from exc
     blockers = format_spec_blockers(spec, compliance_mode, confirmed_semantic_issue_ids)
     preview_bypassed_blockers = []
-    if args.preview_placeholders:
+    preview_mode = args.preview_placeholders or args.output_policy == "review_draft"
+    if preview_mode:
         if compliance_mode != "supported_subset":
-            raise SystemExit("--preview-placeholders requires --compliance-mode supported_subset")
+            raise SystemExit("review-draft placeholders require supported-subset application mode")
         preview_bypassed_blockers = sorted(set(blockers) & {
             "status_needs_clarification", "unresolved_clauses", "open_questions",
         })
@@ -2650,6 +2805,20 @@ def main(argv: list[str]) -> int:
     if blockers:
         raise SystemExit(f"refusing to apply a blocked format spec: {', '.join(blockers)}")
     doc = Document(args.input); args.out_dir.mkdir(parents=True, exist_ok=True)
+    manual_review_ledger = None
+    if args.manual_review_items:
+        try:
+            manual_review_ledger = load_json(args.manual_review_items)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            raise SystemExit(f"invalid manual-review ledger: {exc}") from exc
+        ledger_errors = load_and_validate(
+            manual_review_ledger,
+            Path(__file__).resolve().parents[1] / "schema" / "manual-review-ledger.schema.json",
+        )
+        if ledger_errors:
+            raise SystemExit("invalid manual-review ledger schema:\n" + "\n".join(ledger_errors))
+    if args.output_policy == "review_draft":
+        ensure_manual_review_styles(doc)
     mappings = {}; conflicts = []; created = []; claimed = {}
     page_num = spec.get("page", {}).get("page_number", {})
     selector_mappings = ({"heading_1": {"style_name": explicit["heading_1"]}}
@@ -2850,7 +3019,31 @@ def main(argv: list[str]) -> int:
         doc, spec.get("declarations", {}), resource_items(spec)
     )
     content_instance_audit = apply_content_instance_overrides(doc, spec, mappings)
-    pending_content = insert_missing_content_placeholders(doc, spec, mappings)
+    pending_content = insert_missing_content_placeholders(
+        doc, spec, mappings, review_draft=args.output_policy == "review_draft",
+    )
+    manual_review_document_ledger = manual_review_ledger
+    if args.output_policy == "review_draft":
+        constraint_items = manual_review_constraint_items(
+            resolve_profile_constraints(spec)
+        )
+        if constraint_items:
+            manual_review_document_ledger = copy.deepcopy(manual_review_ledger or {})
+            document_items = list(manual_review_document_ledger.get("items", []))
+            next_index = len(document_items) + 1
+            for item in constraint_items:
+                item = copy.deepcopy(item)
+                item.update({
+                    "marker_id": f"MR-{next_index:04d}",
+                    "status": "pending_manual_review",
+                    "marker_required": True,
+                })
+                document_items.append(item)
+                next_index += 1
+            manual_review_document_ledger["items"] = document_items
+    manual_review_markers = append_manual_review_markers(
+        doc, manual_review_document_ledger if args.output_policy == "review_draft" else None,
+    )
     # Structural generators can insert content before already formatted
     # paragraphs.  Resolve stable node ids only after all such mutations.
     # lxml may hand out distinct Python proxy objects for the same underlying
@@ -2954,7 +3147,7 @@ def main(argv: list[str]) -> int:
         serialized_count = sum(
             1 for paragraph in serialized_body
             if paragraph.style.name == item["style"]
-            and paragraph.text.strip() == NEUTRAL_CONTENT_PLACEHOLDER
+            and paragraph.text.strip() == item.get("placeholder", NEUTRAL_CONTENT_PLACEHOLDER)
         )
         item["serialized_count"] = serialized_count
         if serialized_count < int(item.get("count", 1)):
@@ -2976,9 +3169,18 @@ def main(argv: list[str]) -> int:
         })
     write("pending-content.json", {
         "schema_version": "1.0",
-        "placeholder_policy": "neutral_placeholder",
+        "placeholder_policy": (
+            "red_manual_review_placeholder"
+            if args.output_policy == "review_draft" else "neutral_placeholder"
+        ),
         "placeholder": NEUTRAL_CONTENT_PLACEHOLDER,
         "items": pending_content,
+    })
+    write("manual-review-markers.json", {
+        "schema_version": "1.0",
+        "policy": args.output_policy,
+        "ledger": str(args.manual_review_items.resolve()) if args.manual_review_items else None,
+        "markers": manual_review_markers,
     })
     findings.extend(numbering_issues)
     section_findings = audit_plan_against_docx(applied_section_plan, args.output)
@@ -3011,6 +3213,25 @@ def main(argv: list[str]) -> int:
             if key in expected_page.get("margins_pt", {}):
                 actual = round(getattr(section, attr).pt, 3); expected = expected_page["margins_pt"][key]
                 if abs(actual-expected) > .05: findings.append({"role": "page", "property": f"margins_pt.{key}", "template_value": actual, "required_value": expected})
+    manual_review_findings: list[dict[str, Any]] = []
+    if args.output_policy == "review_draft":
+        manual_review_findings = [
+            item for item in findings if item.get("verification") == "manual"
+        ]
+        # These are intentionally retained in the report and visible marker
+        # list, but they are not deterministic serialization failures.  A
+        # review draft can proceed; submission mode still sees them as hard
+        # findings because this filtering is scoped to review_draft only.
+        findings = [
+            item for item in findings if item.get("verification") != "manual"
+        ]
+    write("manual-review-markers.json", {
+        "schema_version": "1.0",
+        "policy": args.output_policy,
+        "ledger": str(args.manual_review_items.resolve()) if args.manual_review_items else None,
+        "markers": manual_review_markers,
+        "format_constraint_findings": manual_review_findings,
+    })
     missing_required = [item for item in coverage
                         if item["expectation"] == "required" and item["status"] == "missing"]
     serialized_docx_sha256 = hashlib.sha256(args.output.read_bytes()).hexdigest()
@@ -3126,6 +3347,8 @@ def main(argv: list[str]) -> int:
         and not metadata_pending
         and not content_pending
         and not confirmed_semantic_issue_ids
+        and not manual_review_markers
+        and args.output_policy == "submission"
     )
     legacy_role_coverage = not missing_required and not content_pending
     if compliance_mode == "supported_subset" and not source_clause_records:
@@ -3140,22 +3363,38 @@ def main(argv: list[str]) -> int:
         compliance["confirmed_semantic_issues"] = sorted(confirmed_semantic_issue_ids)
         compliance["semantic_issue_binding"] = semantic_issue_binding
         compliance["semantic_issue_confirmations"] = semantic_issue_confirmations
+    elif args.output_policy == "review_draft":
+        compliance["docx_fully_compliant"] = False
+        compliance["overall_status"] = "review_draft_pending"
     report = {"valid": not findings, "fully_covered": (compliance["docx_fully_compliant"] if source_clause_records else legacy_role_coverage),
               "pipeline_valid": not findings,
               "format_ready": (not findings and bool(compliance.get("format_ready"))
                                and bool(property_receipt_audit.get("valid"))),
-              "supported_subset_valid": not findings and compliance["overall_status"] in {"passed", "supported_subset_passed", "input_pending", "confirmed_semantic_issues"},
+              "supported_subset_valid": not findings and compliance["overall_status"] in {"passed", "supported_subset_passed", "input_pending", "confirmed_semantic_issues", "review_draft_pending"},
               "serialized_docx_valid": submission_audit["serialized_docx_valid"],
               "render_validation": submission_audit["render_validation"],
               "submission_ready": effective_submission_ready,
+              "review_draft_ready": bool(
+                  args.output_policy == "review_draft"
+                  and not findings
+                  and (
+                      submission_audit.get("evidence", {}).get("opc_package_valid") is True
+                  )
+              ),
+              "review_draft_package_valid": bool(
+                  submission_audit.get("evidence", {}).get("opc_package_valid") is True
+              ),
               "submission_status": (
                   "confirmed_semantic_issues" if confirmed_semantic_issue_ids
+                  else ("manual_review_required" if args.output_policy == "review_draft"
                   else ("content_pending" if content_pending
-                        else ("cover_metadata_pending" if metadata_pending else submission_audit["status"]))
+                        else ("cover_metadata_pending" if metadata_pending else submission_audit["status"])))
               ),
               "overall_status": compliance["overall_status"],
               "docx_fully_compliant": compliance["docx_fully_compliant"],
               "compliance_mode": compliance_mode,
+              "requested_compliance_mode": requested_compliance_mode,
+              "output_policy": args.output_policy,
               "compliance_summary": {k: v for k, v in compliance.items() if k not in {"records", "external_checklist"}},
               "property_receipt_audit": property_receipt_audit,
               "findings": findings, "coverage_warnings": coverage_warnings, "styles_created": created,
@@ -3166,6 +3405,11 @@ def main(argv: list[str]) -> int:
                   "items": pending_content,
               },
               "pending_content": pending_content,
+              "manual_review_ledger": (
+                  str(args.manual_review_items.resolve()) if args.manual_review_items else None
+              ),
+              "manual_review_markers": manual_review_markers,
+              "manual_review_findings": manual_review_findings,
               "paragraphs_directly_formatted": applied_paragraphs,
               "numbered_paragraphs": numbering_changed, "header_footer_changes": header_footer_changed,
               "automatic_section_created": section_created,
@@ -3188,7 +3432,7 @@ def main(argv: list[str]) -> int:
               "semantic_issue_ledger": (
                   str(args.semantic_issue_ledger.resolve()) if args.semantic_issue_ledger else None
               ),
-              "preview_placeholders": bool(args.preview_placeholders),
+              "preview_placeholders": bool(preview_mode),
               "preview_bypassed_blockers": preview_bypassed_blockers,
               "output_docx": str(args.output)}
     write("clause-compliance-report.json", compliance)

@@ -191,6 +191,35 @@ development modes only. They are never selected implicitly for a user input;
 they require an explicit low-level mode choice, and the batch runner additionally
 requires `--allow-supported-subset`.
 
+## Review-draft policy for human decisions
+
+When a user wants the pipeline to produce an editable artifact while leaving
+uncertain semantic choices for manual review, use:
+
+```bash
+python3 scripts/thesis_format.py \
+  requirements.doc input.tex review-draft.docx \
+  --work-dir build/review-draft \
+  --output-policy review_draft \
+  --llm-response build/review-draft/review/host-agent-response.json
+```
+
+The pipeline writes a run-bound `manual-review-items.json` sidecar and appends
+the corresponding `MR-0001`-style items to the DOCX in red text with a pale
+highlight. Missing thesis content is also rendered as a red `【待补充：…】`
+placeholder. The sidecar records the case/run identity and current source,
+clause, and evidence hashes; it does not rewrite the original clause review or
+invent a requirement/property. Deterministic format and package failures still
+stop the draft.
+
+`review_draft` is explicitly non-submission: it sets `submission_ready=false`,
+defers the strict official-template comparison and Word/PDF release audit, and
+records `draft_manual_review`/`review_draft_pending`. The ten-school batch
+runner defaults to this policy so manual items do not stop the next case. Use
+`--output-policy submission` only after the red items are resolved and the
+submission-mode run has been started fresh; that mode retains the full
+fail-closed capability, render, and final audit gates.
+
 ## Two-stage workflow (packet-only/debug)
 
 ### 1. Prepare evidence packets

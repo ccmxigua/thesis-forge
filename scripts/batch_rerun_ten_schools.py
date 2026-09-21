@@ -136,6 +136,7 @@ def run_command(cmd: list[str], *, label: str, timeout: int = 1800) -> dict[str,
 
 def pipeline_command(case: dict[str, Any], source: Path, work_dir: Path, output_docx: Path,
                      *, compliance_mode: str, prepare_host_review: bool,
+                     output_policy: str = "review_draft",
                      neutral_reference_docx: Path | None = None,
                      llm_response: Path | None = None,
                      run_id: str | None = None,
@@ -149,6 +150,7 @@ def pipeline_command(case: dict[str, Any], source: Path, work_dir: Path, output_
         "--work-dir", str(work_dir),
         "--analysis-mode", str(case["analysis_mode"]),
         "--compliance-mode", compliance_mode,
+        "--output-policy", output_policy,
         "--host-review-chunk-size", str(host_review_chunk_size),
         "--case-id", str(case["id"]),
     ]
@@ -444,6 +446,201 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
             blockers.append(f"{label}_outside_case")
             return None
         return path
+
+    # Review drafts are an explicit, auditable intermediate product.  They may
+    # contain red placeholders for facts or semantic choices that a person
+    # must resolve, but they must still be bound to the fresh run and pass the
+    # mechanical DOCX/package checks.  Keep this gate separate from the
+    # submission gate below so an unresolved capability finding cannot either
+    # masquerade as a release or stop the rest of a review batch.
+    if manifest.get("output_policy") == "review_draft":
+        checks["output_policy"] = "review_draft"
+        if manifest.get("status") != "draft_manual_review":
+            blockers.append(f"review_draft_status:{manifest.get('status')}")
+        if manifest.get("execution_compliance_mode") != "supported_subset":
+            blockers.append("review_draft_not_supported_subset_execution")
+        if manifest.get("submission_ready") is True:
+            blockers.append("review_draft_claims_submission_ready")
+        if manifest.get("blocking_reasons"):
+            blockers.append("review_draft_pipeline_blocking_reasons")
+
+        expected_case_id = manifest.get("case_id")
+        extraction = manifest.get("requirements_extraction")
+        expected_run_id = extraction.get("run_id") if isinstance(extraction, dict) else None
+        if not isinstance(expected_case_id, str) or not expected_case_id:
+            blockers.append("case_id_missing")
+        if not isinstance(expected_run_id, str) or not expected_run_id:
+            blockers.append("pipeline_run_id_missing")
+
+        manual_path = case_artifact("manual_review_items", manifest.get("manual_review_items"))
+        manual_ledger = None
+        if manual_path is None or not manual_path.is_file():
+            blockers.append("manual_review_ledger_missing")
+        else:
+            try:
+                payload = json.loads(manual_path.read_text(encoding="utf-8"))
+                manual_ledger = payload if isinstance(payload, dict) else None
+            except (OSError, json.JSONDecodeError):
+                manual_ledger = None
+            if not isinstance(manual_ledger, dict):
+                blockers.append("manual_review_ledger_invalid")
+            else:
+                if manual_ledger.get("schema_version") != "1.0":
+                    blockers.append("manual_review_ledger_schema_mismatch")
+                if manual_ledger.get("policy") != "review_draft_only":
+                    blockers.append("manual_review_ledger_policy_mismatch")
+                if manual_ledger.get("submission_ready") is not False:
+                    blockers.append("manual_review_ledger_submission_flag_invalid")
+                binding = manual_ledger.get("binding")
+                if isinstance(binding, dict) and expected_run_id and binding.get("run_id") != expected_run_id:
+                    blockers.append("manual_review_ledger_run_mismatch")
+                items = manual_ledger.get("items")
+                if not isinstance(items, list):
+                    blockers.append("manual_review_ledger_items_invalid")
+                checks["manual_review"] = {
+                    "path": str(manual_path),
+                    "summary": manual_ledger.get("summary"),
+                    "item_count": len(items) if isinstance(items, list) else 0,
+                }
+
+        markers_path = case_artifact(
+            "manual_review_markers",
+            str(case_root / "work" / "application" / "manual-review-markers.json"),
+        )
+        markers = None
+        if markers_path is None or not markers_path.is_file():
+            blockers.append("manual_review_markers_missing")
+        else:
+            try:
+                payload = json.loads(markers_path.read_text(encoding="utf-8"))
+                markers = payload if isinstance(payload, dict) else None
+            except (OSError, json.JSONDecodeError):
+                markers = None
+            if not isinstance(markers, dict) or markers.get("policy") != "review_draft":
+                blockers.append("manual_review_markers_invalid")
+            elif not isinstance(markers.get("markers"), list):
+                blockers.append("manual_review_markers_invalid")
+            checks["manual_review_markers"] = str(markers_path)
+
+        capability_path = case_artifact("capability_preflight", manifest.get("capability_preflight"))
+        capability = None
+        if capability_path is None or not capability_path.is_file():
+            blockers.append("capability_artifact_missing")
+        else:
+            try:
+                payload = json.loads(capability_path.read_text(encoding="utf-8"))
+                capability = payload if isinstance(payload, dict) else None
+            except (OSError, json.JSONDecodeError):
+                capability = None
+            if capability is None or capability.get("status") == "failed":
+                blockers.append("capability_artifact_invalid")
+            else:
+                raw_findings = capability.get("findings", [])
+                blocking_count = sum(
+                    1 for item in raw_findings
+                    if isinstance(item, dict) and item.get("blocking")
+                ) if isinstance(raw_findings, list) else 0
+                ledger_count = len(manual_ledger.get("items", [])) if isinstance(manual_ledger, dict) and isinstance(manual_ledger.get("items"), list) else 0
+                if blocking_count and ledger_count == 0:
+                    blockers.append("manual_review_ledger_does_not_cover_capability_findings")
+                if blocking_count and isinstance(manual_ledger, dict):
+                    ledger_codes = {
+                        str(code)
+                        for item in manual_ledger.get("items", [])
+                        if isinstance(item, dict)
+                        for code in (item.get("source_codes") or [item.get("source_code")])
+                        if code
+                    }
+                    finding_codes = {
+                        str(item.get("code"))
+                        for item in raw_findings
+                        if isinstance(item, dict) and item.get("blocking") and item.get("code")
+                    }
+                    if finding_codes - ledger_codes:
+                        blockers.append("manual_review_ledger_missing_capability_codes")
+                marker_count = (
+                    len(markers.get("markers", []))
+                    if isinstance(markers, dict) and isinstance(markers.get("markers"), list)
+                    else 0
+                )
+                if blocking_count and marker_count < ledger_count:
+                    blockers.append("manual_review_markers_do_not_cover_ledger")
+                checks["capability_preflight"] = {
+                    "path": str(capability_path),
+                    "status": capability.get("status"),
+                    "blocking_findings": blocking_count,
+                }
+
+        output_path = case_artifact("output", manifest.get("output"))
+        checks["output"] = str(output_path) if output_path else None
+        if output_path is None or not output_path.is_file() or output_path.stat().st_size <= 0:
+            blockers.append("generated_docx_missing")
+        else:
+            output_artifact = _inspect_docx_artifact(output_path)
+            checks["output_artifact"] = output_artifact
+            if not output_artifact.get("opc_package_valid"):
+                blockers.append("generated_docx_not_valid_opc")
+            if output_path != (case_root / "generated.docx").resolve():
+                blockers.append("generated_output_path_not_canonical")
+
+        validation_path = case_artifact("validation_report", manifest.get("validation_report"))
+        validation = None
+        if validation_path is None or not validation_path.is_file():
+            blockers.append("validation_report_missing_or_invalid")
+        else:
+            try:
+                payload = json.loads(validation_path.read_text(encoding="utf-8"))
+                validation = payload if isinstance(payload, dict) else None
+            except (OSError, json.JSONDecodeError):
+                validation = None
+            if validation is None:
+                blockers.append("validation_report_missing_or_invalid")
+            else:
+                if validation.get("valid") is not True:
+                    blockers.append("review_draft_format_validation_failed")
+                if validation.get("review_draft_ready") is not True:
+                    blockers.append("review_draft_not_ready_in_validation")
+                review_evidence = (
+                    validation.get("submission_audit", {}).get("evidence", {})
+                    if isinstance(validation.get("submission_audit"), dict) else {}
+                )
+                if validation.get("review_draft_package_valid") is not True and review_evidence.get("opc_package_valid") is not True:
+                    blockers.append("review_draft_docx_package_not_verified")
+                receipt_audit = validation.get("property_receipt_audit")
+                if not isinstance(receipt_audit, dict) or receipt_audit.get("valid") is not True:
+                    blockers.append("review_draft_property_receipts_not_verified")
+                if validation.get("submission_ready") is True:
+                    blockers.append("review_draft_validation_claims_submission_ready")
+            checks["validation_report"] = str(validation_path)
+
+        comparison_path = case_artifact(
+            "format_comparison", manifest.get("format_comparison"),
+        )
+        comparison = None
+        if comparison_path is None or not comparison_path.is_file():
+            blockers.append("review_draft_comparison_missing")
+        else:
+            try:
+                payload = json.loads(comparison_path.read_text(encoding="utf-8"))
+                comparison = payload if isinstance(payload, dict) else None
+            except (OSError, json.JSONDecodeError):
+                comparison = None
+            if comparison is None or comparison.get("status") != "review_draft_pending":
+                blockers.append("review_draft_comparison_status_invalid")
+
+        if manifest.get("code_fingerprint") != runtime_code_fingerprint():
+            blockers.append("code_runtime_fingerprint_mismatch")
+        checks["review_draft_ready"] = manifest.get("review_draft_ready") is True
+        if manifest.get("review_draft_ready") is not True:
+            blockers.append("review_draft_not_ready")
+        unique_blockers = sorted(set(blockers))
+        return {
+            "status": "accepted_review_draft" if not unique_blockers else "blocked",
+            "accepted": not unique_blockers,
+            "review_draft": True,
+            "blockers": unique_blockers,
+            "checks": checks,
+        }
 
     checks["pipeline_status"] = manifest.get("status")
     if manifest.get("status") != "completed":
@@ -827,6 +1024,7 @@ def global_fatal_reason(result: dict[str, Any]) -> str | None:
 
 
 def run_case(base: Path, source: Path, case: dict[str, Any], *, prepare_host_review: bool,
+             output_policy: str = "review_draft",
              auto_host_agent: bool = False, host_agent_timeout: int = 900,
              host_agent_max_concurrency: int = 4,
              host_agent_max_attempts: int = 2,
@@ -867,6 +1065,7 @@ def run_case(base: Path, source: Path, case: dict[str, Any], *, prepare_host_rev
     prepare_result = run_command(
         pipeline_command(case, source, work, output,
                          compliance_mode=compliance_mode,
+                         output_policy=output_policy,
                          prepare_host_review=host_review,
                          requirements_dir=(review_requirements if host_review else execution_requirements),
                          host_review_chunk_size=host_review_chunk_size,
@@ -944,6 +1143,7 @@ def run_case(base: Path, source: Path, case: dict[str, Any], *, prepare_host_rev
                 pipeline_command(
                     case, source, work, output,
                     compliance_mode=compliance_mode,
+                    output_policy=output_policy,
                     prepare_host_review=False,
                     requirements_dir=execution_requirements,
                     neutral_reference_docx=neutral_reference_docx,
@@ -963,7 +1163,7 @@ def run_case(base: Path, source: Path, case: dict[str, Any], *, prepare_host_rev
     # produced a separate final DOCX/PDF pair and both final outputs have been
     # audited.  Preparation-only runs have no output and therefore stop before
     # this stage.  The post-render helper keeps pre-render receipts immutable.
-    if result.get("returncode") == 0 and output.is_file():
+    if result.get("returncode") == 0 and output.is_file() and output_policy == "submission":
         post_dir = work / "application"
         final_docx = case_dir / "final-word.docx"
         pdf = case_dir / "final.pdf"
@@ -1052,6 +1252,35 @@ def run_case(base: Path, source: Path, case: dict[str, Any], *, prepare_host_rev
                 else None
             ),
         )
+    elif result.get("returncode") == 0 and output.is_file() and output_policy == "review_draft":
+        # Review drafts intentionally stop before Word/PDF release evidence.
+        # Record the policy decision in the same run manifest so acceptance
+        # cannot confuse “not run by draft policy” with an interrupted render.
+        manifest_path = work / "pipeline-manifest.json"
+        try:
+            pipeline_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            pipeline_manifest["post_render_status"] = "not_run_review_draft"
+            pipeline_manifest["post_render_policy"] = (
+                "Word/PDF release rendering requires output-policy=submission "
+                "after manual review markers are resolved"
+            )
+            atomic_write_text(
+                manifest_path,
+                json.dumps(pipeline_manifest, ensure_ascii=False, indent=2) + "\n",
+            )
+            stages["post_render"] = {
+                "returncode": 0,
+                "status": "not_run_review_draft",
+                "command": [],
+                "reason": pipeline_manifest["post_render_policy"],
+            }
+        except (OSError, json.JSONDecodeError, TypeError):
+            stages["post_render"] = {
+                "returncode": 2,
+                "status": "manifest_update_failed",
+                "command": [],
+            }
+            result = {"returncode": 2, "stderr_tail": "cannot record review-draft post-render policy"}
     result["stages"] = stages
     result["case_id"] = case["id"]
     result["analysis_mode"] = case["analysis_mode"]
@@ -1094,6 +1323,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--allow-supported-subset", action="store_true",
         help="explicitly allow rule_only/known_template compatibility cases; default batches require llm_primary",
+    )
+    parser.add_argument(
+        "--output-policy", choices=("review_draft", "submission"), default="review_draft",
+        help=(
+            "review_draft emits accepted red-marked DOCX drafts and continues past manual "
+            "review items; submission runs the strict Word/PDF release gate"
+        ),
     )
     parser.add_argument("--host-agent-timeout", type=int, default=900,
                         help="per-chunk native Host Agent timeout in seconds (default: 900)")
@@ -1238,6 +1474,7 @@ def main(argv: list[str] | None = None) -> int:
                 else "explicit_supported_subset_opt_in"
             ),
             "allow_supported_subset": bool(args.allow_supported_subset),
+            "output_policy": args.output_policy,
             "canonical_case_order": [str(case["id"]) for case in selected],
             "terminal_status": terminal_status,
             "global_stop_reason": global_stop_reason,
@@ -1252,6 +1489,7 @@ def main(argv: list[str] | None = None) -> int:
         try:
             result = run_case(
                 base, source, case, prepare_host_review=args.prepare_host_review,
+                output_policy=args.output_policy,
                 auto_host_agent=args.auto_host_agent,
                 host_agent_timeout=args.host_agent_timeout,
                 host_agent_max_concurrency=args.host_agent_max_concurrency,

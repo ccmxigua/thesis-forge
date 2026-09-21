@@ -160,6 +160,88 @@ class BatchAcceptanceTests(unittest.TestCase):
         self.assertIn("--thesis-profile", command)
         self.assertEqual(command[command.index("--thesis-profile") + 1], "profile.json")
 
+    def test_review_draft_with_manual_items_is_accepted_without_release_render(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            case_root = root / "case"
+            work = case_root / "work"
+            requirements = work / "requirements"
+            apply_dir = work / "application"
+            requirements.mkdir(parents=True)
+            apply_dir.mkdir(parents=True)
+            output = case_root / "generated.docx"
+            Document().save(output)
+            output_sha256 = __import__("hashlib").sha256(output.read_bytes()).hexdigest()
+            format_spec = requirements / "format-spec.json"
+            format_spec.write_text("{}\n", encoding="utf-8")
+            (requirements / "schema-validation.json").write_text(
+                json.dumps({"valid": True, "errors": []}), encoding="utf-8"
+            )
+            capability = work / "capability-preflight.json"
+            capability.write_text(json.dumps({
+                "status": "blocked",
+                "findings": [{
+                    "code": "capability.clause_gap",
+                    "blocking": True,
+                    "message": "C00076 requires manual review",
+                }],
+            }), encoding="utf-8")
+            ledger = work / "manual-review-items.json"
+            ledger.write_text(json.dumps({
+                "schema_version": "1.0",
+                "policy": "review_draft_only",
+                "binding": {"run_id": "fresh-run"},
+                "submission_ready": False,
+                "items": [{"marker_id": "MR-0001", "source_codes": ["capability.clause_gap"]}],
+                "summary": {"total": 1},
+            }), encoding="utf-8")
+            markers = apply_dir / "manual-review-markers.json"
+            markers.write_text(json.dumps({
+                "schema_version": "1.0", "policy": "review_draft",
+                "markers": [{"marker_id": "MR-0001"}],
+            }), encoding="utf-8")
+            validation = apply_dir / "validation-report.json"
+            validation.write_text(json.dumps({
+                "valid": True,
+                "format_ready": True,
+                "serialized_docx_valid": True,
+                "review_draft_ready": True,
+                "review_draft_package_valid": True,
+                "submission_ready": False,
+                "property_receipt_audit": {"valid": True, "receipts": [{"serialized_docx_sha256": output_sha256}]},
+            }), encoding="utf-8")
+            comparison = apply_dir / "format-comparison.json"
+            comparison.write_text(json.dumps({"status": "review_draft_pending"}), encoding="utf-8")
+            manifest = work / "pipeline-manifest.json"
+            manifest.write_text(json.dumps({
+                "status": "draft_manual_review",
+                "output_policy": "review_draft",
+                "execution_compliance_mode": "supported_subset",
+                "output": str(output),
+                "format_spec": str(format_spec),
+                "capability_preflight": str(capability),
+                "manual_review_items": str(ledger),
+                "validation_report": str(validation),
+                "format_comparison": str(comparison),
+                "review_draft_ready": True,
+                "submission_ready": False,
+                "case_id": "case",
+                "requirements_extraction": {"run_id": "fresh-run"},
+                "code_fingerprint": batch.runtime_code_fingerprint(),
+            }), encoding="utf-8")
+            result = {
+                "returncode": 0,
+                "analysis_mode": "rule_only",
+                "fresh_run": {
+                    "run_id": "fresh-run",
+                    "cache_reused": False,
+                    "pipeline_manifest": str(manifest),
+                },
+            }
+            accepted = batch.case_acceptance(result, root=root)
+            self.assertTrue(accepted["accepted"], accepted)
+            self.assertEqual(accepted["status"], "accepted_review_draft")
+
 
 if __name__ == "__main__":
     unittest.main()

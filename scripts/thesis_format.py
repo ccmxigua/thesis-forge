@@ -38,11 +38,19 @@ def pipeline_command(args: argparse.Namespace, *, prepare_host_review: bool = Fa
                      requirements_dir: Path | None = None,
                      host_agent_audit: Path | None = None,
                      merge_receipt: Path | None = None) -> list[str]:
+    output_policy = getattr(
+        args,
+        "output_policy",
+        "submission" if (getattr(args, "strict_release", False)
+                          or getattr(args, "require_submission_ready", False))
+        else "review_draft",
+    )
     command = [
         sys.executable, str(ROOT / "scripts" / "thesis_format_pipeline.py"),
         str(args.requirements), str(args.input), str(args.output or (args.work_dir / "not-generated.docx")),
         "--work-dir", str(args.work_dir),
         "--analysis-mode", "llm_primary", "--compliance-mode", "full",
+        "--output-policy", output_policy,
         "--host-review-chunk-size", str(args.host_review_chunk_size),
     ]
     if requirements_dir:
@@ -128,10 +136,14 @@ def main(argv: list[str]) -> int:
     p.add_argument("--allow-prompt-only", action="store_true",
                    help="explicit non-release override when native Codex lacks --output-schema")
     p.add_argument("--render-report", type=Path)
+    p.add_argument("--output-policy", choices=["review_draft", "submission"], default="review_draft",
+                   help="default review_draft generates a red-marked editable draft; submission is strict")
     p.add_argument("--require-submission-ready", action="store_true")
     p.add_argument("--strict-release", action="store_true",
                    help="also require official template profile, render evidence and submission readiness")
     args = p.parse_args(argv)
+    if args.output_policy == "review_draft" and (args.require_submission_ready or args.strict_release):
+        p.error("--require-submission-ready/--strict-release require --output-policy submission")
     if sum(bool(value) for value in (
         args.prepare_agent_review, args.auto_host_agent, bool(args.llm_response),
     )) > 1:

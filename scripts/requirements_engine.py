@@ -23,6 +23,7 @@ import xml.etree.ElementTree as ET
 
 from artifact_io import atomic_write_text
 from format_spec_validation import load_and_validate, validate_instance
+from format_contract_guards import normalize_verification_checker_ids
 from host_review_contract import (
     HOST_REVIEW_CONTRACT_V2,
     HOST_REVIEW_CONTRACT_V3,
@@ -994,6 +995,177 @@ def _merge_scoped_projection(
     return conflicts
 
 
+def _merge_cover_projection(
+    dst: dict[str, Any], src: dict[str, Any], *, prefer_incoming: bool = False,
+) -> list[tuple[str, Any, Any]]:
+    """Merge one canonical cover projection without inventing field order.
+
+    A complete host response may contain several clause-scoped ``cover``
+    requirements.  Their local ``order`` values describe different regions or
+    variants; they are not a license to concatenate those lists into one
+    global cover.  Keep the first materializable field definition for the
+    shared projection, record conflicting variants, and retain the complete
+    clause-scoped requirements separately.  In particular, never append a new
+    field whose order is already occupied by another field and never silently
+    renumber it.
+    """
+    conflicts: list[tuple[str, Any, Any]] = []
+
+    def merge_ordered_fields(
+        target: dict[str, Any], incoming: list[Any], target_key: str, path: str,
+    ) -> None:
+        existing = target.setdefault(target_key, [])
+        if not isinstance(existing, list):
+            conflicts.append((path, copy.deepcopy(existing), copy.deepcopy(incoming)))
+            if not prefer_incoming:
+                return
+            existing = []
+            target[target_key] = existing
+
+        by_id = {
+            item.get("id"): item for item in existing
+            if isinstance(item, dict) and isinstance(item.get("id"), str)
+        }
+        order_to_id = {
+            item.get("order"): item.get("id") for item in existing
+            if isinstance(item, dict) and item.get("order") is not None
+        }
+        for candidate in incoming:
+            if not isinstance(candidate, dict):
+                conflicts.append((f"{path}[]", "object", copy.deepcopy(candidate)))
+                continue
+            field_id = candidate.get("id")
+            if not isinstance(field_id, str) or not field_id:
+                conflicts.append((f"{path}[].id", "nonempty id", copy.deepcopy(field_id)))
+                continue
+            current = by_id.get(field_id)
+            if current is None:
+                order = candidate.get("order")
+                owner = order_to_id.get(order)
+                if owner is not None and owner != field_id:
+                    # The requirement-level record remains intact.  The shared
+                    # cover cannot choose between two local layouts safely.
+                    conflicts.append((
+                        f"{path}.order[{order}]", owner, field_id,
+                    ))
+                    continue
+                current = copy.deepcopy(candidate)
+                existing.append(current)
+                by_id[field_id] = current
+                order_to_id[order] = field_id
+                continue
+
+            for key, value in candidate.items():
+                if key == "order":
+                    old_order = current.get(key)
+                    new_order = value
+                    if old_order == new_order:
+                        continue
+                    owner = order_to_id.get(new_order)
+                    if owner is not None and owner != field_id:
+                        conflicts.append((
+                            f"{path}[{field_id}].order", old_order, new_order,
+                        ))
+                        continue
+                    conflicts.append((
+                        f"{path}[{field_id}].order", old_order, new_order,
+                    ))
+                    if prefer_incoming:
+                        order_to_id.pop(old_order, None)
+                        current[key] = copy.deepcopy(new_order)
+                        order_to_id[new_order] = field_id
+                    continue
+                old_value = current.get(key)
+                if old_value == value:
+                    continue
+                conflicts.append((
+                    f"{path}[{field_id}].{key}",
+                    copy.deepcopy(old_value), copy.deepcopy(value),
+                ))
+                if prefer_incoming:
+                    current[key] = copy.deepcopy(value)
+
+    for key, value in src.items():
+        if key == "fields":
+            if isinstance(value, list):
+                merge_ordered_fields(dst, value, "fields", "fields")
+            else:
+                conflicts.append(("fields", copy.deepcopy(dst.get(key)), copy.deepcopy(value)))
+            continue
+        if key == "non_public_administration":
+            if not isinstance(value, dict):
+                conflicts.append((key, copy.deepcopy(dst.get(key)), copy.deepcopy(value)))
+                continue
+            target_admin = dst.setdefault(key, {})
+            if not isinstance(target_admin, dict):
+                conflicts.append((key, copy.deepcopy(target_admin), copy.deepcopy(value)))
+                if not prefer_incoming:
+                    continue
+                target_admin = {}
+                dst[key] = target_admin
+            incoming_admin_fields = value.get("fields")
+            existing_admin_fields = target_admin.get("fields")
+            if isinstance(incoming_admin_fields, list):
+                if not isinstance(existing_admin_fields, list) or not existing_admin_fields:
+                    target_admin["fields"] = copy.deepcopy(incoming_admin_fields)
+                else:
+                    existing_ids = {
+                        item.get("id") for item in existing_admin_fields
+                        if isinstance(item, dict) and isinstance(item.get("id"), str)
+                    }
+                    incoming_ids = {
+                        item.get("id") for item in incoming_admin_fields
+                        if isinstance(item, dict) and isinstance(item.get("id"), str)
+                    }
+                    # A later source region can provide the complete
+                    # non-public table after an earlier fragment exposed only
+                    # one or two fields.  Prefer the complete variant as one
+                    # atomic layout; unioning the two local order spaces can
+                    # create an invalid half-range (for example start without
+                    # until).  The clause-scoped requirements still preserve
+                    # both source regions for audit.
+                    if incoming_ids > existing_ids:
+                        conflicts.append((
+                            f"{key}.fields.variant", copy.deepcopy(existing_admin_fields),
+                            copy.deepcopy(incoming_admin_fields),
+                        ))
+                        target_admin["fields"] = copy.deepcopy(incoming_admin_fields)
+                    else:
+                        merge_ordered_fields(
+                            target_admin, incoming_admin_fields, "fields", f"{key}.fields",
+                        )
+            for admin_key, admin_value in value.items():
+                if admin_key == "fields":
+                    if not isinstance(admin_value, list):
+                        conflicts.append((f"{key}.fields", copy.deepcopy(target_admin.get(admin_key)), copy.deepcopy(admin_value)))
+                    continue
+                local_conflicts = _merge_scoped_projection(
+                    target_admin, {admin_key: admin_value},
+                    path=key, prefer_incoming=prefer_incoming,
+                )
+                conflicts.extend(local_conflicts)
+            continue
+        if key not in dst:
+            dst[key] = copy.deepcopy(value)
+            continue
+        old_value = dst[key]
+        if old_value == value:
+            continue
+        if key == "institution":
+            old_text = str(old_value).strip()
+            new_text = str(value).strip()
+            if old_text in {"——", "--"} and new_text:
+                dst[key] = copy.deepcopy(value)
+                continue
+            if new_text in {"——", "--"} and old_text:
+                continue
+        conflicts.append((key, copy.deepcopy(old_value), copy.deepcopy(value)))
+        if prefer_incoming:
+            dst[key] = copy.deepcopy(value)
+
+    return conflicts
+
+
 def _declaration_body_parts(item: dict[str, Any]) -> list[str]:
     """Return source-derived body paragraphs in their supplied order."""
     parts: list[str] = []
@@ -1479,7 +1651,7 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
                 "LLM output is declarative only and must never contain OOXML edits or executable code.",
                 "Use applicability for explicit conditions/exceptions; never hide a condition in free text when it changes whether the requirement applies.",
                 "For the explicit clause '论文中出现英文时需要使用Times New Roman字体', bind applicability.conditions to fact source_inventory.english_text with operator present and value null. This is a registered source fact, not free-form prose; do not invent another fact name or treat a missing source fact as false.",
-                "Use input_prerequisites for required metadata, source content, template resources, or runtime services. Keys must use the registered namespace for their kind: metadata uses thesis_profile., source_content uses source_inventory., template_resource uses template_profile., and runtime uses runtime. (for example runtime.anchor_inventory, never runtime_context.*). Do not fabricate missing inputs.",
+                "Use input_prerequisites for required metadata, source content, template resources, or runtime services. Keys must use the registered namespace for their kind: metadata uses registered thesis_profile paths such as thesis_profile.cover_metadata or thesis_profile.cover_metadata.title_zh, source_content uses source_inventory., template_resource uses template_profile., and runtime uses registered runtime paths such as runtime.anchor_inventory or runtime.anchor_inventory.selected, never runtime_context.*. Do not fabricate missing inputs.",
                 "Use verification to declare the minimum evidence mode: static_docx, word_render, pdf_render, manual, or external.",
                 "Resolve each clause through its evidence_ids and the matching evidence_context entry; the evidence map is authoritative for source text, runs, styles, location, and neighboring context.",
                 "Use verify_existing only when an existing_requirement_id is being reused and the emitted role, properties, evidence_ids, and source text are an exact evidence-backed match. If the evidence occurrence differs, emit a new requirement or use a non-executable classification; do not force an existing_requirement_id.",
@@ -1487,8 +1659,12 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
                 "Every emitted requirement MUST contain at least one non-null property in its role-specific properties object. A field_key identifies a content instance but is not an executable payload; do not emit properties: {} or use field_key alone. For text and cover-field roles, copy the exact evidence-backed text into properties.text; for style/layout roles, emit the declared nested style or layout property.",
                 "Mechanical response gate: classification is not normative_basis. Never put informational, executable, or any classification string into normative_basis; use only the enum values declared by response_schema and omit the field when no declared basis is supported.",
                 "Mechanical response gate: require_after_role and keyword constraints must remain at the exact nested path declared by the selected role_properties_schema. Do not create a top-level keywords_zh/keywords_en role or move nested properties into a different role.",
+      "For an explicit acknowledgments length clause such as '字数一般不超过500字', use the content_constraints role with the nested payload properties.acknowledgments.max_chars. Do not emit generic null-valued placeholder fields or put the limit at the role root; the bridge may compile this exact evidence-backed form mechanically.",
+      "For an explicit appendix placement clause such as '附录放在正文之后另起页', use the appendices role with properties.page_break_each: true. Do not emit generic null-valued appendix fields or infer labels/titles/order from this clause; the bridge may compile only this exact evidence-backed page-break form mechanically.",
+      "For a cover requirement with an empty required institution string and the declared neutral placeholder policy, preserve the cover structure and use '——'; never copy a school name or infer an institution identity from nearby evidence.",
                 "Mechanical response gate: on retry after local rejection, regenerate the complete object from this chunk. Never auto-correct an invalid enum, invent missing evidence, change a semantic classification without evidence, or reuse a prior response. Apply only mechanical schema corrections explicitly required by the validator, such as omitting an invalid optional field or using [] for a non-executable classification.",
                 "Mechanical retry gate: a partial_clause_coverage error does not authorize changing classification, obligations, clause_ids, or requirement count. Preserve the baseline classification and complete the missing role-specific requirement only when the current evidence and declared schema support it; otherwise return the baseline unchanged and let the bridge fail closed.",
+                "Mechanical retry gate: when executable_review_requires_all_obligations_covered is reported, never change a non-covered obligation to covered merely to satisfy the gate. Preserve each obligation id and status; if the current evidence/backend cannot cover one obligation, reclassify only that clause to the most accurate non-executable classification and remove its clause edge from requirements. Do not change any other review, requirement payload, evidence, or obligation.",
                 "Mechanical response gate: if a clause contains several obligations, include an obligations array with one object per obligation (id, status, reason). Status covered is allowed only when that obligation is fully represented; any residual obligation makes the parent review non-executable.",
                 "Use only the allowed requirement roles and the corresponding properties schema in requirement_contract. Never invent role names such as cover_metadata, declaration_originality, authorization_statement, or other role names absent from that contract; use cover, declarations, document_structure, or a registered text role instead.",
                 "For an existing requirement, the request-only field _eligible_clause_ids lists the exact clause occurrences whose evidence may be reused. Do not use that existing_requirement_id for any other clause_id; never copy an existing requirement from a different evidence occurrence.",
@@ -2263,9 +2439,14 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
                         staged_llm["ordered_role_groups"] = [
                             group for group in groups if group != primary_order
                         ]
+                projection_merge = (
+                    _merge_cover_projection
+                    if top_key == "cover"
+                    else _merge_scoped_projection
+                )
                 projection_conflicts = [
                     (target_roles[0], key, old, new)
-                    for key, old, new in _merge_scoped_projection(staged_llm, scoped_props)
+                    for key, old, new in projection_merge(staged_llm, scoped_props)
                 ]
                 for target_role, key, old, new in projection_conflicts:
                     conflicts.append({
@@ -2290,9 +2471,23 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
                         "property": key, "rule_value": old, "llm_value": new,
                         "clause_ids": sorted(clause_ids),
                     })
-                merged_top_level = copy.deepcopy(spec.get(top_key, {}))
-                scoped_baseline_conflicts = _merge_scoped_projection(
-                    merged_top_level, scoped_props, prefer_incoming=True,
+                # Rebuild the shared projection from the deterministic
+                # baseline plus the complete canonical LLM projection.  For
+                # ``cover`` this is important: applying each local variant
+                # directly to the already-merged cover can overwrite an
+                # earlier field order and create duplicate global orders.
+                merged_top_level = copy.deepcopy(
+                    preserved.get(top_key, {}) if top_key == "cover"
+                    else spec.get(top_key, {})
+                )
+                scoped_baseline_conflicts = (
+                    _merge_cover_projection(
+                        merged_top_level, staged_llm, prefer_incoming=True,
+                    )
+                    if top_key == "cover"
+                    else _merge_scoped_projection(
+                        merged_top_level, scoped_props, prefer_incoming=True,
+                    )
                 )
                 for key, old, new in scoped_baseline_conflicts:
                     conflicts.append({
@@ -3601,6 +3796,15 @@ def analyse(args: argparse.Namespace) -> int:
         conflicts.append(conflict)
         spec.setdefault("blocking_errors", []).append(conflict)
         spec["status"] = "needs_clarification"
+    checker_id_changes = normalize_verification_checker_ids(spec)
+    if checker_id_changes:
+        audit.append({
+            "type": "verification_checker_alias_normalization",
+            "rule_id": "registered_checker_aliases_v1",
+            "semantic_inference": "none",
+            "authorization": "exact_registered_checker_alias_only",
+            "changes": checker_id_changes,
+        })
     normalize_role_line_spacing_units(spec)
     accepted_evidence_ids = {e["id"] for e in evidence["evidence"]}
     if official_template_evidence is not None:

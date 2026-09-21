@@ -44,6 +44,11 @@ SOURCE_MARKERS: tuple[tuple[str, re.Pattern[str]], ...] = (
 )
 PLACEHOLDER_PATTERNS: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("unconfirmed_metadata", re.compile(r"(?:待确认|待填写|待补充|TBD|TODO)", re.I)),
+    # Review-draft markers are intentionally visible and must never be
+    # mistaken for release evidence.  The strict submission audit treats
+    # either the Chinese label or its stable marker id as a critical
+    # placeholder; the draft policy can still emit the same DOCX safely.
+    ("manual_review_marker", re.compile(r"(?:人工审查|人工待审|MR-\d{4})")),
     ("template_x_placeholder", re.compile(r"(?:X{2,}|Ｘ{2,})")),
     ("template_delete_note", re.compile(r"提交存档论文时请删除此备注")),
     ("incomplete_date_placeholder", re.compile(r"(?:20\s*年\s*月\s*日|二[〇○零]XX年XX月)", re.I)),

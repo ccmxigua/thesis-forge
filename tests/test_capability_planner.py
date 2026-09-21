@@ -103,6 +103,31 @@ class CapabilityPlannerTest(unittest.TestCase):
         self.assertEqual(report["status"], "ready")
         self.assertTrue(report["execution_ready"])
 
+    def test_registered_appendix_layout_properties_are_executable(self) -> None:
+        spec = {
+            "requirements": [{
+                "id": "R1",
+                "role": "appendices",
+                "properties": {
+                    "label_style": "alpha_upper",
+                    "page_break_each": True,
+                    "per_appendix_title_required": True,
+                },
+                "clause_ids": ["C1"],
+            }],
+            "clause_compliance": [{
+                "clause_id": "C1",
+                "scope": "docx",
+                "status": "pending_execution",
+                "requirement_ids": ["R1"],
+            }],
+        }
+        report = self.planner.plan_capabilities(spec, self.registry, "full")
+        self.assertEqual(report["requirements"][0]["disposition"], "supported")
+        self.assertEqual(report["clauses"][0]["disposition"], "supported")
+        self.assertEqual(report["status"], "ready")
+        self.assertTrue(report["execution_ready"])
+
     def test_footnote_style_role_is_executable(self) -> None:
         spec = {"requirements": [{"id": "R1", "role": "footnote",
                                   "properties": {"font": {"size_pt": 10.5}},
@@ -238,6 +263,25 @@ class CapabilityPlannerTest(unittest.TestCase):
         self.assertTrue(report["execution_ready"])
         self.assertTrue(report["inputs"]["metadata_provided"])
 
+    def test_cover_metadata_object_satisfies_declared_prerequisite(self) -> None:
+        spec = {"requirements": [{
+            "id": "R-cover-profile", "role": "cover",
+            "properties": {"institution": "——", "fields": []},
+            "clause_ids": ["C-cover-profile"],
+            "input_prerequisites": [{
+                "kind": "metadata", "key": "thesis_profile.cover_metadata",
+                "required": True, "reason": "cover metadata object required",
+            }],
+        }], "clause_compliance": [{
+            "clause_id": "C-cover-profile", "scope": "docx", "status": "pending_execution",
+            "requirement_ids": ["R-cover-profile"], "evidence_ids": ["E-cover-profile"],
+        }]}
+        report = self.planner.plan_capabilities(
+            spec, self.registry, "full",
+            metadata={"cover_metadata": {"title_zh": "测试题目"}})
+        self.assertEqual(report["requirements"][0]["missing_declared_inputs"], [])
+        self.assertEqual(report["requirements"][0]["category"], "supported")
+
     def test_runtime_anchor_inventory_satisfies_runtime_prerequisite(self) -> None:
         spec = {"requirements": [{
             "id": "R-anchor", "role": "declarations",
@@ -255,6 +299,28 @@ class CapabilityPlannerTest(unittest.TestCase):
         report = self.planner.plan_capabilities(
             spec, self.registry, "full",
             runtime_inventory={"declaration_anchor": "abstract_title_zh"})
+        self.assertEqual(report["requirements"][0]["missing_declared_inputs"], [])
+        self.assertEqual(report["requirements"][0]["category"], "supported")
+
+    def test_nested_runtime_anchor_selection_satisfies_runtime_prerequisite(self) -> None:
+        spec = {"requirements": [{
+            "id": "R-anchor-selected", "role": "declarations",
+            "properties": {"before_role": "abstract_title_zh", "items": [{
+                "id": "authorization", "signature_placeholders": []
+            }]}, "clause_ids": ["C-anchor-selected"],
+            "input_prerequisites": [{
+                "kind": "runtime", "key": "runtime.anchor_inventory.selected",
+                "required": True, "reason": "selected anchor must be verified"
+            }],
+        }], "clause_compliance": [{
+            "clause_id": "C-anchor-selected", "scope": "docx", "status": "pending_execution",
+            "requirement_ids": ["R-anchor-selected"], "evidence_ids": ["E-anchor-selected"],
+        }]}
+        report = self.planner.plan_capabilities(
+            spec, self.registry, "full",
+            runtime_inventory={"anchor_inventory": {"selected": {
+                "name": "abstract_title_zh", "binding_status": "verified",
+            }}})
         self.assertEqual(report["requirements"][0]["missing_declared_inputs"], [])
         self.assertEqual(report["requirements"][0]["category"], "supported")
 

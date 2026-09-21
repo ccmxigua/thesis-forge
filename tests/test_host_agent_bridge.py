@@ -427,6 +427,38 @@ class HostAgentBridgeTests(unittest.TestCase):
             )
         )
 
+    def test_empty_payload_fill_may_rewrite_only_the_requirement_reason(self) -> None:
+        previous = self._executable_response({"provenance": {}})
+        previous["requirements"][0]["properties"] = {}
+        previous["requirements"][0]["reason"] = "首轮解释"
+        current = self._executable_response({"provenance": {}})
+        current["requirements"][0]["reason"] = "重试后的解释"
+        records = [{
+            "code": "empty_requirement_properties",
+            "json_pointer": "$.requirements[0].properties",
+        }]
+        changed = bridge._retry_change_paths(previous, current)
+        self.assertEqual(
+            changed,
+            ["$.requirements[0].properties.font", "$.requirements[0].reason"],
+        )
+        self.assertTrue(bridge._retry_changes_allowed(
+            records,
+            changed,
+            contract_version="2.1",
+            previous_response=previous,
+            current_response=current,
+        ))
+        current["requirements"][0]["clause_ids"] = ["C999"]
+        changed = bridge._retry_change_paths(previous, current)
+        self.assertFalse(bridge._retry_changes_allowed(
+            records,
+            changed,
+            contract_version="2.1",
+            previous_response=previous,
+            current_response=current,
+        ))
+
     def test_retry_allows_empty_payload_fill_and_validator_named_property_removal(self) -> None:
         previous = {
             "contract_version": "3.0",
@@ -570,6 +602,44 @@ class HostAgentBridgeTests(unittest.TestCase):
             previous_response=previous, current_response=current,
         ))
 
+    def test_v3_retry_allows_only_first_occurrence_evidence_deduplication(self) -> None:
+        previous = {
+            "contract_version": "3.0",
+            "requirements": [{
+                "role": "declarations", "properties": {"text": "授权书"},
+                "clause_ids": ["C1"], "evidence_ids": ["E1", "E2", "E2"],
+            }],
+            "clause_reviews": [{"clause_id": "C1", "classification": "executable"}],
+            "unsupported_items": [], "reported_conflicts": [],
+        }
+        current = json.loads(json.dumps(previous))
+        current["requirements"][0]["evidence_ids"] = ["E1", "E2"]
+        records = [{
+            "code": "duplicate_evidence_ids",
+            "json_pointer": "$.requirements[0].evidence_ids",
+        }]
+        changed = bridge._retry_change_paths(previous, current)
+        self.assertEqual(changed, ["$.requirements"])
+        self.assertTrue(bridge._retry_changes_allowed(
+            records, changed, contract_version="3.0",
+            previous_response=previous, current_response=current,
+        ))
+
+        current["requirements"][0]["evidence_ids"] = ["E2", "E1"]
+        changed = bridge._retry_change_paths(previous, current)
+        self.assertFalse(bridge._retry_changes_allowed(
+            records, changed, contract_version="3.0",
+            previous_response=previous, current_response=current,
+        ))
+        current = json.loads(json.dumps(previous))
+        current["requirements"][0]["properties"]["text"] = "改动后的授权书"
+        current["requirements"][0]["evidence_ids"] = ["E1", "E2"]
+        changed = bridge._retry_change_paths(previous, current)
+        self.assertFalse(bridge._retry_changes_allowed(
+            records, changed, contract_version="3.0",
+            previous_response=previous, current_response=current,
+        ))
+
     def test_v3_relation_completion_restores_requirements_after_reason_rewrite(self) -> None:
         previous = {
             "contract_version": "3.0",
@@ -663,6 +733,222 @@ class HostAgentBridgeTests(unittest.TestCase):
             chunk={"clauses": [{"id": f"C{i}"} for i in range(1, 4)]},
         ))
 
+    def test_v3_retry_allows_only_proven_non_requirement_projection(self) -> None:
+        previous = {
+            "contract_version": "3.0",
+            "requirements": [
+                {
+                    "role": "body_text", "properties": {"text": "保留"},
+                    "clause_ids": ["C1"], "evidence_ids": ["E1"],
+                },
+                {
+                    "role": "content_constraints", "properties": {"text": "未解决"},
+                    "clause_ids": ["C2"], "evidence_ids": ["E2"],
+                },
+            ],
+            "clause_reviews": [
+                {"clause_id": "C1", "classification": "executable"},
+                {"clause_id": "C2", "classification": "unresolved"},
+            ],
+            "unsupported_items": [],
+            "reported_conflicts": [],
+        }
+        current = json.loads(json.dumps(previous, ensure_ascii=False))
+        current["requirements"].pop(1)
+        records = [{
+            "code": "non_requirement_classification_relation",
+            "json_pointer": "$.requirements[1]",
+            "requirement_index": 1,
+            "relation_category": "non_requirement_classification",
+            "clause_ids": ["C2"],
+        }]
+        chunk = {"clauses": [{"id": "C1"}, {"id": "C2"}]}
+        changed = bridge._retry_change_paths(previous, current)
+        self.assertEqual(changed, ["$.requirements"])
+        self.assertTrue(bridge._v3_non_requirement_projection_allowed(
+            previous, current, records, changed, chunk=chunk,
+        ))
+        self.assertTrue(bridge._retry_changes_allowed(
+            records, changed, contract_version="3.0",
+            previous_response=previous, current_response=current, chunk=chunk,
+        ))
+
+        unsafe = json.loads(json.dumps(previous, ensure_ascii=False))
+        unsafe["requirements"].pop(0)
+        self.assertFalse(bridge._retry_changes_allowed(
+            records, bridge._retry_change_paths(previous, unsafe),
+            contract_version="3.0", previous_response=previous,
+            current_response=unsafe, chunk=chunk,
+        ))
+
+    def test_v3_retry_allows_non_requirement_projection_with_named_payload_cleanup(self) -> None:
+        previous = {
+            "contract_version": "3.0",
+            "requirements": [
+                {
+                    "role": "body_text", "properties": {"style": "bad"},
+                    "clause_ids": ["C1"], "evidence_ids": ["E1"],
+                },
+                {
+                    "role": "body_text", "properties": {"text": "未解决"},
+                    "clause_ids": ["C2"], "evidence_ids": ["E2"],
+                },
+            ],
+            "clause_reviews": [
+                {"clause_id": "C1", "classification": "executable"},
+                {"clause_id": "C2", "classification": "unsupported_backend"},
+            ],
+            "unsupported_items": [],
+        }
+        current = json.loads(json.dumps(previous, ensure_ascii=False))
+        current["requirements"] = [{
+            "role": "body_text", "properties": {},
+            "clause_ids": ["C1"], "evidence_ids": ["E1"],
+        }]
+        records = [
+            {
+                "code": "unknown_property",
+                "json_pointer": "$.requirements[0].properties",
+                "raw_error": "unknown property 'style'",
+            },
+            {
+                "code": "non_requirement_classification_relation",
+                "json_pointer": "$.requirements[1]",
+                "requirement_index": 1,
+                "relation_category": "non_requirement_classification",
+                "clause_ids": ["C2"],
+            },
+        ]
+        chunk = {
+            "clauses": [
+                {"id": "C1", "evidence_ids": ["E1"]},
+                {"id": "C2", "evidence_ids": ["E2"]},
+            ],
+            "evidence_context": {
+                "E1": {"text": "固定正文"},
+                "E2": {"text": "未解决"},
+            },
+            "requirement_contract": {
+                "role_properties_schema": {"body_text": {"$ref": "#/$defs/roleSpec"}},
+            },
+        }
+        changed = bridge._retry_change_paths(previous, current)
+        self.assertEqual(changed, ["$.requirements"])
+        self.assertTrue(bridge._retry_changes_allowed(
+            records, changed, contract_version="3.0",
+            previous_response=previous, current_response=current, chunk=chunk,
+        ))
+
+        current["requirements"][0]["properties"] = {"text": "猜测正文"}
+        self.assertFalse(bridge._retry_changes_allowed(
+            records, bridge._retry_change_paths(previous, current),
+            contract_version="3.0", previous_response=previous,
+            current_response=current, chunk=chunk,
+        ))
+
+    def test_v3_retry_allows_only_exact_fixed_declaration_completion(self) -> None:
+        previous = {
+            "contract_version": "3.0",
+            "requirements": [
+                {
+                    "role": "body_text",
+                    "properties": {"text": "保留 requirement"},
+                    "clause_ids": ["C1"],
+                    "evidence_ids": ["E1"],
+                },
+                {
+                    "role": "table_text",
+                    "properties": {},
+                    "clause_ids": [],
+                    "evidence_ids": [],
+                    "confidence": 0,
+                    "reason": "",
+                },
+            ],
+            "clause_reviews": [
+                {"clause_id": "C1", "classification": "executable", "reason": "保留"},
+                {"clause_id": "C2", "classification": "executable", "reason": "原始标题"},
+                {"clause_id": "C3", "classification": "executable", "reason": "原始正文"},
+            ],
+            "unsupported_items": [],
+            "reported_conflicts": [],
+        }
+        current = json.loads(json.dumps(previous, ensure_ascii=False))
+        current["requirements"] = [
+            json.loads(json.dumps(previous["requirements"][0], ensure_ascii=False)),
+            {
+                "role": "declarations",
+                "properties": {
+                    "before_role": "abstract_title_zh",
+                    "items": [{
+                        "heading": "学位论文使用授权书",
+                        "body_parts": ["本人同意提交电子版"],
+                        "source_evidence_ids": ["E2", "E3"],
+                    }],
+                },
+                "clause_ids": ["C2", "C3"],
+                "evidence_ids": ["E2", "E3"],
+                "confidence": 0.99,
+                "reason": "由当前证据固定生成",
+            },
+        ]
+        current["clause_reviews"][2]["reason"] = "当前证据明确该固定声明正文"
+        records = [
+            {
+                "code": "empty_requirement_properties",
+                "json_pointer": "$.requirements[1].properties",
+                "raw_error": "must_include_semantic_payload",
+            },
+            {
+                "code": "requirement_relation_mismatch",
+                "json_pointer": "$.requirements[1]",
+                "raw_error": "requirements_not_referenced_by_clause_review:1",
+            },
+            {
+                "code": "missing_derived_requirement",
+                "json_pointer": "$.clause_reviews[1]",
+                "raw_error": "executable_review_requires_derived_requirement",
+            },
+            {
+                "code": "missing_derived_requirement",
+                "json_pointer": "$.clause_reviews[2]",
+                "raw_error": "executable_review_requires_derived_requirement",
+            },
+        ]
+        chunk = {
+            "declaration_anchor_preference": "abstract_title_zh",
+            "clauses": [
+                {"id": "C1", "text": "保留 requirement", "evidence_ids": ["E1"]},
+                {"id": "C2", "text": "学位论文使用授权书", "evidence_ids": ["E2"]},
+                {"id": "C3", "text": "本人同意提交电子版", "evidence_ids": ["E3"]},
+                {"id": "C4", "text": "摘要", "evidence_ids": ["E4"]},
+            ],
+            "evidence_context": {
+                "E1": {"text": "保留 requirement"},
+                "E2": {"text": "学位论文使用授权书"},
+                "E3": {"text": "本人同意提交电子版"},
+                "E4": {"text": "摘要"},
+            },
+        }
+        changed = bridge._retry_change_paths(previous, current)
+        self.assertEqual(
+            changed,
+            ["$.clause_reviews[2].reason", "$.requirements"],
+        )
+        with patch.object(bridge, "validate_host_agent_response", return_value=[]):
+            self.assertTrue(bridge._retry_changes_allowed(
+                records, changed, contract_version="3.0",
+                previous_response=previous, current_response=current, chunk=chunk,
+            ))
+
+        current["requirements"][1]["properties"]["items"][0]["body_parts"] = ["猜测正文"]
+        changed = bridge._retry_change_paths(previous, current)
+        with patch.object(bridge, "validate_host_agent_response", return_value=[]):
+            self.assertFalse(bridge._retry_changes_allowed(
+                records, changed, contract_version="3.0",
+                previous_response=previous, current_response=current, chunk=chunk,
+            ))
+
     def test_v3_retry_restores_omitted_baseline_requirements_before_accepting_additions(self) -> None:
         previous = {
             "contract_version": "3.0",
@@ -743,9 +1029,9 @@ class HostAgentBridgeTests(unittest.TestCase):
             }],
             "clause_reviews": [
                 {"clause_id": "C1", "classification": "executable"},
-                {"clause_id": "C2", "classification": "informational"},
+                {"clause_id": "C2", "classification": "unsupported_backend"},
             ],
-            "unsupported_items": [],
+            "unsupported_items": ["C2：后端无法验证该要求"],
         }
         records = [
             {"code": "empty_requirement_properties"},
@@ -770,9 +1056,62 @@ class HostAgentBridgeTests(unittest.TestCase):
             },
         }
         changed = bridge._retry_change_paths(previous, current)
-        self.assertEqual(changed, ["$.clause_reviews", "$.requirements"])
+        self.assertEqual(
+            changed,
+            ["$.clause_reviews", "$.requirements", "$.unsupported_items"],
+        )
         with patch.object(bridge, "validate_host_agent_response", return_value=[]):
             self.assertTrue(bridge._retry_changes_allowed(
+                records, changed, contract_version="3.0",
+                previous_response=previous, current_response=current, chunk=chunk,
+            ))
+
+        current["unsupported_items"] = ["C9：不属于当前 chunk"]
+        changed = bridge._retry_change_paths(previous, current)
+        with patch.object(bridge, "validate_host_agent_response", return_value=[]):
+            self.assertFalse(bridge._retry_changes_allowed(
+                records, changed, contract_version="3.0",
+                previous_response=previous, current_response=current, chunk=chunk,
+            ))
+
+    def test_v3_retry_allows_only_validator_named_missing_clause_review(self) -> None:
+        previous = {
+            "contract_version": "3.0",
+            "requirements": [{
+                "role": "table", "properties": {"style": "three_line"},
+                "clause_ids": ["C1"], "evidence_ids": ["E1"],
+            }, {
+                "role": "table", "properties": {"border_widths_pt": {"top": 1.5}},
+                "clause_ids": ["C2"], "evidence_ids": ["E2"],
+            }],
+            "clause_reviews": [{"clause_id": "C1", "classification": "executable"}],
+            "unsupported_items": [], "reported_conflicts": [],
+        }
+        current = json.loads(json.dumps(previous))
+        current["clause_reviews"].append({
+            "clause_id": "C2", "classification": "informational",
+        })
+        records = [{
+            "code": "missing_clause_review",
+            "json_pointer": "$.requirements[0]",
+            "raw_error": "$.requirements[0]:missing_clause_review:clause_ids=C2",
+        }, {
+            "code": "contract_validation_error",
+            "raw_error": "clause_reviews_must_cover_each_chunk_clause_exactly_once",
+        }]
+        chunk = {"clauses": [{"id": "C1"}, {"id": "C2"}]}
+        changed = bridge._retry_change_paths(previous, current)
+        self.assertEqual(changed, ["$.clause_reviews"])
+        with patch.object(bridge, "validate_host_agent_response", return_value=[]):
+            self.assertTrue(bridge._retry_changes_allowed(
+                records, changed, contract_version="3.0",
+                previous_response=previous, current_response=current, chunk=chunk,
+            ))
+
+        current["clause_reviews"][0]["classification"] = "informational"
+        changed = bridge._retry_change_paths(previous, current)
+        with patch.object(bridge, "validate_host_agent_response", return_value=[]):
+            self.assertFalse(bridge._retry_changes_allowed(
                 records, changed, contract_version="3.0",
                 previous_response=previous, current_response=current, chunk=chunk,
             ))
@@ -831,6 +1170,9 @@ class HostAgentBridgeTests(unittest.TestCase):
                 "role": "cover", "properties": {
                     "before_role": "document_start", "items": [],
                 }, "clause_ids": ["C1"], "evidence_ids": ["E1"],
+                "verification": {
+                    "mode": "static_docx", "checks": ["保留检查", ""],
+                },
             }],
             "clause_reviews": [{
                 "clause_id": "C1", "classification": "executable",
@@ -855,7 +1197,13 @@ class HostAgentBridgeTests(unittest.TestCase):
             {"code": "schema_contract_violation", "json_pointer": "$.requirements[0].properties"},
             {"code": "unknown_property", "json_pointer": "$.requirements[0].properties"},
             {"code": "cover_binding_violation", "json_pointer": "$.requirements[0].properties.fields"},
+            {
+                "code": "contract_validation_error",
+                "json_pointer": "$.requirements[0].verification.checks",
+                "raw_error": "$.requirements[0].verification.checks[1]: is shorter than 1 characters",
+            },
         ]
+        current["requirements"][0]["verification"]["checks"] = ["保留检查"]
         changed = bridge._retry_change_paths(previous, current)
         chunk = {"response_schema": {"type": "object"}}
         with patch.object(bridge, "validate_host_agent_response", return_value=[]):
@@ -946,6 +1294,86 @@ class HostAgentBridgeTests(unittest.TestCase):
             bridge._response_sha256(repaired),
         )
         self.assertEqual(len(response["requirements"]), 4)
+
+    def test_mechanical_repair_removes_only_unbound_empty_requirement_placeholder(self) -> None:
+        response = {
+            "requirements": [
+                {
+                    "role": "declarations",
+                    "properties": {"items": [{"heading": "固定声明"}]},
+                    "clause_ids": ["C1"],
+                    "evidence_ids": ["E1"],
+                    "reason": "固定声明文本有来源依据。",
+                    "confidence": 0.9,
+                },
+                {
+                    "role": "body_text",
+                    "properties": {
+                        "style": None,
+                        "top_border_pt": None,
+                        "header_border_pt": None,
+                        "bottom_border_pt": None,
+                        "remove_vertical_borders": None,
+                        "repeat_header_row": None,
+                        "allow_row_split": None,
+                        "keep_with_caption": None,
+                        "border_widths_pt": None,
+                        "continuation": None,
+                    },
+                    "clause_ids": [],
+                    "evidence_ids": [],
+                    "confidence": 0,
+                    "reason": "",
+                },
+            ],
+            "clause_reviews": [{"clause_id": "C1", "classification": "covered"}],
+        }
+        repaired, repairs = bridge._apply_safe_mechanical_repairs(
+            response,
+            [{
+                "code": "contract_validation_error",
+                "json_pointer": "$.requirements[1].reason",
+                "raw_error": "$.requirements[1].reason: is shorter than 1 characters",
+            }, {
+                "code": "empty_requirement_properties",
+                "json_pointer": "$.requirements[1].properties",
+                "raw_error": "$.requirements[1].properties: must_include_semantic_payload",
+            }, {
+                "code": "schema_contract_violation",
+                "json_pointer": "$.requirements[1].clause_ids",
+                "raw_error": "$.requirements[1].clause_ids: must_be_non_empty",
+            }, {
+                "code": "schema_contract_violation",
+                "json_pointer": "$.requirements[1].evidence_ids",
+                "raw_error": "$.requirements[1].evidence_ids: must_be_non_empty",
+            }, {
+                "code": "requirement_relation_mismatch",
+                "json_pointer": "$.requirements[1]",
+                "raw_error": "requirements_not_referenced_by_clause_review:1",
+                "relation_category": "missing_clause_relation",
+            }],
+        )
+        self.assertIsNotNone(repaired)
+        self.assertEqual(len(repaired["requirements"]), 1)
+        self.assertEqual(repaired["requirements"][0]["role"], "declarations")
+        self.assertEqual(
+            repairs[-1]["rule_id"],
+            "remove_unbound_empty_requirement_placeholder_v1",
+        )
+        self.assertEqual(repairs[-1]["removed_requirement_indexes"], [1])
+
+        for field, value in (("clause_ids", ["C2"]), ("evidence_ids", ["E2"]), ("reason", "有语义")):
+            response["requirements"][1][field] = value
+            rejected, _ = bridge._apply_safe_mechanical_repairs(
+                response,
+                [{
+                    "code": "empty_requirement_properties",
+                    "json_pointer": "$.requirements[1].properties",
+                    "raw_error": "must_include_semantic_payload",
+                }],
+            )
+            self.assertIsNone(rejected)
+            response["requirements"][1][field] = [] if field != "reason" else ""
 
     def test_mechanical_repair_never_removes_mixed_or_noninformational_relations(self) -> None:
         cases = [
@@ -1172,6 +1600,264 @@ class HostAgentBridgeTests(unittest.TestCase):
         self.assertEqual(repaired["requirements"][0]["properties"]["text"], "摘 要")
         self.assertEqual(repairs[0]["filled_property"], "text")
         self.assertNotIn("text", response["requirements"][0]["properties"])
+
+    def test_exact_acknowledgments_limit_is_compiled_into_nested_payload(self) -> None:
+        response = {
+            "requirements": [{
+                "role": "content_constraints",
+                "properties": {},
+                "clause_ids": ["C1"],
+                "evidence_ids": ["E1"],
+            }],
+        }
+        repaired, repairs = bridge._apply_safe_mechanical_repairs(
+            response,
+            [{
+                "code": "empty_requirement_properties",
+                "json_pointer": "$.requirements[0].properties",
+                "raw_error": "must_include_semantic_payload",
+            }],
+            chunk={
+                "clauses": [{
+                    "id": "C1", "text": "字数一般不超过500字", "evidence_ids": ["E1"],
+                }],
+                "evidence_context": {
+                    "E1": {"id": "E1", "text": "字数一般不超过500字"},
+                },
+                "requirement_contract": {},
+            },
+        )
+        self.assertIsNotNone(repaired)
+        self.assertEqual(
+            repaired["requirements"][0]["properties"],
+            {"acknowledgments": {"max_chars": 500}},
+        )
+        self.assertEqual(repairs[0]["rule_id"], "compile_exact_acknowledgments_max_chars_v1")
+
+        response["requirements"][0]["clause_ids"] = ["C2"]
+        rejected, _ = bridge._apply_safe_mechanical_repairs(
+            response,
+            [{
+                "code": "empty_requirement_properties",
+                "json_pointer": "$.requirements[0].properties",
+                "raw_error": "must_include_semantic_payload",
+            }],
+            chunk={
+                "clauses": [{"id": "C2", "text": "致谢内容应简短", "evidence_ids": ["E1"]}],
+                "evidence_context": {"E1": {"id": "E1", "text": "致谢内容应简短"}},
+                "requirement_contract": {},
+            },
+        )
+        self.assertIsNone(rejected)
+
+    def test_exact_appendix_page_break_is_compiled_into_declared_payload(self) -> None:
+        response = {
+            "requirements": [{
+                "role": "appendices",
+                "properties": {
+                    "required_when_profile_has_appendices": None,
+                    "label_style": None,
+                    "label_prefix": None,
+                    "page_break_each": None,
+                    "per_appendix_title_required": None,
+                },
+                "clause_ids": ["C1"],
+                "evidence_ids": ["E1"],
+            }],
+        }
+        repaired, repairs = bridge._apply_safe_mechanical_repairs(
+            response,
+            [{
+                "code": "empty_requirement_properties",
+                "json_pointer": "$.requirements[0].properties",
+                "raw_error": "must_include_semantic_payload",
+            }],
+            chunk={
+                "clauses": [{
+                    "id": "C1", "text": "附录放在正文之后另起页", "evidence_ids": ["E1"],
+                }],
+                "evidence_context": {
+                    "E1": {"id": "E1", "text": "附录放在正文之后另起页"},
+                },
+                "requirement_contract": {},
+            },
+        )
+        self.assertIsNotNone(repaired)
+        self.assertEqual(
+            repaired["requirements"][0]["properties"],
+            {"page_break_each": True},
+        )
+        self.assertEqual(repairs[0]["rule_id"], "compile_exact_appendix_page_break_v1")
+
+        response["requirements"][0]["clause_ids"] = ["C2"]
+        rejected, _ = bridge._apply_safe_mechanical_repairs(
+            response,
+            [{
+                "code": "empty_requirement_properties",
+                "json_pointer": "$.requirements[0].properties",
+                "raw_error": "must_include_semantic_payload",
+            }],
+            chunk={
+                "clauses": [{"id": "C2", "text": "附录放在正文之后"}],
+                "evidence_context": {"E1": {"id": "E1", "text": "附录放在正文之后"}},
+                "requirement_contract": {},
+            },
+        )
+        self.assertIsNone(rejected)
+
+    def test_exact_appendix_label_title_is_compiled_into_declared_payload(self) -> None:
+        response = {
+            "requirements": [{
+                "role": "appendices",
+                "properties": {
+                    "required_when_profile_has_appendices": None,
+                    "label_style": None,
+                    "label_prefix": None,
+                    "page_break_each": None,
+                    "per_appendix_title_required": None,
+                },
+                "clause_ids": ["C1"],
+                "evidence_ids": ["E1"],
+            }],
+        }
+        repaired, repairs = bridge._apply_safe_mechanical_repairs(
+            response,
+            [{
+                "code": "empty_requirement_properties",
+                "json_pointer": "$.requirements[0].properties",
+                "raw_error": "must_include_semantic_payload",
+            }],
+            chunk={
+                "clauses": [{
+                    "id": "C1",
+                    "text": "附录的序号用A，B，C，…系列，如附录A，附录B等，每个附录应有标题",
+                    "evidence_ids": ["E1"],
+                }],
+                "evidence_context": {
+                    "E1": {
+                        "id": "E1",
+                        "text": "附录的序号用A，B，C，…系列，如附录A，附录B等，每个附录应有标题",
+                    },
+                },
+                "requirement_contract": {},
+            },
+        )
+        self.assertIsNotNone(repaired)
+        self.assertEqual(
+            repaired["requirements"][0]["properties"],
+            {"label_style": "alpha_upper", "per_appendix_title_required": True},
+        )
+        self.assertEqual(repairs[0]["rule_id"], "compile_exact_appendix_label_title_v1")
+
+    def test_empty_administrative_cover_institution_uses_neutral_placeholder(self) -> None:
+        response = {
+            "requirements": [{
+                "role": "cover",
+                "properties": {
+                    "institution": "",
+                    "fields": [{"id": "title_zh"}],
+                    "non_public_administration": None,
+                    "missing_value_policy": "placeholder",
+                    "missing_value_placeholder": "——",
+                },
+                "clause_ids": ["C1"],
+                "evidence_ids": ["E1"],
+            }],
+        }
+        repaired, repairs = bridge._apply_safe_mechanical_repairs(
+            response,
+            [{
+                "code": "cover_institution_placeholder",
+                "json_pointer": "$.requirements[0].properties",
+            }, {
+                "code": "cover_institution_placeholder",
+                "json_pointer": "$.requirements[0].properties.institution",
+            }],
+        )
+        self.assertIsNotNone(repaired)
+        self.assertEqual(
+            repaired["requirements"][0]["properties"]["institution"],
+            "——",
+        )
+        self.assertEqual(
+            repairs[0]["rule_id"],
+            "compile_neutral_cover_institution_placeholder_v1",
+        )
+
+        response["requirements"][0]["properties"].pop("missing_value_placeholder")
+        rejected, _ = bridge._apply_safe_mechanical_repairs(
+            response,
+            [{
+                "code": "cover_institution_placeholder",
+                "json_pointer": "$.requirements[0].properties.institution",
+            }],
+        )
+        self.assertIsNone(rejected)
+
+    def test_combined_mechanical_repairs_do_not_require_semantic_retry(self) -> None:
+        response = {
+            "contract_version": "3.0",
+            "requirements": [
+                {
+                    "role": "cover_field_label",
+                    "properties": {"style": "three_line", "continuation": None},
+                    "clause_ids": ["C1"], "evidence_ids": ["E1"],
+                },
+                {
+                    "role": "cover",
+                    "properties": {
+                        "institution": "",
+                        "fields": [],
+                        "missing_value_policy": "placeholder",
+                        "missing_value_placeholder": "——",
+                    },
+                    "clause_ids": ["C2"], "evidence_ids": ["E2"],
+                },
+                {
+                    "role": "declarations",
+                    "properties": {"items": [{
+                        "id": "authorization",
+                        "source_evidence_ids": ["E3", "E3", "E4"],
+                    }]},
+                    "clause_ids": ["C3"], "evidence_ids": ["E3", "E4"],
+                },
+            ],
+            "clause_reviews": [], "unsupported_items": [], "reported_conflicts": [],
+        }
+        records = [
+            {
+                "code": "unknown_property",
+                "json_pointer": "$.requirements[0].properties",
+                "raw_error": "unknown property 'style'",
+            },
+            {
+                "code": "cover_institution_placeholder",
+                "json_pointer": "$.requirements[1].properties",
+            },
+            {
+                "code": "contract_validation_error",
+                "json_pointer": "$.requirements[2].properties",
+                "raw_error": "must match at least one schema in anyOf",
+            },
+            {
+                "code": "contract_validation_error",
+                "json_pointer": "$.requirements[2].properties.items[0].source_evidence_ids",
+                "raw_error": "items must be unique",
+            },
+        ]
+        repaired, repairs = bridge._apply_safe_mechanical_repairs(response, records)
+        self.assertIsNotNone(repaired)
+        assert repaired is not None
+        self.assertNotIn("style", repaired["requirements"][0]["properties"])
+        self.assertEqual(
+            repaired["requirements"][1]["properties"]["institution"], "——",
+        )
+        self.assertEqual(
+            repaired["requirements"][2]["properties"]["items"][0]["source_evidence_ids"],
+            ["E3", "E4"],
+        )
+        self.assertTrue(any(item.get("rule_id") == "deduplicate_first_occurrence_source_evidence_ids_v1"
+                            for item in repairs))
 
     def test_unknown_layout_properties_are_removed_then_exact_text_is_filled(self) -> None:
         response = {

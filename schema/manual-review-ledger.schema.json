@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://thesis-forge.local/schema/manual-review-ledger.schema.json",
+  "type": "object",
+  "required": ["schema_version", "policy", "binding", "submission_ready", "items", "summary"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "policy": {"const": "review_draft_only"},
+    "binding": {
+      "type": "object",
+      "required": ["case_id", "run_id", "source_sha256", "clause_sha256", "evidence_sha256"],
+      "properties": {
+        "case_id": {"type": "string", "minLength": 1},
+        "run_id": {"type": "string", "minLength": 1},
+        "source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "clause_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "evidence_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "request_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"}
+      },
+      "additionalProperties": true
+    },
+    "submission_ready": {"const": false},
+    "items": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["marker_id", "status", "marker_required", "category", "source_text", "reason", "action"],
+        "properties": {
+          "marker_id": {"type": "string", "pattern": "^MR-[0-9]{4}$"},
+          "status": {"const": "pending_manual_review"},
+          "marker_required": {"const": true},
+          "category": {"type": "string"},
+          "source_type": {"type": "string"},
+          "source_code": {"type": "string"},
+          "source_codes": {"type": "array", "items": {"type": "string"}},
+          "clause_ids": {"type": "array", "items": {"type": "string"}},
+          "requirement_ids": {"type": "array", "items": {"type": "string"}},
+          "question_ids": {"type": "array", "items": {"type": "string"}},
+          "evidence_ids": {"type": "array", "items": {"type": "string"}},
+          "source_text": {"type": "string"},
+          "reason": {"type": "string"},
+          "action": {"type": "string"},
+          "original_blocking": {"type": "boolean"}
+        },
+        "additionalProperties": true
+      }
+    },
+    "summary": {"type": "object"}
+  },
+  "additionalProperties": true
+}

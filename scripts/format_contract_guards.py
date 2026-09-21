@@ -15,6 +15,9 @@ REGISTERED_PROFILE_FIELDS = frozenset({
     "metadata_status", "has_appendices", "has_figure_list", "has_table_list",
     "has_symbol_list", "co_supervisor_count", "student_id", "completion_date",
 })
+REGISTERED_PROFILE_OBJECTS = frozenset({
+    "cover_metadata",
+})
 REGISTERED_COVER_FIELDS = frozenset({
     "trust", "classification_number", "unit_code", "title_zh", "title_en",
     "subtitle_zh", "subtitle_en", "author_name", "student_id", "college_name",
@@ -26,6 +29,7 @@ REGISTERED_COVER_FIELDS = frozenset({
 REGISTERED_SOURCE_ROOTS = frozenset({
     "inventory", "figures", "tables", "display_equations", "publications",
     "abstract", "body", "content", "document", "funding", "acknowledgments",
+    "bibliography",
     "source", "latex", "runtime", "english_text",
 })
 REGISTERED_TEMPLATE_ROOTS = frozenset({
@@ -35,13 +39,64 @@ REGISTERED_RUNTIME_ROOTS = frozenset({
     "declaration_anchor", "declaration_anchor_status", "anchor_inventory",
     "source_docx", "word", "render",
 })
+# These are the only nested runtime paths exposed by the execution pipeline.
+# Keep this allow-list explicit: runtime.* must not become an arbitrary model-
+# controlled lookup namespace.
+REGISTERED_RUNTIME_PATHS = frozenset({
+    "anchor_inventory.selected",
+})
 REGISTERED_CHECKER_IDS = frozenset({
     "docx.required_roles", "docx.content_length", "docx.keyword_item_length",
     "docx.keyword_separator", "docx.cover_binding", "docx.declarations_anchor",
     "docx.word_render", "docx.pdf_render", "docx.property_receipts",
+    "cover_non_public_administration", "declarations_fixed_text",
     "manual.abstract_semantics", "manual.table_semantics", "manual.formula_semantics",
     "external.approval_record",
 })
+# A model may use a descriptive spelling for a checker that is already
+# registered under the canonical executable name.  Only these exact aliases
+# are normalized; arbitrary or unknown checker IDs remain a hard error.
+CHECKER_ID_ALIASES = {
+    "declaration_anchor_binding": "docx.declarations_anchor",
+    "fixed_declaration_text": "declarations_fixed_text",
+}
+
+
+def normalize_verification_checker_ids(spec: dict[str, Any]) -> list[dict[str, str]]:
+    """Canonicalize the small, explicit checker-alias set in one run.
+
+    This is a mechanical vocabulary normalization, not semantic inference:
+    the aliases are exact names for existing registered declaration checks.
+    Return an audit trail so the raw host response remains distinguishable
+    from the canonical execution contract.
+    """
+    changes: list[dict[str, str]] = []
+    requirements = spec.get("requirements", []) if isinstance(spec, dict) else []
+    if not isinstance(requirements, list):
+        return changes
+    for requirement_index, requirement in enumerate(requirements):
+        if not isinstance(requirement, dict):
+            continue
+        verification = requirement.get("verification")
+        if not isinstance(verification, dict):
+            continue
+        checker_ids = verification.get("checker_ids")
+        if not isinstance(checker_ids, list):
+            continue
+        for checker_index, checker_id in enumerate(checker_ids):
+            canonical = CHECKER_ID_ALIASES.get(checker_id)
+            if canonical is None:
+                continue
+            checker_ids[checker_index] = canonical
+            changes.append({
+                "json_pointer": (
+                    f"$.requirements[{requirement_index}].verification.checker_ids"
+                    f"[{checker_index}]"
+                ),
+                "from": checker_id,
+                "to": canonical,
+            })
+    return changes
 
 
 def registered_input_key(key: Any) -> bool:
@@ -53,6 +108,8 @@ def registered_input_key(key: Any) -> bool:
         return False
     parts = path.split(".")
     if prefix == "thesis_profile":
+        if len(parts) == 1 and parts[0] in REGISTERED_PROFILE_OBJECTS:
+            return True
         if parts[0] == "cover_metadata":
             return len(parts) == 2 and parts[1] in REGISTERED_COVER_FIELDS
         return len(parts) == 1 and parts[0] in REGISTERED_PROFILE_FIELDS
@@ -61,7 +118,10 @@ def registered_input_key(key: Any) -> bool:
     if prefix == "template_profile":
         return parts[0] in REGISTERED_TEMPLATE_ROOTS
     if prefix == "runtime":
-        return len(parts) == 1 and parts[0] in REGISTERED_RUNTIME_ROOTS
+        return (
+            (len(parts) == 1 and parts[0] in REGISTERED_RUNTIME_ROOTS)
+            or ".".join(parts) in REGISTERED_RUNTIME_PATHS
+        )
     return False
 
 

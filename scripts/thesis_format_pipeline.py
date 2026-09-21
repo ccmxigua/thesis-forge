@@ -28,6 +28,7 @@ from semantic_issue_confirmation import (
     build_confirmation_receipt,
     confirmed_clause_ids,
 )
+from manual_review import build_manual_review_ledger, write_manual_review_ledger
 from artifact_io import atomic_write_text, paths_alias
 from process_runner import run_process
 
@@ -120,6 +121,8 @@ def validate_semantic_review_configuration(args: argparse.Namespace, parser: arg
     if args.prepare_host_review and args.analysis_mode != "llm_primary":
         parser.error("--prepare-host-review requires --analysis-mode llm_primary")
     if args.strict_release:
+        if args.output_policy != "submission":
+            parser.error("--strict-release requires --output-policy submission")
         if args.compliance_mode != "full":
             parser.error("--strict-release requires --compliance-mode full")
         if not args.template_profile:
@@ -739,6 +742,8 @@ def _main(argv: list[str]) -> int:
                    help="unseen templates default to full LLM semantic extraction and completeness review")
     p.add_argument("--compliance-mode", choices=["full", "supported_subset"], default="full",
                    help="full blocks every applicable unsupported/unverifiable DOCX clause; supported_subset is compatibility/testing only")
+    p.add_argument("--output-policy", choices=["review_draft", "submission"], default="submission",
+                   help="review_draft emits red manual-review markers; submission keeps strict release gates")
     p.add_argument("--capability-registry", type=Path,
                    help="optional backend capability registry (defaults to the bundled python-docx/OOXML registry)")
     p.add_argument("--source-inventory", type=Path,
@@ -780,9 +785,13 @@ def _main(argv: list[str]) -> int:
         ):
             p.error("--case-id must contain only letters, digits, dot, underscore, or hyphen")
     validate_semantic_review_configuration(args, p)
+    execution_compliance_mode = (
+        "supported_subset" if args.output_policy == "review_draft"
+        else args.compliance_mode
+    )
     if args.host_review_chunk_size <= 0:
         p.error("--host-review-chunk-size must be a positive integer")
-    if args.preview_placeholders and args.compliance_mode != "supported_subset":
+    if args.preview_placeholders and args.compliance_mode != "supported_subset" and args.output_policy != "review_draft":
         p.error("--preview-placeholders requires --compliance-mode supported_subset")
     if args.semantic_issue_confirmations and not args.semantic_issue_confirmations.is_file():
         p.error(f"semantic issue confirmation file does not exist: {args.semantic_issue_confirmations}")
@@ -812,6 +821,7 @@ def _main(argv: list[str]) -> int:
     source_role_map_path = work / "source-role-map.json"
     semantic_issue_ledger_path = work / "semantic-issue-ledger.json"
     semantic_issue_receipt_path = work / "semantic-issue-confirmation-receipt.json"
+    manual_review_items_path = work / "manual-review-items.json"
     requirements_source = args.requirements.resolve()
     requirements_suffix = requirements_source.suffix.lower()
     if not requirements_source.is_file():
@@ -907,6 +917,9 @@ def _main(argv: list[str]) -> int:
         "output": str(args.output.resolve()), "work_dir": str(work), "steps": steps,
         "code_fingerprint": current_code_fingerprint,
         "case_id": args.case_id,
+        "output_policy": args.output_policy,
+        "requested_compliance_mode": args.compliance_mode,
+        "execution_compliance_mode": execution_compliance_mode,
         "work_reuse_policy": (
             "explicit_allow_existing_work" if args.allow_existing_work
             else "new_directory_required"
@@ -1207,14 +1220,14 @@ def _main(argv: list[str]) -> int:
             "placeholder": spec["cover"]["missing_value_placeholder"],
             "field_count": len(spec["cover"]["fields"]),
         }
-    if args.preview_placeholders:
+    if args.preview_placeholders or args.output_policy == "review_draft":
         ensure_preview_cover_placeholders(spec, manifest)
         ensure_preview_page_number_selector(spec, manifest)
     if canonical_profile is not None:
         spec["thesis_profile"] = canonical_profile
         manifest["metadata_status"] = canonical_profile.get("metadata_status")
         manifest["metadata_pending_fields"] = canonical_profile.get("pending_fields", [])
-    spec["compliance_mode"] = args.compliance_mode
+    spec["compliance_mode"] = execution_compliance_mode
     write_json(requirements_dir / "format-spec.json", spec)
     questions = read_json(requirements_dir / "questions.json")
     semantic_issue_ledger: dict[str, Any] | None = None
@@ -1271,7 +1284,7 @@ def _main(argv: list[str]) -> int:
     capability_cmd = [
         sys.executable, str(ROOT / "scripts" / "capability_planner.py"),
         str(requirements_dir / "format-spec.json"), "--out", str(capability_report_path),
-        "--compliance-mode", args.compliance_mode,
+        "--compliance-mode", execution_compliance_mode,
         "--clauses", str(requirements_dir / "requirement-clauses.json"),
     ]
     if args.capability_registry:
@@ -1315,6 +1328,52 @@ def _main(argv: list[str]) -> int:
     if not capability_report or capability_result.returncode not in {0, 3}:
         manifest.update(status="failed", reason="capability preflight failed")
         write_json(manifest_path, manifest); print(json.dumps(manifest, ensure_ascii=False)); return capability_result.returncode or 2
+    if args.output_policy == "review_draft":
+        semantic_provenance = spec.get("semantic_review_provenance")
+        if not isinstance(semantic_provenance, dict):
+            semantic_provenance = {}
+        clause_file_record = file_record(requirements_dir / "requirement-clauses.json")
+        evidence_context_path = requirements_dir / "evidence-context.json"
+        evidence_file_record = file_record(evidence_context_path) if evidence_context_path.is_file() else {}
+        manual_review_ledger = build_manual_review_ledger(
+            capability_report,
+            questions,
+            binding={
+                "case_id": args.case_id or "standalone",
+                "run_id": spec.get("run_id"),
+                "source_sha256": semantic_provenance.get(
+                    "source_sha256", manifest["inputs"]["source"].get("sha256")
+                ),
+                "clause_sha256": semantic_provenance.get(
+                    "clause_sha256", clause_file_record.get("sha256")
+                ),
+                "evidence_sha256": semantic_provenance.get(
+                    "evidence_sha256", evidence_file_record.get("sha256")
+                ),
+                "request_sha256": semantic_provenance.get("request_sha256"),
+                "requirements_sha256": manifest["inputs"]["requirements"].get("sha256"),
+                "input_source_sha256": manifest["inputs"]["source"].get("sha256"),
+                "format_spec_sha256": file_record(requirements_dir / "format-spec.json").get("sha256"),
+            },
+        )
+        # The ledger is a run product, but validate it against the checked-in
+        # schema before exposing it to the DOCX stage.  A malformed sidecar
+        # must fail here rather than silently producing an unbound red draft.
+        manual_review_schema_errors = load_and_validate(
+            manual_review_ledger, ROOT / "schema" / "manual-review-ledger.schema.json",
+        )
+        if manual_review_schema_errors:
+            manifest.update(
+                status="failed",
+                reason="manual review ledger schema validation failed",
+                manual_review_ledger_errors=manual_review_schema_errors,
+            )
+            write_json(manifest_path, manifest)
+            print(json.dumps(manifest, ensure_ascii=False))
+            return 13
+        write_manual_review_ledger(manual_review_items_path, manual_review_ledger)
+        manifest["manual_review_items"] = str(manual_review_items_path)
+        manifest["manual_review_summary"] = manual_review_ledger.get("summary", {})
     satisfied_clause_ids = {
         str(item.get("clause_id")) for item in (capability_report or {}).get("clauses", [])
         if item.get("category") == "supported"
@@ -1323,11 +1382,11 @@ def _main(argv: list[str]) -> int:
     blockers = requirement_blockers(
         spec,
         questions,
-        args.compliance_mode,
+        execution_compliance_mode,
         satisfied_clause_ids,
         confirmed_semantic_issue_ids,
     )
-    if args.preview_placeholders:
+    if args.preview_placeholders or args.output_policy == "review_draft":
         preview_blockers = sorted(set(blockers) & PREVIEW_PLACEHOLDER_BLOCKERS)
         blockers = [item for item in blockers if item not in PREVIEW_PLACEHOLDER_BLOCKERS]
         manifest["preview_bypassed_requirement_blockers"] = preview_blockers
@@ -1336,7 +1395,7 @@ def _main(argv: list[str]) -> int:
                         blocking_reasons=blockers,
                         questions_file=str(requirements_dir / "questions.json"))
         write_json(manifest_path, manifest); print(json.dumps(manifest, ensure_ascii=False)); return 3
-    if capability_gate_blocked(capability_report, args.compliance_mode):
+    if capability_gate_blocked(capability_report, execution_compliance_mode):
         manifest.update(status="blocked", reason="backend capability preflight blocked execution",
                         capability_findings=capability_report.get("findings", []))
         write_json(manifest_path, manifest); print(json.dumps(manifest, ensure_ascii=False)); return 8
@@ -1432,13 +1491,18 @@ def _main(argv: list[str]) -> int:
         write_json(manifest_path, manifest); print(json.dumps(manifest, ensure_ascii=False)); return result.returncode
 
     style_result = read_json(style_map)
-    if style_result.get("status") == "needs_clarification" and not args.allow_unresolved:
+    if (
+        style_result.get("status") == "needs_clarification"
+        and not args.allow_unresolved
+        and args.output_policy != "review_draft"
+    ):
         manifest.update(status="blocked", reason="style mapping needs clarification", questions_file=str(style_map))
         write_json(manifest_path, manifest); print(json.dumps(manifest, ensure_ascii=False)); return 4
 
     apply_cmd = [sys.executable, str(ROOT / "scripts" / "apply_format_spec.py"), str(application_input),
                  str(requirements_dir / "format-spec.json"), str(args.output), "--out-dir", str(apply_dir),
-                 "--style-map", str(style_map), "--compliance-mode", args.compliance_mode,
+                 "--style-map", str(style_map), "--compliance-mode", execution_compliance_mode,
+                 "--output-policy", args.output_policy,
                  "--capability-report", str(capability_report_path)]
     if not args.neutral_reference_docx:
         apply_cmd.append("--require-coverage")
@@ -1448,8 +1512,10 @@ def _main(argv: list[str]) -> int:
         apply_cmd += ["--official-template", str(official_template)]
     if args.render_report:
         apply_cmd += ["--render-report", str(args.render_report)]
-    if args.preview_placeholders:
+    if args.preview_placeholders or args.output_policy == "review_draft":
         apply_cmd.append("--preview-placeholders")
+    if args.output_policy == "review_draft":
+        apply_cmd += ["--manual-review-items", str(manual_review_items_path)]
     if args.template_profile and not args.neutral_reference_docx:
         # apply_format_spec retains its legacy interface; the profile gate is
         # run independently below so generation cannot self-certify it.
@@ -1470,35 +1536,95 @@ def _main(argv: list[str]) -> int:
     }
     if steps and steps[-1].get("name") == "apply_and_validate":
         steps[-1]["artifacts"] = dict(manifest["section_execution"])
-    if result.returncode or not report or not report.get("valid") or (args.compliance_mode == "full" and not report.get("format_ready")):
+    if result.returncode or not report or not report.get("valid") or (execution_compliance_mode == "full" and not report.get("format_ready")):
         manifest.update(status="failed", reason="application or validation failed",
                         validation_report=str(apply_dir / "validation-report.json"))
         write_json(manifest_path, manifest); print(json.dumps(manifest, ensure_ascii=False)); return result.returncode or 5
 
     comparison_path = apply_dir / "format-comparison.json"
     comparison_markdown = apply_dir / "FORMAT-COMPARISON.md"
-    comparison_cmd = [
-        sys.executable, str(ROOT / "scripts" / "post_generation_format_audit.py"), str(args.output),
-        "--official-template", str(official_template),
-        "--format-spec", str(requirements_dir / "format-spec.json"),
-        "--official-style-map", str(style_map),
-        "--generated-style-map", str(apply_dir / "style-map.json"),
-        "--out", str(comparison_path), "--markdown", str(comparison_markdown), "--strict",
-    ]
-    if not has_official_template:
-        comparison_cmd.append("--requirements-only")
-    comparison_result = run_step("post_generation_format_comparison", comparison_cmd, steps)
-    comparison = read_json(comparison_path) if comparison_path.exists() else None
-    if comparison_result.returncode or not comparison or comparison.get("status") != "passed":
-        manifest.update(status="failed", reason="post-generation official format comparison failed",
-                        format_comparison=str(comparison_path),
-                        format_comparison_markdown=str(comparison_markdown))
-        write_json(manifest_path, manifest); print(json.dumps(manifest, ensure_ascii=False)); return 7
+    if args.output_policy == "review_draft":
+        # A red-marked draft is deliberately not a submission artifact.  Do
+        # not let its review page, placeholders, or unresolved semantic
+        # content masquerade as an official-template comparison.  Emit an
+        # explicit deferred receipt so downstream tooling can distinguish
+        # “not run by policy” from a missing or failed comparison.
+        comparison = {
+            "schema_version": "1.0",
+            "status": "review_draft_pending",
+            "blocking": False,
+            "output_policy": "review_draft",
+            "reason": "strict official format comparison is deferred until manual review is complete",
+            "manual_review_items": str(manual_review_items_path),
+            "inputs": {
+                "generated_docx": file_record(args.output),
+                "format_spec": file_record(requirements_dir / "format-spec.json"),
+                "official_template": file_record(official_template) if has_official_template else None,
+            },
+            "summary": {"manual_review_required": True},
+        }
+        write_json(comparison_path, comparison)
+        atomic_write_text(
+            comparison_markdown,
+            "# FORMAT-COMPARISON\n\n"
+            "Status: `review_draft_pending`\n\n"
+            "Strict official-template comparison is deferred until the red manual-review "
+            "markers are resolved. This file is not release evidence.\n",
+        )
+        steps.append({
+            "name": "post_generation_format_comparison",
+            "command": [],
+            "returncode": 0,
+            "status": "review_draft_pending",
+            "blocking": False,
+        })
+        comparison_result = None
+    else:
+        comparison_cmd = [
+            sys.executable, str(ROOT / "scripts" / "post_generation_format_audit.py"), str(args.output),
+            "--official-template", str(official_template),
+            "--format-spec", str(requirements_dir / "format-spec.json"),
+            "--official-style-map", str(style_map),
+            "--generated-style-map", str(apply_dir / "style-map.json"),
+            "--out", str(comparison_path), "--markdown", str(comparison_markdown), "--strict",
+        ]
+        if not has_official_template:
+            comparison_cmd.append("--requirements-only")
+        comparison_result = run_step("post_generation_format_comparison", comparison_cmd, steps)
+        comparison = read_json(comparison_path) if comparison_path.exists() else None
+        if comparison_result.returncode or not comparison or comparison.get("status") != "passed":
+            manifest.update(status="failed", reason="post-generation official format comparison failed",
+                            format_comparison=str(comparison_path),
+                            format_comparison_markdown=str(comparison_markdown))
+            write_json(manifest_path, manifest); print(json.dumps(manifest, ensure_ascii=False)); return 7
 
     official_template_structure_valid: bool | None = None
     official_template_submission_ready: bool | None = None
     official_template_audit_status: str | None = None
-    if args.template_profile and not args.neutral_reference_docx:
+    if args.template_profile and not args.neutral_reference_docx and args.output_policy == "review_draft":
+        template_audit_path = apply_dir / "template-audit.json"
+        official_template_structure_valid = None
+        official_template_submission_ready = False
+        official_template_audit_status = "review_draft_pending"
+        write_json(template_audit_path, {
+            "schema_version": "1.0",
+            "status": "review_draft_pending",
+            "submission_ready": False,
+            "template_validation": {
+                "official_template_structure_valid": None,
+                "deferred": True,
+            },
+            "reason": "official-template submission audit is deferred until manual review is complete",
+            "manual_review_items": str(manual_review_items_path),
+        })
+        steps.append({
+            "name": "official_template_audit",
+            "command": [],
+            "returncode": 0,
+            "status": "review_draft_pending",
+            "blocking": False,
+        })
+    elif args.template_profile and not args.neutral_reference_docx:
         template_audit_path = apply_dir / "template-audit.json"
         audit_cmd = [sys.executable, str(ROOT / "scripts" / "submission_audit.py"), str(args.output),
                      "--format-spec", str(requirements_dir / "format-spec.json"),
@@ -1547,13 +1673,19 @@ def _main(argv: list[str]) -> int:
             write_json(manifest_path, manifest); print(json.dumps(manifest, ensure_ascii=False)); return 6
 
     final_submission_ready = bool(report.get("submission_ready"))
+    if args.output_policy == "review_draft":
+        final_submission_ready = False
     if confirmed_semantic_issue_ids:
         final_submission_ready = False
     if official_template_submission_ready is not None:
         final_submission_ready = final_submission_ready and official_template_submission_ready
     final_format_ready = bool(
-        report.get("valid") and report.get("format_ready")
-        and comparison.get("status") == "passed"
+        report.get("valid")
+        and (report.get("format_ready") or args.output_policy == "review_draft")
+        and (
+            comparison.get("status") == "passed"
+            or args.output_policy == "review_draft"
+        )
         and (official_template_structure_valid is not False)
     )
     if args.strict_release and not final_submission_ready:
@@ -1565,8 +1697,11 @@ def _main(argv: list[str]) -> int:
                         official_template_audit_status=official_template_audit_status)
         write_json(manifest_path, manifest); print(json.dumps(manifest, ensure_ascii=False)); return 12
     final_status = (
-        "completed_with_confirmed_semantic_issues"
-        if confirmed_semantic_issue_ids else "completed"
+        "draft_manual_review"
+        if args.output_policy == "review_draft" else (
+            "completed_with_confirmed_semantic_issues"
+            if confirmed_semantic_issue_ids else "completed"
+        )
     )
     manifest.update(status=final_status, finished_at=datetime.now(timezone.utc).isoformat(),
                     output_artifact=file_record(args.output),
@@ -1588,6 +1723,16 @@ def _main(argv: list[str]) -> int:
                     format_comparison_summary=comparison.get("summary"),
                     unsupported_items=spec.get("completeness", {}).get("unsupported_items", []),
                     compliance_mode=args.compliance_mode,
+                    output_policy=args.output_policy,
+                    requested_compliance_mode=args.compliance_mode,
+                    execution_compliance_mode=execution_compliance_mode,
+                    manual_review_items=str(manual_review_items_path) if args.output_policy == "review_draft" else None,
+                    manual_review_summary=manifest.get("manual_review_summary", {}),
+                    review_draft_ready=(
+                        args.output_policy == "review_draft"
+                        and bool(report.get("review_draft_ready"))
+                        and final_format_ready
+                    ),
                     overall_status=report.get("overall_status"),
                     pipeline_valid=report.get("pipeline_valid"),
                     supported_subset_valid=report.get("supported_subset_valid"),
@@ -1599,9 +1744,11 @@ def _main(argv: list[str]) -> int:
                     format_ready=final_format_ready,
                     submission_ready=final_submission_ready,
                     submission_status=(
-                        "confirmed_semantic_issues" if confirmed_semantic_issue_ids else (
+                        "manual_review_required" if args.output_policy == "review_draft" else (
+                            "confirmed_semantic_issues" if confirmed_semantic_issue_ids else (
                             report.get("submission_status") or (
                                 "submission_ready" if final_submission_ready else "not_submission_ready"
+                            )
                             )
                         )
                     ),

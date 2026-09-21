@@ -254,6 +254,24 @@ def contract_error_records(
     if isinstance(response, dict) and isinstance(analysis_clauses, list):
         relation_facts = derived_requirement_indexes(response, analysis_clauses)
 
+    def empty_cover_institution(pointer: str | None) -> bool:
+        match = re.fullmatch(
+            r"\$\.requirements\[(\d+)\]\.properties(?:\.institution)?",
+            str(pointer or ""),
+        )
+        if match is None or not isinstance(requirements, list):
+            return False
+        index = int(match.group(1))
+        if index >= len(requirements) or not isinstance(requirements[index], dict):
+            return False
+        requirement = requirements[index]
+        properties = requirement.get("properties")
+        return (
+            requirement.get("role") == "cover"
+            and isinstance(properties, dict)
+            and not str(properties.get("institution") or "").strip()
+        )
+
     def append_generic(
         *, code: str, text: str, pointer: str | None, clause_id: str | None,
         matching: list[int] | None = None,
@@ -279,6 +297,7 @@ def contract_error_records(
                 "mixed_execution_classification_relation", "missing_clause_review",
                 "unknown_clause_relation", "non_requirement_classification_relation",
                 "unused_executable_requirement",
+                "executable_review_obligations_uncovered",
             },
         })
 
@@ -335,12 +354,38 @@ def contract_error_records(
                 ),
             ))
             continue
-        if "normative_basis" in lowered:
+        if "non_requirement_classification_relation" in lowered:
+            pointer = pointer_match.group(1) if pointer_match else None
+            index_match = re.fullmatch(r"\$\.requirements\[(\d+)\]", str(pointer or ""))
+            fact = relation_by_index.get(int(index_match.group(1))) if index_match else None
+            records.append(_relation_record(
+                code="non_requirement_classification_relation", raw_error=text,
+                response=response, requirements=requirements, fact=fact,
+                json_pointer=pointer,
+                matching_requirement_indexes=(
+                    sorted({
+                        matching_index
+                        for clause_id in (fact.get("clause_ids", []) if fact else [])
+                        for matching_index in relation_facts.get(str(clause_id), [])
+                    })
+                    if fact else None
+                ),
+            ))
+            continue
+        if (
+            ("must match at least one schema in anyof" in lowered
+             or "is shorter than 1 characters" in lowered)
+            and empty_cover_institution(pointer_match.group(1) if pointer_match else None)
+        ):
+            code = "cover_institution_placeholder"
+        elif "normative_basis" in lowered:
             code = "normative_basis_invalid"
         elif "requirement_index_not_backed_by_clause" in lowered:
             code = "requirement_relation_mismatch"
         elif "executable_review_requires_derived_requirement" in lowered:
             code = "missing_derived_requirement"
+        elif "executable_review_requires_all_obligations_covered" in lowered:
+            code = "executable_review_obligations_uncovered"
         elif "mixed_execution_classification_relation" in lowered:
             code = "mixed_execution_classification_relation"
         elif "missing_clause_review" in lowered:
@@ -353,6 +398,8 @@ def contract_error_records(
             code = "unused_executable_requirement"
         elif "requirements_not_referenced_by_clause_review" in lowered:
             code = "requirement_relation_mismatch"
+        elif re.fullmatch(r"\$\.requirements\[\d+\]\.evidence_ids: duplicate", lowered):
+            code = "duplicate_evidence_ids"
         elif "not_backed_by_clause:" in lowered:
             code = "evidence_relation_mismatch"
         elif "partial_clause_coverage" in lowered:

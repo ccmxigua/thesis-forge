@@ -29,6 +29,10 @@ from artifact_io import atomic_write_text
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
+# Versioned neutral default used when a schema-required cover institution is
+# absent in an administrative-only chunk. It is a placeholder, not an
+# institution identity and never comes from the model.
+NEUTRAL_COVER_PLACEHOLDER = "——"
 PARENT_SESSION_ENV_NAMES = (
     "OPENCLAW_PARENT_SESSION_KEY",
     "OPENCLAW_SESSION_KEY",
@@ -466,6 +470,9 @@ _BASE_CONTRACT_REPAIR_RULES = (
     "Every executable/covered/verify_existing requirement reference must be a zero-based index of a semantically matching emitted requirement whose clause_ids contains that exact review clause_id; check every review/index pair independently. Never carry an adjacent clause's index, change clause_ids to make validation pass, or emit an unused requirement.",
     "Do not move nested properties to a top-level requirement role: a nested key such as require_after_role is legal only where the supplied role schema places it.",
     "Every emitted requirement must contain at least one non-null property in its role-specific properties object. A field_key identifies a content instance but is not an executable payload; do not emit properties: {} or use field_key alone. For text and cover-field roles, copy the exact evidence-backed text into properties.text; for style/layout roles, emit the declared nested style or layout property.",
+    "For an explicit acknowledgments length clause such as '字数一般不超过500字', use the content_constraints role with the nested payload properties.acknowledgments.max_chars. Do not emit generic null-valued placeholder fields or put the limit at the role root; the bridge may compile this exact evidence-backed form mechanically.",
+    "For an explicit appendix placement clause such as '附录放在正文之后另起页', use the appendices role with properties.page_break_each: true. Do not emit generic null-valued appendix fields or infer labels/titles/order from this clause; the bridge may compile only this exact evidence-backed page-break form mechanically.",
+    "For a cover requirement with an empty required institution string and the declared neutral placeholder policy, preserve the cover structure and use '——'; never copy a school name or infer an institution identity from nearby evidence.",
     "Do not fabricate evidence or guess a semantic classification. Make only the mechanical schema corrections required by the supplied error, then regenerate the complete response from the current chunk.",
     "Administrative approval/marking tables belong under cover.non_public_administration, must be conditional on thesis_profile.security_level with an equals or in condition selecting restricted/classified theses, and must be blank for public theses. If the current chunk contains only this administrative region, cover.fields may be an empty array; never duplicate administrative fields into ordinary cover.fields. Do not use not_equals as the executable binding. Bind approval-number and approval-date labels to approval_number and approval_date; never substitute classification_number or completion_date. When one visible 保密期限 label describes an explicit two-ended date range, preserve two distinct fields in source order: first embargo_start, then embargo_until; do not collapse both endpoints into embargo_until.",
     "When the packet contains fixed_declaration_candidates, treat each candidate as an exact evidence grouping. If any candidate clause is classified executable/covered/verify_existing, emit one declarations requirement covering the candidate clause_ids, copy the cited heading/body text exactly, and preserve the supplied declaration anchor; never leave an executable declaration clause without a derived declarations requirement.",
@@ -474,6 +481,7 @@ _BASE_CONTRACT_REPAIR_RULES = (
     "A single clause may support multiple requirements when it contains obligations for different roles. Repeat the exact clause_id and cited evidence_ids in each semantically matching requirement; a continuation-table clause may therefore bind both table continuation and table_caption position/alignment. Do not hide one role's obligation inside another role or change classification merely because one role is incomplete.",
     "Role boundary for equations: use the top-level equations role for layout properties declared by equationLayoutSpec (same_line, no_lines, alignment, number_alignment, number_parentheses, center_tab_twips, or right_tab_twips). Use equation only for an exact equation/content occurrence. Never put style or an invented layout key in equation; if no declared equations property represents the rule, keep the clause non-executable rather than guessing.",
     "A partial_clause_coverage error never authorizes changing classification, obligations, clause_ids, or requirement count on retry. Preserve the baseline and complete a missing role-specific requirement only when current evidence and the declared schema support it; otherwise return the baseline unchanged and let the bridge fail closed.",
+    "When executable_review_requires_all_obligations_covered is reported, never change a non-covered obligation to covered merely to satisfy the validator. Preserve each obligation id and status; if the current evidence/backend cannot cover one obligation, reclassify only that clause to the most accurate non-executable classification and remove its clause edge from requirements. Do not change any other review, requirement payload, evidence, or obligation.",
     "When a contract-3.0 retry reports executable_review_requires_derived_requirement, preserve every requirement from the rejected response and add only the missing, evidence-backed requirements for the named executable clauses; never drop verify_existing requirements or replace the baseline requirement set.",
     "Use only a verified runtime_context.runtime_inventory anchor. A zero-match, multi-match, or blocked anchor is not executable; never infer a nearby heading or use the declarations role as an insertion anchor.",
 )
@@ -590,6 +598,10 @@ def _contract_repair_guidance(
             "otherwise return the baseline unchanged. Do not add a guessed min/max/semantic property, "
             "change Chinese abstract to English abstract, or reclassify merely to escape the coverage error."
         )
+    if "executable_review_requires_all_obligations_covered" in text:
+        targeted.append(
+            "The executable review has at least one obligation that is not fully represented. Never change that obligation status to covered merely to satisfy the gate. Preserve its id and status; reclassify only the affected clause as the most accurate non-executable status, use requirement_indexes: [] for contract 2.1 or omit the reverse index for contract 3.0, and remove that clause from every requirement edge. Keep every other review, requirement, evidence ID, property, and obligation unchanged."
+        )
     if "item_length_metric:cjk_characters" in text:
         targeted.append(
             "Preserve the source wording 'Chinese characters' as the explicit cjk_characters metric. "
@@ -651,7 +663,7 @@ def _structured_contract_repair_guidance(
             )
         elif code == "non_requirement_classification_relation":
             rule = (
-                f"At {pointer}, do not delete or invent a requirement for an unresolved, unsupported, external, or other non-informational classification. Preserve the semantic state and fail closed."
+                f"At {pointer}, remove only this requirement object if every clause_id it contains is classified as a non-requirement state such as unresolved, requires_source_content, unsupported, external_compliance, or informational. Preserve every clause_review classification, obligation, reason, evidence ID, and every other requirement exactly; do not reclassify a clause, split or merge requirements, or invent a replacement. If the linked classifications are mixed or removal would change any other field, return the parent unchanged and fail closed."
             )
         elif code == "unused_executable_requirement":
             rule = (
@@ -661,10 +673,22 @@ def _structured_contract_repair_guidance(
             rule = (
                 f"At {pointer}, add one evidence-backed requirement only if the current executable clause has no authoritative requirement edge; preserve all existing requirements and reviews."
             )
+        elif code == "duplicate_evidence_ids":
+            rule = (
+                f"At {pointer}, remove only repeated evidence IDs while preserving the first occurrence and its order. "
+                "Keep the requirement role, properties, clause_ids, all other evidence IDs, classifications, and every other response field unchanged."
+            )
         elif code == "partial_clause_coverage":
             rule = (
                 f"At {pointer}, preserve every obligation and do not promote partial coverage. "
                 "Use a non-executable classification when the supplied evidence does not resolve all obligations."
+            )
+        elif code == "executable_review_obligations_uncovered":
+            rule = (
+                f"At {pointer}, do not change any non-covered obligation status to covered merely to satisfy the gate. "
+                "Preserve every obligation id and status; if the evidence/backend cannot cover one obligation, "
+                "reclassify only that clause to the most accurate non-executable classification and emit no requirement "
+                "edge for it. Keep all other reviews, requirements, evidence IDs, properties, and obligations unchanged."
             )
         elif code == "unknown_property":
             rule = (
@@ -674,7 +698,19 @@ def _structured_contract_repair_guidance(
         elif code == "empty_requirement_properties":
             rule = (
                 f"At {pointer}, emit a non-empty role-specific properties object. "
-                "field_key alone is not an executable payload; copy exact evidence-backed text into properties.text or emit the declared style/layout property, without guessing."
+                "field_key alone is not an executable payload; copy exact evidence-backed text into properties.text or emit the declared style/layout property. "
+                "For the exact appendix placement wording '附录放在正文之后另起页', use only appendices.page_break_each: true; do not guess other appendix properties."
+            )
+        elif code == "cover_institution_placeholder":
+            rule = (
+                f"At {pointer}, this cover chunk has no trusted institution value. "
+                f"Replace only the empty cover institution with the neutral placeholder {NEUTRAL_COVER_PLACEHOLDER!r}; "
+                "do not copy a school name or change fields, administrative bindings, classifications, or unsupported_items."
+            )
+        elif code == "contract_validation_error" and "items must be unique" in str(record.get("raw_error") or ""):
+            rule = (
+                f"At {pointer}, remove only repeated values while preserving the first occurrence and order. "
+                "Do not change the cited text, requirement identity, role, clause_ids, or any other semantic field."
             )
         elif code == "fixed_text_evidence_mismatch":
             rule = (
@@ -868,6 +904,60 @@ def _retry_change_paths(previous: Any, current: Any) -> list[str]:
     return changed
 
 
+def _v3_duplicate_evidence_ids_allowed(
+    previous_response: Any,
+    current_response: Any,
+    records: list[dict[str, Any]],
+    changed_paths: list[str],
+) -> bool:
+    """Allow only first-occurrence deduplication of requirement evidence IDs.
+
+    Evidence references are a set-valued relation at validation time, but the
+    response schema carries them as an ordered list. A retry may remove a
+    repeated ID after the validator reports it; it may not reorder evidence,
+    alter its set, or change any neighboring semantic field.
+    """
+    if not isinstance(previous_response, dict) or not isinstance(current_response, dict):
+        return False
+    codes = {str(item.get("code")) for item in records if isinstance(item, dict)}
+    if codes != {"duplicate_evidence_ids"} or changed_paths != ["$.requirements"]:
+        return False
+    previous_view = _semantic_retry_view(previous_response)
+    current_view = _semantic_retry_view(current_response)
+    if previous_view is None or current_view is None:
+        return False
+    for key in ("contract_version", "clause_reviews", "unsupported_items", "top_level"):
+        if previous_view.get(key) != current_view.get(key):
+            return False
+    previous_requirements = previous_view.get("requirements")
+    current_requirements = current_view.get("requirements")
+    if not isinstance(previous_requirements, list) or not isinstance(current_requirements, list):
+        return False
+    if len(previous_requirements) != len(current_requirements):
+        return False
+    changed = False
+    for previous, current in zip(previous_requirements, current_requirements):
+        if not isinstance(previous, dict) or not isinstance(current, dict):
+            return False
+        previous_without_evidence = copy.deepcopy(previous)
+        current_without_evidence = copy.deepcopy(current)
+        previous_ids = previous_without_evidence.pop("evidence_ids", None)
+        current_ids = current_without_evidence.pop("evidence_ids", None)
+        if previous_without_evidence != current_without_evidence:
+            return False
+        if not isinstance(previous_ids, list) or not isinstance(current_ids, list):
+            return False
+        deduplicated: list[Any] = []
+        for evidence_id in previous_ids:
+            if evidence_id not in deduplicated:
+                deduplicated.append(evidence_id)
+        if len(deduplicated) != len(previous_ids):
+            changed = True
+        if current_ids != deduplicated:
+            return False
+    return changed
+
+
 def _retry_changes_allowed(
     records: list[dict[str, Any]], changed_paths: list[str], *, contract_version: str,
     previous_response: Any = None, current_response: Any = None,
@@ -879,7 +969,23 @@ def _retry_changes_allowed(
     codes = {str(item.get("code")) for item in records if isinstance(item, dict)}
     empty_payload_repair = "empty_requirement_properties" in codes
     unknown_payload_repair = "unknown_property" in codes
-    payload_repair = empty_payload_repair or unknown_payload_repair
+    cover_placeholder_repair = "cover_institution_placeholder" in codes
+    source_evidence_dedup_repair = any(
+        isinstance(item, dict)
+        and item.get("code") == "contract_validation_error"
+        and "items must be unique" in str(item.get("raw_error") or "")
+        and re.fullmatch(
+            r"\$\.requirements\[\d+\]\.properties\.items\[\d+\]\.source_evidence_ids",
+            str(item.get("json_pointer") or ""),
+        )
+        for item in records
+    )
+    payload_repair = (
+        empty_payload_repair
+        or unknown_payload_repair
+        or cover_placeholder_repair
+        or source_evidence_dedup_repair
+    )
     previous_view = _semantic_retry_view(previous_response) if payload_repair else None
     current_view = _semantic_retry_view(current_response) if payload_repair else None
     previous_requirements = (
@@ -895,11 +1001,16 @@ def _retry_changes_allowed(
     cover_property_prefixes: set[str] = set()
     exact_property_prefixes: set[str] = set()
     unknown_property_paths: set[str] = set()
+    empty_payload_indexes: set[int] = set()
     for record in records:
         if not isinstance(record, dict):
             continue
         code = str(record.get("code") or "")
         pointer = str(record.get("json_pointer") or "")
+        if code == "empty_requirement_properties":
+            match = re.fullmatch(r"\$\.requirements\[(\d+)\]\.properties", pointer)
+            if match:
+                empty_payload_indexes.add(int(match.group(1)))
         if code == "cover_binding_violation":
             match = re.match(r"^(\$\.requirements\[\d+\]\.properties)\.([^.\[]+)", pointer)
             if match:
@@ -944,8 +1055,56 @@ def _retry_changes_allowed(
 
     if (
         contract_version == HOST_REVIEW_CONTRACT_V3
+        and _v3_clause_review_completion_allowed(
+            previous_response, current_response, records, changed_paths, chunk=chunk,
+        )
+    ):
+        return True
+
+    if (
+        contract_version == HOST_REVIEW_CONTRACT_V3
+        and _v3_duplicate_evidence_ids_allowed(
+            previous_response, current_response, records, changed_paths,
+        )
+    ):
+        return True
+
+    if (
+        contract_version == HOST_REVIEW_CONTRACT_V3
         and _v3_informational_projection_allowed(
             previous_response, current_response, records, changed_paths, chunk=chunk,
+        )
+    ):
+        return True
+
+    if (
+        contract_version == HOST_REVIEW_CONTRACT_V3
+        and _v3_non_requirement_projection_allowed(
+            previous_response, current_response, records, changed_paths, chunk=chunk,
+        )
+    ):
+        return True
+
+    if (
+        contract_version == HOST_REVIEW_CONTRACT_V3
+        and _v3_non_requirement_projection_with_mechanical_repairs_allowed(
+            previous_response, current_response, records, changed_paths, chunk=chunk,
+        )
+    ):
+        return True
+
+    if (
+        contract_version == HOST_REVIEW_CONTRACT_V3
+        and _v3_fixed_declaration_completion_allowed(
+            previous_response, current_response, records, changed_paths, chunk=chunk,
+        )
+    ):
+        return True
+
+    if (
+        contract_version == HOST_REVIEW_CONTRACT_V3
+        and _v3_uncovered_obligation_reclassification_allowed(
+            previous_response, current_response, records, chunk=chunk,
         )
     ):
         return True
@@ -960,6 +1119,136 @@ def _retry_changes_allowed(
         return True
 
     for path in changed_paths:
+        if cover_placeholder_repair:
+            match = re.fullmatch(
+                r"\$\.requirements\[(\d+)\]\.properties\.institution", path,
+            )
+            if match:
+                index = int(match.group(1))
+                before = (
+                    previous_requirements[index]
+                    if index < len(previous_requirements)
+                    else None
+                )
+                after = (
+                    current_requirements[index]
+                    if index < len(current_requirements)
+                    else None
+                )
+                if isinstance(before, dict) and isinstance(after, dict):
+                    before_properties = before.get("properties")
+                    after_properties = after.get("properties")
+                    before_rest = copy.deepcopy(before)
+                    after_rest = copy.deepcopy(after)
+                    before_rest.pop("properties", None)
+                    after_rest.pop("properties", None)
+                    if isinstance(before_properties, dict) and isinstance(after_properties, dict):
+                        before_institution = before_properties.get("institution")
+                        after_institution = after_properties.get("institution")
+                        before_properties = copy.deepcopy(before_properties)
+                        after_properties = copy.deepcopy(after_properties)
+                        before_properties.pop("institution", None)
+                        after_properties.pop("institution", None)
+                        if (
+                            before_rest == after_rest
+                            and before_properties == after_properties
+                            and before_institution in ("", None)
+                            and after_institution == NEUTRAL_COVER_PLACEHOLDER
+                        ):
+                            continue
+        if source_evidence_dedup_repair:
+            match = re.fullmatch(
+                r"\$\.requirements\[(\d+)\]\.properties\.items\[(\d+)\]\.source_evidence_ids",
+                path,
+            )
+            if match:
+                requirement_index = int(match.group(1))
+                item_index = int(match.group(2))
+                before_requirement = (
+                    previous_requirements[requirement_index]
+                    if requirement_index < len(previous_requirements)
+                    else None
+                )
+                after_requirement = (
+                    current_requirements[requirement_index]
+                    if requirement_index < len(current_requirements)
+                    else None
+                )
+                if isinstance(before_requirement, dict) and isinstance(after_requirement, dict):
+                    before_properties = before_requirement.get("properties")
+                    after_properties = after_requirement.get("properties")
+                    before_items = (
+                        before_properties.get("items")
+                        if isinstance(before_properties, dict)
+                        else None
+                    )
+                    after_items = (
+                        after_properties.get("items")
+                        if isinstance(after_properties, dict)
+                        else None
+                    )
+                    if (
+                        isinstance(before_items, list)
+                        and isinstance(after_items, list)
+                        and item_index < len(before_items)
+                        and item_index < len(after_items)
+                    ):
+                        before_item = before_items[item_index]
+                        after_item = after_items[item_index]
+                        if isinstance(before_item, dict) and isinstance(after_item, dict):
+                            before_ids = before_item.get("source_evidence_ids")
+                            after_ids = after_item.get("source_evidence_ids")
+                            before_item_rest = copy.deepcopy(before_item)
+                            after_item_rest = copy.deepcopy(after_item)
+                            before_item_rest.pop("source_evidence_ids", None)
+                            after_item_rest.pop("source_evidence_ids", None)
+                            deduplicated: list[Any] = []
+                            if isinstance(before_ids, list):
+                                for evidence_id in before_ids:
+                                    if evidence_id not in deduplicated:
+                                        deduplicated.append(evidence_id)
+                            if (
+                                before_item_rest == after_item_rest
+                                and isinstance(before_ids, list)
+                                and isinstance(after_ids, list)
+                                and after_ids == deduplicated
+                                and len(after_ids) < len(before_ids)
+                            ):
+                                continue
+        if path.endswith(".reason") and empty_payload_repair:
+            match = re.fullmatch(r"\$\.requirements\[(\d+)\]\.reason", path)
+            if match and int(match.group(1)) in empty_payload_indexes:
+                index = int(match.group(1))
+                before = (
+                    previous_requirements[index]
+                    if index < len(previous_requirements)
+                    else None
+                )
+                after = (
+                    current_requirements[index]
+                    if index < len(current_requirements)
+                    else None
+                )
+                if isinstance(before, dict) and isinstance(after, dict):
+                    before_properties = before.get("properties")
+                    after_properties = after.get("properties")
+                    before_rest = copy.deepcopy(before)
+                    after_rest = copy.deepcopy(after)
+                    before_rest.pop("properties", None)
+                    after_rest.pop("properties", None)
+                    before_rest.pop("reason", None)
+                    after_rest.pop("reason", None)
+                    if (
+                        before_properties == {}
+                        and isinstance(after_properties, dict)
+                        and after_properties
+                        and before_rest == after_rest
+                    ):
+                        # ``reason`` is diagnostic prose, not an execution
+                        # binding.  It may be regenerated together with a
+                        # bounded empty-payload fill; roles, relations,
+                        # evidence, and properties remain checked below.
+                        continue
         if path.endswith(".normative_basis") and "normative_basis_invalid" in codes:
             continue
         if path.endswith(".verification") and "schema_contract_violation" in codes:
@@ -1156,6 +1445,40 @@ def _v3_incomplete_completion_allowed(
     if validate_host_agent_response(current_response, chunk):
         return False
 
+    def unsupported_items_match_reviews(response: dict[str, Any]) -> bool:
+        """Accept only diagnostic unsupported items tied to current reviews."""
+        items = response.get("unsupported_items")
+        reviews = response.get("clause_reviews")
+        if not isinstance(items, list) or not isinstance(reviews, list):
+            return False
+        item_clause_ids: list[str] = []
+        for item in items:
+            if not isinstance(item, str):
+                return False
+            match = re.match(r"^\s*([A-Za-z]+\d+)\s*[:：]", item)
+            if match is None:
+                return False
+            item_clause_ids.append(match.group(1))
+        if len(item_clause_ids) != len(set(item_clause_ids)):
+            return False
+        expected_clause_ids = [
+            str(review.get("clause_id"))
+            for review in reviews
+            if isinstance(review, dict)
+            and review.get("classification") in {"unsupported", "unsupported_backend"}
+            and review.get("clause_id")
+        ]
+        return sorted(item_clause_ids) == sorted(expected_clause_ids)
+
+    unsupported_items_changed = "$.unsupported_items" in changed_paths
+    if unsupported_items_changed:
+        if previous_response.get("unsupported_items") not in (None, []):
+            return False
+        if not unsupported_items_match_reviews(current_response):
+            return False
+    elif previous_response.get("unsupported_items") != current_response.get("unsupported_items"):
+        return False
+
     unbound_placeholder = (
         len(previous_requirements) == 1
         and any(
@@ -1172,8 +1495,13 @@ def _v3_incomplete_completion_allowed(
         )
     )
     root_completion = (
-        set(changed_paths) == {"$.clause_reviews", "$.requirements"}
-        and len(changed_paths) == 2
+        (
+            set(changed_paths) == {"$.clause_reviews", "$.requirements"}
+            or set(changed_paths) == {
+                "$.clause_reviews", "$.requirements", "$.unsupported_items",
+            }
+        )
+        and len(changed_paths) == len(set(changed_paths))
     )
     placeholder_replacement = (
         unbound_placeholder
@@ -1227,6 +1555,339 @@ def _v3_incomplete_completion_allowed(
     return bool(remaining)
 
 
+def _v3_clause_review_completion_allowed(
+    previous_response: Any,
+    current_response: Any,
+    records: list[dict[str, Any]],
+    changed_paths: list[str],
+    *,
+    chunk: dict[str, Any] | None = None,
+) -> bool:
+    """Allow only validator-directed addition of missing clause reviews.
+
+    A v3 response may already contain all requirements but omit one clause
+    review. The retry may add exactly the clause IDs named by the validator,
+    while preserving every existing review and requirement byte-for-byte. This
+    does not permit reclassification, reordering, or changing an existing
+    review; the current response must pass the complete local validator first.
+    """
+    if (
+        chunk is None
+        or not isinstance(previous_response, dict)
+        or not isinstance(current_response, dict)
+        or previous_response.get("contract_version") != HOST_REVIEW_CONTRACT_V3
+        or changed_paths != ["$.clause_reviews"]
+    ):
+        return False
+    if validate_host_agent_response(current_response, chunk):
+        return False
+    if not records or any(
+        not isinstance(record, dict)
+        or record.get("code") not in {"missing_clause_review", "contract_validation_error"}
+        for record in records
+    ):
+        return False
+    missing_records = [
+        record for record in records
+        if isinstance(record, dict) and record.get("code") == "missing_clause_review"
+    ]
+    if not missing_records or not any(
+        isinstance(record, dict)
+        and record.get("code") == "contract_validation_error"
+        and record.get("raw_error") == "clause_reviews_must_cover_each_chunk_clause_exactly_once"
+        for record in records
+    ):
+        return False
+
+    previous_reviews = previous_response.get("clause_reviews")
+    current_reviews = current_response.get("clause_reviews")
+    previous_requirements = previous_response.get("requirements")
+    current_requirements = current_response.get("requirements")
+    if not all(isinstance(value, list) for value in (
+        previous_reviews, current_reviews, previous_requirements, current_requirements,
+    )):
+        return False
+    if previous_requirements != current_requirements:
+        return False
+    for key in set(previous_response) | set(current_response):
+        if key in {"provenance", "clause_reviews"}:
+            continue
+        if previous_response.get(key) != current_response.get(key):
+            return False
+
+    clause_ids = [
+        str(clause.get("id"))
+        for clause in chunk.get("clauses", [])
+        if isinstance(clause, dict) and clause.get("id")
+    ]
+    if not clause_ids or len(clause_ids) != len(set(clause_ids)):
+        return False
+    missing_clause_ids: set[str] = set()
+    for record in missing_records:
+        pointer = str(record.get("json_pointer") or "")
+        if re.fullmatch(r"\$\.requirements\[\d+\]", pointer) is None:
+            return False
+        raw_error = str(record.get("raw_error") or "")
+        match = re.fullmatch(
+            r"\$\.requirements\[\d+\]:missing_clause_review:clause_ids=([^:]+)",
+            raw_error,
+        )
+        if match is None:
+            return False
+        values = {value for value in match.group(1).split(",") if value}
+        if not values or not values <= set(clause_ids):
+            return False
+        missing_clause_ids.update(values)
+    if not missing_clause_ids:
+        return False
+
+    def review_id(review: Any) -> str | None:
+        return (
+            str(review.get("clause_id"))
+            if isinstance(review, dict) and review.get("clause_id")
+            else None
+        )
+
+    previous_ids = [review_id(review) for review in previous_reviews]
+    current_ids = [review_id(review) for review in current_reviews]
+    previous_id_set = {value for value in previous_ids if value is not None}
+    if (
+        any(value is None for value in previous_ids)
+        or any(value is None for value in current_ids)
+        or len(set(previous_ids)) != len(previous_ids)
+        or len(set(current_ids)) != len(current_ids)
+        or current_ids != clause_ids
+        or len(current_reviews) != len(previous_reviews) + len(missing_clause_ids)
+        or set(current_ids) - previous_id_set != missing_clause_ids
+    ):
+        return False
+    if [
+        review for review in current_reviews
+        if review_id(review) in previous_id_set
+    ] != previous_reviews:
+        return False
+
+    # Adding a review is safe here only when the corresponding requirement
+    # already exists. Adding a requirement is a separate semantic repair.
+    requirement_clause_ids = {
+        str(clause_id)
+        for requirement in previous_requirements
+        if isinstance(requirement, dict)
+        for clause_id in (requirement.get("clause_ids") or [])
+    }
+    return missing_clause_ids <= requirement_clause_ids
+
+
+def _v3_fixed_declaration_completion_allowed(
+    previous_response: Any,
+    current_response: Any,
+    records: list[dict[str, Any]],
+    changed_paths: list[str],
+    *,
+    chunk: dict[str, Any] | None = None,
+) -> bool:
+    """Allow only evidence-candidate completion of a missing declaration.
+
+    A native response can contain an unbound role-schema placeholder while
+    omitting a declaration requirement whose exact heading/body grouping was
+    already derived from the current source packet.  The retry is safe only
+    when it removes that placeholder, adds exactly the deterministic fixed
+    declaration candidate, preserves every other requirement, and changes at
+    most diagnostic ``reason`` text for the candidate's reviews.  This is not
+    a general semantic retry permission.
+    """
+    if (
+        chunk is None
+        or not isinstance(previous_response, dict)
+        or not isinstance(current_response, dict)
+        or changed_paths.count("$.requirements") != 1
+        or not isinstance(chunk.get("clauses"), list)
+        or not isinstance(chunk.get("evidence_context"), dict)
+    ):
+        return False
+    codes = {str(item.get("code")) for item in records if isinstance(item, dict)}
+    if "missing_derived_requirement" not in codes:
+        return False
+    if not codes <= {
+        "contract_validation_error", "schema_contract_violation",
+        "cover_binding_violation", "empty_requirement_properties",
+        "missing_derived_requirement", "requirement_relation_mismatch",
+    }:
+        return False
+    if validate_host_agent_response(current_response, chunk):
+        return False
+
+    candidates = _fixed_declaration_candidates(
+        chunk.get("clauses"), chunk.get("evidence_context", {}),
+        anchor=chunk.get("declaration_anchor_preference"),
+    )
+    if not candidates:
+        return False
+    previous_requirements = previous_response.get("requirements")
+    current_requirements = current_response.get("requirements")
+    previous_reviews = previous_response.get("clause_reviews")
+    current_reviews = current_response.get("clause_reviews")
+    if not all(isinstance(value, list) for value in (
+        previous_requirements, current_requirements, previous_reviews, current_reviews,
+    )):
+        return False
+
+    def is_empty_value(value: Any) -> bool:
+        return value is None or value == "" or value == [] or value == {}
+
+    def is_unbound_placeholder(requirement: Any) -> bool:
+        if not isinstance(requirement, dict):
+            return False
+        properties = requirement.get("properties")
+        if not isinstance(properties, dict) or not all(
+            is_empty_value(value) for value in properties.values()
+        ):
+            return False
+        return (
+            is_empty_value(requirement.get("clause_ids"))
+            and is_empty_value(requirement.get("evidence_ids"))
+            and is_empty_value(requirement.get("existing_requirement_id"))
+            and is_empty_value(requirement.get("field_key"))
+            and is_empty_value(requirement.get("reason"))
+            and requirement.get("confidence") in (None, 0, 0.0)
+            and is_empty_value(requirement.get("applicability"))
+            and is_empty_value(requirement.get("input_prerequisites"))
+            and is_empty_value(requirement.get("verification"))
+        )
+
+    placeholder_indexes = {
+        index for index, requirement in enumerate(previous_requirements)
+        if is_unbound_placeholder(requirement)
+    }
+    if not placeholder_indexes:
+        return False
+
+    candidate_by_clause_set = {
+        frozenset(str(value) for value in candidate.get("clause_ids", [])): candidate
+        for candidate in candidates
+    }
+    declaration_indexes = [
+        index for index, requirement in enumerate(current_requirements)
+        if isinstance(requirement, dict)
+        and requirement.get("role") == "declarations"
+        and frozenset(str(value) for value in (requirement.get("clause_ids") or []))
+        in candidate_by_clause_set
+    ]
+    if len(declaration_indexes) != 1:
+        return False
+    declaration_index = declaration_indexes[0]
+    declaration = current_requirements[declaration_index]
+    candidate = candidate_by_clause_set[frozenset(
+        str(value) for value in declaration.get("clause_ids", [])
+    )]
+    preserved_requirements = [
+        copy.deepcopy(requirement)
+        for index, requirement in enumerate(previous_requirements)
+        if index not in placeholder_indexes
+    ]
+    current_without_declaration = [
+        copy.deepcopy(requirement)
+        for index, requirement in enumerate(current_requirements)
+        if index != declaration_index
+    ]
+    if current_without_declaration != preserved_requirements:
+        return False
+    if declaration.get("existing_requirement_id"):
+        return False
+    if declaration.get("clause_ids") != list(candidate.get("clause_ids", [])):
+        return False
+    if declaration.get("evidence_ids") != list(candidate.get("evidence_ids", [])):
+        return False
+    properties = declaration.get("properties")
+    if not isinstance(properties, dict) or properties.get("before_role") != candidate.get("before_role"):
+        return False
+    items = properties.get("items")
+    if not isinstance(items, list) or len(items) != 1 or not isinstance(items[0], dict):
+        return False
+    item = items[0]
+    evidence_context = chunk.get("evidence_context", {})
+    heading_ids = [str(value) for value in candidate.get("heading_evidence_ids", [])]
+    body_ids = [str(value) for value in candidate.get("body_evidence_ids", [])]
+    heading_texts = [
+        str(evidence_context[evidence_id].get("text") or "")
+        for evidence_id in heading_ids
+        if isinstance(evidence_context.get(evidence_id), dict)
+    ]
+    expected_body_parts: list[str] = []
+    seen_body_ids: set[str] = set()
+    for evidence_id in body_ids:
+        if evidence_id in seen_body_ids:
+            continue
+        seen_body_ids.add(evidence_id)
+        evidence = evidence_context.get(evidence_id)
+        if not isinstance(evidence, dict):
+            return False
+        expected_body_parts.append(str(evidence.get("text") or ""))
+    if (
+        len(heading_texts) != 1
+        or item.get("heading") != heading_texts[0]
+        or item.get("body_parts") != expected_body_parts
+        or item.get("source_evidence_ids") != list(candidate.get("evidence_ids", []))
+    ):
+        return False
+
+    candidate_clause_ids = set(map(str, candidate.get("clause_ids", [])))
+    if len(previous_reviews) != len(current_reviews):
+        return False
+    previous_review_ids = [
+        str(review.get("clause_id")) for review in previous_reviews
+        if isinstance(review, dict) and review.get("clause_id")
+    ]
+    current_review_ids = [
+        str(review.get("clause_id")) for review in current_reviews
+        if isinstance(review, dict) and review.get("clause_id")
+    ]
+    if previous_review_ids != current_review_ids:
+        return False
+    for previous_review, current_review in zip(previous_reviews, current_reviews):
+        if not isinstance(previous_review, dict) or not isinstance(current_review, dict):
+            return False
+        clause_id = str(previous_review.get("clause_id") or "")
+        previous_without_reason = copy.deepcopy(previous_review)
+        current_without_reason = copy.deepcopy(current_review)
+        previous_reason = previous_without_reason.pop("reason", None)
+        current_reason = current_without_reason.pop("reason", None)
+        if previous_without_reason != current_without_reason:
+            return False
+        if previous_reason != current_reason and clause_id not in candidate_clause_ids:
+            return False
+
+    for path in changed_paths:
+        if path == "$.requirements":
+            continue
+        match = re.fullmatch(r"\$\.clause_reviews\[(\d+)\]\.reason", path)
+        if match is None:
+            return False
+        index = int(match.group(1))
+        if index >= len(current_reviews):
+            return False
+        if str(current_reviews[index].get("clause_id")) not in candidate_clause_ids:
+            return False
+
+    missing_candidate_review = False
+    for record in records:
+        if not isinstance(record, dict) or record.get("code") != "missing_derived_requirement":
+            continue
+        match = re.fullmatch(r"\$\.clause_reviews\[(\d+)\]", str(record.get("json_pointer") or ""))
+        if match is None:
+            return False
+        index = int(match.group(1))
+        if index >= len(previous_reviews):
+            return False
+        review = previous_reviews[index]
+        if not isinstance(review, dict) or str(review.get("clause_id")) not in candidate_clause_ids:
+            return False
+        if review.get("classification") not in {"covered", "executable", "verify_existing"}:
+            return False
+        missing_candidate_review = True
+    return missing_candidate_review
+
+
 def _v3_cover_contract_completion_allowed(
     previous_response: Any,
     current_response: Any,
@@ -1246,10 +1907,7 @@ def _v3_cover_contract_completion_allowed(
     """
     if chunk is None or not isinstance(previous_response, dict) or not isinstance(current_response, dict):
         return False
-    if not changed_paths or any(
-        re.fullmatch(r"\$\.requirements\[\d+\]\.properties(?:\..+)?", path) is None
-        for path in changed_paths
-    ):
+    if not changed_paths:
         return False
     codes = {str(item.get("code")) for item in records if isinstance(item, dict)}
     if "cover_binding_violation" not in codes:
@@ -1274,10 +1932,51 @@ def _v3_cover_contract_completion_allowed(
     current_requirements = current_view.get("requirements", [])
     if len(previous_requirements) != len(current_requirements):
         return False
+
+    def empty_verification_check_removed(path: str) -> bool:
+        match = re.fullmatch(
+            r"\$\.requirements\[(\d+)\]\.verification\.checks", path,
+        )
+        if match is None:
+            return False
+        index = int(match.group(1))
+        if index >= len(previous_requirements) or index >= len(current_requirements):
+            return False
+        previous_verification = previous_requirements[index].get("verification")
+        current_verification = current_requirements[index].get("verification")
+        if not isinstance(previous_verification, dict) or not isinstance(current_verification, dict):
+            return False
+        previous_checks = previous_verification.get("checks")
+        current_checks = current_verification.get("checks")
+        if not isinstance(previous_checks, list) or not isinstance(current_checks, list):
+            return False
+        check_record = next(
+            (
+                record for record in records
+                if isinstance(record, dict)
+                and record.get("code") == "contract_validation_error"
+                and (
+                    str(record.get("json_pointer") or "") == path
+                    or str(record.get("json_pointer") or "").startswith(path + "[")
+                )
+                and "is shorter than 1 characters" in str(record.get("raw_error") or "")
+            ),
+            None,
+        )
+        if check_record is None or len(previous_checks) != len(current_checks) + 1:
+            return False
+        empty_indexes = [check_index for check_index, value in enumerate(previous_checks) if value == ""]
+        if len(empty_indexes) != 1:
+            return False
+        empty_index = empty_indexes[0]
+        return current_checks == previous_checks[:empty_index] + previous_checks[empty_index + 1:]
+
     cover_changed = False
     for path in changed_paths:
         match = re.fullmatch(r"\$\.requirements\[(\d+)\]\.properties(?:\.(.+))?", path)
         if match is None:
+            if empty_verification_check_removed(path):
+                continue
             return False
         index = int(match.group(1))
         if index >= len(previous_requirements) or index >= len(current_requirements):
@@ -1465,6 +2164,419 @@ def _v3_informational_projection_allowed(
     previous_without_requirements.pop("provenance", None)
     current_without_requirements.pop("provenance", None)
     return previous_without_requirements == current_without_requirements
+
+
+def _v3_non_requirement_projection_allowed(
+    previous_response: Any,
+    current_response: Any,
+    records: list[dict[str, Any]],
+    changed_paths: list[str],
+    *,
+    chunk: dict[str, Any] | None = None,
+) -> bool:
+    """Allow removal of requirements bound only to non-requirement reviews.
+
+    A v3 requirement cannot remain attached to a clause classified as
+    unresolved, requires_source_content, external_compliance, or another
+    non-executable state.  The model may therefore remove exactly the
+    validator-identified requirement objects while preserving every review and
+    every other requirement.  This is a relation projection, not a semantic
+    reclassification: the unresolved review remains unresolved and the
+    resulting full run remains fail-closed.
+    """
+    if (
+        changed_paths != ["$.requirements"]
+        or chunk is None
+        or not isinstance(previous_response, dict)
+        or not isinstance(current_response, dict)
+    ):
+        return False
+    records = [record for record in records if isinstance(record, dict)]
+    target_records = [
+        record for record in records
+        if record.get("code") == "non_requirement_classification_relation"
+    ]
+    if not target_records:
+        return False
+    previous_requirements = previous_response.get("requirements")
+    current_requirements = current_response.get("requirements")
+    previous_reviews = previous_response.get("clause_reviews")
+    current_reviews = current_response.get("clause_reviews")
+    if not all(isinstance(value, list) for value in (
+        previous_requirements, current_requirements, previous_reviews, current_reviews,
+    )):
+        return False
+    if previous_reviews != current_reviews:
+        return False
+
+    analysis = analyze_requirement_relations(previous_response, chunk.get("clauses", []))
+    target_indexes: set[int] = set()
+    for record in target_records:
+        index_value = record.get("requirement_index")
+        if not isinstance(index_value, int):
+            match = re.fullmatch(
+                r"\$\.requirements\[(\d+)\]", str(record.get("json_pointer") or ""),
+            )
+            if match is None:
+                return False
+            index_value = int(match.group(1))
+        target_indexes.add(index_value)
+    actual_indexes = {
+        int(item["requirement_index"])
+        for item in analysis
+        if isinstance(item, dict)
+        and item.get("category") == "non_requirement_classification"
+        and isinstance(item.get("requirement_index"), int)
+    }
+    if not target_indexes or target_indexes != actual_indexes:
+        return False
+    expected_requirements = [
+        item for index, item in enumerate(previous_requirements)
+        if index not in target_indexes
+    ]
+    if current_requirements != expected_requirements:
+        return False
+    previous_without_requirements = copy.deepcopy(previous_response)
+    current_without_requirements = copy.deepcopy(current_response)
+    previous_without_requirements.pop("requirements", None)
+    current_without_requirements.pop("requirements", None)
+    previous_without_requirements.pop("provenance", None)
+    current_without_requirements.pop("provenance", None)
+    return previous_without_requirements == current_without_requirements
+
+
+def _v3_non_requirement_projection_with_mechanical_repairs_allowed(
+    previous_response: Any,
+    current_response: Any,
+    records: list[dict[str, Any]],
+    changed_paths: list[str],
+    *,
+    chunk: dict[str, Any] | None = None,
+) -> bool:
+    """Allow a non-requirement projection plus named payload cleanup.
+
+    Native retries sometimes remove a requirement that is linked only to an
+    unresolved/non-executable clause while also dropping a validator-named
+    unknown property from a preserved requirement.  The retry is safe only if
+    the preserved requirements remain identical after those exact removals;
+    an empty surviving payload must still be fillable from one exact cited
+    evidence text.  No classification, relation, or other property change is
+    admitted here.
+    """
+    if (
+        changed_paths != ["$.requirements"]
+        or chunk is None
+        or not isinstance(previous_response, dict)
+        or not isinstance(current_response, dict)
+    ):
+        return False
+    records = [record for record in records if isinstance(record, dict)]
+    target_records = [
+        record for record in records
+        if record.get("code") == "non_requirement_classification_relation"
+    ]
+    if not target_records:
+        return False
+    if any(record.get("code") not in {
+        "non_requirement_classification_relation",
+        "unknown_property",
+        "empty_requirement_properties",
+        "contract_validation_error",
+        "schema_contract_violation",
+    } for record in records):
+        return False
+    previous_reviews = previous_response.get("clause_reviews")
+    current_reviews = current_response.get("clause_reviews")
+    if previous_reviews != current_reviews:
+        return False
+    previous_requirements = previous_response.get("requirements")
+    current_requirements = current_response.get("requirements")
+    if not isinstance(previous_requirements, list) or not isinstance(current_requirements, list):
+        return False
+
+    clauses = chunk.get("clauses")
+    if not isinstance(clauses, list):
+        return False
+    analysis = analyze_requirement_relations(previous_response, clauses)
+    target_indexes: set[int] = set()
+    for record in target_records:
+        index_value = record.get("requirement_index")
+        if not isinstance(index_value, int):
+            match = re.fullmatch(
+                r"\$\.requirements\[(\d+)\]", str(record.get("json_pointer") or ""),
+            )
+            if match is None:
+                return False
+            index_value = int(match.group(1))
+        target_indexes.add(index_value)
+    actual_indexes = {
+        int(item["requirement_index"])
+        for item in analysis
+        if isinstance(item, dict)
+        and item.get("category") == "non_requirement_classification"
+        and isinstance(item.get("requirement_index"), int)
+    }
+    if not target_indexes or target_indexes != actual_indexes:
+        return False
+
+    # Unknown-property records are addressed against the first response's
+    # indexes.  The retry may remove only those exact names and only from a
+    # requirement that survives the relation projection.
+    removed_properties: dict[int, set[str]] = {}
+    for record in records:
+        if record.get("code") != "unknown_property":
+            continue
+        pointer_match = re.fullmatch(
+            r"\$\.requirements\[(\d+)\]\.properties", str(record.get("json_pointer") or ""),
+        )
+        property_match = re.search(
+            r"unknown property ['\"]([^'\"]+)['\"]",
+            str(record.get("raw_error") or ""),
+        )
+        if pointer_match is None or property_match is None:
+            return False
+        index = int(pointer_match.group(1))
+        property_name = property_match.group(1)
+        if index in target_indexes or index >= len(previous_requirements):
+            return False
+        previous_properties = previous_requirements[index].get("properties")
+        if not isinstance(previous_properties, dict) or property_name not in previous_properties:
+            return False
+        removed_properties.setdefault(index, set()).add(property_name)
+
+    expected_requirements: list[Any] = []
+    for index, previous in enumerate(previous_requirements):
+        if index in target_indexes:
+            continue
+        expected = copy.deepcopy(previous)
+        if removed_properties.get(index):
+            properties = expected.get("properties")
+            if not isinstance(properties, dict):
+                return False
+            for property_name in removed_properties[index]:
+                properties.pop(property_name, None)
+        expected_requirements.append(expected)
+    if len(current_requirements) != len(expected_requirements):
+        return False
+    for expected, current in zip(expected_requirements, current_requirements):
+        if expected != current:
+            return False
+        if isinstance(current, dict) and current.get("properties") == {}:
+            # The subsequent mechanical phase must be able to fill the
+            # surviving empty payload from one exact cited evidence text.
+            if _exact_cited_text(current, chunk) is None:
+                return False
+
+    previous_without_requirements = copy.deepcopy(previous_response)
+    current_without_requirements = copy.deepcopy(current_response)
+    previous_without_requirements.pop("requirements", None)
+    current_without_requirements.pop("requirements", None)
+    previous_without_requirements.pop("provenance", None)
+    current_without_requirements.pop("provenance", None)
+    return previous_without_requirements == current_without_requirements
+
+
+_NON_REQUIREMENT_RECLASSIFICATIONS = frozenset({
+    "external_compliance",
+    "informational",
+    "not_applicable",
+    "requires_metadata",
+    "requires_source_content",
+    "unresolved",
+    "unsupported",
+    "unsupported_backend",
+    "unverifiable",
+})
+
+
+def _v3_uncovered_obligation_reclassification_response(
+    previous_response: Any,
+    current_response: Any,
+    records: list[dict[str, Any]],
+    *,
+    chunk: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Preserve an uncovered obligation while projecting its relation away.
+
+    The model is allowed to make the semantic decision that a clause is not
+    executable when the validator has proved that one of its obligations is
+    not covered.  It is not allowed to satisfy the retry mechanically by
+    changing that obligation to ``covered``.  This helper accepts only a
+    complete, locally valid retry that preserves the affected obligation
+    ``id``/``status`` pair and changes only the affected review's
+    classification.  The accepted response is rebuilt from the previous
+    response, and requirement edges for the affected clause are removed by
+    deterministic projection rather than trusted from model bookkeeping.
+    """
+    if (
+        chunk is None
+        or not isinstance(previous_response, dict)
+        or not isinstance(current_response, dict)
+        or previous_response.get("contract_version") != HOST_REVIEW_CONTRACT_V3
+    ):
+        return None, None
+    if not records or any(
+        not isinstance(record, dict)
+        or record.get("code") != "executable_review_obligations_uncovered"
+        for record in records
+    ):
+        return None, None
+    if validate_host_agent_response(current_response, chunk):
+        return None, None
+
+    previous_reviews = previous_response.get("clause_reviews")
+    current_reviews = current_response.get("clause_reviews")
+    previous_requirements = previous_response.get("requirements")
+    current_requirements = current_response.get("requirements")
+    if not all(isinstance(value, list) for value in (
+        previous_reviews, current_reviews, previous_requirements, current_requirements,
+    )):
+        return None, None
+    if len(previous_reviews) != len(current_reviews):
+        return None, None
+
+    affected_indexes: list[int] = []
+    for record in records:
+        pointer = str(record.get("json_pointer") or "")
+        match = re.fullmatch(r"\$\.clause_reviews\[(\d+)\]\.obligations", pointer)
+        if match is None:
+            return None, None
+        review_index = int(match.group(1))
+        if review_index >= len(previous_reviews) or review_index in affected_indexes:
+            return None, None
+        affected_indexes.append(review_index)
+    if not affected_indexes:
+        return None, None
+
+    affected_clause_ids: set[str] = set()
+    repaired_reviews = copy.deepcopy(previous_reviews)
+    for review_index in affected_indexes:
+        previous_review = previous_reviews[review_index]
+        current_review = current_reviews[review_index]
+        if not isinstance(previous_review, dict) or not isinstance(current_review, dict):
+            return None, None
+        clause_id = previous_review.get("clause_id")
+        if not isinstance(clause_id, str) or not clause_id:
+            return None, None
+        if current_review.get("clause_id") != clause_id:
+            return None, None
+        if not classification_requires_requirement(str(previous_review.get("classification"))):
+            return None, None
+        current_classification = current_review.get("classification")
+        if (
+            current_classification not in _NON_REQUIREMENT_RECLASSIFICATIONS
+            or classification_requires_requirement(str(current_classification))
+        ):
+            return None, None
+        previous_obligations = previous_review.get("obligations")
+        current_obligations = current_review.get("obligations")
+        if not isinstance(previous_obligations, list) or not isinstance(current_obligations, list):
+            return None, None
+        if not any(
+            isinstance(item, dict) and item.get("status") != "covered"
+            for item in previous_obligations
+        ):
+            return None, None
+        previous_signatures = [
+            (item.get("id"), item.get("status"))
+            for item in previous_obligations
+            if isinstance(item, dict)
+        ]
+        current_signatures = [
+            (item.get("id"), item.get("status"))
+            for item in current_obligations
+            if isinstance(item, dict)
+        ]
+        if (
+            len(previous_signatures) != len(previous_obligations)
+            or len(current_signatures) != len(current_obligations)
+            or previous_signatures != current_signatures
+        ):
+            return None, None
+        expected_review = copy.deepcopy(previous_review)
+        expected_review["classification"] = current_classification
+        if current_review != expected_review:
+            return None, None
+        repaired_reviews[review_index] = expected_review
+        affected_clause_ids.add(clause_id)
+
+    # No unrelated semantic response field may change during this bounded
+    # reclassification.  Provenance is owned by the bridge and is excluded.
+    for key in set(previous_response) | set(current_response):
+        if key in {"provenance", "requirements", "clause_reviews"}:
+            continue
+        if previous_response.get(key) != current_response.get(key):
+            return None, None
+
+    projected_requirements: list[dict[str, Any]] = []
+    clauses = chunk.get("clauses")
+    if not isinstance(clauses, list):
+        return None, None
+    clause_map = {
+        str(item.get("id")): item
+        for item in clauses
+        if isinstance(item, dict) and item.get("id")
+    }
+    for requirement in previous_requirements:
+        if not isinstance(requirement, dict):
+            return None, None
+        raw_clause_ids = requirement.get("clause_ids")
+        if not isinstance(raw_clause_ids, list) or not raw_clause_ids:
+            return None, None
+        clause_ids = [str(value) for value in raw_clause_ids]
+        if len(clause_ids) != len(set(clause_ids)) or any(
+            clause_id not in clause_map for clause_id in clause_ids
+        ):
+            return None, None
+        remaining_clause_ids = [
+            clause_id for clause_id in clause_ids if clause_id not in affected_clause_ids
+        ]
+        if not remaining_clause_ids:
+            continue
+        projected = copy.deepcopy(requirement)
+        if remaining_clause_ids != clause_ids:
+            evidence_ids = requirement.get("evidence_ids")
+            if not isinstance(evidence_ids, list):
+                return None, None
+            backed_evidence_ids = {
+                str(evidence_id)
+                for clause_id in remaining_clause_ids
+                for evidence_id in (clause_map[clause_id].get("evidence_ids") or [])
+            }
+            if not set(map(str, evidence_ids)) <= backed_evidence_ids:
+                return None, None
+            projected["clause_ids"] = remaining_clause_ids
+        projected_requirements.append(projected)
+
+    if current_requirements != projected_requirements:
+        return None, None
+    repaired = copy.deepcopy(previous_response)
+    repaired["clause_reviews"] = repaired_reviews
+    repaired["requirements"] = projected_requirements
+    if validate_host_agent_response(repaired, chunk):
+        return None, None
+    return repaired, {
+        "rule_id": "preserve_uncovered_obligation_and_project_relation_v1",
+        "affected_clause_ids": sorted(affected_clause_ids),
+        "affected_review_indexes": sorted(affected_indexes),
+        "preserved_obligation_statuses": True,
+        "removed_clause_edges": sorted(affected_clause_ids),
+        "preserved_requirement_count": len(previous_requirements),
+        "projected_requirement_count": len(projected_requirements),
+    }
+
+
+def _v3_uncovered_obligation_reclassification_allowed(
+    previous_response: Any,
+    current_response: Any,
+    records: list[dict[str, Any]],
+    *,
+    chunk: dict[str, Any] | None = None,
+) -> bool:
+    repaired, _audit = _v3_uncovered_obligation_reclassification_response(
+        previous_response, current_response, records, chunk=chunk,
+    )
+    return repaired is not None
 
 
 def _v3_relation_completion_response(
@@ -1671,6 +2783,8 @@ def _apply_safe_mechanical_repairs(
         "unknown_property", "evidence_relation_mismatch",
         "empty_requirement_properties", "informational_requirement_forbidden",
         "applicability_fact_namespace", "partial_clause_coverage",
+        "cover_institution_placeholder", "contract_validation_error",
+        "schema_contract_violation", "requirement_relation_mismatch",
     }
     if any(
         not isinstance(record, dict)
@@ -1793,6 +2907,134 @@ def _apply_safe_mechanical_repairs(
             "repaired_response_sha256": _response_sha256(repaired),
         })
         return repaired, repairs
+
+    # A native model sometimes emits one role-schema default as a trailing
+    # ``requirement`` even though it has no clause/evidence relation and no
+    # semantic content at all.  This is not a requirement that can be
+    # compiled: it is an unbound placeholder produced by the response shape.
+    # Remove it only under the complete predicate below.  In particular, a
+    # requirement with any clause, evidence, reason, confidence, applicability,
+    # prerequisite, verification, field key, existing id, or non-empty payload
+    # remains fail-closed and cannot be guessed away.
+    empty_placeholder_records = [
+        record for record in error_records
+        if isinstance(record, dict)
+        and record.get("code") == "empty_requirement_properties"
+    ]
+    if empty_placeholder_records:
+        requirements = repaired.get("requirements")
+        if not isinstance(requirements, list):
+            return None, []
+
+        def is_empty_value(value: Any) -> bool:
+            return value is None or value == "" or value == [] or value == {}
+
+        def is_unbound_placeholder(requirement: Any) -> bool:
+            if not isinstance(requirement, dict):
+                return False
+            properties = requirement.get("properties")
+            if not isinstance(properties, dict) or not all(
+                is_empty_value(value) for value in properties.values()
+            ):
+                return False
+            return (
+                is_empty_value(requirement.get("clause_ids"))
+                and is_empty_value(requirement.get("evidence_ids"))
+                and is_empty_value(requirement.get("existing_requirement_id"))
+                and is_empty_value(requirement.get("field_key"))
+                and is_empty_value(requirement.get("reason"))
+                and requirement.get("confidence") in (None, 0, 0.0)
+                and is_empty_value(requirement.get("applicability"))
+                and is_empty_value(requirement.get("input_prerequisites"))
+                and is_empty_value(requirement.get("verification"))
+            )
+
+        placeholder_related_codes = {
+            "contract_validation_error", "empty_requirement_properties",
+            "schema_contract_violation", "requirement_relation_mismatch",
+        }
+
+        def related_placeholder_index(record: dict[str, Any]) -> int | None:
+            code = str(record.get("code") or "")
+            pointer = str(record.get("json_pointer") or "")
+            raw_error = str(record.get("raw_error") or "")
+            pointer_match = re.match(r"^\$\.requirements\[(\d+)\]", pointer)
+            if pointer_match is None:
+                return None
+            index = int(pointer_match.group(1))
+            if code == "empty_requirement_properties":
+                if pointer != f"$.requirements[{index}].properties" or "must_include_semantic_payload" not in raw_error:
+                    return None
+                return index
+            if code == "contract_validation_error":
+                if pointer != f"$.requirements[{index}].reason" or "is shorter than 1 characters" not in raw_error:
+                    return None
+                return index
+            if code == "schema_contract_violation":
+                if pointer not in {
+                    f"$.requirements[{index}].clause_ids",
+                    f"$.requirements[{index}].evidence_ids",
+                } or "must_be_non_empty" not in raw_error:
+                    return None
+                return index
+            if code == "requirement_relation_mismatch":
+                if pointer != f"$.requirements[{index}]":
+                    return None
+                if raw_error != f"requirements_not_referenced_by_clause_review:{index}":
+                    return None
+                if record.get("relation_category") != "missing_clause_relation":
+                    return None
+                return index
+            return None
+
+        indexes: set[int] = set()
+        can_remove_placeholders = all(
+            isinstance(record, dict)
+            and str(record.get("code") or "") in placeholder_related_codes
+            for record in error_records
+        )
+        if can_remove_placeholders:
+            for record in error_records:
+                index = related_placeholder_index(record)
+                if index is None:
+                    can_remove_placeholders = False
+                    break
+                if index >= len(requirements) or not is_unbound_placeholder(requirements[index]):
+                    can_remove_placeholders = False
+                    break
+                indexes.add(index)
+        if not can_remove_placeholders or not indexes:
+            # This is an ordinary empty-payload error with a bound evidence
+            # relation; let the exact-text/registered-payload compilers below
+            # handle it instead of treating it as a placeholder.
+            indexes.clear()
+        else:
+            before_count = len(requirements)
+            removed_fingerprints: list[str] = []
+            for index in sorted(indexes, reverse=True):
+                removed = requirements.pop(index)
+                removed_fingerprints.append(_response_sha256(removed))
+                repairs.append({
+                    "code": "empty_requirement_properties",
+                    "rule_id": "remove_unbound_empty_requirement_placeholder_v1",
+                    "removed_requirement_index": index,
+                    "removed_requirement": copy.deepcopy(removed),
+                    "removed_requirement_sha256": removed_fingerprints[-1],
+                    "reason": "requirement has no clause/evidence binding or semantic payload",
+                })
+            repairs.append({
+                "code": "empty_requirement_properties",
+                "rule_id": "remove_unbound_empty_requirement_placeholder_v1",
+                "removed_requirement_indexes": sorted(indexes),
+                "removed_requirement_count": len(indexes),
+                "before_requirement_count": before_count,
+                "after_requirement_count": len(requirements),
+                "projection": "ordered_mask",
+                "removed_requirement_fingerprints": list(reversed(removed_fingerprints)),
+                "source_response_sha256": _response_sha256(response),
+                "repaired_response_sha256": _response_sha256(repaired),
+            })
+            return repaired, repairs
 
     # The source clause explicitly says the continuation caption may be
     # omitted. If the model nevertheless emits the boolean continuation flag
@@ -1929,6 +3171,52 @@ def _apply_safe_mechanical_repairs(
     if applicability_records:
         return repaired, repairs
 
+    placeholder_records = [
+        record for record in error_records
+        if isinstance(record, dict)
+        and record.get("code") == "cover_institution_placeholder"
+    ]
+    if placeholder_records and len(placeholder_records) == len(error_records):
+        requirements = repaired.get("requirements")
+        if not isinstance(requirements, list):
+            return None, []
+        seen_indexes: set[int] = set()
+        for record in placeholder_records:
+            pointer = str(record.get("json_pointer") or "")
+            match = re.fullmatch(
+                r"\$\.requirements\[(\d+)\]\.properties(?:\.institution)?",
+                pointer,
+            )
+            if match is None:
+                return None, []
+            requirement_index = int(match.group(1))
+            if requirement_index in seen_indexes:
+                continue
+            if requirement_index >= len(requirements):
+                return None, []
+            requirement = requirements[requirement_index]
+            properties = requirement.get("properties") if isinstance(requirement, dict) else None
+            if (
+                not isinstance(requirement, dict)
+                or requirement.get("role") != "cover"
+                or not isinstance(properties, dict)
+                or str(properties.get("institution") or "").strip()
+                or not isinstance(properties.get("fields"), list)
+                or properties.get("missing_value_policy") != "placeholder"
+                or properties.get("missing_value_placeholder") != NEUTRAL_COVER_PLACEHOLDER
+            ):
+                return None, []
+            properties["institution"] = NEUTRAL_COVER_PLACEHOLDER
+            seen_indexes.add(requirement_index)
+            repairs.append({
+                "code": "cover_institution_placeholder",
+                "json_pointer": f"$.requirements[{requirement_index}].properties.institution",
+                "replacement": NEUTRAL_COVER_PLACEHOLDER,
+                "rule_id": "compile_neutral_cover_institution_placeholder_v1",
+                "reason": "cover chunk has no trusted institution value",
+            })
+        return repaired, repairs
+
     def resolve_pointer(pointer: str) -> Any:
         if not isinstance(pointer, str) or not pointer.startswith("$"):
             return None
@@ -2009,6 +3297,88 @@ def _apply_safe_mechanical_repairs(
                         "value": exact_text,
                         "after_unknown_property_removal": True,
                     })
+        elif record.get("code") == "cover_institution_placeholder":
+            match = re.fullmatch(
+                r"\$\.requirements\[(\d+)\]\.properties(?:\.institution)?",
+                pointer,
+            )
+            requirements = repaired.get("requirements")
+            if match is None or not isinstance(requirements, list):
+                return None, []
+            requirement_index = int(match.group(1))
+            if requirement_index >= len(requirements):
+                return None, []
+            requirement = requirements[requirement_index]
+            properties = requirement.get("properties") if isinstance(requirement, dict) else None
+            if (
+                not isinstance(requirement, dict)
+                or requirement.get("role") != "cover"
+                or not isinstance(properties, dict)
+                or not isinstance(properties.get("fields"), list)
+                or properties.get("missing_value_policy") != "placeholder"
+                or properties.get("missing_value_placeholder") != NEUTRAL_COVER_PLACEHOLDER
+            ):
+                return None, []
+            institution = properties.get("institution")
+            if institution not in ("", None, NEUTRAL_COVER_PLACEHOLDER):
+                return None, []
+            if institution != NEUTRAL_COVER_PLACEHOLDER:
+                properties["institution"] = NEUTRAL_COVER_PLACEHOLDER
+                repairs.append({
+                    "code": "cover_institution_placeholder",
+                    "json_pointer": f"$.requirements[{requirement_index}].properties.institution",
+                    "replacement": NEUTRAL_COVER_PLACEHOLDER,
+                    "rule_id": "compile_neutral_cover_institution_placeholder_v1",
+                    "reason": "cover chunk has no trusted institution value",
+                })
+        elif (
+            record.get("code") == "contract_validation_error"
+            and "items must be unique" in raw_error
+        ):
+            match = re.fullmatch(
+                r"\$\.requirements\[(\d+)\]\.properties\.items\[(\d+)\]\.source_evidence_ids",
+                pointer,
+            )
+            if match is None or not isinstance(target, list):
+                # A parent anyOf error is only a summary when a more specific
+                # child error is present; the child branch below owns repair.
+                if (
+                    re.fullmatch(r"\$\.requirements\[(\d+)\]\.properties", pointer)
+                    and any(
+                        isinstance(other, dict)
+                        and str(other.get("json_pointer") or "").startswith(pointer + ".")
+                        for other in error_records
+                    )
+                ):
+                    continue
+                return None, []
+            deduplicated: list[Any] = []
+            for evidence_id in target:
+                if evidence_id not in deduplicated:
+                    deduplicated.append(evidence_id)
+            if deduplicated == target:
+                return None, []
+            removed_duplicate_count = len(target) - len(deduplicated)
+            target[:] = deduplicated
+            repairs.append({
+                "code": "contract_validation_error",
+                "json_pointer": pointer,
+                "rule_id": "deduplicate_first_occurrence_source_evidence_ids_v1",
+                "removed_duplicate_count": removed_duplicate_count,
+            })
+        elif record.get("code") == "contract_validation_error":
+            # A parent anyOf/schema error is diagnostic when a more specific
+            # child record in the same payload identifies the exact repair.
+            if (
+                re.fullmatch(r"\$\.requirements\[(\d+)\]\.properties", pointer)
+                and any(
+                    isinstance(other, dict)
+                    and str(other.get("json_pointer") or "").startswith(pointer + ".")
+                    for other in error_records
+                )
+            ):
+                continue
+            return None, []
         elif record.get("code") == "evidence_relation_mismatch":
             if evidence_match is None or not isinstance(target, list):
                 return None, []
@@ -2020,6 +3390,155 @@ def _apply_safe_mechanical_repairs(
                 "code": "evidence_relation_mismatch",
                 "json_pointer": pointer,
                 "removed_evidence_id": evidence_id,
+            })
+        elif record.get("code") == "empty_requirement_properties":
+            match = re.fullmatch(r"\$\.requirements\[(\d+)\]\.properties", pointer)
+            requirements = repaired.get("requirements")
+            if (
+                match is None
+                or not isinstance(requirements, list)
+                or int(match.group(1)) >= len(requirements)
+                or not isinstance(requirements[int(match.group(1))], dict)
+                or not isinstance(target, dict)
+                or any(value is not None for value in target.values())
+                or not isinstance(chunk, dict)
+            ):
+                return None, []
+            requirement = requirements[int(match.group(1))]
+            if requirement.get("role") == "appendices":
+                clauses = chunk.get("clauses")
+                evidence_context = chunk.get("evidence_context")
+                if not isinstance(clauses, list) or not isinstance(evidence_context, dict):
+                    return None, []
+                linked_clause_ids = {
+                    str(value) for value in requirement.get("clause_ids", [])
+                }
+                linked_evidence_ids = {
+                    str(value) for value in requirement.get("evidence_ids", [])
+                }
+                source_texts = [
+                    str(clause.get("text") or clause.get("source_text_full") or "")
+                    for clause in clauses
+                    if isinstance(clause, dict) and str(clause.get("id")) in linked_clause_ids
+                ]
+                source_texts.extend(
+                    str(evidence_context[evidence_id].get("text") or "")
+                    for evidence_id in linked_evidence_ids
+                    if isinstance(evidence_context.get(evidence_id), dict)
+                )
+                if source_texts and all(
+                    re.search(r"附录.*正文.*另起页", text, re.S)
+                    for text in source_texts
+                ):
+                    target.clear()
+                    target["page_break_each"] = True
+                    repairs.append({
+                        "code": "empty_requirement_properties",
+                        "json_pointer": pointer,
+                        "filled_property": "page_break_each",
+                        "value": True,
+                        "rule_id": "compile_exact_appendix_page_break_v1",
+                        "source_clause_ids": sorted(linked_clause_ids),
+                        "source_evidence_ids": sorted(linked_evidence_ids),
+                    })
+                    continue
+
+                if (
+                    source_texts
+                    and all(
+                        re.search(r"附录.*序号.*A.*B.*C", text, re.S)
+                        and re.search(r"每个附录.*标题", text, re.S)
+                        for text in source_texts
+                    )
+                ):
+                    target.clear()
+                    target.update({
+                        "label_style": "alpha_upper",
+                        "per_appendix_title_required": True,
+                    })
+                    repairs.append({
+                        "code": "empty_requirement_properties",
+                        "json_pointer": pointer,
+                        "filled_properties": [
+                            "label_style", "per_appendix_title_required",
+                        ],
+                        "value": {
+                            "label_style": "alpha_upper",
+                            "per_appendix_title_required": True,
+                        },
+                        "rule_id": "compile_exact_appendix_label_title_v1",
+                        "source_clause_ids": sorted(linked_clause_ids),
+                        "source_evidence_ids": sorted(linked_evidence_ids),
+                    })
+                    continue
+            if requirement.get("role") == "content_constraints":
+                clauses = chunk.get("clauses")
+                evidence_context = chunk.get("evidence_context")
+                if not isinstance(clauses, list) or not isinstance(evidence_context, dict):
+                    return None, []
+                linked_clause_ids = {
+                    str(value) for value in requirement.get("clause_ids", [])
+                }
+                linked_texts = [
+                    str(clause.get("text") or clause.get("source_text_full") or "")
+                    for clause in clauses
+                    if isinstance(clause, dict) and str(clause.get("id")) in linked_clause_ids
+                ]
+                evidence_texts = [
+                    str(evidence_context[str(evidence_id)].get("text") or "")
+                    for evidence_id in requirement.get("evidence_ids", [])
+                    if str(evidence_id) in evidence_context
+                    and isinstance(evidence_context[str(evidence_id)], dict)
+                ]
+                source_texts = [*linked_texts, *evidence_texts]
+                values = {
+                    int(match.group(1))
+                    for text in source_texts
+                    for match in re.finditer(r"字数\s*一般?不超过\s*(\d+)\s*字", text)
+                }
+                if len(values) == 1:
+                    max_chars = next(iter(values))
+                    target["acknowledgments"] = {"max_chars": max_chars}
+                    repairs.append({
+                        "code": "empty_requirement_properties",
+                        "json_pointer": pointer,
+                        "filled_property": "acknowledgments.max_chars",
+                        "value": max_chars,
+                        "rule_id": "compile_exact_acknowledgments_max_chars_v1",
+                        "source_clause_ids": sorted(linked_clause_ids),
+                        "source_evidence_ids": [
+                            str(evidence_id)
+                            for evidence_id in requirement.get("evidence_ids", [])
+                        ],
+                    })
+                    continue
+            requirements = repaired.get("requirements")
+            requirement = (
+                requirements[int(match.group(1))]
+                if isinstance(requirements, list) and int(match.group(1)) < len(requirements)
+                else None
+            )
+            if not isinstance(requirement, dict):
+                return None, []
+            evidence_context = chunk.get("evidence_context")
+            evidence_ids = requirement.get("evidence_ids")
+            if not isinstance(evidence_context, dict) or not isinstance(evidence_ids, list):
+                return None, []
+            exact_text = _exact_cited_text(requirement, chunk)
+            if exact_text is None:
+                return None, []
+            target["text"] = exact_text
+            repairs.append({
+                "code": "empty_requirement_properties",
+                "json_pointer": pointer,
+                "filled_property": "text",
+                "source_evidence_ids": [
+                    str(evidence_id)
+                    for evidence_id in evidence_ids
+                    if isinstance(evidence_context.get(str(evidence_id)), dict)
+                    and evidence_context[str(evidence_id)].get("text") == exact_text
+                ],
+                "value": exact_text,
             })
         else:
             match = re.fullmatch(r"\$\.requirements\[(\d+)\]\.properties", pointer)
@@ -2230,11 +3749,21 @@ def _host_prompt(*, request_path: Path, chunk_path: Path,
         contract_version == HOST_REVIEW_CONTRACT_V3
         and bool(retry_codes & {"requirement_relation_mismatch", "missing_derived_requirement"})
     )
+    v3_non_requirement_projection_retry = (
+        contract_version == HOST_REVIEW_CONTRACT_V3
+        and "non_requirement_classification_relation" in retry_codes
+    )
     if retry_parent_response_path is not None:
         requirement_change_rule = (
             "For an executable clause explicitly identified by the validator as missing an authoritative requirement edge, "
             "the retry may add only that evidence-backed requirement; preserve every existing requirement and review unchanged."
             if v3_relation_addition_retry else
+            "For non_requirement_classification_relation, remove only the validator-identified requirement objects whose clause_ids are all classified as non-requirement states. Preserve every clause_review and every other requirement byte-for-byte; do not reclassify, split, merge, reorder, or invent a replacement."
+            if v3_non_requirement_projection_retry else
+            "For a clause with executable_review_requires_all_obligations_covered, preserve every obligation id and status. "
+            "If an obligation remains non-covered, reclassify only that clause to the most accurate non-executable classification "
+            "and remove that clause from every requirements[].clause_ids edge; do not change any other review or requirement."
+            if bool(retry_codes & {"executable_review_obligations_uncovered"}) else
             "Do not split, merge, add, drop, or reorder requirements, and do not reclassify a clause."
         )
         parent_text = f"""The rejected parent response is available only as a repair baseline at:
@@ -2243,7 +3772,8 @@ Read that file on this retry. The current chunk packet and cited evidence remain
 the semantic authority. Preserve every non-error semantic field from the parent
 response exactly: clause IDs, classifications, obligations, requirement count,
 roles, clause_ids, evidence_ids, applicability, prerequisites, verification,
-and unrelated properties. Apply only the minimum mechanical edits explicitly
+and unrelated properties, except for the exact requirement-list projection
+explicitly authorized below. Apply only the minimum mechanical edits explicitly
 identified by the structured validator records above. {requirement_change_rule} Return the full
 response object, not a patch. The bridge will reject any unapproved semantic
 drift. Parent response sha256: {retry_parent_response_sha256 or 'unavailable'}."""
@@ -2263,6 +3793,8 @@ informational review into executable. If a safe local repair is not possible
 without changing semantics, return the parent object unchanged and let the
 bridge fail closed."""
         ) if v3_relation_addition_retry else (
+            """\nFINAL RETRY INVARIANT: copy every clause_review classification, obligation, reason, and evidence ID from the repair baseline exactly. Remove only the validator-identified requirement objects whose clause_ids are all bound to non-requirement classifications; preserve every other requirement object and all requirement fields exactly. Do not reclassify a clause, invent a replacement, or change any unrelated field. If this exact projection is not possible, return the parent unchanged and let the bridge fail closed."""
+            if v3_non_requirement_projection_retry else
             """\nFINAL RETRY INVARIANT: copy every clause_review classification, obligation,
 requirement identity, clause_ids, evidence_ids, and requirement count from the
 repair baseline exactly. The only permitted differences are the exact property
@@ -2682,9 +4214,33 @@ def run_host_agent_chunk(
                     "local response contract validation failed before provenance binding: "
                     + _summarize_contract_errors(remaining_errors)
                 )
-                error.error_records = contract_error_records(  # type: ignore[attr-defined]
+                remaining_error_records = contract_error_records(
                     remaining_errors, response=response, chunk=chunk,
                 )
+                # Keep the validator evidence that authorized a mechanical
+                # projection even when that projection did not make the
+                # entire response valid.  A subsequent native retry may
+                # legitimately repeat that same bounded correction (for
+                # example, replacing an empty cover institution or removing
+                # a duplicate evidence ID) while also repairing unrelated
+                # schema fields.  Dropping the original records would make
+                # the retry-drift guard mistake the authorized correction for
+                # semantic rewriting.
+                combined_error_records: list[dict[str, Any]] = []
+                seen_error_record_keys: set[tuple[str, str, str]] = set()
+                for record in [*error_records, *remaining_error_records]:
+                    if not isinstance(record, dict):
+                        continue
+                    record_key = (
+                        str(record.get("code") or ""),
+                        str(record.get("json_pointer") or ""),
+                        str(record.get("raw_error") or ""),
+                    )
+                    if record_key in seen_error_record_keys:
+                        continue
+                    seen_error_record_keys.add(record_key)
+                    combined_error_records.append(record)
+                error.error_records = combined_error_records  # type: ignore[attr-defined]
                 raise error
         else:
             error = ValueError(
@@ -3169,6 +4725,23 @@ def run_bridge(
                             audit.setdefault("semantic_retry_repairs", []).append(
                                 relation_repair_audit
                             )
+                        obligation_repair, obligation_repair_audit = (
+                            _v3_uncovered_obligation_reclassification_response(
+                                previous_response,
+                                current_response,
+                                retry_error_records,
+                                chunk=chunk,
+                            )
+                        )
+                        if obligation_repair is not None:
+                            atomic_write_text(
+                                attempt_response_path,
+                                json.dumps(obligation_repair, ensure_ascii=False, indent=2) + "\n",
+                            )
+                            current_response = obligation_repair
+                            audit.setdefault("semantic_retry_repairs", []).append(
+                                obligation_repair_audit
+                            )
                         change_error, semantic_changes = _retry_semantic_change_error(
                             previous_response,
                             current_response,
@@ -3191,6 +4764,20 @@ def run_bridge(
                             ):
                                 audit["semantic_retry_change_policy"] = (
                                     "code_owned_informational_projection"
+                                )
+                            elif all(
+                                isinstance(record, dict)
+                                and record.get("code") in {
+                                    "missing_clause_review", "contract_validation_error",
+                                }
+                                for record in retry_error_records
+                            ) and any(
+                                isinstance(record, dict)
+                                and record.get("code") == "missing_clause_review"
+                                for record in retry_error_records
+                            ):
+                                audit["semantic_retry_change_policy"] = (
+                                    "code_owned_missing_clause_review_completion"
                                 )
                             else:
                                 audit["semantic_retry_change_policy"] = "mechanical_only"

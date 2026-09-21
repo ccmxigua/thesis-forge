@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from format_spec_validation import load_and_validate  # noqa: E402
+from format_contract_guards import normalize_verification_checker_ids  # noqa: E402
 from host_review_contract import validate_response  # noqa: E402
 from apply_format_spec import compile_cover_contract  # noqa: E402
 from evidence_context_guards import sample_content_guard  # noqa: E402
@@ -353,6 +354,51 @@ class RootCauseGuardTests(unittest.TestCase):
         errors = load_and_validate(spec, ROOT / "schema" / "format-spec.schema.json")
         self.assertTrue(any("unregistered input path" in error for error in errors), errors)
 
+    def test_registered_nested_runtime_anchor_selection_is_accepted(self) -> None:
+        spec = {
+            "schema_version": "1.0",
+            "requirements": [{
+                "id": "R1", "role": "declarations", "properties": {
+                    "before_role": "abstract_title_zh", "items": [],
+                }, "clause_ids": ["C1"], "input_prerequisites": [{
+                    "kind": "runtime", "key": "runtime.anchor_inventory.selected",
+                    "required": True, "reason": "verified selected anchor",
+                }],
+            }],
+        }
+        errors = load_and_validate(spec, ROOT / "schema" / "format-spec.schema.json")
+        self.assertFalse(any("unregistered input path" in error for error in errors), errors)
+
+    def test_registered_bibliography_source_inventory_is_accepted(self) -> None:
+        spec = {
+            "schema_version": "1.0",
+            "requirements": [{
+                "id": "R1", "role": "bibliography_entry",
+                "properties": {"numbering": {"style": "decimal"}},
+                "clause_ids": ["C1"], "input_prerequisites": [{
+                    "kind": "source_content", "key": "source_inventory.bibliography",
+                    "required": True, "reason": "verified bibliography inventory",
+                }],
+            }],
+        }
+        errors = load_and_validate(spec, ROOT / "schema" / "format-spec.schema.json")
+        self.assertFalse(any("unregistered input path" in error for error in errors), errors)
+
+    def test_registered_cover_metadata_object_is_accepted(self) -> None:
+        spec = {
+            "schema_version": "1.0",
+            "requirements": [{
+                "id": "R1", "role": "cover", "properties": {
+                    "institution": "——", "fields": [],
+                }, "clause_ids": ["C1"], "input_prerequisites": [{
+                    "kind": "metadata", "key": "thesis_profile.cover_metadata",
+                    "required": True, "reason": "verified cover metadata object",
+                }],
+            }],
+        }
+        errors = load_and_validate(spec, ROOT / "schema" / "format-spec.schema.json")
+        self.assertFalse(any("unregistered input path" in error for error in errors), errors)
+
     def test_unknown_checker_id_is_rejected_but_explanation_text_remains_free_form(self) -> None:
         spec = {
             "schema_version": "1.0",
@@ -367,6 +413,39 @@ class RootCauseGuardTests(unittest.TestCase):
         }
         errors = load_and_validate(spec, ROOT / "schema" / "format-spec.schema.json")
         self.assertTrue(any("unregistered checker id" in error for error in errors), errors)
+
+    def test_known_checker_aliases_are_canonicalized_but_unknown_ids_are_not(self) -> None:
+        spec = {
+            "schema_version": "1.0",
+            "requirements": [{
+                "id": "R1", "role": "declarations", "properties": {
+                    "before_role": "abstract_title_zh", "items": [{
+                        "id": "authorization", "heading": "授权书",
+                        "body_parts": ["固定正文"], "source_evidence_ids": ["E1"],
+                    }],
+                }, "clause_ids": ["C1"],
+                "verification": {
+                    "mode": "static_docx",
+                    "checker_ids": ["declaration_anchor_binding", "fixed_declaration_text", "custom.unknown"],
+                },
+            }],
+        }
+        changes = normalize_verification_checker_ids(spec)
+        self.assertEqual(
+            [(item["from"], item["to"]) for item in changes],
+            [
+                ("declaration_anchor_binding", "docx.declarations_anchor"),
+                ("fixed_declaration_text", "declarations_fixed_text"),
+            ],
+        )
+        self.assertEqual(
+            spec["requirements"][0]["verification"]["checker_ids"],
+            ["docx.declarations_anchor", "declarations_fixed_text", "custom.unknown"],
+        )
+        errors = load_and_validate(spec, ROOT / "schema" / "format-spec.schema.json")
+        self.assertTrue(any("unregistered checker id 'custom.unknown'" in error for error in errors), errors)
+        self.assertFalse(any("declaration_anchor_binding" in error for error in errors), errors)
+        self.assertFalse(any("fixed_declaration_text" in error for error in errors), errors)
 
     def test_runtime_anchor_inventory_requires_one_unique_source_match(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -2581,6 +2581,25 @@ def _v3_uncovered_obligation_reclassification_response(
     }
 
 
+def _bind_current_invocation_provenance(
+    response: Any,
+    provenance: dict[str, Any],
+) -> dict[str, Any]:
+    """Re-bind bridge-owned provenance after a bounded semantic projection.
+
+    The v3 retry projections intentionally rebuild their semantic payload from
+    raw provider responses, which do not contain trusted identity fields. A
+    projection must therefore receive the current invocation provenance again
+    before it is persisted or validated. This function never preserves a
+    provider-supplied provenance object.
+    """
+    if not isinstance(response, dict):
+        raise ValueError("semantic retry projection did not produce an object")
+    bound = copy.deepcopy(response)
+    bound["provenance"] = copy.deepcopy(provenance)
+    return bound
+
+
 def _v3_uncovered_obligation_reclassification_allowed(
     previous_response: Any,
     current_response: Any,
@@ -4907,6 +4926,9 @@ def run_bridge(
                             chunk=chunk,
                         )
                         if relation_repair is not None:
+                            relation_repair = _bind_current_invocation_provenance(
+                                relation_repair, provenance,
+                            )
                             atomic_write_text(
                                 attempt_response_path,
                                 json.dumps(relation_repair, ensure_ascii=False, indent=2) + "\n",
@@ -4924,6 +4946,9 @@ def run_bridge(
                             )
                         )
                         if obligation_repair is not None:
+                            obligation_repair = _bind_current_invocation_provenance(
+                                obligation_repair, provenance,
+                            )
                             atomic_write_text(
                                 attempt_response_path,
                                 json.dumps(obligation_repair, ensure_ascii=False, indent=2) + "\n",

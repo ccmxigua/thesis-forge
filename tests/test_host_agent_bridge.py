@@ -2213,6 +2213,94 @@ class HostAgentBridgeTests(unittest.TestCase):
             self.assertEqual(audit["error_type"], "HostAgentProvenanceMismatch")
             self.assertFalse(audit["merged_response_written"])
 
+    def test_semantic_retry_projection_rebinds_current_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            directory = Path(td) / "requirements"
+            clauses = [{
+                "id": "C1", "text": "图题应简明并置于图序之后", "evidence_ids": ["E1"],
+                "source_kind": "paragraph", "location": {}, "part_index": 0,
+            }]
+            evidence = {
+                "evidence": [{"id": "E1", "text": clauses[0]["text"], "kind": "paragraph"}],
+            }
+            request = engine.build_llm_request(
+                [], clauses, evidence, {}, "full", contract_version="3.0",
+            )
+            request = attach_request_provenance(
+                request, source_sha256="a" * 64, evidence_doc=evidence,
+                clauses=clauses, run_id="run-v3-provenance-retry",
+            )
+            engine.prepare_host_agent_review_packets(
+                request, clauses, evidence, "a" * 64, directory, chunk_size=1,
+            )
+            chunk = json.loads(
+                (directory / "llm-request-chunks.json").read_text(encoding="utf-8")
+            )[0]
+
+            def review(classification: str) -> dict:
+                return {
+                    "clause_id": "C1",
+                    "classification": classification,
+                    "obligations": [
+                        {"id": "caption_after_number", "status": "covered", "reason": "位置已由 requirement 表示。"},
+                        {"id": "concise_caption", "status": "unverifiable", "reason": "简明性需要人工判断。"},
+                    ],
+                    "reason": "当前证据已审查。",
+                    "normative_basis": "explicit_normative_text",
+                }
+
+            first = {
+                "contract_version": "3.0",
+                "requirements": [{
+                    "role": "figure_caption",
+                    "properties": {"position": "below"},
+                    "clause_ids": ["C1"],
+                    "evidence_ids": ["E1"],
+                    "confidence": 0.9,
+                    "reason": "证据支持图题位置。",
+                    "verification": {"mode": "static_docx", "checks": ["检查图题位置。"]},
+                }],
+                "clause_reviews": [review("executable")],
+                "unsupported_items": [],
+                "reported_conflicts": [],
+            }
+            second = {
+                "contract_version": "3.0",
+                "requirements": [],
+                "clause_reviews": [review("unverifiable")],
+                "unsupported_items": [],
+                "reported_conflicts": [],
+            }
+            envelopes = [
+                {"runId": "openclaw-v3-provenance-retry-1", "status": "ok",
+                 "provider": "openai", "model": "gpt-5.6-luna",
+                 "result": {"payloads": [{"text": json.dumps(first, ensure_ascii=False)}]}},
+                {"runId": "openclaw-v3-provenance-retry-2", "status": "ok",
+                 "provider": "openai", "model": "gpt-5.6-luna",
+                 "result": {"payloads": [{"text": json.dumps(second, ensure_ascii=False)}]}},
+            ]
+            response_out = Path(td) / "host-agent-response.json"
+            fake_results = [
+                subprocess.CompletedProcess(["openclaw"], 0, json.dumps(envelopes[0]), ""),
+                subprocess.CompletedProcess(["openclaw"], 0, json.dumps(envelopes[1]), ""),
+            ]
+            with patch.object(bridge, "_run_command", side_effect=fake_results):
+                audit = bridge.run_bridge(
+                    directory, response_out=response_out,
+                    agent_id="main", timeout=1, max_attempts=2,
+                    openclaw_bin="openclaw", model="openai/gpt-5.6-luna",
+                )
+
+            merged = json.loads(response_out.read_text(encoding="utf-8"))
+            full_request = json.loads(
+                (directory / "llm-request.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(merged["provenance"], full_request["provenance"])
+            self.assertEqual(merged["clause_reviews"][0]["classification"], "unverifiable")
+            self.assertEqual(merged["requirements"], [])
+            self.assertEqual(audit["status"], "merged")
+            self.assertEqual(audit["chunk_runs"][0]["provenance_binding"], "bridge_generated")
+
     def test_bridge_rejects_tampered_chunk_before_starting_native_agent(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             review_dir, _chunk = self._packet(Path(td) / "requirements")

@@ -482,7 +482,7 @@ _BASE_CONTRACT_REPAIR_RULES = (
     "Role boundary for equations: use the top-level equations role for layout properties declared by equationLayoutSpec (same_line, no_lines, alignment, number_alignment, number_parentheses, center_tab_twips, or right_tab_twips). Use equation only for an exact equation/content occurrence. Never put style or an invented layout key in equation; if no declared equations property represents the rule, keep the clause non-executable rather than guessing.",
     "A partial_clause_coverage error never authorizes changing classification, obligations, clause_ids, or requirement count on retry. Preserve the baseline and complete a missing role-specific requirement only when current evidence and the declared schema support it; otherwise return the baseline unchanged and let the bridge fail closed.",
     "When executable_review_requires_all_obligations_covered is reported, never change a non-covered obligation to covered merely to satisfy the validator. Preserve each obligation id and status; if the current evidence/backend cannot cover one obligation, reclassify only that clause to the most accurate non-executable classification and remove its clause edge from requirements. Do not change any other review, requirement payload, evidence, or obligation.",
-    "When a contract-3.0 retry reports executable_review_requires_derived_requirement, preserve every requirement from the rejected response and add only the missing, evidence-backed requirements for the named executable clauses; never drop verify_existing requirements or replace the baseline requirement set.",
+    "When a contract-3.0 retry reports executable_review_requires_derived_requirement, preserve every non-placeholder requirement from the rejected response and add one evidence-backed requirement for each distinct named executable clause that lacks an authoritative edge; never drop verify_existing requirements, collapse several missing clauses into an unbound placeholder, or replace the baseline requirement set.",
     "Use only a verified runtime_context.runtime_inventory anchor. A zero-match, multi-match, or blocked anchor is not executable; never infer a nearby heading or use the declarations role as an insertion anchor.",
 )
 
@@ -670,8 +670,12 @@ def _structured_contract_repair_guidance(
                 f"At {pointer}, preserve this executable requirement and re-check its exact evidence-backed clause binding. Do not delete an executable requirement as a mechanical cleanup."
             )
         elif code == "missing_derived_requirement":
+            clause_label = (
+                f" for clause_id={record.get('clause_id')}"
+                if record.get("clause_id") else ""
+            )
             rule = (
-                f"At {pointer}, add one evidence-backed requirement only if the current executable clause has no authoritative requirement edge; preserve all existing requirements and reviews."
+                f"At {pointer}{clause_label}, add exactly one evidence-backed requirement for this distinct executable clause if it has no authoritative requirement edge; preserve every existing non-placeholder requirement and review. If several such records are present, satisfy each distinct clause_id separately rather than adding one empty or generic placeholder."
             )
         elif code == "duplicate_evidence_ids":
             rule = (
@@ -699,6 +703,7 @@ def _structured_contract_repair_guidance(
             rule = (
                 f"At {pointer}, emit a non-empty role-specific properties object. "
                 "field_key alone is not an executable payload; copy exact evidence-backed text into properties.text or emit the declared style/layout property. "
+                "If this object has no clause_ids, no evidence_ids, no semantic properties, and an empty reason, it is an unbound provider placeholder: remove only that placeholder rather than filling it or assigning a guessed clause. "
                 "For the exact appendix placement wording '附录放在正文之后另起页', use only appendices.page_break_each: true; do not guess other appendix properties."
             )
         elif code == "cover_institution_placeholder":
@@ -1106,6 +1111,15 @@ def _retry_changes_allowed(
         and _v3_uncovered_obligation_reclassification_allowed(
             previous_response, current_response, records, chunk=chunk,
         )
+    ):
+        return True
+
+    if (
+        contract_version == HOST_REVIEW_CONTRACT_V3
+        and bool(codes & {"requirement_relation_mismatch", "missing_derived_requirement"})
+        and _v3_relation_completion_response(
+            previous_response, current_response, records, chunk=chunk,
+        )[0] is not None
     ):
         return True
 
@@ -2586,23 +2600,33 @@ def _v3_relation_completion_response(
     *,
     chunk: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
-    """Restore omitted baseline requirements while accepting a narrow retry.
+    """Accept a bounded v3 relation-completion retry.
 
-    A contract-3.0 retry may correctly add requirements for executable reviews
-    that were missing from the first response, but the model may also omit
-    unrelated ``verify_existing`` requirements while doing so.  The safe
-    deterministic operation is to preserve the first response and append only
-    genuinely new, evidence-backed requirements for the validator-identified
-    missing clauses.  Any changed baseline item, changed review, or new item
-    outside those clauses remains fail-closed.
+    The provider owns the semantic construction of a missing requirement.  The
+    bridge only accepts the retry when it can prove that every non-placeholder
+    baseline requirement and every review survived, that each added
+    requirement is evidence-backed for a validator-named executable clause,
+    and that any removed item was an unbound empty provider placeholder.  A
+    fixed declaration text correction is admitted only when it is the exact
+    cited evidence text.  No requirement or semantic payload is synthesized
+    here.
     """
     if chunk is None or not isinstance(previous_response, dict) or not isinstance(current_response, dict):
         return None, None
-    if not records or any(
-        not isinstance(record, dict) or record.get("code") not in {
-            "requirement_relation_mismatch", "missing_derived_requirement",
-        }
+    relation_codes = {"requirement_relation_mismatch", "missing_derived_requirement"}
+    mechanical_codes = {
+        "contract_validation_error", "schema_contract_violation", "unknown_property",
+        "empty_requirement_properties", "fixed_text_evidence_mismatch",
+    }
+    codes = {
+        str(record.get("code"))
         for record in records
+        if isinstance(record, dict)
+    }
+    if (
+        not records
+        or not codes & relation_codes
+        or not codes <= relation_codes | mechanical_codes
     ):
         return None, None
     if previous_response.get("contract_version") != HOST_REVIEW_CONTRACT_V3:
@@ -2617,16 +2641,60 @@ def _v3_relation_completion_response(
     previous_requirements = previous_response.get("requirements")
     if not isinstance(previous_requirements, list) or not isinstance(current_requirements, list):
         return None, None
-    if validate_host_agent_response(current_response, chunk):
-        return None, None
-
     missing_clause_ids: set[str] = set()
     previous_reviews = previous_response.get("clause_reviews")
     if not isinstance(previous_reviews, list):
         return None, None
+    placeholder_indexes: set[int] = set()
+
+    def has_meaningful_value(value: Any) -> bool:
+        if value is None:
+            return False
+        if isinstance(value, str):
+            return bool(value.strip())
+        if isinstance(value, list):
+            return any(has_meaningful_value(item) for item in value)
+        if isinstance(value, dict):
+            return any(has_meaningful_value(item) for item in value.values())
+        return True
+
+    def is_unbound_placeholder(requirement: Any) -> bool:
+        if not isinstance(requirement, dict):
+            return False
+        properties = requirement.get("properties")
+        return (
+            isinstance(properties, dict)
+            and not has_meaningful_value(properties)
+            and not has_meaningful_value(requirement.get("clause_ids"))
+            and not has_meaningful_value(requirement.get("evidence_ids"))
+            and not has_meaningful_value(requirement.get("existing_requirement_id"))
+            and not has_meaningful_value(requirement.get("field_key"))
+            and not has_meaningful_value(requirement.get("reason"))
+            and requirement.get("confidence") in (None, 0, 0.0)
+            and not has_meaningful_value(requirement.get("applicability"))
+            and not has_meaningful_value(requirement.get("input_prerequisites"))
+            and not has_meaningful_value(requirement.get("verification"))
+        )
+
+    for index, requirement in enumerate(previous_requirements):
+        if is_unbound_placeholder(requirement):
+            placeholder_indexes.add(index)
+
     for record in records:
+        if not isinstance(record, dict):
+            return None, None
+        code = str(record.get("code") or "")
         pointer = str(record.get("json_pointer") or "")
         raw_error = str(record.get("raw_error") or "")
+        if code == "empty_requirement_properties":
+            match = re.fullmatch(r"\$\.requirements\[(\d+)\]\.properties", pointer)
+            if match is None or int(match.group(1)) not in placeholder_indexes:
+                return None, None
+            continue
+        if code in {"contract_validation_error", "schema_contract_violation", "unknown_property", "fixed_text_evidence_mismatch"}:
+            continue
+        if code not in relation_codes:
+            return None, None
         review_match = re.search(r"\$\.clause_reviews\[(\d+)\]", pointer)
         if review_match is not None:
             review_index = int(review_match.group(1))
@@ -2640,7 +2708,10 @@ def _v3_relation_completion_response(
             clause_id = review.get("clause_id")
             if not isinstance(clause_id, str) or not clause_id:
                 return None, None
-            if "executable_review_requires_derived_requirement" not in raw_error:
+            if (
+                code not in {"missing_derived_requirement", "requirement_relation_mismatch"}
+                or "executable_review_requires_derived_requirement" not in raw_error
+            ):
                 return None, None
             missing_clause_ids.add(clause_id)
             continue
@@ -2653,6 +2724,8 @@ def _v3_relation_completion_response(
         if requirement_index >= len(previous_requirements):
             return None, None
         clause_ids = previous_requirements[requirement_index].get("clause_ids")
+        if requirement_index in placeholder_indexes:
+            continue
         if not isinstance(clause_ids, list) or not clause_ids:
             return None, None
         missing_clause_ids.update(str(value) for value in clause_ids)
@@ -2669,24 +2742,44 @@ def _v3_relation_completion_response(
         }, ensure_ascii=False, sort_keys=True)
 
     previous_by_identity: dict[str, list[dict[str, Any]]] = {}
-    for item in previous_requirements:
+    previous_non_placeholders = [
+        item for index, item in enumerate(previous_requirements)
+        if index not in placeholder_indexes
+    ]
+    for item in previous_non_placeholders:
         key = identity(item)
         if key is None:
             return None, None
         previous_by_identity.setdefault(key, []).append(item)
     additions: list[dict[str, Any]] = []
+    preserved_by_identity: dict[str, list[dict[str, Any]]] = {}
     consumed_previous: dict[str, int] = {}
-    for item in current_requirements:
+    current_placeholder_indexes: set[int] = set()
+    for index, item in enumerate(current_requirements):
+        if is_unbound_placeholder(item):
+            current_placeholder_indexes.add(index)
+            if index not in placeholder_indexes:
+                return None, None
+            continue
         key = identity(item)
         if key is None:
             return None, None
         candidates = previous_by_identity.get(key, [])
         consumed = consumed_previous.get(key, 0)
         if consumed < len(candidates):
-            if _retry_requirement_semantic_payload(item) != _retry_requirement_semantic_payload(
-                candidates[consumed]
-            ):
-                return None, None
+            previous_item = candidates[consumed]
+            if _retry_requirement_semantic_payload(item) != _retry_requirement_semantic_payload(previous_item):
+                if not _v3_fixed_text_requirement_change_allowed(
+                    previous_item, item, records, chunk=chunk,
+                ):
+                    return None, None
+                preserved_item = copy.deepcopy(previous_item)
+                preserved_item["properties"] = copy.deepcopy(item.get("properties"))
+            else:
+                # Keep the baseline object (including its diagnostic reason)
+                # rather than allowing an otherwise-unnecessary retry rewrite.
+                preserved_item = copy.deepcopy(previous_item)
+            preserved_by_identity.setdefault(key, []).append(preserved_item)
             consumed_previous[key] = consumed + 1
             continue
         clause_ids = item.get("clause_ids") if isinstance(item, dict) else None
@@ -2699,19 +2792,101 @@ def _v3_relation_completion_response(
         ):
             return None, None
         additions.append(copy.deepcopy(item))
-    if not additions:
+    preserved_items: list[dict[str, Any]] = []
+    restored_omitted_count = 0
+    for previous_item in previous_non_placeholders:
+        key = identity(previous_item)
+        if key is None:
+            return None, None
+        candidates = preserved_by_identity.get(key, [])
+        if candidates:
+            preserved_items.append(candidates.pop(0))
+        else:
+            # A retry is allowed to omit a baseline requirement while adding
+            # the missing relation. Restore that exact baseline object; the
+            # bridge never accepts the omission as a semantic deletion.
+            preserved_items.append(copy.deepcopy(previous_item))
+            restored_omitted_count += 1
+    added_clause_ids = {
+        str(clause_id)
+        for item in additions
+        for clause_id in (item.get("clause_ids") or [])
+    }
+    if not additions or not missing_clause_ids <= added_clause_ids:
         return None, None
 
     repaired = copy.deepcopy(current_response)
-    repaired["requirements"] = copy.deepcopy(previous_requirements) + additions
+    repaired["requirements"] = preserved_items + additions
     if validate_host_agent_response(repaired, chunk):
         return None, None
     return repaired, {
-        "rule_id": "preserve_baseline_add_missing_v3_requirements",
+        "rule_id": "preserve_baseline_add_missing_v3_requirements_and_remove_unbound_placeholder",
         "missing_clause_ids": sorted(missing_clause_ids),
-        "preserved_requirement_count": len(previous_requirements),
+        "removed_unbound_placeholder_count": len(current_placeholder_indexes),
+        "preserved_requirement_count": len(previous_non_placeholders),
+        "restored_omitted_baseline_count": restored_omitted_count,
         "added_requirement_count": len(additions),
     }
+
+
+def _v3_fixed_text_requirement_change_allowed(
+    previous_requirement: Any,
+    current_requirement: Any,
+    records: list[dict[str, Any]],
+    *,
+    chunk: dict[str, Any],
+) -> bool:
+    """Allow only exact cited-text edits inside a fixed declaration payload."""
+    if not any(
+        isinstance(record, dict) and record.get("code") == "fixed_text_evidence_mismatch"
+        for record in records
+    ):
+        return False
+    changed_paths = _retry_change_paths(
+        {"requirements": [previous_requirement]},
+        {"requirements": [current_requirement]},
+    )
+    if not changed_paths:
+        return False
+    evidence_context = chunk.get("evidence_context")
+    evidence_ids = current_requirement.get("evidence_ids") if isinstance(current_requirement, dict) else None
+    if not isinstance(evidence_context, dict) or not isinstance(evidence_ids, list):
+        return False
+    evidence_texts = {
+        str(evidence_context[str(evidence_id)].get("text") or "")
+        for evidence_id in evidence_ids
+        if str(evidence_id) in evidence_context
+        and isinstance(evidence_context[str(evidence_id)], dict)
+        and str(evidence_context[str(evidence_id)].get("text") or "").strip()
+    }
+    properties = current_requirement.get("properties") if isinstance(current_requirement, dict) else None
+    items = properties.get("items") if isinstance(properties, dict) else None
+    if not isinstance(items, list):
+        return False
+    for path in changed_paths:
+        if path.endswith(".heading"):
+            match = re.fullmatch(r"\$\.requirements\[0\]\.properties\.items\[(\d+)\]\.heading", path)
+            if match is None or int(match.group(1)) >= len(items):
+                return False
+            value = items[int(match.group(1))].get("heading") if isinstance(items[int(match.group(1))], dict) else None
+            if value not in evidence_texts:
+                return False
+            continue
+        match = re.fullmatch(
+            r"\$\.requirements\[0\]\.properties\.items\[(\d+)\]\.body_parts\[(\d+)\]",
+            path,
+        )
+        if match is None:
+            return False
+        item_index, part_index = int(match.group(1)), int(match.group(2))
+        if item_index >= len(items) or not isinstance(items[item_index], dict):
+            return False
+        body_parts = items[item_index].get("body_parts")
+        if not isinstance(body_parts, list) or part_index >= len(body_parts):
+            return False
+        if body_parts[part_index] not in evidence_texts:
+            return False
+    return True
 
 
 def _retry_semantic_change_error(
@@ -3755,8 +3930,10 @@ def _host_prompt(*, request_path: Path, chunk_path: Path,
     )
     if retry_parent_response_path is not None:
         requirement_change_rule = (
-            "For an executable clause explicitly identified by the validator as missing an authoritative requirement edge, "
-            "the retry may add only that evidence-backed requirement; preserve every existing requirement and review unchanged."
+            "For every distinct executable clause explicitly identified by the validator as missing an authoritative requirement edge, "
+            "the retry must add one evidence-backed requirement for that clause. Preserve every existing non-placeholder "
+            "requirement and review unchanged. If the parent contains a requirement with empty clause_ids, empty evidence_ids, "
+            "empty properties, and an empty reason, remove only that unbound provider placeholder; never assign it a guessed clause."
             if v3_relation_addition_retry else
             "For non_requirement_classification_relation, remove only the validator-identified requirement objects whose clause_ids are all classified as non-requirement states. Preserve every clause_review and every other requirement byte-for-byte; do not reclassify, split, merge, reorder, or invent a replacement."
             if v3_non_requirement_projection_retry else
@@ -3770,10 +3947,11 @@ def _host_prompt(*, request_path: Path, chunk_path: Path,
 {retry_parent_response_path}
 Read that file on this retry. The current chunk packet and cited evidence remain
 the semantic authority. Preserve every non-error semantic field from the parent
-response exactly: clause IDs, classifications, obligations, requirement count,
-roles, clause_ids, evidence_ids, applicability, prerequisites, verification,
-and unrelated properties, except for the exact requirement-list projection
-explicitly authorized below. Apply only the minimum mechanical edits explicitly
+response exactly: clause IDs, classifications, obligations, roles, clause_ids,
+evidence_ids, applicability, prerequisites, verification, and unrelated
+properties. The requirement-list membership and count may change only under
+the exact requirement-list projection explicitly authorized below. Apply only
+the minimum mechanical edits explicitly
 identified by the structured validator records above. {requirement_change_rule} Return the full
 response object, not a patch. The bridge will reject any unapproved semantic
 drift. Parent response sha256: {retry_parent_response_sha256 or 'unavailable'}."""
@@ -3785,13 +3963,16 @@ drift. Parent response sha256: {retry_parent_response_sha256 or 'unavailable'}."
         )
     retry_invariant = (
         (
-            """\nFINAL RETRY INVARIANT: copy every clause_review classification, obligation,
-requirement identity, clause_ids, and evidence_ids from the repair baseline exactly. The
-only permitted requirement-list difference is one new, evidence-backed requirement
-for the validator-identified executable clause. Do not turn an unresolved or
-informational review into executable. If a safe local repair is not possible
-without changing semantics, return the parent object unchanged and let the
-bridge fail closed."""
+            """\nFINAL RETRY INVARIANT: copy every clause_review classification and obligation
+from the repair baseline exactly. Preserve every non-placeholder requirement
+identity, clause_ids, evidence_ids, and semantic payload. Add one new,
+evidence-backed requirement for EACH distinct validator-identified executable
+clause that lacks an authoritative edge. If the baseline contains an unbound
+empty provider placeholder, remove only that placeholder. Do not turn an
+unresolved or informational review into executable, do not invent properties,
+and do not reuse one requirement for an unrelated clause. If a safe local
+repair is not possible without changing semantics, return the parent object
+unchanged and let the bridge fail closed."""
         ) if v3_relation_addition_retry else (
             """\nFINAL RETRY INVARIANT: copy every clause_review classification, obligation, reason, and evidence ID from the repair baseline exactly. Remove only the validator-identified requirement objects whose clause_ids are all bound to non-requirement classifications; preserve every other requirement object and all requirement fields exactly. Do not reclassify a clause, invent a replacement, or change any unrelated field. If this exact projection is not possible, return the parent unchanged and let the bridge fail closed."""
             if v3_non_requirement_projection_retry else
@@ -4706,9 +4887,17 @@ def run_bridge(
                             ),
                             chunk.get("response_schema") if isinstance(chunk.get("response_schema"), dict) else {},
                         )
-                        current_response = _read_json(
-                            attempt_response_path,
-                            label=f"Host Agent response {index} attempt {attempt}",
+                        response_schema = (
+                            chunk.get("response_schema")
+                            if isinstance(chunk.get("response_schema"), dict)
+                            else {}
+                        )
+                        current_response = normalize_native_response(
+                            _read_json(
+                                attempt_response_path,
+                                label=f"Host Agent response {index} attempt {attempt}",
+                            ),
+                            response_schema,
                         )
                         relation_repair, relation_repair_audit = _v3_relation_completion_response(
                             previous_response,

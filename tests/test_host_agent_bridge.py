@@ -696,6 +696,92 @@ class HostAgentBridgeTests(unittest.TestCase):
         self.assertIsNone(repaired)
         self.assertIsNone(audit)
 
+    def test_v3_relation_completion_handles_multiple_missing_clauses_and_empty_placeholder(self) -> None:
+        previous = {
+            "contract_version": "3.0",
+            "requirements": [
+                {
+                    "role": "body_text", "properties": {"font": {"cjk": "SimSun"}},
+                    "clause_ids": ["C1"], "evidence_ids": ["E1"],
+                    "confidence": 0.9, "reason": "保留的已有要求",
+                },
+                {
+                    "role": "abstract_title_zh", "properties": {},
+                    "clause_ids": [], "evidence_ids": [], "confidence": 0,
+                    "reason": "",
+                },
+            ],
+            "clause_reviews": [
+                {"clause_id": "C1", "classification": "executable"},
+                {"clause_id": "C2", "classification": "executable"},
+                {"clause_id": "C3", "classification": "executable"},
+            ],
+            "unsupported_items": [],
+            "reported_conflicts": [],
+        }
+        current = {
+            "contract_version": "3.0",
+            "requirements": [
+                json.loads(json.dumps(previous["requirements"][0])),
+                json.loads(json.dumps(previous["requirements"][1])),
+                {
+                    "role": "content_constraints", "properties": {"keywords_zh": {"max_chars": 10}},
+                    "clause_ids": ["C2"], "evidence_ids": ["E2"],
+                    "confidence": 0.9, "reason": "C2 的证据支持关键词限制",
+                },
+                {
+                    "role": "content_constraints", "properties": {"keywords_en": {"max_chars": 10}},
+                    "clause_ids": ["C3"], "evidence_ids": ["E3"],
+                    "confidence": 0.9, "reason": "C3 的证据支持英文关键词限制",
+                },
+            ],
+            "clause_reviews": previous["clause_reviews"],
+            "unsupported_items": [],
+            "reported_conflicts": [],
+        }
+        records = [
+            {
+                "code": "empty_requirement_properties",
+                "json_pointer": "$.requirements[1].properties",
+                "raw_error": "$.requirements[1].properties: must_include_semantic_payload",
+            },
+            {
+                "code": "missing_derived_requirement",
+                "json_pointer": "$.clause_reviews[1]",
+                "raw_error": "$.clause_reviews[1]: executable_review_requires_derived_requirement",
+            },
+            {
+                "code": "missing_derived_requirement",
+                "json_pointer": "$.clause_reviews[2]",
+                "raw_error": "$.clause_reviews[2]: executable_review_requires_derived_requirement",
+            },
+            {
+                "code": "requirement_relation_mismatch",
+                "json_pointer": "$.requirements[1]",
+                "raw_error": "requirements_not_referenced_by_clause_review:1",
+            },
+        ]
+        with patch.object(bridge, "validate_host_agent_response", return_value=[]):
+            repaired, audit = bridge._v3_relation_completion_response(
+                previous, current, records, chunk={},
+            )
+        self.assertIsNotNone(repaired)
+        self.assertEqual(
+            [item["clause_ids"] for item in repaired["requirements"]],
+            [["C1"], ["C2"], ["C3"]],
+        )
+        self.assertEqual(audit["missing_clause_ids"], ["C2", "C3"])
+        self.assertEqual(audit["removed_unbound_placeholder_count"], 1)
+        self.assertEqual(audit["added_requirement_count"], 2)
+
+        current["requirements"][2]["clause_ids"] = ["C9"]
+        with patch.object(bridge, "validate_host_agent_response", return_value=[]):
+            repaired, audit = bridge._v3_relation_completion_response(
+                previous, current, records, chunk={},
+            )
+        self.assertIsNone(repaired)
+        self.assertIsNone(audit)
+
     def test_v3_retry_allows_only_proven_informational_projection(self) -> None:
         previous = {
             "contract_version": "3.0",

@@ -344,7 +344,7 @@ class HostReviewV3Tests(unittest.TestCase):
     def test_missing_v3_requirement_relation_is_structured_as_relation_error(self) -> None:
         records = contract_error_records(
             [
-                "$.clause_reviews[12]: executable_review_requires_derived_requirement",
+                "$.clause_reviews[0]: executable_review_requires_derived_requirement",
                 "requirements_not_referenced_by_clause_review:0",
             ],
             response=self._executable_response(),
@@ -354,6 +354,7 @@ class HostReviewV3Tests(unittest.TestCase):
             [record["code"] for record in records],
             ["missing_derived_requirement", "unused_executable_requirement"],
         )
+        self.assertEqual(records[0]["clause_id"], "C1")
 
     def test_informational_requirement_relation_is_explicitly_forbidden(self) -> None:
         response = self._informational_response()

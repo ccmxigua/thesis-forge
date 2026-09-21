@@ -306,6 +306,17 @@ def contract_error_records(
         lowered = text.lower()
         pointer_match = re.match(r"(\$[^:]+)", text)
         clause_match = re.search(r"clause_id=([^:;]+)", text)
+        pointer = pointer_match.group(1) if pointer_match else None
+        derived_clause_id = clause_match.group(1) if clause_match else None
+        if derived_clause_id is None and pointer:
+            review_match = re.fullmatch(r"\$\.clause_reviews\[(\d+)\](?:\..*)?", pointer)
+            if review_match and isinstance(response, dict):
+                review_index = int(review_match.group(1))
+                reviews = response.get("clause_reviews")
+                if isinstance(reviews, list) and review_index < len(reviews):
+                    review = reviews[review_index]
+                    if isinstance(review, dict) and review.get("clause_id"):
+                        derived_clause_id = str(review["clause_id"])
 
         aggregate_match = re.fullmatch(
             r"requirements_not_referenced_by_clause_review:(\d+(?:,\d+)*)",
@@ -438,11 +449,11 @@ def contract_error_records(
             code = "contract_validation_error"
         append_generic(
             code=code, text=text,
-            pointer=pointer_match.group(1) if pointer_match else None,
-            clause_id=clause_match.group(1) if clause_match else None,
+            pointer=pointer,
+            clause_id=derived_clause_id,
             matching=(
-                relation_facts.get(clause_match.group(1), [])
-                if clause_match else None
+                relation_facts.get(derived_clause_id, [])
+                if derived_clause_id else None
             ),
         )
     return records

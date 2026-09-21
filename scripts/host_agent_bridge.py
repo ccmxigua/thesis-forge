@@ -2871,9 +2871,28 @@ def _v3_relation_completion_response(
         if consumed < len(candidates):
             previous_item = candidates[consumed]
             if _retry_requirement_semantic_payload(item) != _retry_requirement_semantic_payload(previous_item):
-                if not _v3_fixed_text_requirement_change_allowed(
+                previous_item_index = next(
+                    (
+                        index
+                        for index, candidate in enumerate(previous_requirements)
+                        if candidate is previous_item
+                    ),
+                    None,
+                )
+                fixed_text_allowed = _v3_fixed_text_requirement_change_allowed(
                     previous_item, item, records, chunk=chunk,
-                ):
+                )
+                unknown_property_text_allowed = (
+                    previous_item_index is not None
+                    and _v3_unknown_property_text_requirement_change_allowed(
+                        previous_item,
+                        item,
+                        records,
+                        chunk=chunk,
+                        requirement_index=previous_item_index,
+                    )
+                )
+                if not fixed_text_allowed and not unknown_property_text_allowed:
                     return None, None
                 preserved_item = copy.deepcopy(previous_item)
                 preserved_item["properties"] = copy.deepcopy(item.get("properties"))
@@ -2989,6 +3008,58 @@ def _v3_fixed_text_requirement_change_allowed(
         if body_parts[part_index] not in evidence_texts:
             return False
     return True
+
+
+def _v3_unknown_property_text_requirement_change_allowed(
+    previous_requirement: Any,
+    current_requirement: Any,
+    records: list[dict[str, Any]],
+    *,
+    chunk: dict[str, Any],
+    requirement_index: int,
+) -> bool:
+    """Allow an unknown-property removal followed by exact cited text fill.
+
+    ``run_host_agent_chunk`` can deterministically remove a validator-named
+    layout property and then fill a text-capable role with the one exact
+    cited evidence string.  Relation completion must recognize that bound
+    mechanical projection when it also accepts a newly derived requirement;
+    it must not treat the projection as a provider-authored semantic rewrite.
+    """
+    if not isinstance(previous_requirement, dict) or not isinstance(current_requirement, dict):
+        return False
+    unknown_names: set[str] = set()
+    pointer = f"$.requirements[{requirement_index}].properties"
+    for record in records:
+        if not isinstance(record, dict) or record.get("code") != "unknown_property":
+            continue
+        if str(record.get("json_pointer") or "") != pointer:
+            continue
+        match = re.search(
+            r"unknown property ['\"]([^'\"]+)['\"]",
+            str(record.get("raw_error") or ""),
+        )
+        if match is None:
+            return False
+        unknown_names.add(match.group(1))
+    if not unknown_names:
+        return False
+    previous_properties = previous_requirement.get("properties")
+    current_properties = current_requirement.get("properties")
+    exact_text = _exact_cited_text(current_requirement, chunk)
+    if (
+        not isinstance(previous_properties, dict)
+        or not isinstance(current_properties, dict)
+        or set(previous_properties) != unknown_names
+        or current_properties != {"text": exact_text}
+        or exact_text is None
+    ):
+        return False
+    previous_rest = copy.deepcopy(previous_requirement)
+    current_rest = copy.deepcopy(current_requirement)
+    previous_rest.pop("properties", None)
+    current_rest.pop("properties", None)
+    return previous_rest == current_rest
 
 
 def _retry_semantic_change_error(

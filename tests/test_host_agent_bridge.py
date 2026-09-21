@@ -1132,6 +1132,88 @@ class HostAgentBridgeTests(unittest.TestCase):
         self.assertIsNone(repaired)
         self.assertIsNone(audit)
 
+    def test_v3_relation_completion_accepts_exact_text_after_unknown_property_removal(self) -> None:
+        previous = {
+            "contract_version": "3.0",
+            "requirements": [
+                {
+                    "role": "cover_field_label",
+                    "properties": {"style": "three_line"},
+                    "clause_ids": ["C1"],
+                    "evidence_ids": ["E1"],
+                },
+                {
+                    "role": "body_text",
+                    "properties": {"text": "正文"},
+                    "clause_ids": ["C2"],
+                    "evidence_ids": ["E2"],
+                },
+            ],
+            "clause_reviews": [
+                {"clause_id": "C1", "classification": "executable"},
+                {"clause_id": "C2", "classification": "executable"},
+                {"clause_id": "C3", "classification": "executable"},
+            ],
+            "unsupported_items": [],
+            "reported_conflicts": [],
+        }
+        current = json.loads(json.dumps(previous, ensure_ascii=False))
+        current["requirements"] = [
+            {
+                "role": "cover_field_label",
+                "properties": {"text": "论文题目"},
+                "clause_ids": ["C1"],
+                "evidence_ids": ["E1"],
+            },
+            current["requirements"][1],
+            {
+                "role": "body_text",
+                "properties": {"text": "新增正文"},
+                "clause_ids": ["C3"],
+                "evidence_ids": ["E3"],
+            },
+        ]
+        records = [
+            {
+                "code": "unknown_property",
+                "json_pointer": "$.requirements[0].properties",
+                "raw_error": "unknown property 'style'",
+            },
+            {
+                "code": "missing_derived_requirement",
+                "json_pointer": "$.clause_reviews[2]",
+                "clause_id": "C3",
+                "raw_error": "$.clause_reviews[2]: executable_review_requires_derived_requirement",
+            },
+        ]
+        chunk = {
+            "clauses": [
+                {"id": "C1", "evidence_ids": ["E1"]},
+                {"id": "C2", "evidence_ids": ["E2"]},
+                {"id": "C3", "evidence_ids": ["E3"]},
+            ],
+            "evidence_context": {
+                "E1": {"text": "论文题目"},
+                "E2": {"text": "正文"},
+                "E3": {"text": "新增正文"},
+            },
+            "requirement_contract": {
+                "role_properties_schema": {
+                    "cover_field_label": {"$ref": "#/$defs/roleSpec"},
+                    "body_text": {"$ref": "#/$defs/roleSpec"},
+                },
+            },
+        }
+        with patch.object(bridge, "validate_host_agent_response", return_value=[]):
+            repaired, audit = bridge._v3_relation_completion_response(
+                previous, current, records, chunk=chunk,
+            )
+        self.assertIsNotNone(repaired)
+        self.assertIsNotNone(audit)
+        assert repaired is not None
+        self.assertEqual(repaired["requirements"][0]["properties"], {"text": "论文题目"})
+        self.assertEqual(repaired["requirements"][-1]["clause_ids"], ["C3"])
+
     def test_v3_retry_allows_bounded_completion_of_truncated_response(self) -> None:
         previous = {
             "contract_version": "3.0",

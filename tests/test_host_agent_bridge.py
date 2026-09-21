@@ -1774,6 +1774,109 @@ class HostAgentBridgeTests(unittest.TestCase):
         self.assertEqual(repairs[0]["rule_id"], "optional_continuation_caption_is_not_required")
         self.assertTrue(response["requirements"][0]["properties"]["continuation"]["caption_required_on_continuation"])
 
+    def test_mechanical_repair_compiles_explicit_empty_table_caption_properties(self) -> None:
+        response = {
+            "requirements": [
+                {
+                    "role": "table",
+                    "properties": {"continuation": {"caption_suffix": "(续)"}},
+                    "clause_ids": ["C1"],
+                    "evidence_ids": ["E1"],
+                },
+                {
+                    "role": "table_caption",
+                    "properties": {},
+                    "clause_ids": ["C1"],
+                    "evidence_ids": ["E1"],
+                },
+                {
+                    "role": "table_caption",
+                    "properties": {},
+                    "clause_ids": ["C2"],
+                    "evidence_ids": ["E2"],
+                },
+            ],
+            "clause_reviews": [
+                {"clause_id": "C1", "classification": "executable"},
+                {"clause_id": "C2", "classification": "executable"},
+            ],
+        }
+        chunk = {
+            "clauses": [
+                {"id": "C1", "text": "表序后跟表题，居中置于表上方"},
+                {"id": "C2", "text": "表题居中置于表的上方"},
+            ],
+        }
+        repaired, repairs = bridge._apply_safe_mechanical_repairs(
+            response,
+            [
+                {
+                    "code": "empty_requirement_properties",
+                    "json_pointer": "$.requirements[1].properties",
+                },
+                {
+                    "code": "empty_requirement_properties",
+                    "json_pointer": "$.requirements[2].properties",
+                },
+                {
+                    "code": "partial_clause_coverage",
+                    "json_pointer": "$.clause_reviews[0]",
+                    "raw_error": (
+                        "$.clause_reviews[0]: partial_clause_coverage:"
+                        "table_caption.position:above,table_caption.paragraph.alignment:center"
+                    ),
+                },
+                {
+                    "code": "partial_clause_coverage",
+                    "json_pointer": "$.clause_reviews[1]",
+                    "raw_error": (
+                        "$.clause_reviews[1]: partial_clause_coverage:"
+                        "table_caption.paragraph.alignment:center"
+                    ),
+                },
+            ],
+            chunk=chunk,
+        )
+        self.assertIsNotNone(repaired)
+        assert repaired is not None
+        self.assertEqual(
+            repaired["requirements"][1]["properties"],
+            {"position": "above", "paragraph": {"alignment": "center"}},
+        )
+        self.assertEqual(
+            repaired["requirements"][2]["properties"],
+            {"position": "above", "paragraph": {"alignment": "center"}},
+        )
+        self.assertEqual(
+            {item["rule_id"] for item in repairs},
+            {
+                "compile_explicit_table_caption_position_v1",
+                "compile_explicit_table_caption_alignment_v1",
+            },
+        )
+
+        unrelated = json.loads(json.dumps(response, ensure_ascii=False))
+        unrelated["requirements"][1]["clause_ids"] = ["C3"]
+        rejected, _ = bridge._apply_safe_mechanical_repairs(
+            unrelated,
+            [
+                {
+                    "code": "empty_requirement_properties",
+                    "json_pointer": "$.requirements[1].properties",
+                },
+                {
+                    "code": "partial_clause_coverage",
+                    "json_pointer": "$.clause_reviews[0]",
+                    "raw_error": (
+                        "$.clause_reviews[0]: partial_clause_coverage:"
+                        "table_caption.position:above"
+                    ),
+                },
+            ],
+            chunk=chunk,
+        )
+        self.assertIsNone(rejected)
+
     def test_fixed_declaration_candidate_is_derived_from_exact_chunk_evidence(self) -> None:
         packet = bridge.compact_model_packet({
             "contract_version": "3.0",

@@ -3389,6 +3389,110 @@ def _apply_safe_mechanical_repairs(
     # as required, the validator reports an exact, source-backed contradiction
     # rather than a semantic ambiguity. Normalize only that registered
     # contradiction; all other partial-coverage errors remain fail-closed.
+    # A table-caption requirement can be emitted with an empty normalized
+    # payload when the native provider supplies nullable role fields.  The
+    # validator has already named the exact missing obligations, so compile
+    # only the two registered source-backed facts below.  This does not infer
+    # a caption from a generic table mention: every linked source clause must
+    # explicitly state the position/alignment phrase before the field is
+    # materialized.
+    table_caption_partial_records = [
+        record for record in error_records
+        if isinstance(record, dict)
+        and record.get("code") == "partial_clause_coverage"
+        and "table_caption." in str(record.get("raw_error") or "")
+    ]
+    table_caption_empty_records = [
+        record for record in error_records
+        if isinstance(record, dict)
+        and record.get("code") == "empty_requirement_properties"
+    ]
+    if table_caption_partial_records and table_caption_empty_records:
+        if (
+            not isinstance(chunk, dict)
+            or any(
+                not isinstance(record, dict)
+                or record.get("code") not in {
+                    "empty_requirement_properties", "partial_clause_coverage",
+                }
+                for record in error_records
+            )
+        ):
+            return None, []
+        required_fields: set[str] = set()
+        for record in table_caption_partial_records:
+            raw_error = str(record.get("raw_error") or "")
+            suffix = raw_error.split("partial_clause_coverage:", 1)[-1]
+            for gap in suffix.split(","):
+                if gap not in {
+                    "table_caption.position:above",
+                    "table_caption.paragraph.alignment:center",
+                }:
+                    return None, []
+                required_fields.add(gap)
+        clauses = chunk.get("clauses")
+        requirements = repaired.get("requirements")
+        if not isinstance(clauses, list) or not isinstance(requirements, list):
+            return None, []
+        clauses_by_id = {
+            str(clause.get("id")): clause
+            for clause in clauses
+            if isinstance(clause, dict) and clause.get("id")
+        }
+        seen_indexes: set[int] = set()
+        for record in table_caption_empty_records:
+            pointer = str(record.get("json_pointer") or "")
+            match = re.fullmatch(r"\$\.requirements\[(\d+)\]\.properties", pointer)
+            if match is None:
+                return None, []
+            requirement_index = int(match.group(1))
+            if requirement_index in seen_indexes or requirement_index >= len(requirements):
+                return None, []
+            requirement = requirements[requirement_index]
+            properties = requirement.get("properties") if isinstance(requirement, dict) else None
+            clause_ids = requirement.get("clause_ids") if isinstance(requirement, dict) else None
+            if (
+                not isinstance(requirement, dict)
+                or requirement.get("role") != "table_caption"
+                or properties != {}
+                or not isinstance(clause_ids, list)
+                or not clause_ids
+            ):
+                return None, []
+            linked_text = " ".join(
+                str(clauses_by_id[clause_id].get("text") or clauses_by_id[clause_id].get("source_text_full") or "")
+                for clause_id in map(str, clause_ids)
+                if clause_id in clauses_by_id
+            )
+            if not linked_text or not re.search(r"表", linked_text):
+                return None, []
+            if "table_caption.position:above" in required_fields and not re.search(
+                r"表上方|置于表(?:的)?上方|表上.*居中|居中.*表上", linked_text
+            ):
+                return None, []
+            if "table_caption.paragraph.alignment:center" in required_fields and "居中" not in linked_text:
+                return None, []
+            if "table_caption.position:above" in required_fields:
+                properties["position"] = "above"
+                repairs.append({
+                    "code": "partial_clause_coverage",
+                    "json_pointer": f"$.requirements[{requirement_index}].properties.position",
+                    "replacement": "above",
+                    "rule_id": "compile_explicit_table_caption_position_v1",
+                    "source_clause_ids": [str(value) for value in clause_ids],
+                })
+            if "table_caption.paragraph.alignment:center" in required_fields:
+                properties["paragraph"] = {"alignment": "center"}
+                repairs.append({
+                    "code": "partial_clause_coverage",
+                    "json_pointer": f"$.requirements[{requirement_index}].properties.paragraph.alignment",
+                    "replacement": "center",
+                    "rule_id": "compile_explicit_table_caption_alignment_v1",
+                    "source_clause_ids": [str(value) for value in clause_ids],
+                })
+            seen_indexes.add(requirement_index)
+        return repaired, repairs
+
     partial_records = [
         record for record in error_records
         if isinstance(record, dict) and record.get("code") == "partial_clause_coverage"

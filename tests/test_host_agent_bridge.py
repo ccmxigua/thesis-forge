@@ -2251,6 +2251,114 @@ class HostAgentBridgeTests(unittest.TestCase):
         )
         self.assertIsNone(rejected)
 
+    def test_missing_admin_fields_become_bound_manual_review_without_guessing(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            _review_dir, chunk = self._packet(Path(td) / "requirements")
+            chunk["clauses"] = [
+                {"id": "C1", "text": "正文使用宋体", "evidence_ids": ["E1"]},
+                {"id": "C2", "text": "非公开论文须经审批，公开论文该项为空白", "evidence_ids": ["E2"]},
+            ]
+            chunk["evidence_context"] = {
+                "E1": {"id": "E1", "text": "正文使用宋体"},
+                "E2": {"id": "E2", "text": "非公开论文须经审批，公开论文该项为空白"},
+            }
+            response = {
+                "contract_version": "2.1",
+                "requirements": [{
+                    "role": "cover",
+                    "properties": {
+                        "institution": "——",
+                        "fields": [],
+                        "non_public_administration": {
+                            "applicability": {
+                                "status": "conditional",
+                                "conditions": [{
+                                    "fact": "thesis_profile.security_level",
+                                    "operator": "in",
+                                    "value": ["restricted", "classified"],
+                                }],
+                            },
+                            "fields": [],
+                            "public_policy": "blank",
+                            "source_region": "E2",
+                        },
+                    },
+                    "clause_ids": ["C1", "C2"],
+                    "evidence_ids": ["E1", "E2"],
+                    "confidence": 0.9,
+                    "reason": "行政说明",
+                    "verification": {"mode": "static_docx", "checks": ["检查"]},
+                }, {
+                    "role": "body_text",
+                    "properties": {"font": {"cjk": "SimSun", "size_pt": 12}},
+                    "clause_ids": ["C1"],
+                    "evidence_ids": ["E1"],
+                    "confidence": 0.9,
+                    "reason": "正文格式",
+                    "verification": {"mode": "static_docx", "checks": ["检查"]},
+                }],
+                "clause_reviews": [{
+                    "clause_id": "C1", "classification": "executable",
+                    "requirement_indexes": [1], "reason": "正文格式",
+                    "obligations": [{
+                        "id": "fixed_statement", "status": "covered",
+                        "reason": "固定文本",
+                    }],
+                }, {
+                    "clause_id": "C2", "classification": "executable",
+                    "requirement_indexes": [0], "reason": "行政规则",
+                    "obligations": [{
+                        "id": "public_blank_policy", "status": "covered",
+                        "reason": "公开论文留白",
+                    }],
+                }],
+                "unsupported_items": [], "reported_conflicts": [],
+            }
+            records = [{
+                "code": "contract_validation_error",
+                "json_pointer": "$.requirements[0].properties",
+                "raw_error": "must match at least one schema in anyOf",
+            }, {
+                "code": "non_public_administration_fields_missing",
+                "json_pointer": "$.requirements[0].properties.non_public_administration.fields",
+                "raw_error": "requires at least 1 items",
+            }]
+            repaired, repairs = bridge._apply_safe_mechanical_repairs(
+                response, records, chunk=chunk,
+            )
+            self.assertIsNotNone(repaired)
+            assert repaired is not None
+            self.assertEqual(
+                [item["clause_id"] for item in repaired["clause_reviews"]
+                 if item["classification"] == "requires_source_content"],
+                ["C2"],
+            )
+            self.assertEqual(repaired["clause_reviews"][1]["requirement_indexes"], [])
+            self.assertEqual(repaired["requirements"][0]["clause_ids"], ["C1"])
+            self.assertEqual(
+                repairs[0]["rule_id"],
+                "downgrade_unlabeled_admin_region_to_manual_review_v1",
+            )
+            self.assertEqual(bridge.validate_host_agent_response(repaired, chunk), [])
+
+            chunk["clauses"][1]["text"] = "非公开论文需填写审批表编号和批准日期"
+            chunk["evidence_context"]["E2"]["text"] = chunk["clauses"][1]["text"]
+            rejected, _ = bridge._apply_safe_mechanical_repairs(
+                response, records, chunk=chunk,
+            )
+            self.assertIsNone(rejected)
+
+    def test_contract_error_records_name_missing_admin_fields_explicitly(self) -> None:
+        response = {"requirements": [{
+            "role": "cover",
+            "properties": {"non_public_administration": {"fields": []}},
+        }]}
+        records = bridge.contract_error_records([
+            "$.requirements[0].properties.non_public_administration.fields: requires at least 1 items",
+        ], response=response, chunk={"clauses": []})
+        self.assertEqual(records[0]["code"], "non_public_administration_fields_missing")
+        self.assertTrue(records[0]["semantic_review_required"])
+
     def test_combined_mechanical_repairs_do_not_require_semantic_retry(self) -> None:
         response = {
             "contract_version": "3.0",

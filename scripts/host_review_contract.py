@@ -301,6 +301,7 @@ def contract_error_records(
                 "unknown_clause_relation", "non_requirement_classification_relation",
                 "unused_executable_requirement",
                 "executable_review_obligations_uncovered",
+                "non_public_administration_fields_missing",
             },
         })
 
@@ -445,6 +446,14 @@ def contract_error_records(
             and "does not match" in lowered
         ):
             code = "applicability_fact_namespace"
+        elif (
+            ".non_public_administration.fields" in lowered
+            and (
+                "requires at least 1 items" in lowered
+                or "minitems" in lowered
+            )
+        ):
+            code = "non_public_administration_fields_missing"
         elif "non_public_administration" in lowered:
             code = "cover_binding_violation"
         elif "input_prerequisites" in lowered and (

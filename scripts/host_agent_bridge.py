@@ -723,6 +723,14 @@ def _structured_contract_repair_guidance(
                 f"Replace only the empty cover institution with the neutral placeholder {NEUTRAL_COVER_PLACEHOLDER!r}; "
                 "do not copy a school name or change fields, administrative bindings, classifications, or unsupported_items."
             )
+        elif code == "non_public_administration_fields_missing":
+            rule = (
+                f"At {pointer}, the source does not provide a non-empty administrative field list. "
+                "Do not invent approval, date, security-marking, embargo, or other fields and do not use an empty fields array as an executable requirement. "
+                "Preserve any exact fixed declaration heading/body that the evidence supports. "
+                "If the cited source has no explicit field labels, keep only the independently supported fixed declaration requirements, remove the incomplete administrative requirement edge, and classify only the affected administrative obligation as requires_source_content with no requirement relation so it remains a visible manual-review item. "
+                "If the source does name exact fields, emit only those exact fields with their source-backed labels and bindings; otherwise fail closed."
+            )
         elif code == "contract_validation_error" and "items must be unique" in str(record.get("raw_error") or ""):
             rule = (
                 f"At {pointer}, remove only repeated values while preserving the first occurrence and order. "
@@ -3127,13 +3135,17 @@ def _apply_safe_mechanical_repairs(
     response: Any, error_records: list[dict[str, Any]],
     *, chunk: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
-    """Apply only validator-directed, semantics-preserving JSON repairs.
+    """Apply only validator-directed, bounded JSON repairs.
 
     Unknown properties, evidence IDs that are explicitly reported as not
     backed by the authoritative clause relation, empty role payloads whose
     exact text is present in cited evidence, and an explicit optional-caption
-    contradiction are mechanical boundary errors. The helper never invents a
-    value or repairs a semantic classification.
+    contradiction are mechanical boundary errors. One additional narrow
+    projection converts an incomplete administrative cover branch into an
+    explicit manual-review state when the source has no field labels. It is
+    deliberately not a semantic guess: fixed declaration text is preserved,
+    the incomplete requirement edge is removed, and release gates remain
+    fail-closed. The helper never invents an administrative field or value.
     """
     if not isinstance(response, dict) or not error_records:
         return None, []
@@ -3143,6 +3155,7 @@ def _apply_safe_mechanical_repairs(
         "applicability_fact_namespace", "partial_clause_coverage",
         "cover_institution_placeholder", "contract_validation_error",
         "schema_contract_violation", "requirement_relation_mismatch",
+        "non_public_administration_fields_missing",
     }
     if any(
         not isinstance(record, dict)
@@ -3152,6 +3165,258 @@ def _apply_safe_mechanical_repairs(
         return None, []
     repaired = copy.deepcopy(response)
     repairs: list[dict[str, Any]] = []
+
+    # A source can require a non-public thesis approval/marking statement
+    # without specifying the actual administrative form fields. The schema
+    # correctly rejects ``fields: []``; do not satisfy that schema by
+    # inventing approval_number/date/security fields. Instead, only when the
+    # source has no explicit field labels and the response has an independent
+    # administrative obligation review, remove the incomplete cover branch,
+    # retain exact fixed declaration requirements, and downgrade that narrow
+    # administrative obligation to a visible source-content/manual-review
+    # state. This projection is bound to the current chunk and response; it
+    # is not a global rule for any particular clause ID or school.
+    missing_admin_records = [
+        record for record in error_records
+        if isinstance(record, dict)
+        and record.get("code") == "non_public_administration_fields_missing"
+    ]
+    if missing_admin_records:
+        requirements = repaired.get("requirements")
+        reviews = repaired.get("clause_reviews")
+        if not isinstance(requirements, list) or not isinstance(reviews, list):
+            return None, []
+
+        def record_requirement_index(record: dict[str, Any]) -> int | None:
+            pointer = str(record.get("json_pointer") or "")
+            match = re.match(r"^\$\.requirements\[(\d+)\]", pointer)
+            return int(match.group(1)) if match else None
+
+        admin_indexes = {
+            index for record in missing_admin_records
+            if (index := record_requirement_index(record)) is not None
+        }
+        if not admin_indexes:
+            return None, []
+
+        clauses_by_id = {
+            str(clause.get("id")): clause
+            for clause in (chunk.get("clauses", []) if isinstance(chunk, dict) else [])
+            if isinstance(clause, dict) and clause.get("id")
+        }
+        evidence_context = (
+            chunk.get("evidence_context", {})
+            if isinstance(chunk, dict) else {}
+        )
+        if not isinstance(evidence_context, dict):
+            evidence_context = {}
+
+        def source_texts(requirement: dict[str, Any]) -> list[str]:
+            evidence_ids: list[str] = []
+            for value in requirement.get("evidence_ids", []):
+                if str(value) not in evidence_ids:
+                    evidence_ids.append(str(value))
+            for clause_id in requirement.get("clause_ids", []):
+                clause = clauses_by_id.get(str(clause_id))
+                if not isinstance(clause, dict):
+                    continue
+                for value in clause.get("evidence_ids", []):
+                    if str(value) not in evidence_ids:
+                        evidence_ids.append(str(value))
+            texts: list[str] = []
+            for evidence_id in evidence_ids:
+                evidence = evidence_context.get(evidence_id)
+                if isinstance(evidence, dict):
+                    for key in ("text", "source_text_full", "body"):
+                        value = evidence.get(key)
+                        if isinstance(value, str) and value.strip():
+                            texts.append(value)
+                            break
+            for clause_id in requirement.get("clause_ids", []):
+                clause = clauses_by_id.get(str(clause_id))
+                if isinstance(clause, dict):
+                    for key in ("text", "source_text_full"):
+                        value = clause.get(key)
+                        if isinstance(value, str) and value.strip():
+                            texts.append(value)
+                            break
+            return texts
+
+        # These are field labels, not general approval language. A sentence
+        # saying that approval is required is insufficient evidence for a
+        # particular field. If any exact label is present, leave the response
+        # fail-closed so the model or a later authoritative source can bind it.
+        explicit_field_patterns = (
+            r"审批表编号", r"批准日期", r"保密期限", r"保密级别", r"密级",
+            r"approval[_ ]number", r"approval[_ ]date", r"security[_ ]marking",
+            r"embargo[_ ](?:start|until)",
+        )
+
+        reviews_by_clause = {
+            str(review.get("clause_id")): review
+            for review in reviews
+            if isinstance(review, dict) and review.get("clause_id")
+        }
+        administrative_obligation_tokens = (
+            "admin", "approval", "embargo", "security", "public_blank",
+        )
+        target_clause_ids: set[str] = set()
+        removed_requirement_fingerprints: list[str] = []
+        source_hashes: dict[int, str] = {}
+        for index in sorted(admin_indexes):
+            if index < 0 or index >= len(requirements):
+                return None, []
+            requirement = requirements[index]
+            if not isinstance(requirement, dict) or requirement.get("role") != "cover":
+                return None, []
+            if requirement.get("existing_requirement_id") not in (None, "", []):
+                return None, []
+            properties = requirement.get("properties")
+            if not isinstance(properties, dict):
+                return None, []
+            administration = properties.get("non_public_administration")
+            if (
+                not isinstance(administration, dict)
+                or administration.get("fields") != []
+            ):
+                return None, []
+            texts = source_texts(requirement)
+            source_hashes[index] = _response_sha256(texts)
+            if any(
+                re.search(pattern, " ".join(texts), re.IGNORECASE)
+                for pattern in explicit_field_patterns
+            ):
+                return None, []
+            clause_ids = requirement.get("clause_ids")
+            if not isinstance(clause_ids, list) or not clause_ids:
+                return None, []
+            for clause_id_value in clause_ids:
+                clause_id = str(clause_id_value)
+                review = reviews_by_clause.get(clause_id)
+                if not isinstance(review, dict):
+                    return None, []
+                obligations = review.get("obligations")
+                if not isinstance(obligations, list):
+                    return None, []
+                admin_obligation = any(
+                    any(
+                        token in str(obligation.get("id") or "").lower()
+                        for token in administrative_obligation_tokens
+                    )
+                    for obligation in obligations
+                    if isinstance(obligation, dict)
+                )
+                if admin_obligation:
+                    if review.get("classification") not in {
+                        "covered", "executable", "verify_existing",
+                    }:
+                        return None, []
+                    target_clause_ids.add(clause_id)
+        if not target_clause_ids:
+            return None, []
+
+        # Remove the invalid cover branch first, retaining the old-index map
+        # for legacy contract 2.1 reverse indexes. The current contract is
+        # v3, where requirements[].clause_ids is the sole relation authority.
+        original_requirements = list(requirements)
+        old_to_new: dict[int, int | None] = {}
+        kept_requirements: list[dict[str, Any]] = []
+        for old_index, requirement in enumerate(original_requirements):
+            if old_index in admin_indexes:
+                old_to_new[old_index] = None
+                removed_requirement_fingerprints.append(_response_sha256(requirement))
+                continue
+            old_to_new[old_index] = len(kept_requirements)
+            kept_requirements.append(requirement)
+
+        # Remove only the unresolved administrative clause edges from all
+        # surviving requirements. If that would leave a bound requirement
+        # empty, refuse the projection instead of guessing whether it should
+        # be deleted or reclassified.
+        for requirement in kept_requirements:
+            clause_ids = requirement.get("clause_ids")
+            if not isinstance(clause_ids, list):
+                return None, []
+            retained_clause_ids = [
+                value for value in clause_ids if str(value) not in target_clause_ids
+            ]
+            if clause_ids and not retained_clause_ids:
+                return None, []
+            requirement["clause_ids"] = retained_clause_ids
+        repaired["requirements"] = kept_requirements
+
+        for review in reviews:
+            if not isinstance(review, dict) or not review.get("clause_id"):
+                continue
+            clause_id = str(review["clause_id"])
+            indexes = review.get("requirement_indexes")
+            if clause_id in target_clause_ids:
+                review["classification"] = "requires_source_content"
+                review["reason"] = (
+                    str(review.get("reason") or "").rstrip()
+                    + " 原文未提供可执行的行政字段清单，已保留原文并转为人工审查占位；"
+                    "补充权威字段后才能生成行政表格。"
+                )
+                if isinstance(indexes, list):
+                    review["requirement_indexes"] = []
+            elif isinstance(indexes, list):
+                remapped = [
+                    old_to_new[index]
+                    for index in indexes
+                    if isinstance(index, int)
+                    and index in old_to_new
+                    and old_to_new[index] is not None
+                ]
+                review["requirement_indexes"] = remapped
+
+        repairs.append({
+            "code": "non_public_administration_fields_missing",
+            "rule_id": "downgrade_unlabeled_admin_region_to_manual_review_v1",
+            "removed_requirement_indexes": sorted(admin_indexes),
+            "removed_requirement_fingerprints": removed_requirement_fingerprints,
+            "target_clause_ids": sorted(target_clause_ids),
+            "source_clause_ids": sorted({
+                str(value)
+                for index in admin_indexes
+                for value in original_requirements[index].get("clause_ids", [])
+            }),
+            "source_text_hashes": source_hashes,
+            "disposition": "manual_review_draft_only",
+            "reason": "source has an approval/marking obligation but no explicit administrative field labels",
+            "source_response_sha256": _response_sha256(response),
+            "repaired_response_sha256": _response_sha256(repaired),
+        })
+
+        remaining_records: list[dict[str, Any]] = []
+        for record in error_records:
+            index = record_requirement_index(record) if isinstance(record, dict) else None
+            code = str(record.get("code") or "") if isinstance(record, dict) else ""
+            pointer = str(record.get("json_pointer") or "") if isinstance(record, dict) else ""
+            raw_error = str(record.get("raw_error") or "") if isinstance(record, dict) else ""
+            projection_error = (
+                code == "non_public_administration_fields_missing"
+                or (
+                    code == "cover_institution_placeholder"
+                    and pointer in {
+                        f"$.requirements[{index}].properties",
+                        f"$.requirements[{index}].properties.institution",
+                    }
+                )
+                or (
+                    code == "contract_validation_error"
+                    and pointer == f"$.requirements[{index}].properties"
+                    and "must match at least one schema in anyof" in raw_error.lower()
+                )
+                or (
+                    code in {"cover_binding_violation", "schema_contract_violation"}
+                    and ".non_public_administration" in pointer
+                )
+            )
+            if index not in admin_indexes or not projection_error:
+                remaining_records.append(record)
+        error_records = remaining_records
+        if not error_records:
+            return repaired, repairs
 
     informational_records = [
         record for record in error_records

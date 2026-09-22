@@ -317,6 +317,16 @@ and must:
    `requires_source_content`, `unsupported_backend`, `unverifiable`, or another
    contract classification rather than inventing a requirement.
 
+An administrative approval/marking sentence is not an administrative field
+table. If the current source does not name exact fields such as an approval
+number, approval date, security marking, or embargo range, never emit
+`cover.non_public_administration.fields: []` as an executable requirement and
+never invent those fields. Preserve any independently supported fixed
+declaration text, remove the incomplete administrative requirement relation,
+and keep the affected administrative obligation as a visible
+`requires_source_content` manual-review item. Full/submission gates remain
+fail-closed; only `review_draft` may continue with the red placeholder.
+
 Do not combine chunks manually and do not copy a response from an earlier
 run. The provenance hash binds the response to the exact fresh extraction.
 

@@ -32,6 +32,9 @@ MANUAL_REVIEW_VISUAL_POLICY = {
     "text_color": "C00000",
     "highlight": "FFF2CC",
     "bold": True,
+    "cjk_font": "Noto Sans SC",
+    "unlocated_region": "document_front_unlocated",
+    "placement_basis": "code_owned_role_or_property_path_only",
     "placeholder_prefix": "【待人工处理：",
     "placeholder_suffix": "】",
 }
@@ -59,6 +62,12 @@ def _string_list(value: Any) -> list[str]:
 
 def _question_item(question: dict[str, Any]) -> dict[str, Any]:
     clause_id = str(question.get("clause_id") or "")
+    source_text = str(
+        question.get("source_text")
+        or question.get("question")
+        or question.get("text")
+        or ""
+    )
     return {
         "source_type": "open_question",
         "source_code": "open_question",
@@ -70,7 +79,10 @@ def _question_item(question: dict[str, Any]) -> dict[str, Any]:
         if question.get("question_id") else [],
         "evidence_ids": [str(question.get("evidence_id"))]
         if question.get("evidence_id") else [],
-        "source_text": str(question.get("question") or question.get("text") or ""),
+        # Keep the extracted source clause when available.  The short human
+        # question is useful as the reason, but cannot locate an inline marker
+        # in the generated document or explain what the reviewer must decide.
+        "source_text": source_text,
         "reason": str(question.get("reason") or question.get("question") or ""),
         "action": "请人工确认该条款的适用对象、数值单位或权威解释。",
         "placeholder_text": f"【待人工处理：{clause_id or question.get('question_id', '未绑定问题')}】",

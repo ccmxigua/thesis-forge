@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import copy
 import json
 import sys
 import tempfile
@@ -9,11 +10,16 @@ from pathlib import Path
 
 from docx import Document
 from docx.oxml.ns import qn
+from docx.shared import Pt, RGBColor
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from apply_format_spec import append_manual_review_markers  # noqa: E402
+from apply_format_spec import (  # noqa: E402
+    append_manual_review_markers,
+    insert_inline_manual_review_markers,
+    audit_manual_review_markers,
+)
 from format_spec_validation import load_and_validate  # noqa: E402
 from manual_review import build_manual_review_ledger  # noqa: E402
 from submission_audit import PLACEHOLDER_PATTERNS  # noqa: E402
@@ -38,6 +44,7 @@ class ManualReviewTests(unittest.TestCase):
             "clause_id": "C00074",
             "evidence_id": "E00074",
             "question": "英文目标是否明确？",
+            "source_text": "The Chinese abstract is 300 to 1,000 words",
         }]
         ledger = build_manual_review_ledger(
             report,
@@ -57,6 +64,8 @@ class ManualReviewTests(unittest.TestCase):
             {tuple(item["clause_ids"]) for item in ledger["items"]},
             {("C00074",)},
         )
+        question_item = next(item for item in ledger["items"] if item["source_type"] == "open_question")
+        self.assertEqual(question_item["source_text"], "The Chinese abstract is 300 to 1,000 words")
         self.assertEqual(
             load_and_validate(ledger, ROOT / "schema" / "manual-review-ledger.schema.json"),
             [],
@@ -85,10 +94,10 @@ class ManualReviewTests(unittest.TestCase):
         }
         receipts = append_manual_review_markers(document, ledger)
         self.assertEqual(len(receipts), 1)
-        self.assertIn("MR-0001", document.paragraphs[-1].text)
-        self.assertIn("【待人工处理：C00076】", document.paragraphs[-1].text)
+        marker = next(p for p in document.paragraphs if p.text.startswith("【MR-0001"))
+        self.assertIn("【待人工处理：C00076】", marker.text)
         self.assertEqual(receipts[0]["placeholder_text"], "【待人工处理：C00076】")
-        run = document.paragraphs[-1].runs[0]
+        run = marker.runs[0]
         self.assertEqual(str(run.font.color.rgb), "C00000")
         shading = run._r.rPr.find(qn("w:shd"))
         self.assertIsNotNone(shading)
@@ -126,8 +135,153 @@ class ManualReviewTests(unittest.TestCase):
         document = Document()
         receipts = append_manual_review_markers(document, ledger)
         self.assertEqual(receipts[0]["placeholder_text"], "【待提供：官方版式模板】")
-        self.assertIn("【待提供：官方版式模板】", document.paragraphs[-1].text)
-        self.assertEqual(str(document.paragraphs[-1].runs[0].font.color.rgb), "C00000")
+        marker = next(p for p in document.paragraphs if p.text.startswith("【MR-0001"))
+        self.assertIn("【待提供：官方版式模板】", marker.text)
+        self.assertEqual(str(marker.runs[0].font.color.rgb), "C00000")
+
+    @staticmethod
+    def _item(index=1, **values):
+        return {
+            "marker_id": f"MR-{index:04d}", "status": "pending_manual_review",
+            "marker_required": True, "category": "runtime_manual_unverifiable",
+            "source_type": "open_question", "clause_ids": [], "requirement_ids": [],
+            "source_text": "适用对象需要确认", "reason": "不能推测具体解释",
+            "action": "请人工核对后填写", "placeholder_text": "【待人工处理：保留原文】",
+            "original_blocking": True, **values,
+        }
+
+    def test_inline_marker_is_inserted_after_safe_abstract_anchor(self) -> None:
+        document = Document()
+        document.styles.add_style("Abstract Body CN", 1)
+        document.add_paragraph("中文摘要正文示例", "Abstract Body CN")
+        ledger = {"items": [self._item(
+            source_type="format_constraint", source_text="abstract_zh.require_third_person",
+        )]}
+        original = copy.deepcopy(ledger)
+        locations = insert_inline_manual_review_markers(document, ledger, {})
+        self.assertEqual(locations["MR-0001"]["location"], "inline_after_role")
+        self.assertIn("【MR-0001｜人工待审】", document.paragraphs[1].text)
+        self.assertIn("请在此人工处理", document.paragraphs[1].text)
+        self.assertEqual(str(document.paragraphs[1].runs[0].font.color.rgb), "C00000")
+        self.assertEqual(ledger, original)
+
+    def test_english_abstract_fallback_has_imported_detector(self) -> None:
+        document = Document()
+        document.styles.add_style("Abstract Body EN", 1)
+        document.add_paragraph("English abstract body", "Abstract Body EN")
+        locations = insert_inline_manual_review_markers(document, {"items": [self._item(
+            source_type="format_constraint", source_text="abstract_en.required_sections",
+        )]}, {})
+        self.assertEqual(locations["MR-0001"]["anchor_role"], "abstract_body_en")
+
+    def test_ambiguous_measurement_and_abstract_are_front_unlocated(self) -> None:
+        document = Document()
+        document.add_paragraph("论文原始正文")
+        ledger = {"items": [
+            self._item(source_text="3cm左右", clause_ids=["C00421"]),
+            self._item(2, source_text="The Chinese abstract is 300 to 1,000 words",
+                       clause_ids=["C00076"]),
+            self._item(3, source_type="release_gate", source_code="official_template_missing"),
+            self._item(4, source_type="format_constraint", source_text="abstract_zh.target"),
+        ]}
+        before = copy.deepcopy(ledger)
+        locations = insert_inline_manual_review_markers(document, ledger, {})
+        self.assertEqual(locations, {})
+        receipts = append_manual_review_markers(document, ledger, locations)
+        self.assertEqual({r["location"] for r in receipts}, {"document_front_unlocated"})
+        self.assertEqual(document.paragraphs[0].text, "待定位人工处理（审查草稿，不可提交）")
+        self.assertEqual(document.paragraphs[-1].text, "论文原始正文")
+        self.assertIn("3cm左右", document.paragraphs[2].text)
+        self.assertEqual(ledger, before)
+
+    def test_all_categories_have_one_primary_serialized_marker(self) -> None:
+        document = Document()
+        document.add_paragraph("源文档内容不应被改写")
+        categories = ["input_prerequisite", "runtime_manual_unverifiable",
+                      "confirmed_semantic_issue", "format_validation",
+                      "property_receipt", "backend_capability_gap", "render_validation"]
+        ledger = {"items": [self._item(i, category=category)
+                            for i, category in enumerate(categories, 1)]}
+        append_manual_review_markers(document, ledger)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "markers.docx"
+            document.save(path)
+            result = audit_manual_review_markers(path, ledger)
+        self.assertTrue(result["valid"], result)
+        self.assertEqual(result["visible_marker_count"], len(categories))
+        self.assertFalse(result["submission_ready"])
+        self.assertEqual(result["visual_verification"], "required")
+
+    def test_marker_style_overrides_inherited_hidden_and_clipped_text(self) -> None:
+        document = Document()
+        document.styles["Normal"].font.hidden = True
+        document.styles["Normal"].paragraph_format.line_spacing = Pt(1)
+        ledger = {"items": [self._item()]}
+        append_manual_review_markers(document, ledger)
+        paragraph = next(p for p in document.paragraphs if p.text.startswith("【MR-"))
+        run = paragraph.runs[0]
+        self.assertIs(run.font.hidden, False)
+        self.assertEqual(run._r.rPr.rFonts.get(qn("w:eastAsia")), "Noto Sans SC")
+        self.assertEqual(paragraph.style.paragraph_format.line_spacing, 1.15)
+
+    def test_markers_after_table_stay_outside_cells_and_anchors_are_stable(self) -> None:
+        document = Document()
+        document.styles.add_style("Test Table Body", 1)
+        table = document.add_table(rows=1, cols=1)
+        cell_paragraph = table.cell(0, 0).paragraphs[0]
+        cell_paragraph.style = "Test Table Body"
+        cell_paragraph.text = "表格原文"
+        ledger = {"items": [self._item(i, source_type="property_receipt",
+                                       source_text="table_body.font.cjk") for i in (1, 2)]}
+        locations = insert_inline_manual_review_markers(
+            document, ledger, {"table_body": {"style_name": "Test Table Body"}},
+        )
+        self.assertEqual(table.cell(0, 0).text, "表格原文")
+        self.assertEqual([v["anchor_text"] for v in locations.values()], ["表格原文"] * 2)
+        self.assertEqual([v["anchor_kind"] for v in locations.values()], ["table"] * 2)
+        self.assertEqual(len(document.paragraphs), 2)
+        append_manual_review_markers(document, ledger, locations)
+        self.assertTrue(document.element.body.index(table._tbl) <
+                        document.element.body.index(document.paragraphs[-2]._p))
+
+    def test_serialized_audit_rejects_missing_duplicate_and_nonred_markers(self) -> None:
+        for mutation in ("missing", "duplicate", "nonred"):
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as tmp:
+                document = Document()
+                ledger = {"items": [self._item()]}
+                append_manual_review_markers(document, ledger)
+                p = next(p for p in document.paragraphs if p.text.startswith("【MR-"))
+                if mutation == "missing":
+                    p._p.getparent().remove(p._p)
+                elif mutation == "duplicate":
+                    p._p.addnext(copy.deepcopy(p._p))
+                else:
+                    p.runs[0].font.color.rgb = RGBColor(0, 0, 0)
+                path = Path(tmp) / "bad.docx"
+                document.save(path)
+                self.assertFalse(audit_manual_review_markers(path, ledger)["valid"])
+
+    def test_duplicate_ledger_ids_are_rejected_before_insertion(self) -> None:
+        document = Document()
+        with self.assertRaises(ValueError):
+            insert_inline_manual_review_markers(
+                document, {"items": [self._item(), self._item()]}, {},
+            )
+
+    def test_word_normalized_marker_uses_inherited_color_and_font(self) -> None:
+        document = Document()
+        ledger = {"items": [self._item()]}
+        append_manual_review_markers(document, ledger)
+        paragraph = next(p for p in document.paragraphs if p.text.startswith("【MR-"))
+        rpr = paragraph.runs[0]._r.rPr
+        for tag in ("rFonts", "color", "vanish"):
+            node = rpr.find(qn("w:" + tag))
+            if node is not None:
+                rpr.remove(node)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "normalized.docx"
+            document.save(path)
+            self.assertTrue(audit_manual_review_markers(path, ledger)["valid"])
 
     def test_nonblocking_confirmed_semantic_issue_still_gets_marker(self) -> None:
         ledger = build_manual_review_ledger(

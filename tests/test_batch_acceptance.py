@@ -12,6 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import batch_rerun_ten_schools as batch  # noqa: E402
+from manual_review_display import append_manual_review_markers  # noqa: E402
 
 
 class BatchAcceptanceTests(unittest.TestCase):
@@ -196,6 +197,10 @@ class BatchAcceptanceTests(unittest.TestCase):
                 "summary": {"total": 1},
             }), encoding="utf-8")
             markers = apply_dir / "manual-review-markers.json"
+            doc = Document(output)
+            append_manual_review_markers(doc, json.loads(ledger.read_text()))
+            doc.save(output)
+            output_sha256 = __import__("hashlib").sha256(output.read_bytes()).hexdigest()
             markers.write_text(json.dumps({
                 "schema_version": "1.0", "policy": "review_draft",
                 "markers": [{"marker_id": "MR-0001"}],
@@ -241,6 +246,11 @@ class BatchAcceptanceTests(unittest.TestCase):
             accepted = batch.case_acceptance(result, root=root)
             self.assertTrue(accepted["accepted"], accepted)
             self.assertEqual(accepted["status"], "accepted_review_draft")
+            # Forged JSON receipts cannot compensate for absent DOCX markers.
+            Document().save(output)
+            rejected = batch.case_acceptance(result, root=root)
+            self.assertFalse(rejected["accepted"])
+            self.assertIn("manual_review_serialized_markers_invalid", rejected["blockers"])
 
     def test_review_draft_accepts_receipts_bound_to_manual_review_items(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -267,6 +277,10 @@ class BatchAcceptanceTests(unittest.TestCase):
                 "schema_version": "1.0", "policy": "review_draft",
                 "markers": [{"marker_id": "MR-0001"}],
             }), encoding="utf-8")
+            output = case_root / "generated.docx"
+            doc = Document(output)
+            append_manual_review_markers(doc, json.loads(manual.read_text()))
+            doc.save(output)
             validation = json.loads((apply_dir / "validation-report.json").read_text(encoding="utf-8"))
             validation.update({
                 "valid": True,

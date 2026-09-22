@@ -3100,6 +3100,9 @@ b&=2\notag
             doc.add_paragraph("摘 要", "AbstractTitleCN"); doc.save(source)
             spec = self._fixed_text_cover_declaration_spec()
             del spec["thesis_profile"]["cover_metadata"]["unit_code"]
+            # Late semantic checks must not discard the previously added
+            # missing-cover marker when they extend the same draft ledger.
+            spec["content_constraints"] = {"abstract_zh": {"require_third_person": True}}
             spec_path = td / "review-draft.json"
             spec_path.write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
             ledger_path.write_text(json.dumps({
@@ -3125,6 +3128,7 @@ b&=2\notag
             self.assertIn("unit_code", report["cover_metadata"]["pending_fields"])
             ledger = json.loads(ledger_path.read_text())
             item = next(item for item in ledger["items"] if item["source_code"] == "missing_cover_metadata:unit_code")
+            self.assertTrue(any(i["source_type"] == "format_constraint" for i in ledger["items"]))
             self.assertTrue(item["release_gate"])
             self.assertEqual(item["placeholder_text"], "【待提供：unit_code】")
             self.assertEqual(ledger["visual_policy"]["text_color"], "C00000")

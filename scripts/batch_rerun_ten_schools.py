@@ -35,6 +35,7 @@ from host_runtime import (  # noqa: E402
     require_host_runtime,
 )
 from pdf_visual_audit import audit_pdf  # noqa: E402
+from manual_review_display import audit_manual_review_markers  # noqa: E402
 from process_runner import run_process  # noqa: E402
 from thesis_format_pipeline import runtime_code_fingerprint  # noqa: E402
 
@@ -582,6 +583,14 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
                 blockers.append("generated_docx_not_valid_opc")
             if output_path != (case_root / "generated.docx").resolve():
                 blockers.append("generated_output_path_not_canonical")
+            if output_artifact.get("opc_package_valid") and isinstance(manual_ledger, dict):
+                try:
+                    marker_audit = audit_manual_review_markers(output_path, manual_ledger)
+                except (OSError, ValueError, TypeError, KeyError) as exc:
+                    marker_audit = {"valid": False, "error": str(exc)}
+                checks["serialized_manual_review_markers"] = marker_audit
+                if marker_audit.get("valid") is not True:
+                    blockers.append("manual_review_serialized_markers_invalid")
 
         validation_path = case_artifact("validation_report", manifest.get("validation_report"))
         validation = None

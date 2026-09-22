@@ -226,6 +226,31 @@ runner defaults to this policy so manual items do not stop the next case. Use
 submission-mode run has been started fresh; that mode retains the full
 fail-closed capability, render, and final audit gates.
 
+### Visible review-draft placeholders
+
+Every ledger item must have one visible `MR-xxxx` marker in the editable DOCX.
+Markers use Chinese red text (`C00000`), pale-yellow shading (`FFF2CC`) and an
+explicit East Asian font (`Noto Sans SC`); make that font available to the target
+renderer and verify actual glyph rendering, not merely text extraction.
+The renderer must not replace Chinese explanations with English-only labels.
+
+Only code-owned role/property paths may anchor a marker beside source content.
+Table-related notes go outside the table. Free-text questions, measurements
+such as `3cm`, and missing official templates must never trigger a guessed cover
+or abstract location. Unlocated items go at the front under
+`待定位人工处理（审查草稿，不可提交）`, each with its MR ID, source excerpt, reason,
+and editable handling prompt. Full original text stays in the bound ledger;
+placement never changes unresolved status, requirements, or source paragraphs.
+
+`manual-review-marker-audit.json` reopens the serialized DOCX and checks unique
+coverage, red text, shading, non-hidden text and CJK font binding. Batch
+acceptance independently repeats the check; a JSON marker list is insufficient.
+Word may normalize direct formatting into inherited styles; both are inspected.
+The package audit deliberately leaves `visual_verification=required`. Exported
+page count, extractable text and a successful renderer exit are not visual QA.
+Inspect Word/PDF pages for readable Chinese, complete MR markers, tables,
+overlap and pagination. Keep `submission_ready=false` throughout draft review.
+
 ## Two-stage workflow (packet-only/debug)
 
 ### 1. Prepare evidence packets

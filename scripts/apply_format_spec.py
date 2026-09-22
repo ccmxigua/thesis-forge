@@ -41,6 +41,12 @@ from docx_semantics import (
 )
 from format_spec_validation import load_and_validate
 from manual_review import add_manual_review_items, write_manual_review_ledger
+from manual_review_display import (
+    MANUAL_REVIEW_STYLE, MANUAL_REVIEW_PLACEHOLDER_STYLE,
+    ensure_manual_review_styles, mark_manual_review_paragraph,
+    insert_inline_manual_review_markers, append_manual_review_markers,
+    audit_manual_review_markers,
+)
 from semantic_issue_confirmation import validate_bound_ledger_for_spec
 from compliance import annotate_satisfied_inputs, finalize_records, report as compliance_report
 from role_registry import find_existing_style, generated_style, role_config, role_names, structural_detector, style_aliases
@@ -100,95 +106,6 @@ PLACEHOLDER_CONTENT_LABELS = {
     "bibliography_heading": "参考文献标题",
     "bibliography_entry": "参考文献条目",
 }
-
-MANUAL_REVIEW_STYLE = "Thesis Manual Review"
-MANUAL_REVIEW_PLACEHOLDER_STYLE = "Thesis Manual Review Placeholder"
-MANUAL_REVIEW_RED = RGBColor(0xC0, 0x00, 0x00)
-
-
-def ensure_manual_review_styles(doc: Document) -> None:
-    """Create non-heading styles used only by review-draft markers."""
-    for name, size, bold in (
-        (MANUAL_REVIEW_STYLE, 10.5, True),
-        (MANUAL_REVIEW_PLACEHOLDER_STYLE, 12, True),
-    ):
-        try:
-            style = doc.styles[name]
-        except KeyError:
-            style = doc.styles.add_style(name, WD_STYLE_TYPE.PARAGRAPH)
-            style.base_style = doc.styles["Normal"]
-        style.font.name = "宋体"
-        style.font.size = Pt(size)
-        style.font.bold = bold
-        style.font.color.rgb = MANUAL_REVIEW_RED
-
-
-def mark_manual_review_paragraph(paragraph: Paragraph) -> None:
-    """Apply visible red formatting without creating Word comments."""
-    for run in paragraph.runs:
-        run.font.color.rgb = MANUAL_REVIEW_RED
-        run.font.bold = True
-        shading = run._r.get_or_add_rPr().find(qn("w:shd"))
-        if shading is None:
-            shading = OxmlElement("w:shd")
-            run._r.get_or_add_rPr().append(shading)
-        shading.set(qn("w:fill"), "FFF2CC")
-
-
-def append_manual_review_markers(
-    doc: Document, ledger: dict[str, Any] | None,
-) -> list[dict[str, Any]]:
-    """Append a visible, searchable review list and return marker receipts."""
-    if not isinstance(ledger, dict):
-        return []
-    items = ledger.get("items")
-    if not isinstance(items, list) or not items:
-        return []
-    ensure_manual_review_styles(doc)
-    page_break = doc.add_paragraph()
-    page_break.add_run().add_break(WD_BREAK.PAGE)
-    heading = doc.add_paragraph(style=MANUAL_REVIEW_STYLE)
-    heading.add_run("人工审查清单（草稿）")
-    mark_manual_review_paragraph(heading)
-    intro = doc.add_paragraph(style=MANUAL_REVIEW_STYLE)
-    intro.add_run("以下项目来自本次运行的条款、证据和能力审查。请逐项处理；本清单中的内容不能作为提交版正文。")
-    mark_manual_review_paragraph(intro)
-    receipts: list[dict[str, Any]] = []
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        marker_id = str(item.get("marker_id") or "MR-UNNUMBERED")
-        clauses = ", ".join(str(value) for value in item.get("clause_ids", [])) or "未绑定条款"
-        requirements = ", ".join(str(value) for value in item.get("requirement_ids", []))
-        source_text = " ".join(str(item.get("source_text") or "").split())[:480]
-        reason = " ".join(str(item.get("reason") or "").split())[:480]
-        action = " ".join(str(item.get("action") or "请人工核对并记录结果。").split())[:360]
-        placeholder = str(
-            item.get("placeholder_text")
-            or f"【待人工处理：{item.get('source_code') or item.get('category', '未命名项目')}】"
-        )
-        text = (
-            f"【{marker_id}｜人工待审｜{item.get('category', 'manual_review')}】\n"
-            f"条款：{clauses}"
-            + (f"；要求：{requirements}" if requirements else "")
-            + f"\n红色占位：{placeholder}"
-            + f"\n原文/问题：{source_text}\n原因：{reason}\n处理：{action}"
-        )
-        paragraph = doc.add_paragraph(style=MANUAL_REVIEW_STYLE)
-        paragraph.paragraph_format.keep_together = True
-        paragraph.add_run(text)
-        mark_manual_review_paragraph(paragraph)
-        receipts.append({
-            "marker_id": marker_id,
-            "category": item.get("category"),
-            "clause_ids": item.get("clause_ids", []),
-            "requirement_ids": item.get("requirement_ids", []),
-            "placeholder_text": placeholder,
-            "paragraph_text": text,
-            "location": "document_end",
-            "paragraph_index": sum(1 for _ in all_body_paragraphs(doc)) - 1,
-        })
-    return receipts
 
 
 def load_json(path: Path) -> dict[str, Any]:
@@ -3169,9 +3086,9 @@ def main(argv: list[str]) -> int:
                 )
                 normalized["release_gate"] = True
                 normalized_constraint_items.append(normalized)
-            if manual_review_ledger is not None:
+            if manual_review_document_ledger is not None:
                 manual_review_document_ledger = add_manual_review_items(
-                    copy.deepcopy(manual_review_ledger), normalized_constraint_items,
+                    copy.deepcopy(manual_review_document_ledger), normalized_constraint_items,
                 )
                 # These constraints are discovered from the exact current
                 # format-spec during application.  Keep the authoritative
@@ -3196,6 +3113,7 @@ def main(argv: list[str]) -> int:
     # visible red page are added after all post-serialization findings are
     # known below.
     manual_review_markers: list[dict[str, Any]] = []
+    manual_review_marker_audit: dict[str, Any] = {}
     # Structural generators can insert content before already formatted
     # paragraphs.  Resolve stable node ids only after all such mutations.
     # lxml may hand out distinct Python proxy objects for the same underlying
@@ -3495,13 +3413,22 @@ def main(argv: list[str]) -> int:
                     "invalid generated manual-review ledger schema:\n" + "\n".join(ledger_errors)
                 )
             write_manual_review_ledger(args.manual_review_items, manual_review_document_ledger)
+        inline_manual_review_locations = insert_inline_manual_review_markers(
+            check, manual_review_document_ledger, mappings,
+        )
         manual_review_markers = append_manual_review_markers(
-            check, manual_review_document_ledger,
+            check, manual_review_document_ledger, inline_manual_review_locations,
         )
         staged_output = sibling_temp(args.output)
         try:
             check.save(staged_output)
             canonicalize_docx_zip(staged_output)
+            manual_review_marker_audit = audit_manual_review_markers(
+                staged_output, manual_review_document_ledger,
+            )
+            if not manual_review_marker_audit["valid"]:
+                write("manual-review-marker-audit.json", manual_review_marker_audit)
+                raise SystemExit("review draft marker coverage or visibility failed")
             commit_files([(staged_output, args.output)])
         finally:
             staged_output.unlink(missing_ok=True)
@@ -3511,8 +3438,12 @@ def main(argv: list[str]) -> int:
             "ledger": str(args.manual_review_items.resolve()) if args.manual_review_items else None,
             "visual_policy": manual_review_document_ledger.get("visual_policy"),
             "markers": manual_review_markers,
+            "inline_marker_count": len(inline_manual_review_locations),
+            "unlocated_marker_count": len(manual_review_markers) - len(inline_manual_review_locations),
+            "serialized_marker_audit": manual_review_marker_audit,
             "format_constraint_findings": raw_validation_findings,
         })
+        write("manual-review-marker-audit.json", manual_review_marker_audit)
         # The marker page is part of the final review artifact.  Rebind every
         # property receipt to that final serialized DOCX instead of leaving a
         # receipt that hashes only the pre-marker intermediate.
@@ -3616,6 +3547,7 @@ def main(argv: list[str]) -> int:
               "review_draft_ready": bool(
                   args.output_policy == "review_draft"
                   and not findings
+                  and manual_review_marker_audit.get("valid") is True
                   and (
                       submission_audit.get("evidence", {}).get("opc_package_valid") is True
                   )
@@ -3648,6 +3580,7 @@ def main(argv: list[str]) -> int:
                   str(args.manual_review_items.resolve()) if args.manual_review_items else None
               ),
               "manual_review_markers": manual_review_markers,
+              "manual_review_marker_audit": manual_review_marker_audit,
               "manual_review_findings": manual_review_findings,
               "manual_review_receipts": manual_review_receipt_items(property_receipts)
               if args.output_policy == "review_draft" else [],

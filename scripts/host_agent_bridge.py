@@ -2609,7 +2609,12 @@ def _v3_uncovered_obligation_reclassification_response(
     ``id``/``status`` pair and changes only the affected review's
     classification.  The accepted response is rebuilt from the previous
     response, and requirement edges for the affected clause are removed by
-    deterministic projection rather than trusted from model bookkeeping.
+    deterministic projection rather than trusted from model bookkeeping.  A
+    provider may leave behind the exact old requirement object with only
+    ``clause_ids: []`` after removing its last affected edge; that invalid
+    empty shell is accepted only as an intermediate form and is dropped by
+    the same deterministic projection.  No other invalid or changed
+    requirement payload is admitted.
     """
     if (
         chunk is None
@@ -2624,9 +2629,6 @@ def _v3_uncovered_obligation_reclassification_response(
         for record in records
     ):
         return None, None
-    if validate_host_agent_response(current_response, chunk):
-        return None, None
-
     previous_reviews = previous_response.get("clause_reviews")
     current_reviews = current_response.get("clause_reviews")
     previous_requirements = previous_response.get("requirements")
@@ -2712,6 +2714,7 @@ def _v3_uncovered_obligation_reclassification_response(
             return None, None
 
     projected_requirements: list[dict[str, Any]] = []
+    intermediate_requirements: list[dict[str, Any]] = []
     clauses = chunk.get("clauses")
     if not isinstance(clauses, list):
         return None, None
@@ -2735,6 +2738,9 @@ def _v3_uncovered_obligation_reclassification_response(
             clause_id for clause_id in clause_ids if clause_id not in affected_clause_ids
         ]
         if not remaining_clause_ids:
+            stale_empty = copy.deepcopy(requirement)
+            stale_empty["clause_ids"] = []
+            intermediate_requirements.append(stale_empty)
             continue
         projected = copy.deepcopy(requirement)
         if remaining_clause_ids != clause_ids:
@@ -2750,8 +2756,9 @@ def _v3_uncovered_obligation_reclassification_response(
                 return None, None
             projected["clause_ids"] = remaining_clause_ids
         projected_requirements.append(projected)
+        intermediate_requirements.append(copy.deepcopy(projected))
 
-    if current_requirements != projected_requirements:
+    if current_requirements not in (projected_requirements, intermediate_requirements):
         return None, None
     repaired = copy.deepcopy(previous_response)
     repaired["clause_reviews"] = repaired_reviews
@@ -2766,6 +2773,9 @@ def _v3_uncovered_obligation_reclassification_response(
         "removed_clause_edges": sorted(affected_clause_ids),
         "preserved_requirement_count": len(previous_requirements),
         "projected_requirement_count": len(projected_requirements),
+        "dropped_stale_empty_requirement_count": (
+            len(intermediate_requirements) - len(projected_requirements)
+        ),
     }
 
 

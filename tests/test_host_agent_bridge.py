@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import os
 import subprocess
@@ -904,6 +905,65 @@ class HostAgentBridgeTests(unittest.TestCase):
             contract_version="3.0", previous_response=previous,
             current_response=unsafe, chunk=chunk,
         ))
+
+    def test_v3_uncovered_obligation_retry_drops_stale_empty_requirement_shell(self) -> None:
+        previous = {
+            "contract_version": "3.0",
+            "requirements": [{
+                "role": "figure_caption",
+                "properties": {"position": "below"},
+                "clause_ids": ["C1"],
+                "evidence_ids": ["E1"],
+                "existing_requirement_id": "R1",
+                "reason": "现有图题要求。",
+            }],
+            "clause_reviews": [{
+                "clause_id": "C1",
+                "classification": "verify_existing",
+                "obligations": [{
+                    "id": "C1.separator",
+                    "status": "unverifiable",
+                    "reason": "分隔要求需要人工确认。",
+                }],
+                "reason": "当前候选只能覆盖部分要求。",
+                "normative_basis": "explicit_normative_text",
+            }],
+            "unsupported_items": [],
+            "reported_conflicts": [],
+        }
+        current = copy.deepcopy(previous)
+        current["clause_reviews"][0]["classification"] = "unsupported_backend"
+        # This is the exact invalid intermediate shape emitted by the native
+        # retry: it removes the last clause edge but leaves the old reference
+        # and evidence behind. The bridge must drop this shell, not preserve it.
+        current["requirements"][0]["clause_ids"] = []
+        records = [{
+            "code": "executable_review_obligations_uncovered",
+            "json_pointer": "$.clause_reviews[0].obligations",
+            "clause_id": "C1",
+            "raw_error": "$.clause_reviews[0].obligations: executable_review_requires_all_obligations_covered",
+        }]
+        chunk = {"clauses": [{"id": "C1"}]}
+        with patch.object(bridge, "validate_host_agent_response", return_value=[]):
+            repaired, audit = bridge._v3_uncovered_obligation_reclassification_response(
+                previous, current, records, chunk=chunk,
+            )
+        self.assertIsNotNone(repaired)
+        assert repaired is not None
+        self.assertEqual(repaired["requirements"], [])
+        self.assertEqual(
+            repaired["clause_reviews"][0]["classification"], "unsupported_backend",
+        )
+        self.assertEqual(audit["dropped_stale_empty_requirement_count"], 1)
+
+        # A payload edit next to the stale shell is still semantic drift and
+        # must remain fail-closed.
+        current["requirements"][0]["reason"] = "被篡改的说明"
+        with patch.object(bridge, "validate_host_agent_response", return_value=[]):
+            rejected, _ = bridge._v3_uncovered_obligation_reclassification_response(
+                previous, current, records, chunk=chunk,
+            )
+        self.assertIsNone(rejected)
 
     def test_v3_retry_allows_non_requirement_projection_with_named_payload_cleanup(self) -> None:
         previous = {

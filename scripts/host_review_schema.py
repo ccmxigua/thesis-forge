@@ -307,6 +307,7 @@ def build_host_review_response_schema(
     top_level_requirement_roles: set[str],
     allowed_review_classifications: set[str],
     contract_version: str,
+    eligible_existing_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     """Compile the one Host Review response schema used by all adapters.
 
@@ -422,4 +423,11 @@ def build_host_review_response_schema(
         response_schema["properties"]["clause_reviews"]["items"]["properties"]["requirement_indexes"] = {
             "type": "array", "items": {"type": "integer", "minimum": 0}, "uniqueItems": True,
         }
+    if eligible_existing_ids is not None:
+        # Scope before hashing the request, not later inside a host adapter.
+        # Native optional fields become nullable; null means a NEW requirement.
+        ids = sorted(set(eligible_existing_ids))
+        response_schema["properties"]["requirements"]["items"]["properties"]["existing_requirement_id"] = (
+            {"type": "string", "enum": ids} if ids else {"type": "null"}
+        )
     return response_schema

@@ -625,7 +625,17 @@ def _structured_contract_repair_guidance(
         code = str(record.get("code") or "contract_validation_error")
         pointer = str(record.get("json_pointer") or "the indicated field")
         matching = record.get("matching_requirement_indexes")
-        if code == "normative_basis_invalid":
+        if code.startswith("existing_requirement_") or code in {
+            "unknown_existing_requirement_id", "invalid_existing_requirement_id",
+        }:
+            rule = (
+                f"At {pointer}, the existing requirement reference is not bound to this exact current-input occurrence. "
+                "Do not guess a replacement ID, remove the reference to disguise a mismatch as a new requirement, "
+                "or change role, clause_ids, evidence_ids or classification. Preserve the parent and fail closed "
+                "if the identity is wrong. New requirements use an omitted/null existing_requirement_id on the initial "
+                "response, never a self-allocated or incremented ID."
+            )
+        elif code == "normative_basis_invalid":
             rule = (
                 f"At {pointer}, omit the invalid normative_basis field rather than replacing it with a guessed value; "
                 "keep classification and cited evidence unchanged unless the current evidence independently requires a semantic re-review."
@@ -4333,6 +4343,11 @@ write, copy, abbreviate, or recompute a provenance/hash object in the response.
 The raw response is retained before binding for audit. Review every and only the
 supplied clause IDs exactly once.
 Cite only evidence and clause IDs present in this chunk.
+existing_requirement_id is an optional selector, NOT an output ID to allocate.
+Use an ID only from eligible_existing_requirements and only for the exact supplied
+role, clause_ids, evidence_ids and source occurrence. For a NEW requirement,
+omit this field (use null in native structured output); deterministic code assigns
+its final ID. Never increment, infer or copy an ID from another chunk.
 For declaration clauses, copy fixed headings/body paragraphs exactly from the
 cited evidence, use a run-local semantic item id, and use blank signature
 placeholders only; never invent resource_id, version, or sha256.

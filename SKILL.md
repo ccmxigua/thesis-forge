@@ -41,6 +41,22 @@ OpenAI, Grok, Claude, or any other specific vendor.
 - Fail closed when a clause is missing, ambiguous, unsupported, stale, or not
   backed by the supplied evidence. Never fill gaps with a plausible guess.
 
+## Existing requirement reference integrity
+
+Existing requirement IDs are selectors into the current input, never IDs for
+the model to allocate. Each freshly prepared chunk constrains the selector to
+its supplied candidates before computing its request hash. A new requirement
+omits `existing_requirement_id` (`null` in native structured output); only the
+deterministic merger assigns its final ID. The shared chunk/merge validator
+checks exact role, clause set, evidence set and canonical source occurrence.
+Only after that identity matches may the existing deterministic properties be
+projected, with before/after hashes in the merge audit and raw output preserved.
+Unknown IDs, wrong occurrences and malformed references fail closed at chunk
+acceptance. Retry feedback must not authorize guessing a replacement, deleting
+the ID to disguise a mismatch, or turning that integrity error into a red
+manual-review placeholder. Semantic uncertainty remains eligible for explicit
+review-draft markers under the separate policy below.
+
 ## Explicit semantic issue acknowledgements
 
 When a user confirms that an unresolved clause is a real semantic ambiguity but

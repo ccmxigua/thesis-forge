@@ -13,7 +13,6 @@ import hashlib
 import json
 import re
 import sys
-import unicodedata
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -22,6 +21,11 @@ from uuid import uuid4
 import xml.etree.ElementTree as ET
 
 from artifact_io import atomic_write_text
+from existing_requirement_contract import (
+    existing_reference_errors,
+    normalized_source_text,
+    project_authoritative_existing_payloads as _project_authoritative_existing_payloads,
+)
 from format_spec_validation import load_and_validate, validate_instance
 from format_contract_guards import normalize_verification_checker_ids
 from host_review_contract import (
@@ -206,9 +210,7 @@ def _requires_external_artifact_verification(text: str) -> bool:
 
 def _normalized_exact_text(text: Any) -> str:
     """Normalize presentation-only differences for auditable exact matching."""
-    value = unicodedata.normalize("NFKC", str(text or ""))
-    value = re.sub(r"\s+", "", value)
-    return value.strip(" ：:。；;，,、.!！？?\t\r\n")
+    return normalized_source_text(text)
 
 
 def _style_properties_for_role(role: str, props: dict[str, Any]) -> dict[str, Any]:
@@ -1639,6 +1641,7 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
             "instructions": [
                 "Treat every supplied clause as in scope for completeness review.",
                 "Return formatting requirements supported by cited clause_ids and evidence_ids.",
+                "existing_requirement_id selects an exact supplied current-input candidate; it is not a new output ID. Omit it for a new requirement (null in native structured output). Code assigns new IDs. Never increment IDs or borrow one from a neighboring chunk.",
                 "Every requirement object MUST include a non-empty reason explaining why its role and properties are supported by the cited clause/evidence.",
                 "When a clause exactly supports an existing deterministic requirement, set existing_requirement_id and preserve that requirement's role, properties, and evidence_ids exactly. Copy only the supplied candidate payload; do not expand it with shared role defaults, inherited body styles, or other properties from the surrounding schema.",
                 "Do not invent values. Use unresolved_clause_ids when evidence is insufficient.",
@@ -1720,6 +1723,10 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
                 top_level_requirement_roles=TOP_LEVEL_REQUIREMENT_ROLES,
                 allowed_review_classifications=ALLOWED_REVIEW_CLASSIFICATIONS,
                 contract_version=contract_version,
+                eligible_existing_ids=[
+                    item["id"] for item in request_rule_spec.get("requirements", [])
+                    if isinstance(item, dict) and isinstance(item.get("id"), str)
+                ],
             )
         }
         review_properties = request["response_schema"]["properties"]["clause_reviews"]["items"]["properties"]
@@ -1778,77 +1785,6 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
             }
         }
     }
-
-
-def _project_authoritative_existing_payloads(
-    response: dict[str, Any],
-    existing_requirement_map: dict[str, dict[str, Any]],
-    clause_map: dict[str, dict[str, Any]],
-) -> tuple[dict[str, Any], list[dict[str, Any]]]:
-    """Project safe existing-requirement payloads from the deterministic baseline.
-
-    A host model can understand that an existing requirement applies while
-    still expanding its properties with shared role defaults.  The existing
-    requirement ID is a code-owned reference, so once role, exact clause set,
-    exact evidence set, and canonical source text all match, its payload must
-    come from the authoritative baseline rather than from model restatement.
-    Any mismatch leaves the response untouched and lets the normal merge gate
-    fail closed.
-    """
-    projected = copy.deepcopy(response)
-    requirements = projected.get("requirements")
-    if not isinstance(requirements, list):
-        return projected, []
-    repairs: list[dict[str, Any]] = []
-    for index, item in enumerate(requirements):
-        if not isinstance(item, dict):
-            continue
-        existing_id = item.get("existing_requirement_id")
-        if not isinstance(existing_id, str) or not existing_id:
-            continue
-        existing = existing_requirement_map.get(existing_id)
-        if not isinstance(existing, dict):
-            continue
-        if item.get("role") != existing.get("role"):
-            continue
-        clause_ids = {str(value) for value in item.get("clause_ids", [])}
-        baseline_clause_ids = {str(value) for value in existing.get("clause_ids", [])}
-        evidence_ids = {str(value) for value in item.get("evidence_ids", [])}
-        baseline_evidence_ids = {str(value) for value in existing.get("evidence_ids", [])}
-        if not clause_ids or clause_ids != baseline_clause_ids or evidence_ids != baseline_evidence_ids:
-            continue
-        source_parts = [
-            str(clause_map[clause_id].get("text", ""))
-            for clause_id in sorted(clause_ids)
-            if clause_id in clause_map
-        ]
-        if len(source_parts) != len(clause_ids) or not all(source_parts):
-            continue
-        expected_source = " | ".join(source_parts)
-        if (
-            not expected_source
-            or _normalized_exact_text(existing.get("source_text"))
-            != _normalized_exact_text(expected_source)
-        ):
-            continue
-        baseline_properties = existing.get("properties")
-        model_properties = item.get("properties")
-        if not isinstance(baseline_properties, dict) or not isinstance(model_properties, dict):
-            continue
-        if model_properties == baseline_properties:
-            continue
-        item["properties"] = copy.deepcopy(baseline_properties)
-        repairs.append({
-            "response_index": index,
-            "existing_requirement_id": existing_id,
-            "role": existing.get("role"),
-            "clause_ids": sorted(clause_ids),
-            "evidence_ids": sorted(evidence_ids),
-            "before_properties_sha256": sha256_json(model_properties),
-            "after_properties_sha256": sha256_json(baseline_properties),
-            "rule_id": "authoritative_existing_requirement_payload",
-        })
-    return projected, repairs
 
 
 def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dict[str, Any]],
@@ -2136,6 +2072,7 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
         existing_indexes = indexes if isinstance(indexes, list) else []
         backed_by_existing = bool(existing_indexes) and all(
             isinstance(requirements[i], dict)
+            and isinstance(requirements[i].get("existing_requirement_id"), str)
             and requirements[i].get("existing_requirement_id") in existing_requirement_map
             for i in existing_indexes
             if isinstance(i, int) and 0 <= i < len(requirements)
@@ -2237,6 +2174,7 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
         str(item.get("existing_requirement_id"))
         for item in requirements
         if isinstance(item, dict)
+        and isinstance(item.get("existing_requirement_id"), str)
         and item.get("existing_requirement_id") in existing_requirement_map
     }
     emitted_requirement_ids: set[str] = set()
@@ -2275,7 +2213,10 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
         if not isinstance(item, dict):
             conflicts.append({"type": "llm_contract", "reason": "requirement_must_be_object", "response": item}); continue
         existing_requirement_id = item.get("existing_requirement_id")
-        existing_requirement = existing_requirement_map.get(existing_requirement_id)
+        existing_requirement = (
+            existing_requirement_map.get(existing_requirement_id)
+            if isinstance(existing_requirement_id, str) else None
+        )
         role = item.get("role"); props = item.get("properties")
         clause_ids = set(item.get("clause_ids") or []); cited_evidence = set(item.get("evidence_ids") or [])
         confidence = item.get("confidence")
@@ -2334,22 +2275,7 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
                                                      f"$.input_prerequisites[{prereq_index}]"))
         expected_indexes = {i for cid in clause_ids if cid in review_map for i in review_map[cid]["requirement_indexes"]}
         if item_index not in expected_indexes: reasons.append("requirement_not_referenced_by_clause_review")
-        if existing_requirement_id is not None:
-            if existing_requirement is None:
-                reasons.append("unknown_existing_requirement_id")
-            else:
-                if role != existing_requirement.get("role") or props != existing_requirement.get("properties"):
-                    reasons.append("existing_requirement_payload_mismatch")
-                if cited_evidence != set(existing_requirement.get("evidence_ids") or []):
-                    reasons.append("existing_requirement_evidence_mismatch")
-                # A deterministic requirement may legitimately combine
-                # several clauses from the same source statement.  Validate
-                # the exact canonical composition instead of imposing a
-                # one-clause restriction; multiplicity is preserved by the
-                # sorted clause-id list and no fuzzy matching is used.
-                expected_source = " | ".join(clause_map[cid].get("text", "") for cid in sorted(clause_ids))
-                if _normalized_exact_text(existing_requirement.get("source_text")) != _normalized_exact_text(expected_source):
-                    reasons.append("existing_requirement_source_text_mismatch")
+        reasons.extend(existing_reference_errors(item, existing_requirement_map, clause_map))
         if reasons:
             conflicts.append({"type": "llm_contract", "reason": reasons, "response": item})
             audit.append({"accepted": False, "reason": reasons, "response": item}); continue
@@ -3392,6 +3318,10 @@ def validate_spec(spec: dict[str, Any], evidence_ids: set[str]) -> list[str]:
     hard_contract_reasons = {
         "unknown_requirement_role",
         "unknown_existing_requirement_id",
+        "invalid_existing_requirement_id",
+        "existing_requirement_clause_mismatch",
+        "existing_requirement_evidence_mismatch",
+        "existing_requirement_source_text_mismatch",
         "existing_requirement_payload_mismatch",
         "invalid_clause_ids",
         "invalid_evidence_ids",

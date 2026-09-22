@@ -10,6 +10,9 @@ from compliance import classification_requires_requirement
 from evidence_context_guards import sample_content_guard
 from format_spec_validation import schema_support_errors, validate_instance
 from format_contract_guards import cover_binding_errors
+from existing_requirement_contract import (
+    existing_reference_errors, project_authoritative_existing_payloads,
+)
 
 
 _GENERIC_SIGNATURE_LINE_PATTERNS = (
@@ -351,6 +354,23 @@ def contract_error_records(
                 ))
             continue
 
+        if pointer and pointer.endswith(".existing_requirement_id"):
+            code = text.rsplit(": ", 1)[-1]
+            if not (code.startswith("existing_requirement_") or code in {
+                "unknown_existing_requirement_id", "invalid_existing_requirement_id",
+            }):
+                code = "existing_requirement_reference_invalid"
+            append_generic(code=code, text=text, pointer=pointer, clause_id=None)
+            candidates = (chunk or {}).get("rule_spec", {}).get("requirements", [])
+            records[-1].update({
+                "allowed_values": sorted({
+                    item["id"] for item in candidates
+                    if isinstance(item, dict) and isinstance(item.get("id"), str)
+                }),
+                "semantic_review_required": True,
+                "identity_repair_allowed": False,
+            })
+            continue
         if "informational_requirement_forbidden" in lowered:
             pointer = pointer_match.group(1) if pointer_match else None
             index_match = re.fullmatch(r"\$\.requirements\[(\d+)\]", str(pointer or ""))
@@ -716,6 +736,20 @@ def validate_response(response: Any, chunk: dict[str, Any]) -> list[str]:
     if not isinstance(response, dict):
         return ["response_must_be_object"]
 
+    clause_map_for_binding = {
+        item["id"]: item for item in chunk.get("clauses", [])
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    existing_map = {
+        item["id"]: item for item in chunk.get("rule_spec", {}).get("requirements", [])
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    # Use exactly the merger's safe deterministic payload projection. This is
+    # a validation view, not a rewrite of the raw model response. The merger
+    # persists its before/after hashes; neither stage changes identity.
+    response, _ = project_authoritative_existing_payloads(
+        response, existing_map, clause_map_for_binding,
+    )
     errors: list[str] = []
     contract_version = response.get("contract_version")
     if contract_version not in SUPPORTED_HOST_REVIEW_CONTRACTS:
@@ -759,6 +793,10 @@ def validate_response(response: Any, chunk: dict[str, Any]) -> list[str]:
             errors.append(f"$.requirements[{index}]: must_be_object")
             continue
         role = item.get("role")
+        errors.extend(
+            f"$.requirements[{index}].existing_requirement_id: {reason}"
+            for reason in existing_reference_errors(item, existing_map, clause_map)
+        )
         if role not in allowed_roles:
             errors.append(f"$.requirements[{index}].role: unknown_or_disallowed_role")
         errors.extend(requirement_payload_errors(item, index))

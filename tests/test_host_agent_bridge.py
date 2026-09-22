@@ -576,6 +576,7 @@ class HostAgentBridgeTests(unittest.TestCase):
         current["requirements"][0]["properties"]["non_public_administration"] = {
             "fields": [{"id": "security_marking", "label": "密级"}],
         }
+        current["clause_reviews"][0]["reason"] = "已将密级字段迁移到行政区域。"
         records = [{
             "code": "cover_binding_violation",
             "json_pointer": "$.requirements[0].properties.fields[0]",

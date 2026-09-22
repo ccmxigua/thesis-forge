@@ -994,6 +994,7 @@ def _retry_changes_allowed(
     empty_payload_repair = "empty_requirement_properties" in codes
     unknown_payload_repair = "unknown_property" in codes
     cover_placeholder_repair = "cover_institution_placeholder" in codes
+    cover_binding_repair = "cover_binding_violation" in codes
     source_evidence_dedup_repair = any(
         isinstance(item, dict)
         and item.get("code") == "contract_validation_error"
@@ -1008,6 +1009,7 @@ def _retry_changes_allowed(
         empty_payload_repair
         or unknown_payload_repair
         or cover_placeholder_repair
+        or cover_binding_repair
         or source_evidence_dedup_repair
     )
     previous_view = _semantic_retry_view(previous_response) if payload_repair else None
@@ -1281,6 +1283,48 @@ def _retry_changes_allowed(
                         # binding.  It may be regenerated together with a
                         # bounded empty-payload fill; roles, relations,
                         # evidence, and properties remain checked below.
+                        continue
+        if path.endswith(".reason") and "cover_binding_violation" in codes:
+            match = re.fullmatch(r"\$\.clause_reviews\[(\d+)\]\.reason", path)
+            if match:
+                review_index = int(match.group(1))
+                previous_reviews = previous_response.get("clause_reviews")
+                current_reviews = current_response.get("clause_reviews")
+                cover_indexes = {
+                    int(index_match.group(1))
+                    for prefix in cover_property_prefixes
+                    if (index_match := re.match(
+                        r"^\$\.requirements\[(\d+)\]\.properties", prefix,
+                    )) is not None
+                }
+                if (
+                    isinstance(previous_reviews, list)
+                    and isinstance(current_reviews, list)
+                    and review_index < len(previous_reviews)
+                    and review_index < len(current_reviews)
+                    and isinstance(previous_reviews[review_index], dict)
+                    and isinstance(current_reviews[review_index], dict)
+                ):
+                    previous_review = copy.deepcopy(previous_reviews[review_index])
+                    current_review = copy.deepcopy(current_reviews[review_index])
+                    previous_reason = previous_review.pop("reason", None)
+                    current_reason = current_review.pop("reason", None)
+                    clause_id = str(previous_review.get("clause_id") or "")
+                    linked_to_cover = any(
+                        0 <= index < len(previous_requirements)
+                        and isinstance(previous_requirements[index], dict)
+                        and clause_id in {
+                            str(value)
+                            for value in (previous_requirements[index].get("clause_ids") or [])
+                        }
+                        for index in cover_indexes
+                    )
+                    if (
+                        previous_reason != current_reason
+                        and current_review == previous_review
+                        and str(current_reason or "").strip()
+                        and linked_to_cover
+                    ):
                         continue
         if path.endswith(".normative_basis") and "normative_basis_invalid" in codes:
             continue
@@ -2016,9 +2060,12 @@ def _v3_cover_contract_completion_allowed(
     Native unions can make a ``cover`` requirement resemble a different
     object branch.  A retry may then replace the invalid cover payload with a
     schema-valid one.  This is accepted only when the local validator reports
-    a cover/schema error, all requirement identities and clause reviews stay
-    unchanged, and every non-cover change is the exact evidence-text fill
-    handled by the mechanical payload rule.
+    a cover/schema error, all requirement identities and clause-review
+    semantics stay unchanged, and every non-cover change is the exact
+    evidence-text fill handled by the mechanical payload rule. A reason-only
+    update on a clause tied to the repaired cover is diagnostic metadata and
+    is allowed; classifications, obligations, evidence, and relations remain
+    byte-for-byte protected.
     """
     if chunk is None or not isinstance(previous_response, dict) or not isinstance(current_response, dict):
         return False
@@ -2035,8 +2082,6 @@ def _v3_cover_contract_completion_allowed(
         "empty_requirement_properties",
     }:
         return False
-    if previous_response.get("clause_reviews") != current_response.get("clause_reviews"):
-        return False
     if validate_host_agent_response(current_response, chunk):
         return False
     previous_view = _semantic_retry_view(previous_response)
@@ -2047,6 +2092,47 @@ def _v3_cover_contract_completion_allowed(
     current_requirements = current_view.get("requirements", [])
     if len(previous_requirements) != len(current_requirements):
         return False
+
+    changed_cover_indexes = {
+        int(match.group(1))
+        for path in changed_paths
+        if (match := re.fullmatch(
+            r"\$\.requirements\[(\d+)\]\.properties(?:\..+)?", path,
+        )) is not None
+    }
+    previous_reviews = previous_response.get("clause_reviews")
+    current_reviews = current_response.get("clause_reviews")
+    if not isinstance(previous_reviews, list) or not isinstance(current_reviews, list):
+        return False
+    if len(previous_reviews) != len(current_reviews):
+        return False
+    for review_index, (previous_review, current_review) in enumerate(
+        zip(previous_reviews, current_reviews)
+    ):
+        if not isinstance(previous_review, dict) or not isinstance(current_review, dict):
+            return False
+        previous_without_reason = copy.deepcopy(previous_review)
+        current_without_reason = copy.deepcopy(current_review)
+        previous_reason = previous_without_reason.pop("reason", None)
+        current_reason = current_without_reason.pop("reason", None)
+        if previous_without_reason != current_without_reason:
+            return False
+        if previous_reason == current_reason:
+            continue
+        reason_path = f"$.clause_reviews[{review_index}].reason"
+        if reason_path not in changed_paths or not str(current_reason or "").strip():
+            return False
+        clause_id = str(previous_review.get("clause_id") or "")
+        if not any(
+            index in changed_cover_indexes
+            and isinstance(previous_requirements[index], dict)
+            and clause_id in {
+                str(value) for value in (previous_requirements[index].get("clause_ids") or [])
+            }
+            for index in changed_cover_indexes
+            if 0 <= index < len(previous_requirements)
+        ):
+            return False
 
     def empty_verification_check_removed(path: str) -> bool:
         match = re.fullmatch(
@@ -2091,6 +2177,8 @@ def _v3_cover_contract_completion_allowed(
         match = re.fullmatch(r"\$\.requirements\[(\d+)\]\.properties(?:\.(.+))?", path)
         if match is None:
             if empty_verification_check_removed(path):
+                continue
+            if re.fullmatch(r"\$\.clause_reviews\[\d+\]\.reason", path):
                 continue
             return False
         index = int(match.group(1))

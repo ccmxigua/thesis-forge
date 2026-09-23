@@ -13,6 +13,7 @@ from format_spec_validation import validate_instance
 from host_review_contract import classification_requires_requirement
 from host_adapters import codex as codex_adapter
 from host_adapters import openclaw as openclaw_adapter
+from host_review_schema import native_output_schema, require_native_schema
 from host_runtime import automatic_adapter_id, require_host_runtime
 from process_runner import run_process
 from semantic_contract import sha256_json, strict_json_dumps
@@ -395,6 +396,15 @@ def run_native_semantic_review(
         raise NativeSemanticReviewError("native Codex semantic review model must be non-empty when supplied")
     response_schema = OBLIGATION_COVERAGE_SCHEMA if obligation_coverage_mode else RESPONSE_SCHEMA
     response_validator = validate_obligation_coverage_response if obligation_coverage_mode else validate_response
+    provider_response_schema: dict[str, Any] | None = None
+    if adapter_id == "codex":
+        provider_response_schema = native_output_schema(response_schema)
+        try:
+            require_native_schema(provider_response_schema)
+        except ValueError as exc:
+            raise NativeSemanticReviewError(
+                f"native Codex semantic-review schema is not provider-compatible: {exc}"
+            ) from exc
     checks = request.get("checks")
     if not isinstance(checks, list) or not checks:
         return {
@@ -412,9 +422,10 @@ def run_native_semantic_review(
     stdout_path = output_dir / "stdout.jsonl"
     stderr_path = output_dir / "stderr.txt"
     schema_path = output_dir / "response-schema.json"
+    provider_schema_path = output_dir / "provider-response-schema.json"
     reserved_paths = [
         request_path, prompt_path, response_path, stdout_path, stderr_path,
-        schema_path, output_dir / "last-message.txt",
+        schema_path, provider_schema_path, output_dir / "last-message.txt",
     ]
     existing_paths = [str(path) for path in reserved_paths if path.exists()]
     if existing_paths:
@@ -424,6 +435,11 @@ def run_native_semantic_review(
     _write_fresh(request_path, strict_json_dumps(request, ensure_ascii=False, indent=2) + "\n")
     _write_fresh(prompt_path, _prompt(request))
     _write_fresh(schema_path, strict_json_dumps(response_schema, ensure_ascii=False, indent=2) + "\n")
+    if provider_response_schema is not None:
+        _write_fresh(
+            provider_schema_path,
+            strict_json_dumps(provider_response_schema, ensure_ascii=False, indent=2) + "\n",
+        )
 
     if adapter_id == "codex":
         codex_binary = codex_adapter.resolve_binary(binary)
@@ -436,7 +452,7 @@ def run_native_semantic_review(
             binary=codex_binary, prompt_path=prompt_path,
             last_message_path=output_dir / "last-message.txt",
             cwd=Path(__file__).resolve().parents[1], model=model,
-            output_schema_path=schema_path,
+            output_schema_path=provider_schema_path,
         )
         route_audit: dict[str, Any] = {
             "binary": codex_binary,

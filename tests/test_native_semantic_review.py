@@ -14,11 +14,13 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from native_semantic_review import (  # noqa: E402
     NativeSemanticReviewError,
+    OBLIGATION_COVERAGE_SCHEMA,
     build_obligation_coverage_request,
     validate_response,
     validate_obligation_coverage_response,
 )
 import native_semantic_review as native_review  # noqa: E402
+from host_review_schema import native_schema_support_errors  # noqa: E402
 
 
 class NativeSemanticReviewTests(unittest.TestCase):
@@ -128,6 +130,9 @@ class NativeSemanticReviewTests(unittest.TestCase):
             {"results": [{**good["results"][0], "identified_obligations": [{
                 "source_quote": "表格应居中", "disposition": "unrepresented", "requirement_indexes": [],
             }]}]},
+            {"results": [{**good["results"][0], "identified_obligations": [{
+                "source_quote": "表格应居中", "disposition": "represented", "requirement_indexes": [0, 0],
+            }]}]},
         ]
         for response in bad_cases:
             with self.subTest(response=response), self.assertRaises(NativeSemanticReviewError):
@@ -192,6 +197,63 @@ class NativeSemanticReviewTests(unittest.TestCase):
             self.assertEqual((output_dir / "stdout.jsonl").read_text(), "partial stdout")
             self.assertIn("[process-timeout]", (output_dir / "stderr.txt").read_text())
             self.assertFalse((output_dir / "response.json").exists())
+
+    def test_codex_runner_uses_provider_compatible_projection_and_keeps_local_constraints(self) -> None:
+        check = {
+            "check_id": "C1", "document_text": "该处约3cm",
+            "review_context": {
+                "classification": "unresolved", "requires_requirement": False,
+                "linked_requirements": [], "machine_obligation_ids": [],
+            },
+        }
+        response = {"results": [{
+            "check_id": "C1", "verdict": "uncertain", "rationale": "The source is ambiguous.",
+            "evidence_quotes": ["3cm"], "machine_obligation_ids": [],
+            "identified_obligations": [{
+                "source_quote": "3cm", "disposition": "ambiguous", "requirement_indexes": [],
+            }],
+        }]}
+        observed = {}
+
+        def build_command(**kwargs):
+            observed.update(kwargs)
+            kwargs["last_message_path"].write_text("{}", encoding="utf-8")
+            return ["codex"]
+
+        patches = self._stub_codex_host(CompletedProcess(["codex"], 0, "{}", ""))
+        patches[4] = patch.object(native_review.codex_adapter, "build_command", side_effect=build_command)
+        patches.append(patch.object(
+            native_review.codex_adapter, "parse_result",
+            return_value=(response, {"event_types": ["task_complete"]}),
+        ))
+        with tempfile.TemporaryDirectory() as td:
+            output_dir = Path(td) / "native"
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+                native_review.run_native_semantic_review(
+                    {
+                        "protocol": native_review.OBLIGATION_COVERAGE_PROTOCOL,
+                        "case_id": "case", "run_id": "run", "checks": [check],
+                    },
+                    output_dir=output_dir, host_runtime="codex", model="gpt-5.6-luna",
+                    timeout=5,
+                )
+
+            local_schema = json.loads((output_dir / "response-schema.json").read_text(encoding="utf-8"))
+            provider_schema_path = output_dir / "provider-response-schema.json"
+            provider_schema = json.loads(provider_schema_path.read_text(encoding="utf-8"))
+            self.assertEqual(local_schema, OBLIGATION_COVERAGE_SCHEMA)
+            self.assertEqual(observed["output_schema_path"], provider_schema_path)
+            self.assertEqual(native_schema_support_errors(provider_schema), [])
+
+            def contains_unique_items(node):
+                if isinstance(node, dict):
+                    return "uniqueItems" in node or any(contains_unique_items(value) for value in node.values())
+                if isinstance(node, list):
+                    return any(contains_unique_items(value) for value in node)
+                return False
+
+            self.assertTrue(contains_unique_items(local_schema))
+            self.assertFalse(contains_unique_items(provider_schema))
 
     def test_native_runner_does_not_call_non_timeout_exit_124_a_timeout(self) -> None:
         with tempfile.TemporaryDirectory() as td:

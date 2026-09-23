@@ -25,10 +25,14 @@ def equal(left: Any, right: Any) -> bool:
 def satisfies(property_path: str, actual: Any, expected: Any) -> bool:
     """Evaluate exact properties and monotone constraint properties."""
     leaf = property_path.rsplit(".", 1)[-1]
-    if leaf == "min_count" and isinstance(actual, (int, float)) and isinstance(expected, (int, float)):
-        return actual >= expected
-    if leaf == "max_count" and isinstance(actual, (int, float)) and isinstance(expected, (int, float)):
-        return actual <= expected
+    lower_bounds = {"min_count", "min_chars", "min_words"}
+    upper_bounds = {"max_count", "max_chars", "max_words", "max_item_chars"}
+    if leaf in lower_bounds | upper_bounds:
+        if (isinstance(actual, bool) or isinstance(expected, bool)
+                or not isinstance(actual, (int, float))
+                or not isinstance(expected, (int, float))):
+            return False
+        return actual >= expected if leaf in lower_bounds else actual <= expected
     return equal(actual, expected)
 
 

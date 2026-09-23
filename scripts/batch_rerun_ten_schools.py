@@ -34,9 +34,12 @@ from host_runtime import (  # noqa: E402
     automatic_adapter_id,
     require_host_runtime,
 )
+from manual_review import HUMAN_MARKER_CATEGORIES  # noqa: E402
 from pdf_visual_audit import audit_pdf  # noqa: E402
 from manual_review_display import audit_manual_review_markers  # noqa: E402
+from native_semantic_review import NativeSemanticReviewError, validate_response  # noqa: E402
 from process_runner import run_process  # noqa: E402
+from semantic_contract import sha256_json  # noqa: E402
 from thesis_format_pipeline import runtime_code_fingerprint  # noqa: E402
 
 
@@ -46,6 +49,66 @@ def resolve_project_path(value: str | Path, *, label: str) -> Path:
     if not resolved.is_file():
         raise ValueError(f"{label} does not exist: {resolved}")
     return resolved
+
+
+def native_semantic_review_integrity(
+    review: Any, *, case_id: Any, run_id: Any, case_root: Path,
+) -> bool:
+    """Require semantic-review evidence to bind to this case and cover all checks."""
+    if not isinstance(review, dict):
+        return False
+    if (
+        review.get("schema_version") != "1.0"
+        or review.get("protocol") != "native_semantic_content_review_v1"
+        or review.get("case_id") != case_id
+        or review.get("run_id") != run_id
+    ):
+        return False
+    checks = review.get("checks")
+    results = review.get("results")
+    if not isinstance(checks, list) or not isinstance(results, list):
+        return False
+    if not checks:
+        return review.get("status") == "not_required" and not results
+    if review.get("status") != "completed":
+        return False
+    try:
+        request_path = _artifact_path(review.get("request_path"), root=case_root)
+        response_path = _artifact_path(review.get("response_path"), root=case_root)
+        if not _path_within(request_path, case_root) or not _path_within(response_path, case_root):
+            return False
+        if request_path is None or response_path is None:
+            return False
+        request = json.loads(request_path.read_text(encoding="utf-8"))
+        response = json.loads(response_path.read_text(encoding="utf-8"))
+        if not isinstance(request, dict) or not isinstance(response, dict):
+            return False
+        request_sha256 = sha256_json(request)
+        response_sha256 = hashlib.sha256(response_path.read_bytes()).hexdigest()
+        if (
+            request_sha256 != review.get("request_sha256")
+            or response_sha256 != review.get("response_sha256")
+            or request.get("case_id") != case_id
+            or request.get("run_id") != run_id
+            or request.get("checks") != checks
+            or request.get("source_sha256") != review.get("source_sha256")
+            or request.get("format_spec_sha256") != review.get("format_spec_sha256")
+            or request.get("document_text_sha256") != review.get("document_text_sha256")
+        ):
+            return False
+        document_text_sha256 = hashlib.sha256(json.dumps(
+            [(item["check_id"], item["document_text"]) for item in checks],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()
+        if request.get("document_text_sha256") != document_text_sha256:
+            return False
+        validated_results = validate_response(response, checks)
+        if validated_results != results:
+            return False
+    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError, NativeSemanticReviewError):
+        return False
+    return True
 
 
 def load_manifest(path: Path) -> tuple[Path, list[dict[str, Any]], Path]:
@@ -144,7 +207,9 @@ def pipeline_command(case: dict[str, Any], source: Path, work_dir: Path, output_
                      requirements_dir: Path | None = None,
                      host_agent_audit: Path | None = None,
                      merge_receipt: Path | None = None,
-                     host_review_chunk_size: int = 20) -> list[str]:
+                     host_review_chunk_size: int = 20,
+                     semantic_review_runtime: str | None = None,
+                     semantic_review_model: str | None = None) -> list[str]:
     command = [
         sys.executable, "scripts/thesis_format_pipeline.py",
         str(case["requirements"]), str(source), str(output_docx),
@@ -182,6 +247,11 @@ def pipeline_command(case: dict[str, Any], source: Path, work_dir: Path, output_
         command.extend(["--template-profile", str(case["template_profile"])])
     if case.get("thesis_profile"):
         command.extend(["--thesis-profile", str(case["thesis_profile"])])
+    if semantic_review_runtime and semantic_review_model:
+        command.extend([
+            "--semantic-review-runtime", semantic_review_runtime,
+            "--semantic-review-model", semantic_review_model,
+        ])
     return command
 
 
@@ -451,9 +521,9 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
     # Review drafts are an explicit, auditable intermediate product.  They may
     # contain red placeholders for facts or semantic choices that a person
     # must resolve, but they must still be bound to the fresh run and pass the
-    # mechanical DOCX/package checks.  Keep this gate separate from the
-    # submission gate below so an unresolved capability finding cannot either
-    # masquerade as a release or stop the rest of a review batch.
+    # mechanical DOCX/package checks. Human-only open inputs may remain as
+    # red markers, but any deterministic/capability failure blocks acceptance
+    # and therefore stops a fail-fast school run.
     if manifest.get("output_policy") == "review_draft":
         checks["output_policy"] = "review_draft"
         if manifest.get("status") != "draft_manual_review":
@@ -498,6 +568,20 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
                 items = manual_ledger.get("items")
                 if not isinstance(items, list):
                     blockers.append("manual_review_ledger_items_invalid")
+                else:
+                    marker_ids = [
+                        str(item.get("marker_id")) for item in items
+                        if isinstance(item, dict) and item.get("marker_id")
+                    ]
+                    invalid_categories = sorted({
+                        str(item.get("category") or "") for item in items
+                        if not isinstance(item, dict)
+                        or str(item.get("category") or "") not in HUMAN_MARKER_CATEGORIES
+                    })
+                    if len(marker_ids) != len(items) or len(set(marker_ids)) != len(marker_ids):
+                        blockers.append("manual_review_ledger_marker_ids_invalid")
+                    if invalid_categories:
+                        blockers.append("manual_review_ledger_contains_technical_diagnostics")
                 checks["manual_review"] = {
                     "path": str(manual_path),
                     "summary": manual_ledger.get("summary"),
@@ -541,35 +625,45 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
                     1 for item in raw_findings
                     if isinstance(item, dict) and item.get("blocking")
                 ) if isinstance(raw_findings, list) else 0
-                ledger_count = len(manual_ledger.get("items", [])) if isinstance(manual_ledger, dict) and isinstance(manual_ledger.get("items"), list) else 0
-                if blocking_count and ledger_count == 0:
-                    blockers.append("manual_review_ledger_does_not_cover_capability_findings")
-                if blocking_count and isinstance(manual_ledger, dict):
-                    ledger_codes = {
-                        str(code)
-                        for item in manual_ledger.get("items", [])
-                        if isinstance(item, dict)
-                        for code in (item.get("source_codes") or [item.get("source_code")])
-                        if code
-                    }
-                    finding_codes = {
-                        str(item.get("code"))
-                        for item in raw_findings
-                        if isinstance(item, dict) and item.get("blocking") and item.get("code")
-                    }
-                    if finding_codes - ledger_codes:
-                        blockers.append("manual_review_ledger_missing_capability_codes")
+                human_input_count = 0
+                technical_blocking_count = 0
+                if isinstance(raw_findings, list):
+                    for item in raw_findings:
+                        if not isinstance(item, dict) or not item.get("blocking"):
+                            continue
+                        categories = {
+                            evidence.get("value")
+                            for evidence in item.get("evidence", [])
+                            if isinstance(evidence, dict)
+                            and evidence.get("kind") == "category"
+                        }
+                        if categories and categories.issubset(HUMAN_MARKER_CATEGORIES):
+                            human_input_count += 1
+                        else:
+                            technical_blocking_count += 1
+                if technical_blocking_count:
+                    blockers.append("capability_technical_blocking_findings")
+                if (capability.get("status") == "blocked"
+                        and (not human_input_count or blocking_count != human_input_count)):
+                    blockers.append("capability_blocked_without_human_only_basis")
                 marker_count = (
                     len(markers.get("markers", []))
                     if isinstance(markers, dict) and isinstance(markers.get("markers"), list)
                     else 0
                 )
-                if blocking_count and marker_count < ledger_count:
+                ledger_count = (
+                    len(manual_ledger.get("items", []))
+                    if isinstance(manual_ledger, dict) and isinstance(manual_ledger.get("items"), list)
+                    else 0
+                )
+                if marker_count != ledger_count:
                     blockers.append("manual_review_markers_do_not_cover_ledger")
                 checks["capability_preflight"] = {
                     "path": str(capability_path),
                     "status": capability.get("status"),
                     "blocking_findings": blocking_count,
+                    "human_marker_eligible_findings": human_input_count,
+                    "technical_blocking_findings": technical_blocking_count,
                 }
 
         output_path = case_artifact("output", manifest.get("output"))
@@ -605,10 +699,42 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
             if validation is None:
                 blockers.append("validation_report_missing_or_invalid")
             else:
-                if validation.get("valid") is not True:
-                    blockers.append("review_draft_format_validation_failed")
                 if validation.get("review_draft_ready") is not True:
                     blockers.append("review_draft_not_ready_in_validation")
+                if validation.get("diagnostic_draft_generated") is not True:
+                    blockers.append("review_draft_not_generated_in_validation")
+                validation_findings = validation.get("findings")
+                technical_validation_ok = (
+                    validation.get("valid") is True
+                    and validation.get("format_ready") is True
+                    and validation.get("diagnostic_draft_generated") is True
+                    and validation.get("review_draft_package_valid") is True
+                    and isinstance(validation_findings, list)
+                    and not validation_findings
+                )
+                checks["technical_validation"] = technical_validation_ok
+                if not technical_validation_ok:
+                    blockers.append("review_draft_technical_validation_not_passed")
+                semantic_review = validation.get("native_semantic_content_review")
+                semantic_review_ok = native_semantic_review_integrity(
+                    semantic_review,
+                    case_id=manifest.get("case_id"),
+                    run_id=fresh.get("run_id"),
+                    case_root=case_root,
+                )
+                checks["native_semantic_content_review"] = {
+                    "valid": semantic_review_ok,
+                    "status": semantic_review.get("status")
+                    if isinstance(semantic_review, dict) else None,
+                    "check_count": len(semantic_review.get("checks", []))
+                    if isinstance(semantic_review, dict)
+                    and isinstance(semantic_review.get("checks"), list) else None,
+                    "result_count": len(semantic_review.get("results", []))
+                    if isinstance(semantic_review, dict)
+                    and isinstance(semantic_review.get("results"), list) else None,
+                }
+                if not semantic_review_ok:
+                    blockers.append("review_draft_semantic_review_invalid_or_unbound")
                 review_evidence = (
                     validation.get("submission_audit", {}).get("evidence", {})
                     if isinstance(validation.get("submission_audit"), dict) else {}
@@ -616,35 +742,54 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
                 if validation.get("review_draft_package_valid") is not True and review_evidence.get("opc_package_valid") is not True:
                     blockers.append("review_draft_docx_package_not_verified")
                 receipt_audit = validation.get("property_receipt_audit")
-                receipt_review_ok = False
-                if isinstance(receipt_audit, dict) and receipt_audit.get("valid") is True:
-                    receipt_review_ok = True
-                elif (
-                    isinstance(receipt_audit, dict)
-                    and receipt_audit.get("review_draft_manual_review") is True
-                    and isinstance(manual_ledger, dict)
-                ):
-                    manual_codes = {
-                        str(code)
-                        for item in manual_ledger.get("items", [])
+                receipt_integrity_ok = False
+                if isinstance(receipt_audit, dict):
+                    receipts = receipt_audit.get("receipts")
+                    expected_ids = receipt_audit.get("expected_receipt_ids")
+                    receipt_ids = [
+                        str(item.get("receipt_id")) for item in receipts
+                        if isinstance(item, dict) and item.get("receipt_id")
+                    ] if isinstance(receipts, list) else []
+                    output_sha = hashlib.sha256(output_path.read_bytes()).hexdigest() if output_path else None
+                    expected_ids_valid = (
+                        isinstance(expected_ids, list)
+                        and all(isinstance(value, str) and value for value in expected_ids)
+                        and len(expected_ids) == len(set(expected_ids))
+                    )
+                    receipt_statuses = [
+                        item.get("status") for item in receipts
                         if isinstance(item, dict)
-                        for code in (item.get("source_codes") or [item.get("source_code")])
-                        if code
+                    ] if isinstance(receipts, list) else []
+                    status_counts = {
+                        "verified_count": receipt_statuses.count("verified"),
+                        "failed_count": receipt_statuses.count("failed"),
+                        "unverified_count": receipt_statuses.count("unverified"),
                     }
-                    expected_receipt_codes = {
-                        f"property_receipt:{receipt_id}"
-                        for receipt_id in receipt_audit.get("manual_review_receipt_ids", [])
-                        if receipt_id
-                    }
-                    receipt_review_ok = bool(expected_receipt_codes) and expected_receipt_codes <= manual_codes
-                    if not receipt_review_ok:
-                        blockers.append("review_draft_property_receipt_items_missing_from_ledger")
-                    checks["property_receipts_manual_review"] = {
-                        "receipt_count": len(expected_receipt_codes),
-                        "ledger_covered": receipt_review_ok,
-                    }
-                if not receipt_review_ok:
+                    receipt_integrity_ok = (
+                        isinstance(receipts, list)
+                        and len(receipt_ids) == len(receipts)
+                        and len(receipt_ids) == len(set(receipt_ids))
+                        and expected_ids_valid
+                        and set(receipt_ids) == set(expected_ids)
+                        and len(receipt_ids) == len(expected_ids)
+                        and receipt_audit.get("receipt_count") == len(receipts)
+                        and all(item.get("status") == "verified" for item in receipts)
+                        and all(item.get("serialized_docx_sha256") == output_sha for item in receipts)
+                        and all(receipt_audit.get(key) == value for key, value in status_counts.items())
+                        and receipt_audit.get("missing_count") == 0
+                        and receipt_audit.get("unexpected_count") == 0
+                        and receipt_audit.get("duplicate_count") == 0
+                        and receipt_audit.get("valid") is True
+                    )
+                if not receipt_integrity_ok:
                     blockers.append("review_draft_property_receipts_not_verified")
+                checks["property_receipts"] = {
+                    "integrity_bound_to_output": receipt_integrity_ok,
+                    "all_expected_receipts_verified": receipt_integrity_ok,
+                    "verified": receipt_audit.get("verified_count") if isinstance(receipt_audit, dict) else None,
+                    "failed": receipt_audit.get("failed_count") if isinstance(receipt_audit, dict) else None,
+                    "unverified": receipt_audit.get("unverified_count") if isinstance(receipt_audit, dict) else None,
+                }
                 if validation.get("submission_ready") is True:
                     blockers.append("review_draft_validation_claims_submission_ready")
             checks["validation_report"] = str(validation_path)
@@ -666,6 +811,9 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
 
         if manifest.get("code_fingerprint") != runtime_code_fingerprint():
             blockers.append("code_runtime_fingerprint_mismatch")
+        checks["diagnostic_draft_generated"] = manifest.get("diagnostic_draft_generated") is True
+        if manifest.get("diagnostic_draft_generated") is not True:
+            blockers.append("review_draft_not_generated_in_manifest")
         checks["review_draft_ready"] = manifest.get("review_draft_ready") is True
         if manifest.get("review_draft_ready") is not True:
             blockers.append("review_draft_not_ready")
@@ -1076,6 +1224,7 @@ def run_case(base: Path, source: Path, case: dict[str, Any], *, prepare_host_rev
              openclaw_config: Path | None = None,
              codex_bin: str | None = None,
              codex_model: str | None = None,
+             semantic_review_model: str | None = None,
              allow_prompt_only: bool = False,
              neutral_reference_docx: Path | None = None,
              word_open_timeout: int = 45,
@@ -1188,6 +1337,10 @@ def run_case(base: Path, source: Path, case: dict[str, Any], *, prepare_host_rev
                     host_agent_audit=review_requirements / "host-agent-run.json",
                     merge_receipt=review_requirements / "merge-receipt.json",
                     host_review_chunk_size=host_review_chunk_size,
+                    semantic_review_runtime=host_runtime,
+                    semantic_review_model=(semantic_review_model or (
+                        codex_model if host_adapter_id == "codex" else host_agent_model
+                    )),
                 ),
                 label=f"[{case['id']}] full deterministic DOCX + declaration resources",
                 timeout=stage_timeout,
@@ -1395,6 +1548,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="optional native codex executable used by --auto-host-agent")
     parser.add_argument("--codex-model",
                         help="optional explicit native Codex model; omitted means the current Codex CLI configuration")
+    parser.add_argument("--semantic-review-model",
+                        help="explicit model route for the post-format semantic review; defaults to the selected host model")
     parser.add_argument(
         "--allow-prompt-only", action="store_true",
         help="explicit non-release override when native Codex lacks --output-schema",
@@ -1543,6 +1698,7 @@ def main(argv: list[str] | None = None) -> int:
                 openclaw_config=args.openclaw_config,
                 codex_bin=args.codex_bin,
                 codex_model=args.codex_model,
+                semantic_review_model=args.semantic_review_model,
                 allow_prompt_only=args.allow_prompt_only,
                 neutral_reference_docx=neutral_reference,
                 word_open_timeout=args.word_open_timeout,

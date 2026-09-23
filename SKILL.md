@@ -222,22 +222,30 @@ python3 scripts/thesis_format.py \
 
 The pipeline writes a run-bound `manual-review-items.json` sidecar and appends
 the corresponding `MR-0001`-style items to the DOCX in red text with a pale
-highlight. Every uncertainty that is suitable for human handling is rendered
-through the same policy: semantic ambiguity, missing user/source input,
-backend capability gaps, runtime-manual checks, missing official templates, and
-unresolved style mappings receive a run-bound red placeholder (for example
-`【待提供：官方版式模板】`) and a machine-readable ledger item. Missing thesis
-content is also rendered as a red `【待补充：…】` placeholder. The ledger records
-the case/run identity, current source/clause/evidence hashes, and the fixed
-red-marker policy; it does not rewrite the original clause review or invent a
-requirement/property. Deterministic contract, structural, format, and package
-failures still stop the draft; a red marker never means that the requirement
-passed.
+highlight. Red markers are reserved for choices or inputs a person must
+resolve: unresolved semantic ambiguity, missing user/source input, genuinely
+unverifiable runtime checks, missing official templates, unresolved style
+mappings, or a native semantic reviewer that returns `uncertain`. A detected
+semantic violation is recorded as a finding, not disguised as an uncertainty
+marker. Deterministic formatting repairs (for example, a declared keyword
+separator change that preserves each keyword) are applied by code and rechecked.
+Deterministic format/property/coverage failures and render evidence required by
+the current contract remain in their technical reports and keep `format_ready` or
+`submission_ready` false; they are not red TODOs for the author. The serialized
+marker layer rejects technical categories even if an old or hand-written ledger
+contains them. A red marker never means that a requirement passed.
 
 `review_draft` is explicitly non-submission: it sets `submission_ready=false`,
-defers the strict official-template comparison and Word/PDF release audit, and
-records `draft_manual_review`/`review_draft_pending`. The ten-school batch
-runner defaults to this policy so manual items do not stop the next case. Use
+keeps `format_ready=false` when any technical finding remains, defers the strict
+official-template comparison and Word/PDF release audit, and records
+`draft_manual_review`/`review_draft_pending`. A diagnostic draft may be emitted
+as an inspectable artifact (`diagnostic_draft_generated`), but it is not an
+accepted review draft unless deterministic validation is clean, `format_ready`
+is true, and every expected property receipt is verified against the serialized
+DOCX. Technical failure stops the current case and a fail-fast batch; only
+genuinely unresolved human inputs/decisions may remain as red markers while a
+technically valid review draft is accepted. This is not a formatting or release
+pass. The ten-school batch runner defaults to this policy. Use
 `--output-policy submission` only after the red items are resolved and the
 submission-mode run has been started fresh; that mode retains the full
 fail-closed capability, render, and final audit gates.

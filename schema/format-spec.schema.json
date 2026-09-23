@@ -694,12 +694,6 @@
                 ]
               },
               "uniqueItems": true
-            },
-            "exception_policy": {
-              "enum": [
-                "none",
-                "user_confirmed_special_need"
-              ]
             }
           },
           "additionalProperties": false

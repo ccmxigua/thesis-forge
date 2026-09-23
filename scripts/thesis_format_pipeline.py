@@ -741,6 +741,10 @@ def _main(argv: list[str]) -> int:
                    help="immutable merge-receipt.json bound to --llm-response")
     p.add_argument("--run-id", help="explicit current semantic-review run id when resuming a fresh host response")
     p.add_argument("--case-id", help="stable batch case identity bound into the host-review request")
+    p.add_argument("--semantic-review-runtime", choices=["codex", "openclaw"],
+                   help="explicit native runtime for post-format abstract semantic review")
+    p.add_argument("--semantic-review-model",
+                   help="explicit native model route for post-format abstract semantic review")
     p.add_argument("--thesis-profile", type=Path, help="JSON metadata for conditional requirements such as master/doctor limits")
     p.add_argument("--analysis-mode", choices=["llm_primary", "rule_only", "known_template"], default="llm_primary",
                    help="unseen templates default to full LLM semantic extraction and completeness review")
@@ -782,6 +786,8 @@ def _main(argv: list[str]) -> int:
     p.add_argument("--pandoc-arg", action="append", default=[],
                    help="extra argument forwarded to convert.sh/Pandoc for .tex input; repeat as needed")
     args = p.parse_args(argv)
+    if bool(args.semantic_review_runtime) != bool(args.semantic_review_model):
+        p.error("--semantic-review-runtime and --semantic-review-model must be supplied together")
     if args.case_id is not None:
         args.case_id = args.case_id.strip()
         if not args.case_id or not all(
@@ -1578,6 +1584,12 @@ def _main(argv: list[str]) -> int:
         apply_cmd.append("--preview-placeholders")
     if args.output_policy == "review_draft":
         apply_cmd += ["--manual-review-items", str(manual_review_items_path)]
+    if args.semantic_review_runtime:
+        apply_cmd += [
+            "--semantic-review-runtime", args.semantic_review_runtime,
+            "--semantic-review-model", args.semantic_review_model,
+            "--case-id", args.case_id or "standalone",
+        ]
     if args.template_profile and not args.neutral_reference_docx:
         # apply_format_spec retains its legacy interface; the profile gate is
         # run independently below so generation cannot self-certify it.
@@ -1598,9 +1610,23 @@ def _main(argv: list[str]) -> int:
     }
     if steps and steps[-1].get("name") == "apply_and_validate":
         steps[-1]["artifacts"] = dict(manifest["section_execution"])
-    if result.returncode or not report or not report.get("valid") or (execution_compliance_mode == "full" and not report.get("format_ready")):
+    application_failed = bool(result.returncode or not report)
+    if report:
+        if args.output_policy == "review_draft":
+            application_failed = application_failed or report.get("review_draft_ready") is not True
+        else:
+            application_failed = application_failed or report.get("valid") is not True
+            application_failed = application_failed or (
+                execution_compliance_mode == "full" and report.get("format_ready") is not True
+            )
+    if application_failed:
         manifest.update(status="failed", reason="application or validation failed",
-                        validation_report=str(apply_dir / "validation-report.json"))
+                        validation_report=str(apply_dir / "validation-report.json"),
+                        diagnostic_draft_generated=(
+                            bool(report.get("diagnostic_draft_generated"))
+                            if args.output_policy == "review_draft" and report else False
+                        ),
+                        review_draft_ready=False)
         write_json(manifest_path, manifest); print(json.dumps(manifest, ensure_ascii=False)); return result.returncode or 5
 
     comparison_path = apply_dir / "format-comparison.json"
@@ -1741,13 +1767,17 @@ def _main(argv: list[str]) -> int:
         final_submission_ready = False
     if official_template_submission_ready is not None:
         final_submission_ready = final_submission_ready and official_template_submission_ready
+    if args.output_policy == "review_draft" and manual_review_items_path.is_file():
+        try:
+            final_manual_ledger = read_json(manual_review_items_path)
+        except (OSError, json.JSONDecodeError):
+            final_manual_ledger = None
+        if isinstance(final_manual_ledger, dict):
+            manifest["manual_review_summary"] = final_manual_ledger.get("summary", {})
     final_format_ready = bool(
         report.get("valid")
-        and (report.get("format_ready") or args.output_policy == "review_draft")
-        and (
-            comparison.get("status") == "passed"
-            or args.output_policy == "review_draft"
-        )
+        and report.get("format_ready")
+        and comparison.get("status") == "passed"
         and (official_template_structure_valid is not False)
     )
     if args.strict_release and not final_submission_ready:
@@ -1790,10 +1820,13 @@ def _main(argv: list[str]) -> int:
                     execution_compliance_mode=execution_compliance_mode,
                     manual_review_items=str(manual_review_items_path) if args.output_policy == "review_draft" else None,
                     manual_review_summary=manifest.get("manual_review_summary", {}),
+                    diagnostic_draft_generated=(
+                        bool(report.get("diagnostic_draft_generated"))
+                        if args.output_policy == "review_draft" else False
+                    ),
                     review_draft_ready=(
                         args.output_policy == "review_draft"
                         and bool(report.get("review_draft_ready"))
-                        and final_format_ready
                     ),
                     overall_status=report.get("overall_status"),
                     pipeline_valid=report.get("pipeline_valid"),

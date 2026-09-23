@@ -20,6 +20,7 @@ from docx.shared import Pt, RGBColor
 from docx.text.paragraph import Paragraph
 
 from docx_semantics import all_body_paragraphs, is_abstract_body_en, is_abstract_body_zh
+from manual_review import HUMAN_MARKER_CATEGORIES
 
 MANUAL_REVIEW_STYLE = "Thesis Manual Review"
 MANUAL_REVIEW_PLACEHOLDER_STYLE = "Thesis Manual Review Placeholder"
@@ -153,6 +154,16 @@ def _items(ledger: dict[str, Any] | None) -> list[dict[str, Any]]:
         not isinstance(value, str) or not re.fullmatch(r"MR-\d{4}", value) for value in ids
     ):
         raise ValueError("manual review markers require unique, valid ledger IDs")
+    invalid_categories = sorted({
+        str(item.get("category") or "")
+        for item in items
+        if item.get("category") not in HUMAN_MARKER_CATEGORIES
+    })
+    if invalid_categories:
+        raise ValueError(
+            "manual review display accepts only unresolved human decisions/inputs; "
+            "technical diagnostics must stay in reports: " + ", ".join(invalid_categories)
+        )
     return items
 
 

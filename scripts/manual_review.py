@@ -19,11 +19,22 @@ CLAUSE_RE = re.compile(r"\bC\d{5}\b")
 REQUIREMENT_RE = re.compile(r"\bR\d{5}\b")
 
 CATEGORY_ACTIONS = {
-    "backend_capability_gap": "补充后端 capability、schema 或 deterministic checker；确认后再提交。",
     "input_prerequisite": "补充论文、模板或用户确认的真实输入；不要用示例内容替代。",
     "runtime_manual_unverifiable": "人工核对生成文档和原始条款，并在清单中记录结果。",
     "confirmed_semantic_issue": "提供权威解释后重新绑定条款；当前标注只表示问题已确认存在。",
+    "semantic_content_review": "对照权威条款人工核实；系统不会改写论文正文。",
 }
+
+# Red markers are reserved for an actual human decision/input. Deterministic
+# format, schema, property-receipt, capability, and render failures belong in
+# their technical reports and keep release gates closed; they are not TODOs
+# that should be pushed onto the author as unexplained red text.
+HUMAN_MARKER_CATEGORIES = frozenset({
+    "input_prerequisite",
+    "runtime_manual_unverifiable",
+    "confirmed_semantic_issue",
+    "semantic_content_review",
+})
 
 # This is a document-facing policy, not a compliance result.  It is repeated
 # in the ledger so a consumer cannot mistake a visually marked draft for a
@@ -114,12 +125,14 @@ def build_manual_review_ledger(
         if not isinstance(finding, dict):
             continue
         evidence = finding.get("evidence")
-        category = next(iter(_values(evidence, "category")), "runtime_manual_unverifiable")
+        category = next(iter(_values(evidence, "category")), "")
         # In supported-subset analysis, a confirmed semantic issue is
         # intentionally non-blocking in the capability report.  It still
         # needs a visible red marker so the analysis result cannot be mistaken
         # for an interpreted requirement.
         if not finding.get("blocking") and category != "confirmed_semantic_issue":
+            continue
+        if category not in HUMAN_MARKER_CATEGORIES:
             continue
         clause_ids = _values(evidence, "clause_id") or _ids_from_text(finding.get("message"), CLAUSE_RE)
         if category == "confirmed_semantic_issue" and question_clause_ids.intersection(clause_ids):
@@ -156,7 +169,9 @@ def build_manual_review_ledger(
         if not isinstance(gate, dict):
             continue
         code = str(gate.get("source_code") or "release_gate")
-        category = str(gate.get("category") or "input_prerequisite")
+        category = str(gate.get("category") or "")
+        if category not in HUMAN_MARKER_CATEGORIES:
+            continue
         candidates.append({
             "source_type": "release_gate",
             "source_code": code,
@@ -252,6 +267,8 @@ def add_manual_review_items(
         if not isinstance(candidate, dict):
             continue
         item = dict(candidate)
+        if str(item.get("category") or "") not in HUMAN_MARKER_CATEGORIES:
+            continue
         identity = (
             str(item.get("category") or ""),
             str(item.get("source_code") or ""),
@@ -288,6 +305,44 @@ def add_manual_review_items(
         "total": len(existing),
         "by_category": categories,
         "original_blocking_count": sum(bool(item.get("original_blocking")) for item in existing),
+    }
+    ledger["submission_ready"] = False
+    return ledger
+
+
+def filter_manual_marker_ledger(ledger: dict[str, Any]) -> dict[str, Any]:
+    """Remove legacy technical diagnostics from a red-marker ledger.
+
+    The original diagnostics remain in validation/capability/receipt reports.
+    This boundary also protects apply-time consumers from old ledgers created
+    before technical findings were separated from human decisions.
+    """
+    if not isinstance(ledger, dict):
+        raise ValueError("manual review ledger must be an object")
+    items = [
+        dict(item) for item in ledger.get("items", [])
+        if isinstance(item, dict)
+        and str(item.get("category") or "") in HUMAN_MARKER_CATEGORIES
+    ]
+    items.sort(key=lambda item: (
+        tuple(item.get("clause_ids") or []),
+        tuple(item.get("requirement_ids") or []),
+        str(item.get("source_code") or ""),
+        str(item.get("source_text") or ""),
+    ))
+    categories: dict[str, int] = {}
+    for index, item in enumerate(items, start=1):
+        item["marker_id"] = f"MR-{index:04d}"
+        item["status"] = "pending_manual_review"
+        item["marker_required"] = True
+        category = str(item.get("category") or "")
+        categories[category] = categories.get(category, 0) + 1
+    ledger["visual_policy"] = dict(MANUAL_REVIEW_VISUAL_POLICY)
+    ledger["items"] = items
+    ledger["summary"] = {
+        "total": len(items),
+        "by_category": categories,
+        "original_blocking_count": sum(bool(item.get("original_blocking")) for item in items),
     }
     ledger["submission_ready"] = False
     return ledger

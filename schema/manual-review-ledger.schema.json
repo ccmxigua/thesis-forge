@@ -40,7 +40,14 @@
           "marker_id": {"type": "string", "pattern": "^MR-[0-9]{4}$"},
           "status": {"const": "pending_manual_review"},
           "marker_required": {"const": true},
-          "category": {"type": "string"},
+          "category": {
+            "enum": [
+              "input_prerequisite",
+              "runtime_manual_unverifiable",
+              "confirmed_semantic_issue",
+              "semantic_content_review"
+            ]
+          },
           "source_type": {"type": "string"},
           "source_code": {"type": "string"},
           "source_codes": {"type": "array", "items": {"type": "string"}},

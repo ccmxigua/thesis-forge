@@ -40,12 +40,20 @@ from docx_semantics import (
     iter_document_nodes,
 )
 from format_spec_validation import load_and_validate
-from manual_review import add_manual_review_items, write_manual_review_ledger
+from manual_review import (
+    add_manual_review_items,
+    filter_manual_marker_ledger,
+    write_manual_review_ledger,
+)
 from manual_review_display import (
     MANUAL_REVIEW_STYLE, MANUAL_REVIEW_PLACEHOLDER_STYLE,
     ensure_manual_review_styles, mark_manual_review_paragraph,
     insert_inline_manual_review_markers, append_manual_review_markers,
     audit_manual_review_markers,
+)
+from native_semantic_review import (
+    NativeSemanticReviewError,
+    run_native_semantic_review,
 )
 from semantic_issue_confirmation import validate_bound_ledger_for_spec
 from compliance import annotate_satisfied_inputs, finalize_records, report as compliance_report
@@ -1978,6 +1986,88 @@ def _keyword_values(text: str, language: str) -> list[str]:
     return [item.strip() for item in re.split(splitter, payload) if item.strip()]
 
 
+def normalize_keyword_separators(
+    doc: Document, constraints: dict[str, Any], mappings: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Normalize only keyword delimiters when the source list is unambiguous.
+
+    The text of each keyword is preserved byte-for-byte; only recognized list
+    separators change.  Runs are updated in-place by character offsets so
+    paragraph/run formatting is retained.  If the paragraph contains non-text
+    run content or the parsed values cannot be preserved exactly, leave it
+    unchanged and let the deterministic audit fail closed.
+    """
+    expected_glyph = {
+        ("zh", "chinese_comma"): "，",
+        ("en", "english_comma"): ",",
+        ("zh", "semicolon"): "；",
+        ("en", "semicolon"): ";",
+    }
+    delimiter_pattern = re.compile(r"[，,；;]")
+    repairs: list[dict[str, Any]] = []
+    for key, role, language in (
+        ("keywords_zh", "keywords_zh", "zh"),
+        ("keywords_en", "keywords_en", "en"),
+    ):
+        rule = constraints.get(key, {})
+        if not isinstance(rule, dict):
+            continue
+        target = expected_glyph.get((language, str(rule.get("separator") or "")))
+        if target is None:
+            continue
+        for paragraph in _role_paragraphs(doc, role, mappings):
+            runs = list(paragraph.runs)
+            before = "".join(run.text or "" for run in runs)
+            # Rewriting Run.text reconstructs the run's XML children. Refuse
+            # paragraphs with hyperlinks, fields, tabs, breaks, drawings, or
+            # other non-text nodes so a mechanical delimiter change cannot
+            # erase or relocate semantic Word content.
+            if before != paragraph.text:
+                continue
+            if any(
+                child.tag not in {qn("w:pPr"), qn("w:r"), qn("w:bookmarkStart"),
+                                  qn("w:bookmarkEnd"), qn("w:proofErr")}
+                for child in paragraph._p
+            ):
+                continue
+            if any(
+                node.tag not in {qn("w:rPr"), qn("w:t")}
+                for run in runs for node in run._r
+            ):
+                continue
+            values_before = _keyword_values(before, language)
+            if len(values_before) <= 1:
+                continue
+            after = delimiter_pattern.sub(target, before)
+            if after == before:
+                continue
+            values_after = _keyword_values(after, language)
+            if values_after != values_before:
+                continue
+            # A delimiter may not cross XML run boundaries after flattening;
+            # replacements have equal code-point width, so offsets remain
+            # stable and existing run properties survive.
+            offset = 0
+            for run in runs:
+                value = run.text or ""
+                end = offset + len(value)
+                run.text = after[offset:end]
+                offset = end
+            if offset != len(after):
+                # Defensive check: do not claim a repair if the run projection
+                # did not cover the complete paragraph text.
+                raise ValueError("keyword separator normalization lost paragraph text")
+            repairs.append({
+                "role": role,
+                "expected_separator": rule.get("separator"),
+                "separator_glyph": target,
+                "before": before,
+                "after": after,
+                "keyword_values_preserved": True,
+            })
+    return repairs
+
+
 def _section_paragraphs(doc: Document, heading_role: str, mappings: dict[str, Any]) -> list[Paragraph]:
     """Return body paragraphs belonging to each occurrence of a heading role."""
     paragraphs = list(doc.paragraphs)
@@ -2036,18 +2126,8 @@ def _document_has_comments(doc: Document) -> bool:
                for part in getattr(doc.part.package, "parts", []))
 
 
-def _manual_semantic_finding(key: str, property_name: str, reason: str) -> dict[str, Any]:
-    return {
-        "role": "content_constraints",
-        "property": f"{key}.{property_name}",
-        "template_value": "manual_verification_required",
-        "required_value": reason,
-        "verification": "manual",
-    }
-
-
 def manual_review_constraint_items(constraints: dict[str, Any]) -> list[dict[str, Any]]:
-    """Describe semantic checks that need a human but not a hard-stop draft.
+    """Describe only unresolved targets that no semantic reviewer can infer.
 
     These are deliberately derived from the current format spec rather than
     being a global list of clause IDs.  The resulting visible markers are
@@ -2069,29 +2149,193 @@ def manual_review_constraint_items(constraints: dict[str, Any]) -> list[dict[str
                 "clause_ids": [], "requirement_ids": [], "question_ids": [], "evidence_ids": [],
                 "original_blocking": True,
             })
-        for property_name in ("require_third_person", "required_sections", "exception_policy"):
-            if rule.get(property_name):
-                items.append({
-                    "source_type": "format_constraint",
-                    "category": "runtime_manual_unverifiable",
-                    "source_text": f"{key}.{property_name}",
-                    "reason": "该摘要语义约束不能由确定性 DOCX 格式检查证明。",
-                    "action": "请人工审查正文语义；不要把草稿标记直接当作合规证据。",
-                    "clause_ids": [], "requirement_ids": [], "question_ids": [], "evidence_ids": [],
-                    "original_blocking": True,
-                })
-        for object_kind in rule.get("prohibited_objects", []) if isinstance(rule.get("prohibited_objects"), list) else []:
-            if object_kind in {"chemical_equations", "nonpublic_symbols_and_terminology"}:
-                items.append({
-                    "source_type": "format_constraint",
-                    "category": "runtime_manual_unverifiable",
-                    "source_text": f"{key}.prohibited_objects.{object_kind}",
-                    "reason": "该语义禁用项不能安全地由关键词猜测。",
-                    "action": "请人工核对摘要内容；确认后再进入提交模式。",
-                    "clause_ids": [], "requirement_ids": [], "question_ids": [], "evidence_ids": [],
-                    "original_blocking": True,
-                })
     return items
+
+
+def build_semantic_content_checks(
+    doc: Document,
+    spec: dict[str, Any],
+    constraints: dict[str, Any],
+    mappings: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Compile evidence-bound abstract checks for a read-only native reviewer."""
+    checks: list[dict[str, Any]] = []
+    semantic_properties = ("require_third_person", "required_sections")
+    for key, role in (("abstract_zh", "abstract_body_zh"), ("abstract_en", "abstract_body_en")):
+        rule = constraints.get(key, {})
+        if not isinstance(rule, dict) or rule.get("target") == "unresolved":
+            continue
+        paragraphs = _role_paragraphs(doc, role, mappings)
+        document_text = "\n".join(paragraph.text for paragraph in paragraphs).strip()
+        if not document_text:
+            continue
+        relevant: list[dict[str, Any]] = []
+        for requirement in spec.get("requirements", []):
+            if not isinstance(requirement, dict) or requirement.get("role") != "content_constraints":
+                continue
+            properties = requirement.get("properties")
+            scoped = properties.get(key) if isinstance(properties, dict) else None
+            if not isinstance(scoped, dict):
+                continue
+            if not any(name in scoped for name in semantic_properties) and not any(
+                kind in {"chemical_equations", "nonpublic_symbols_and_terminology"}
+                for kind in (scoped.get("prohibited_objects") or [])
+            ):
+                continue
+            relevant.append({
+                "requirement_id": requirement.get("id"),
+                "clause_ids": list(requirement.get("clause_ids") or []),
+                "evidence_ids": list(requirement.get("evidence_ids") or []),
+                "source_text": requirement.get("source_text"),
+                "properties": copy.deepcopy(scoped),
+            })
+        source_by_clause = {
+            str(item.get("clause_id")): item
+            for item in spec.get("clause_compliance", [])
+            if isinstance(item, dict) and item.get("clause_id")
+        }
+        source_by_requirement = {
+            str(item.get("id")): item
+            for item in spec.get("requirements", [])
+            if isinstance(item, dict) and item.get("id")
+        }
+        evidence_records: list[dict[str, Any]] = []
+        for requirement in relevant:
+            for clause_id in requirement["clause_ids"]:
+                record = source_by_clause.get(str(clause_id), {})
+                evidence_records.append({
+                    "clause_id": clause_id,
+                    "requirement_id": requirement["requirement_id"],
+                    "evidence_ids": requirement["evidence_ids"],
+                    "source_text": requirement["source_text"],
+                    "source_reason": record.get("reason"),
+                    "requirement_reason": source_by_requirement.get(
+                        str(requirement["requirement_id"]), {}
+                    ).get("reason"),
+                })
+        for property_name in semantic_properties:
+            value = rule.get(property_name)
+            if not value:
+                continue
+            checks.append({
+                "check_id": f"{key}.{property_name}",
+                "role": role,
+                "property": property_name,
+                "rule": copy.deepcopy(value),
+                "document_text": document_text,
+                "source_requirements": [
+                    item for item in relevant
+                    if property_name in item["properties"]
+                ],
+                "source_evidence": evidence_records,
+            })
+        prohibited = rule.get("prohibited_objects", [])
+        if isinstance(prohibited, list):
+            for kind in prohibited:
+                if kind not in {"chemical_equations", "nonpublic_symbols_and_terminology"}:
+                    continue
+                checks.append({
+                    "check_id": f"{key}.prohibited_objects.{kind}",
+                    "role": role,
+                    "property": f"prohibited_objects.{kind}",
+                    "rule": kind,
+                    "document_text": document_text,
+                    "source_requirements": [
+                        item for item in relevant
+                        if kind in (item["properties"].get("prohibited_objects") or [])
+                    ],
+                    "source_evidence": evidence_records,
+                })
+    return checks
+
+
+def semantic_content_review_items(
+    review: dict[str, Any], checks: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Red-mark only semantic checks the native agent cannot resolve."""
+    checks_by_id = {str(item["check_id"]): item for item in checks}
+    items: list[dict[str, Any]] = []
+    for result in review.get("results", []) if isinstance(review.get("results"), list) else []:
+        if not isinstance(result, dict) or result.get("verdict") != "uncertain":
+            continue
+        check = checks_by_id.get(str(result.get("check_id")))
+        if check is None:
+            raise ValueError(f"semantic review result has no current check: {result.get('check_id')}")
+        requirements = check.get("source_requirements", [])
+        clause_ids = sorted({
+            str(value) for item in requirements if isinstance(item, dict)
+            for value in item.get("clause_ids", []) if value
+        })
+        requirement_ids = sorted({
+            str(item.get("requirement_id")) for item in requirements
+            if isinstance(item, dict) and item.get("requirement_id")
+        })
+        evidence_ids = sorted({
+            str(value) for item in requirements if isinstance(item, dict)
+            for value in item.get("evidence_ids", []) if value
+        })
+        check_id = str(result["check_id"])
+        source_code = f"semantic_review:{check_id}"
+        verdict = str(result.get("verdict"))
+        quotes = result.get("evidence_quotes") or []
+        items.append({
+            "source_type": "native_semantic_review",
+            "source_code": source_code,
+            "source_codes": [source_code],
+            "category": "semantic_content_review",
+            "clause_ids": clause_ids,
+            "requirement_ids": requirement_ids,
+            "question_ids": [],
+            "evidence_ids": evidence_ids,
+            "source_text": check_id,
+            "reason": (
+                f"原生宿主 Agent 判定 {verdict}：{result.get('rationale')}；"
+                f"原文证据：{' / '.join(str(value) for value in quotes)}"
+            ),
+            "action": (
+                "请依据原条款人工修改摘要内容后重新运行；系统不会自动改写论文正文。"
+                if verdict == "noncompliant" else
+                "当前宿主 Agent 无法可靠判断此项；请人工对照权威条款核实后重新运行。"
+            ),
+            "placeholder_text": f"【待人工处理：{check_id}】",
+            "original_blocking": True,
+            "release_gate": True,
+        })
+    return items
+
+
+def semantic_content_review_findings(
+    review: dict[str, Any], checks: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Keep confident semantic violations as findings, not human TODO markers."""
+    checks_by_id = {str(item["check_id"]): item for item in checks}
+    findings: list[dict[str, Any]] = []
+    for result in review.get("results", []) if isinstance(review.get("results"), list) else []:
+        if not isinstance(result, dict) or result.get("verdict") != "noncompliant":
+            continue
+        check = checks_by_id.get(str(result.get("check_id")))
+        if check is None:
+            raise ValueError(f"semantic review result has no current check: {result.get('check_id')}")
+        requirements = check.get("source_requirements", [])
+        findings.append({
+            "role": "content_constraints",
+            "property": f"{result['check_id']}.semantic_compliance",
+            "template_value": "noncompliant",
+            "required_value": "satisfied",
+            "failure_type": "native_semantic_noncompliance",
+            "reason": str(result.get("rationale") or "当前文本未满足绑定的语义约束。"),
+            "evidence_quotes": list(result.get("evidence_quotes") or []),
+            "clause_ids": sorted({
+                str(value) for item in requirements if isinstance(item, dict)
+                for value in item.get("clause_ids", []) if value
+            }),
+            "requirement_ids": sorted({
+                str(item.get("requirement_id")) for item in requirements
+                if isinstance(item, dict) and item.get("requirement_id")
+            }),
+            "verification": "native_semantic",
+        })
+    return findings
 
 
 def manual_review_validation_items(
@@ -2099,14 +2343,13 @@ def manual_review_validation_items(
 ) -> list[dict[str, Any]]:
     """Convert post-application findings into explicit draft-only review items.
 
-    A review draft may continue past a finding only when the finding remains
-    visible, is bound to this exact validation result, and is still a release
-    gate.  The finding is never rewritten as a successful check; the source
-    validation report keeps the original object and values.
+    Only checks explicitly requiring a human semantic decision become red
+    markers. Deterministic and confidently detected failures remain in the
+    validation report and keep format/submission gates closed.
     """
     items: list[dict[str, Any]] = []
     for finding in findings:
-        if not isinstance(finding, dict):
+        if not isinstance(finding, dict) or finding.get("verification") != "human_decision":
             continue
         fingerprint = hashlib.sha256(
             json.dumps(finding, ensure_ascii=False, sort_keys=True, default=str).encode("utf-8")
@@ -2120,10 +2363,10 @@ def manual_review_validation_items(
         if actual is not None or expected is not None:
             source_text += f"（实际={actual!r}；要求={expected!r}）"
         items.append({
-            "source_type": "post_application_validation",
+            "source_type": "human_semantic_verification",
             "source_code": f"validation_finding:{fingerprint}",
             "source_codes": [f"validation_finding:{fingerprint}"],
-            "category": "format_validation",
+            "category": "semantic_content_review",
             "clause_ids": [str(value) for value in finding.get("clause_ids", [])]
             if isinstance(finding.get("clause_ids"), list) else [],
             "requirement_ids": [str(value) for value in finding.get("requirement_ids", [])]
@@ -2143,35 +2386,9 @@ def manual_review_validation_items(
 def manual_review_receipt_items(
     receipts: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Expose every non-verified property receipt as a draft review gate."""
-    items: list[dict[str, Any]] = []
-    for receipt in receipts:
-        if not isinstance(receipt, dict) or receipt.get("status") == "verified":
-            continue
-        receipt_id = str(receipt.get("receipt_id") or "unknown")
-        property_path = str(receipt.get("property_path") or "property")
-        source_code = f"property_receipt:{receipt_id}"
-        items.append({
-            "source_type": "property_receipt",
-            "source_code": source_code,
-            "source_codes": [source_code],
-            "category": "property_receipt",
-            "clause_ids": [str(value) for value in receipt.get("clause_ids", [])],
-            "requirement_ids": [str(receipt.get("requirement_id"))]
-            if receipt.get("requirement_id") else [],
-            "question_ids": [],
-            "evidence_ids": [],
-            "source_text": f"{receipt.get('role', 'role')}.{property_path}",
-            "reason": (
-                f"属性回执状态为 {receipt.get('status')!s}；"
-                f"实际={receipt.get('actual')!r}；要求={receipt.get('expected')!r}。"
-            ),
-            "action": "请人工核对 DOCX 中该属性并修正后，以 submission 模式重新开始一轮新运行。",
-            "placeholder_text": f"【待人工处理：{source_code}】",
-            "original_blocking": True,
-            "release_gate": True,
-        })
-    return items
+    """Property receipts are deterministic diagnostics, never human markers."""
+    del receipts
+    return []
 
 
 def audit_content_constraints(doc: Document, constraints: dict[str, Any], mappings: dict[str, Any]) -> list[dict[str, Any]]:
@@ -2200,25 +2417,12 @@ def audit_content_constraints(doc: Document, constraints: dict[str, Any], mappin
                 findings.append({"role": "content_constraints", "property": f"{key}.max_words", "template_value": actual_words, "required_value": rule["max_words"], "metric": rule.get("length_metric", "words")})
         if rule.get("target") and rule.get("target") != key:
             findings.append({"role": "content_constraints", "property": f"{key}.target", "template_value": key, "required_value": rule["target"]})
-        if key == "abstract_en" and rule.get("target") == "unresolved":
-            findings.append(_manual_semantic_finding(key, "target", "abstract language target is unresolved"))
-        for property_name in ("require_third_person", "required_sections", "exception_policy"):
-            if rule.get(property_name):
-                findings.append(_manual_semantic_finding(
-                    key, property_name,
-                    "semantic abstract content cannot be proven by deterministic DOCX formatting alone",
-                ))
         if rule.get("prohibit_comments"):
             if _document_has_comments(doc):
                 findings.append({"role": "content_constraints", "property": f"{key}.prohibit_comments", "template_value": True, "required_value": False})
         for object_kind in rule.get("prohibited_objects", []) if isinstance(rule.get("prohibited_objects"), list) else []:
             if object_kind in {"figures", "tables"} and _abstract_has_embedded_object(paragraphs, object_kind):
                 findings.append({"role": "content_constraints", "property": f"{key}.prohibited_objects.{object_kind}", "template_value": True, "required_value": False})
-            elif object_kind in {"chemical_equations", "nonpublic_symbols_and_terminology"}:
-                findings.append(_manual_semantic_finding(
-                    key, f"prohibited_objects.{object_kind}",
-                    "requires semantic/manual review; deterministic text scanning must not guess domain meaning",
-                ))
     acknowledgments = constraints.get("acknowledgments", {})
     if isinstance(acknowledgments, dict) and acknowledgments.get("max_chars") is not None:
         section = _section_paragraphs(doc, "heading_acknowledgments", mappings)
@@ -2242,10 +2446,17 @@ def audit_content_constraints(doc: Document, constraints: dict[str, Any], mappin
         expected_sep = rule.get("separator")
         payload = re.sub(r"^(?:关\s*键\s*词|key\s*words?)\s*[：:]\s*", "", text, flags=re.I)
         if len(values) > 1 and expected_sep:
-            ok = ((expected_sep == "chinese_comma" and "，" in payload and "," not in payload)
-                  or (expected_sep == "english_comma" and "," in payload and "，" not in payload)
-                  or (expected_sep == "semicolon" and ("；" in payload or ";" in payload)))
-            if not ok: findings.append({"role": "content_constraints", "property": f"{key}.separator", "template_value": text, "required_value": expected_sep})
+            expected_glyph = {
+                ("zh", "chinese_comma"): "，",
+                ("en", "english_comma"): ",",
+                ("zh", "semicolon"): "；",
+                ("en", "semicolon"): ";",
+            }.get((language, str(expected_sep)))
+            delimiters = re.findall(r"[，,；;]", payload)
+            if expected_glyph is None or not delimiters or any(
+                delimiter != expected_glyph for delimiter in delimiters
+            ):
+                findings.append({"role": "content_constraints", "property": f"{key}.separator", "template_value": text, "required_value": expected_sep})
         if rule.get("max_item_chars") is not None:
             metric = rule.get("item_length_metric", "cjk_characters" if language == "zh" else "words")
             for item_index, item in enumerate(values):
@@ -2258,14 +2469,32 @@ def audit_content_constraints(doc: Document, constraints: dict[str, Any], mappin
                         "required_value": rule["max_item_chars"],
                         "metric": metric,
                         "item": item,
+                        "verification": "human_decision",
+                        "reason": (
+                            "该关键词超过字数上限；系统可以检测长度，但不能擅自删改或替换作者的学术术语。"
+                        ),
                     })
         after_role = rule.get("require_after_role")
         if after_role and paragraphs:
             before = _role_paragraphs(doc, after_role, mappings)
             if not before or max(positions.get(p._p, -1) for p in before) >= min(positions.get(p._p, 10**9) for p in paragraphs):
                 findings.append({"role": "content_constraints", "property": f"{key}.require_after_role", "template_value": False, "required_value": after_role})
-    if constraints.get("keywords_en", {}).get("match_other_language_count") and keyword_counts.get("keywords_en") != keyword_counts.get("keywords_zh"):
-        findings.append({"role": "content_constraints", "property": "keywords_en.match_other_language_count", "template_value": keyword_counts, "required_value": "equal"})
+    matched_keyword_languages = [
+        key for key in ("keywords_zh", "keywords_en")
+        if constraints.get(key, {}).get("match_other_language_count") is True
+    ]
+    if matched_keyword_languages and keyword_counts.get("keywords_en") != keyword_counts.get("keywords_zh"):
+        findings.append({
+            "role": "content_constraints",
+            "property": "keywords.match_other_language_count",
+            "template_value": keyword_counts,
+            "required_value": "equal",
+            "declared_by": matched_keyword_languages,
+            "verification": "human_decision",
+            "reason": (
+                "中英文关键词数量不一致；系统不能确定应补充、删除或如何翻译哪一个关键词。"
+            ),
+        })
     return findings
 
 
@@ -2440,11 +2669,15 @@ def _receipt_keyword_separator(text: str, language: str, values: list[str]) -> s
     if len(values) <= 1:
         return None
     payload = re.sub(r"^(?:关\s*键\s*词|key\s*words?)\s*[：: ]*", "", text.strip(), flags=re.I)
-    if language == "zh" and "，" in payload and "," not in payload:
+    delimiters = re.findall(r"[，,；;]", payload)
+    if not delimiters or len(set(delimiters)) != 1:
+        return None
+    delimiter = delimiters[0]
+    if language == "zh" and delimiter == "，":
         return "chinese_comma"
-    if language == "en" and "," in payload and "，" not in payload:
+    if language == "en" and delimiter == ",":
         return "english_comma"
-    if "；" in payload or ";" in payload:
+    if (language == "zh" and delimiter == "；") or (language == "en" and delimiter == ";"):
         return "semicolon"
     return None
 
@@ -2760,7 +2993,21 @@ def main(argv: list[str]) -> int:
                    help="run-bound manual-review ledger used to append red draft markers")
     p.add_argument("--semantic-issue-ledger", type=Path,
                    help="run-bound user acknowledgement ledger for unresolved semantic clauses")
+    p.add_argument("--semantic-review-runtime", choices=["codex", "openclaw"],
+                   help="explicit current host runtime for read-only abstract semantic review")
+    p.add_argument("--semantic-review-model",
+                   help="explicit model route for the current host's semantic review")
+    p.add_argument("--semantic-review-timeout", type=int, default=900)
+    p.add_argument("--semantic-review-agent-id", default="main")
+    p.add_argument("--semantic-review-runner", choices=["exec", "gateway"], default="exec")
+    p.add_argument("--semantic-review-bin")
+    p.add_argument("--semantic-review-config", type=Path)
+    p.add_argument("--case-id", help="stable case identity bound into semantic-content review")
     args = p.parse_args(argv)
+    if bool(args.semantic_review_runtime) != bool(args.semantic_review_model):
+        p.error("--semantic-review-runtime and --semantic-review-model must be supplied together")
+    if args.semantic_review_timeout <= 0:
+        p.error("--semantic-review-timeout must be positive")
     spec = load_json(args.format_spec)
     validation_errors = load_and_validate(
         spec,
@@ -2825,6 +3072,8 @@ def main(argv: list[str]) -> int:
         )
         if ledger_errors:
             raise SystemExit("invalid manual-review ledger schema:\n" + "\n".join(ledger_errors))
+        manual_review_ledger = filter_manual_marker_ledger(manual_review_ledger)
+        write_manual_review_ledger(args.manual_review_items, manual_review_ledger)
     if args.output_policy == "review_draft":
         ensure_manual_review_styles(doc)
     mappings = {}; conflicts = []; created = []; claimed = {}
@@ -2879,12 +3128,14 @@ def main(argv: list[str]) -> int:
     # captions; applying body_text first would relabel them and make both the
     # receipt and caption-object contracts internally contradictory.
     role_priority = {
+        "thesis_title_zh": 5, "thesis_title_en": 5,
         "figure_caption": 10, "table_caption": 10,
+        "toc_title": 10, "bibliography_heading": 10,
         # Semantic headings and keyword lines must claim a converter-emitted
         # generic Heading 1/Normal paragraph before broad roles do.
         "heading_acknowledgments": 15, "heading_appendix": 15,
         "heading_conclusion": 15, "heading_publications": 15,
-        "heading_references": 15, "bibliography_heading": 15,
+        "heading_references": 15,
         "keywords_zh": 15, "keywords_en": 15,
         "equation": 20, "toc": 20, "table_text": 30, "body_text": 100,
     }
@@ -2915,7 +3166,7 @@ def main(argv: list[str]) -> int:
                 "thesis_title_zh", "thesis_title_en",
                 "figure_caption", "table_caption", "equation", "keywords_zh", "keywords_en",
                 "heading_acknowledgments", "heading_appendix", "heading_conclusion",
-                "heading_publications", "heading_references", "bibliography_heading",
+                "heading_publications", "heading_references", "bibliography_heading", "toc_title",
             }
             detector_match = bool(detector and matches_structural_detector(paragraph, detector))
             if role == "toc":
@@ -3029,6 +3280,9 @@ def main(argv: list[str]) -> int:
     content_instance_audit = apply_content_instance_overrides(doc, spec, mappings)
     pending_content = insert_missing_content_placeholders(
         doc, spec, mappings, review_draft=args.output_policy == "review_draft",
+    )
+    keyword_separator_repairs = normalize_keyword_separators(
+        doc, resolve_profile_constraints(spec), mappings,
     )
     manual_review_document_ledger = manual_review_ledger
     if args.output_policy == "review_draft":
@@ -3174,6 +3428,11 @@ def main(argv: list[str]) -> int:
         },
     })
     write("cover-contract.json", cover_contract)
+    write("deterministic-content-repairs.json", {
+        "schema_version": "1.0",
+        "policy": "punctuation_only_preserve_keyword_text",
+        "keyword_separator_repairs": keyword_separator_repairs,
+    })
     write("execution-receipts.json", {"schema_version": "1.0", "receipts": execution_receipts})
     # Re-open the serialized file before validation to catch OOXML round-trip errors.
     check = Document(args.output); findings = []; coverage_warnings = []
@@ -3280,6 +3539,89 @@ def main(argv: list[str]) -> int:
     findings.extend(audit_declarations(
         check, spec.get("declarations", {}), resource_items(spec)
     ))
+    semantic_checks = build_semantic_content_checks(
+        check, spec, effective_content_constraints, mappings,
+    )
+    semantic_review_complete = not semantic_checks
+    semantic_review: dict[str, Any] = {
+        "schema_version": "1.0",
+        "protocol": "native_semantic_content_review_v1",
+        "status": "not_required" if not semantic_checks else "not_configured",
+        "case_id": args.case_id,
+        "run_id": spec.get("run_id"),
+        "checks": semantic_checks,
+        "results": [],
+    }
+    semantic_uncertainty_items: list[dict[str, Any]] = []
+    if semantic_checks:
+        if not args.semantic_review_runtime or not args.semantic_review_model:
+            findings.append({
+                "role": "content_constraints",
+                "property": "native_semantic_review.configuration",
+                "template_value": "not_configured",
+                "required_value": "explicit native host runtime and model",
+                "failure_type": "native_semantic_review_not_configured",
+                "reason": "存在需要自然语言判断的摘要约束，但当前运行没有绑定原生宿主和模型。",
+            })
+        else:
+            document_text_sha256 = hashlib.sha256(json.dumps(
+                [(item["check_id"], item["document_text"]) for item in semantic_checks],
+                ensure_ascii=False, separators=(",", ":"),
+            ).encode("utf-8")).hexdigest()
+            request = {
+                "schema_version": "1.0",
+                "protocol": "native_semantic_content_review_v1",
+                "case_id": args.case_id,
+                "run_id": spec.get("run_id"),
+                "source_sha256": hashlib.sha256(args.input.read_bytes()).hexdigest(),
+                "format_spec_sha256": hashlib.sha256(args.format_spec.read_bytes()).hexdigest(),
+                "document_text_sha256": document_text_sha256,
+                "checks": semantic_checks,
+            }
+            if not request["run_id"]:
+                findings.append({
+                    "role": "content_constraints",
+                    "property": "native_semantic_review.run_binding",
+                    "template_value": None,
+                    "required_value": "current run_id",
+                    "failure_type": "native_semantic_review_run_binding_missing",
+                    "reason": "摘要语义审查缺少当前运行身份，无法安全绑定模型响应。",
+                })
+            else:
+                try:
+                    semantic_review = run_native_semantic_review(
+                        request,
+                        output_dir=args.out_dir / "native-semantic-review",
+                        host_runtime=args.semantic_review_runtime,
+                        model=args.semantic_review_model,
+                        timeout=args.semantic_review_timeout,
+                        agent_id=args.semantic_review_agent_id,
+                        runner=args.semantic_review_runner,
+                        binary=args.semantic_review_bin,
+                        config_path=args.semantic_review_config,
+                    )
+                    semantic_review_complete = semantic_review.get("status") == "completed"
+                    semantic_uncertainty_items = semantic_content_review_items(
+                        semantic_review, semantic_checks,
+                    )
+                    findings.extend(semantic_content_review_findings(
+                        semantic_review, semantic_checks,
+                    ))
+                except (NativeSemanticReviewError, OSError, ValueError, TypeError) as exc:
+                    semantic_review = {
+                        **semantic_review,
+                        "status": "failed",
+                        "error": f"{type(exc).__name__}: {exc}",
+                    }
+                    findings.append({
+                        "role": "content_constraints",
+                        "property": "native_semantic_review.execution",
+                        "template_value": "failed",
+                        "required_value": "completed exact-coverage review",
+                        "failure_type": "native_semantic_review_failed",
+                        "reason": str(exc),
+                    })
+    write("native-semantic-content-review.json", semantic_review)
     expected_page = spec.get("page", {})
     if expected_page:
         section = check.sections[0]
@@ -3369,28 +3711,9 @@ def main(argv: list[str]) -> int:
     )
     if args.output_policy == "review_draft":
         late_review_items = manual_review_validation_items(raw_validation_findings)
+        late_review_items.extend(semantic_uncertainty_items)
         manual_review_receipts = manual_review_receipt_items(property_receipts)
         late_review_items.extend(manual_review_receipts)
-        if not render_report or render_report.get("status") not in {"accepted", "passed"}:
-            render_status = (
-                str(render_report.get("status"))
-                if isinstance(render_report, dict) and render_report.get("status")
-                else "not_run"
-            )
-            late_review_items.append({
-                "source_type": "render_validation",
-                "source_code": f"render_validation:{render_status}",
-                "source_codes": [f"render_validation:{render_status}"],
-                "category": "render_validation",
-                "clause_ids": [], "requirement_ids": [],
-                "question_ids": [], "evidence_ids": [],
-                "source_text": "docx.render_validation",
-                "reason": "当前运行没有获得可接受的 Word/PDF 渲染验收证据。",
-                "action": "请在人工确认后补充 Word/PDF 渲染证据，再以 submission 模式重新开始一轮新运行。",
-                "placeholder_text": "【待人工处理：docx.render_validation】",
-                "original_blocking": True,
-                "release_gate": True,
-            })
         if manual_review_document_ledger is None:
             manual_review_document_ledger = {
                 "schema_version": "1.0",
@@ -3402,6 +3725,9 @@ def main(argv: list[str]) -> int:
             }
         manual_review_document_ledger = add_manual_review_items(
             copy.deepcopy(manual_review_document_ledger), late_review_items,
+        )
+        manual_review_document_ledger = filter_manual_marker_ledger(
+            manual_review_document_ledger,
         )
         if args.manual_review_items:
             ledger_errors = load_and_validate(
@@ -3468,17 +3794,15 @@ def main(argv: list[str]) -> int:
                 } | set(role_results),
             ),
         )
-        property_receipt_audit["review_draft_manual_review"] = bool(manual_review_receipts)
-        property_receipt_audit["manual_review_receipt_ids"] = [
+        property_receipt_audit["review_draft_diagnostic_only"] = True
+        property_receipt_audit["review_draft_failed_or_unverified_ids"] = [
             str(item.get("receipt_id"))
             for item in property_receipts
             if item.get("status") != "verified"
         ]
-        # Report the original findings only through the explicit manual-review
-        # channel.  They remain in manual_review_findings and in the ledger;
-        # they are not changed into successful validation results.
-        manual_review_findings = raw_validation_findings
-        findings = []
+        # Findings retain their original status and keep valid/format_ready
+        # false. Only verification=human_decision checks appear in the red ledger.
+        manual_review_findings = manual_review_validation_items(raw_validation_findings)
     write("property-receipts.json", {
         "schema_version": "1.0", "receipts": property_receipts,
     })
@@ -3536,22 +3860,31 @@ def main(argv: list[str]) -> int:
     elif args.output_policy == "review_draft":
         compliance["docx_fully_compliant"] = False
         compliance["overall_status"] = "review_draft_pending"
+    format_ready = bool(
+        not findings and compliance.get("format_ready") and property_receipt_audit.get("valid")
+    )
+    diagnostic_draft_generated = bool(
+        args.output_policy == "review_draft"
+        and args.output.is_file()
+        and args.output.stat().st_size > 0
+        and manual_review_marker_audit.get("valid") is True
+        and submission_audit.get("evidence", {}).get("opc_package_valid") is True
+    )
+    review_draft_ready = bool(
+        diagnostic_draft_generated
+        and semantic_review_complete
+        and not findings
+        and format_ready
+    )
     report = {"valid": not findings, "fully_covered": (compliance["docx_fully_compliant"] if source_clause_records else legacy_role_coverage),
               "pipeline_valid": not findings,
-              "format_ready": (not findings and bool(compliance.get("format_ready"))
-                               and bool(property_receipt_audit.get("valid"))),
+              "format_ready": format_ready,
               "supported_subset_valid": not findings and compliance["overall_status"] in {"passed", "supported_subset_passed", "input_pending", "confirmed_semantic_issues", "review_draft_pending"},
               "serialized_docx_valid": submission_audit["serialized_docx_valid"],
               "render_validation": submission_audit["render_validation"],
               "submission_ready": effective_submission_ready,
-              "review_draft_ready": bool(
-                  args.output_policy == "review_draft"
-                  and not findings
-                  and manual_review_marker_audit.get("valid") is True
-                  and (
-                      submission_audit.get("evidence", {}).get("opc_package_valid") is True
-                  )
-              ),
+              "diagnostic_draft_generated": diagnostic_draft_generated,
+              "review_draft_ready": review_draft_ready,
               "review_draft_package_valid": bool(
                   submission_audit.get("evidence", {}).get("opc_package_valid") is True
               ),
@@ -3568,6 +3901,7 @@ def main(argv: list[str]) -> int:
               "output_policy": args.output_policy,
               "compliance_summary": {k: v for k, v in compliance.items() if k not in {"records", "external_checklist"}},
               "property_receipt_audit": property_receipt_audit,
+              "native_semantic_content_review": semantic_review,
               "findings": findings, "coverage_warnings": coverage_warnings, "styles_created": created,
               "role_coverage": coverage,
               "content_placeholder_policy": {
@@ -3595,6 +3929,9 @@ def main(argv: list[str]) -> int:
               "equation_layout_changes": equation_changes,
               "cover_changes": cover_changes,
               "content_instance_audit": content_instance_audit,
+              "deterministic_content_repairs": {
+                  "keyword_separator_repairs": keyword_separator_repairs,
+              },
               "cover_metadata": {"status": cover_changes.get("metadata_status", "not_applicable"),
                                    "pending_fields": cover_pending_fields},
               "declaration_changes": declaration_changes,
@@ -3613,8 +3950,13 @@ def main(argv: list[str]) -> int:
     write("external-compliance-checklist.json", compliance["external_checklist"])
     write("submission-audit.json", submission_audit)
     write("validation-report.json", report); print(json.dumps(report, ensure_ascii=False))
-    failed = (bool(findings) or (compliance_mode == "full" and not report["format_ready"])
-              or (args.require_submission_ready and not effective_submission_ready))
+    failed = (
+        (args.output_policy != "review_draft" and bool(findings))
+        or (args.output_policy != "review_draft"
+            and compliance_mode == "full" and not report["format_ready"])
+        or (args.output_policy == "review_draft" and not report["review_draft_ready"])
+        or (args.require_submission_ready and not effective_submission_ready)
+    )
     return 1 if failed else 0
 
 if __name__ == "__main__": raise SystemExit(main(sys.argv[1:]))

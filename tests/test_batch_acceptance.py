@@ -16,6 +16,62 @@ from manual_review_display import append_manual_review_markers  # noqa: E402
 
 
 class BatchAcceptanceTests(unittest.TestCase):
+    def test_native_semantic_review_requires_case_run_and_exact_check_coverage(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            case_root = Path(td) / "case"
+            artifacts = case_root / "work" / "application" / "native-semantic-review"
+            artifacts.mkdir(parents=True)
+            checks = [{
+                "check_id": "abstract_zh.require_third_person",
+                "document_text": "本文提出一种模型。",
+            }]
+            document_text_sha256 = __import__("hashlib").sha256(json.dumps(
+                [(item["check_id"], item["document_text"]) for item in checks],
+                ensure_ascii=False, separators=(",", ":"),
+            ).encode("utf-8")).hexdigest()
+            request = {
+                "schema_version": "1.0",
+                "protocol": "native_semantic_content_review_v1",
+                "case_id": "case-a", "run_id": "run-a",
+                "source_sha256": "a" * 64,
+                "format_spec_sha256": "b" * 64,
+                "document_text_sha256": document_text_sha256,
+                "checks": checks,
+            }
+            response = {"results": [{
+                "check_id": "abstract_zh.require_third_person",
+                "verdict": "satisfied",
+                "rationale": "The passage uses third-person wording.",
+                "evidence_quotes": ["本文提出"],
+            }]}
+            request_path = artifacts / "request.json"
+            response_path = artifacts / "response.json"
+            request_path.write_text(json.dumps(request, ensure_ascii=False), encoding="utf-8")
+            response_path.write_text(json.dumps(response, ensure_ascii=False), encoding="utf-8")
+            review = {
+                "schema_version": "1.0",
+                "protocol": "native_semantic_content_review_v1",
+                "status": "completed",
+                "case_id": "case-a", "run_id": "run-a",
+                "checks": checks, "results": response["results"],
+                "request_path": str(request_path), "response_path": str(response_path),
+                "request_sha256": batch.sha256_json(request),
+                "response_sha256": __import__("hashlib").sha256(response_path.read_bytes()).hexdigest(),
+                "source_sha256": request["source_sha256"],
+                "format_spec_sha256": request["format_spec_sha256"],
+                "document_text_sha256": document_text_sha256,
+            }
+            kwargs = {"case_id": "case-a", "run_id": "run-a", "case_root": case_root}
+            self.assertTrue(batch.native_semantic_review_integrity(review, **kwargs))
+            self.assertFalse(batch.native_semantic_review_integrity(
+                review, **{**kwargs, "case_id": "case-b"},
+            ))
+            self.assertFalse(batch.native_semantic_review_integrity(
+                review, **{**kwargs, "run_id": "run-b"},
+            ))
+            review["results"] = []
+            self.assertFalse(batch.native_semantic_review_integrity(review, **kwargs))
+
     def _result(self, root: Path, *, returncode: int = 0, render: bool = True,
                 compliance_mode: str = "full") -> dict:
         work = root / "case" / "work"
@@ -47,7 +103,16 @@ class BatchAcceptanceTests(unittest.TestCase):
             "output_docx": str(output),
             "property_receipt_audit": {
                 "valid": True,
-                "receipts": [{"serialized_docx_sha256": output_sha256}],
+                "receipt_count": 1,
+                "verified_count": 1,
+                "failed_count": 0,
+                "unverified_count": 0,
+                "missing_count": 0,
+                "unexpected_count": 0,
+                "duplicate_count": 0,
+                "expected_receipt_ids": ["PR-R00001-0001"],
+                "receipts": [{"receipt_id": "PR-R00001-0001", "status": "verified",
+                              "serialized_docx_sha256": output_sha256}],
             },
         }), encoding="utf-8")
         comparison = apply_dir / "format-comparison.json"
@@ -151,6 +216,18 @@ class BatchAcceptanceTests(unittest.TestCase):
         self.assertIn("--case-id", command)
         self.assertIn("bsu", command)
 
+    def test_pipeline_command_binds_post_format_review_to_explicit_host_model(self) -> None:
+        command = batch.pipeline_command(
+            {"id": "bsu", "requirements": Path("requirements.docx"),
+             "analysis_mode": "llm_primary"},
+            Path("source.tex"), Path("work"), Path("output.docx"),
+            compliance_mode="full", prepare_host_review=False,
+            semantic_review_runtime="codex", semantic_review_model="gpt-5.6-luna",
+        )
+        self.assertIn("--semantic-review-runtime", command)
+        self.assertEqual(command[command.index("--semantic-review-runtime") + 1], "codex")
+        self.assertEqual(command[command.index("--semantic-review-model") + 1], "gpt-5.6-luna")
+
     def test_pipeline_command_passes_explicit_source_bound_thesis_profile(self) -> None:
         command = batch.pipeline_command(
             {"id": "bsu", "requirements": Path("requirements.docx"),
@@ -185,6 +262,7 @@ class BatchAcceptanceTests(unittest.TestCase):
                     "code": "capability.clause_gap",
                     "blocking": True,
                     "message": "C00076 requires manual review",
+                    "evidence": [{"kind": "category", "value": "runtime_manual_unverifiable"}],
                 }],
             }), encoding="utf-8")
             ledger = work / "manual-review-items.json"
@@ -193,7 +271,8 @@ class BatchAcceptanceTests(unittest.TestCase):
                 "policy": "review_draft_only",
                 "binding": {"run_id": "fresh-run"},
                 "submission_ready": False,
-                "items": [{"marker_id": "MR-0001", "source_codes": ["capability.clause_gap"]}],
+                "items": [{"marker_id": "MR-0001", "category": "runtime_manual_unverifiable",
+                           "source_codes": ["capability.clause_gap"]}],
                 "summary": {"total": 1},
             }), encoding="utf-8")
             markers = apply_dir / "manual-review-markers.json"
@@ -210,10 +289,33 @@ class BatchAcceptanceTests(unittest.TestCase):
                 "valid": True,
                 "format_ready": True,
                 "serialized_docx_valid": True,
+                "diagnostic_draft_generated": True,
                 "review_draft_ready": True,
                 "review_draft_package_valid": True,
                 "submission_ready": False,
-                "property_receipt_audit": {"valid": True, "receipts": [{"serialized_docx_sha256": output_sha256}]},
+                "findings": [],
+                "native_semantic_content_review": {
+                    "schema_version": "1.0",
+                    "protocol": "native_semantic_content_review_v1",
+                    "status": "not_required",
+                    "case_id": "case",
+                    "run_id": "fresh-run",
+                    "checks": [],
+                    "results": [],
+                },
+                "property_receipt_audit": {
+                    "valid": True,
+                    "receipt_count": 1,
+                    "verified_count": 1,
+                    "failed_count": 0,
+                    "unverified_count": 0,
+                    "missing_count": 0,
+                    "unexpected_count": 0,
+                    "duplicate_count": 0,
+                    "expected_receipt_ids": ["PR-R00001-0001"],
+                    "receipts": [{"receipt_id": "PR-R00001-0001", "status": "verified",
+                                  "serialized_docx_sha256": output_sha256}],
+                },
             }), encoding="utf-8")
             comparison = apply_dir / "format-comparison.json"
             comparison.write_text(json.dumps({"status": "review_draft_pending"}), encoding="utf-8")
@@ -228,6 +330,7 @@ class BatchAcceptanceTests(unittest.TestCase):
                 "manual_review_items": str(ledger),
                 "validation_report": str(validation),
                 "format_comparison": str(comparison),
+                "diagnostic_draft_generated": True,
                 "review_draft_ready": True,
                 "submission_ready": False,
                 "case_id": "case",
@@ -246,13 +349,70 @@ class BatchAcceptanceTests(unittest.TestCase):
             accepted = batch.case_acceptance(result, root=root)
             self.assertTrue(accepted["accepted"], accepted)
             self.assertEqual(accepted["status"], "accepted_review_draft")
+            validation_payload = json.loads(validation.read_text(encoding="utf-8"))
+            validation_payload["diagnostic_draft_generated"] = False
+            validation.write_text(json.dumps(validation_payload), encoding="utf-8")
+            missing_diagnostic = batch.case_acceptance(result, root=root)
+            self.assertFalse(missing_diagnostic["accepted"])
+            self.assertIn("review_draft_not_generated_in_validation", missing_diagnostic["blockers"])
+            validation_payload["diagnostic_draft_generated"] = True
+            review_payload = validation_payload["native_semantic_content_review"]
+            review_payload["case_id"] = "another-case"
+            validation.write_text(json.dumps(validation_payload), encoding="utf-8")
+            wrong_case = batch.case_acceptance(result, root=root)
+            self.assertFalse(wrong_case["accepted"])
+            self.assertIn("review_draft_semantic_review_invalid_or_unbound", wrong_case["blockers"])
+            review_payload["case_id"] = "case"
+            review_payload["status"] = "completed"
+            review_payload["checks"] = [{"check_id": "abstract_zh.require_third_person",
+                                          "document_text": "本文提出一种模型。"}]
+            review_payload["results"] = []
+            validation.write_text(json.dumps(validation_payload), encoding="utf-8")
+            incomplete_semantic = batch.case_acceptance(result, root=root)
+            self.assertFalse(incomplete_semantic["accepted"])
+            self.assertIn("review_draft_semantic_review_invalid_or_unbound", incomplete_semantic["blockers"])
+            review_payload.update({"status": "not_required", "checks": [], "results": []})
+            validation.write_text(json.dumps(validation_payload), encoding="utf-8")
+            manifest_payload = json.loads(manifest.read_text(encoding="utf-8"))
+            manifest_payload["diagnostic_draft_generated"] = False
+            manifest.write_text(json.dumps(manifest_payload), encoding="utf-8")
+            missing_manifest_diagnostic = batch.case_acceptance(result, root=root)
+            self.assertFalse(missing_manifest_diagnostic["accepted"])
+            self.assertIn("review_draft_not_generated_in_manifest", missing_manifest_diagnostic["blockers"])
+            manifest_payload["diagnostic_draft_generated"] = True
+            manifest.write_text(json.dumps(manifest_payload), encoding="utf-8")
+            audit = validation_payload["property_receipt_audit"]
+            expected_ids = audit.pop("expected_receipt_ids")
+            validation.write_text(json.dumps(validation_payload), encoding="utf-8")
+            missing_expected = batch.case_acceptance(result, root=root)
+            self.assertFalse(missing_expected["accepted"])
+            self.assertIn("review_draft_property_receipts_not_verified", missing_expected["blockers"])
+            audit["expected_receipt_ids"] = expected_ids
+            audit["receipt_count"] = 0
+            validation.write_text(json.dumps(validation_payload), encoding="utf-8")
+            inconsistent_count = batch.case_acceptance(result, root=root)
+            self.assertFalse(inconsistent_count["accepted"])
+            self.assertIn("review_draft_property_receipts_not_verified", inconsistent_count["blockers"])
+            audit["receipt_count"] = 1
+            validation.write_text(json.dumps(validation_payload), encoding="utf-8")
+            capability_payload = json.loads(capability.read_text(encoding="utf-8"))
+            capability_payload["findings"].append({
+                "code": "format.backend_gap", "blocking": True,
+                "evidence": [{"kind": "category", "value": "backend_capability_gap"}],
+            })
+            capability.write_text(json.dumps(capability_payload), encoding="utf-8")
+            technical_capability = batch.case_acceptance(result, root=root)
+            self.assertFalse(technical_capability["accepted"])
+            self.assertIn("capability_technical_blocking_findings", technical_capability["blockers"])
+            capability_payload["findings"].pop()
+            capability.write_text(json.dumps(capability_payload), encoding="utf-8")
             # Forged JSON receipts cannot compensate for absent DOCX markers.
             Document().save(output)
             rejected = batch.case_acceptance(result, root=root)
             self.assertFalse(rejected["accepted"])
             self.assertIn("manual_review_serialized_markers_invalid", rejected["blockers"])
 
-    def test_review_draft_accepts_receipts_bound_to_manual_review_items(self) -> None:
+    def test_review_draft_technical_findings_and_failed_receipts_block_acceptance(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             result = self._result(root, render=False, compliance_mode="supported_subset")
@@ -269,7 +429,8 @@ class BatchAcceptanceTests(unittest.TestCase):
                 "submission_ready": False,
                 "items": [{
                     "marker_id": "MR-0001",
-                    "source_codes": ["property_receipt:PR-R00001-0001"],
+                    "category": "input_prerequisite",
+                    "source_codes": ["official_template_missing"],
                 }],
                 "summary": {"total": 1},
             }), encoding="utf-8")
@@ -283,15 +444,31 @@ class BatchAcceptanceTests(unittest.TestCase):
             doc.save(output)
             validation = json.loads((apply_dir / "validation-report.json").read_text(encoding="utf-8"))
             validation.update({
-                "valid": True,
+                "valid": False,
                 "format_ready": False,
                 "review_draft_ready": True,
                 "review_draft_package_valid": True,
                 "submission_ready": False,
+                "findings": [{
+                    "role": "keywords_zh", "property": "separator",
+                    "template_value": "，", "required_value": "semicolon",
+                    "failure_type": "deterministic_format_validation",
+                }],
                 "property_receipt_audit": {
                     "valid": False,
-                    "review_draft_manual_review": True,
-                    "manual_review_receipt_ids": ["PR-R00001-0001"],
+                    "review_draft_diagnostic_only": True,
+                    "receipt_count": 1,
+                    "verified_count": 0,
+                    "failed_count": 1,
+                    "unverified_count": 0,
+                    "missing_count": 0,
+                    "unexpected_count": 0,
+                    "duplicate_count": 0,
+                    "expected_receipt_ids": ["PR-R00001-0001"],
+                    "receipts": [{
+                        "receipt_id": "PR-R00001-0001", "status": "failed",
+                        "serialized_docx_sha256": __import__("hashlib").sha256(output.read_bytes()).hexdigest(),
+                    }],
                 },
             })
             (apply_dir / "validation-report.json").write_text(
@@ -314,8 +491,11 @@ class BatchAcceptanceTests(unittest.TestCase):
             })
             manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
             accepted = batch.case_acceptance(result, root=root)
-            self.assertTrue(accepted["accepted"], accepted)
-            self.assertTrue(accepted["checks"]["property_receipts_manual_review"]["ledger_covered"])
+            self.assertFalse(accepted["accepted"], accepted)
+            self.assertIn("review_draft_technical_validation_not_passed", accepted["blockers"])
+            self.assertIn("review_draft_property_receipts_not_verified", accepted["blockers"])
+            self.assertFalse(accepted["checks"]["property_receipts"]["all_expected_receipts_verified"])
+            self.assertFalse(validation["format_ready"])
 
 
 if __name__ == "__main__":

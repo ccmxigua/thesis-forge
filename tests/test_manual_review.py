@@ -21,11 +21,50 @@ from apply_format_spec import (  # noqa: E402
     audit_manual_review_markers,
 )
 from format_spec_validation import load_and_validate  # noqa: E402
-from manual_review import build_manual_review_ledger  # noqa: E402
+from manual_review import (  # noqa: E402
+    build_manual_review_ledger,
+    filter_manual_marker_ledger,
+)
 from submission_audit import PLACEHOLDER_PATTERNS  # noqa: E402
 
 
 class ManualReviewTests(unittest.TestCase):
+    def test_technical_findings_do_not_become_human_red_markers(self) -> None:
+        ledger = build_manual_review_ledger({
+            "findings": [
+                {
+                    "code": "backend_gap", "blocking": True,
+                    "message": "format execution unavailable",
+                    "evidence": [{"kind": "category", "value": "backend_capability_gap"}],
+                },
+                {
+                    "code": "runtime_unknown", "blocking": True,
+                    "message": "abstract target cannot be inferred",
+                    "evidence": [{"kind": "category", "value": "runtime_manual_unverifiable"}],
+                },
+            ],
+        }, [], release_gates=[{
+            "source_code": "render_not_run", "category": "render_validation",
+            "source_text": "word render not run",
+        }])
+        self.assertEqual([item["source_code"] for item in ledger["items"]], ["runtime_unknown"])
+        self.assertEqual(ledger["summary"]["total"], 1)
+
+    def test_legacy_technical_items_are_removed_but_human_decisions_remain(self) -> None:
+        ledger = {
+            "items": [
+                {"marker_id": "MR-0001", "category": "property_receipt", "source_code": "receipt"},
+                {"marker_id": "MR-0002", "category": "input_prerequisite", "source_code": "template"},
+                {"marker_id": "MR-0003", "category": "semantic_content_review", "source_code": "abstract"},
+            ],
+        }
+        filtered = filter_manual_marker_ledger(ledger)
+        self.assertEqual([item["source_code"] for item in filtered["items"]], ["abstract", "template"])
+        self.assertEqual([item["marker_id"] for item in filtered["items"]], ["MR-0001", "MR-0002"])
+        self.assertEqual(filtered["summary"]["by_category"], {
+            "semantic_content_review": 1, "input_prerequisite": 1,
+        })
+
     def test_ledger_preserves_binding_and_merges_duplicate_question(self) -> None:
         report = {
             "findings": [{
@@ -194,12 +233,11 @@ class ManualReviewTests(unittest.TestCase):
         self.assertIn("3cm左右", document.paragraphs[2].text)
         self.assertEqual(ledger, before)
 
-    def test_all_categories_have_one_primary_serialized_marker(self) -> None:
+    def test_only_human_decision_categories_can_be_serialized_as_markers(self) -> None:
         document = Document()
         document.add_paragraph("源文档内容不应被改写")
         categories = ["input_prerequisite", "runtime_manual_unverifiable",
-                      "confirmed_semantic_issue", "format_validation",
-                      "property_receipt", "backend_capability_gap", "render_validation"]
+                      "confirmed_semantic_issue", "semantic_content_review"]
         ledger = {"items": [self._item(i, category=category)
                             for i, category in enumerate(categories, 1)]}
         append_manual_review_markers(document, ledger)
@@ -211,6 +249,14 @@ class ManualReviewTests(unittest.TestCase):
         self.assertEqual(result["visible_marker_count"], len(categories))
         self.assertFalse(result["submission_ready"])
         self.assertEqual(result["visual_verification"], "required")
+
+        for category in ("format_validation", "property_receipt",
+                         "backend_capability_gap", "render_validation"):
+            with self.subTest(category=category):
+                with self.assertRaisesRegex(ValueError, "technical diagnostics"):
+                    append_manual_review_markers(
+                        Document(), {"items": [self._item(category=category)]},
+                    )
 
     def test_marker_style_overrides_inherited_hidden_and_clipped_text(self) -> None:
         document = Document()

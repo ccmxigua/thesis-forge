@@ -2797,9 +2797,17 @@ b&=2\notag
             result = run_raw("scripts/apply_format_spec.py", str(bad_path), str(spec_path), str(td / "bad-out.docx"),
                              "--out-dir", str(td / "bad-audit"), "--compliance-mode", "supported_subset")
             self.assertNotEqual(result.returncode, 0)
-            findings = json.loads((td / "bad-audit" / "validation-report.json").read_text())["findings"]
+            bad_report = json.loads((td / "bad-audit" / "validation-report.json").read_text())
+            findings = bad_report["findings"]
             self.assertTrue(any(x["property"] == "keywords_zh.min_count" for x in findings))
-            self.assertTrue(any(x["property"] == "keywords_zh.separator" for x in findings))
+            self.assertFalse(any(x["property"] == "keywords_zh.separator" for x in findings))
+            repairs = json.loads((td / "bad-audit" / "deterministic-content-repairs.json").read_text())
+            self.assertEqual(len(repairs["keyword_separator_repairs"]), 1)
+            repaired = Document(td / "bad-out.docx")
+            self.assertEqual(
+                next(p.text for p in repaired.paragraphs if p.text.startswith("关键词")),
+                "关键词：测试，验证",
+            )
 
     def test_thesis_profile_resolves_conditional_abstract_limit(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -3100,8 +3108,8 @@ b&=2\notag
             doc.add_paragraph("摘 要", "AbstractTitleCN"); doc.save(source)
             spec = self._fixed_text_cover_declaration_spec()
             del spec["thesis_profile"]["cover_metadata"]["unit_code"]
-            # Late semantic checks must not discard the previously added
-            # missing-cover marker when they extend the same draft ledger.
+            # A semantic rule that the system can evaluate is not turned into
+            # an author-facing red marker; the missing metadata remains one.
             spec["content_constraints"] = {"abstract_zh": {"require_third_person": True}}
             spec_path = td / "review-draft.json"
             spec_path.write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
@@ -3128,7 +3136,7 @@ b&=2\notag
             self.assertIn("unit_code", report["cover_metadata"]["pending_fields"])
             ledger = json.loads(ledger_path.read_text())
             item = next(item for item in ledger["items"] if item["source_code"] == "missing_cover_metadata:unit_code")
-            self.assertTrue(any(i["source_type"] == "format_constraint" for i in ledger["items"]))
+            self.assertFalse(any(i["source_type"] == "format_constraint" for i in ledger["items"]))
             self.assertTrue(item["release_gate"])
             self.assertEqual(item["placeholder_text"], "【待提供：unit_code】")
             self.assertEqual(ledger["visual_policy"]["text_color"], "C00000")

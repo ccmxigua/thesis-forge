@@ -23,6 +23,8 @@ except ImportError:  # compatibility with the repository's older test environmen
 ROOT = Path(__file__).resolve().parents[1]
 SAMPLE = ROOT / "tests/sample-thesis.tex"
 
+from semantic_contract import strict_json_read
+
 VARIANTS = {
     "baseline": {},
     "long-fields": {
@@ -137,7 +139,7 @@ def run_batch(source: Path, build: Path, neutral_reference: Path | None = None) 
     proc = subprocess.run(cmd, cwd=ROOT, text=True, capture_output=True)
     (build / "batch.stdout.log").write_text(proc.stdout, encoding="utf-8")
     (build / "batch.stderr.log").write_text(proc.stderr, encoding="utf-8")
-    summary = json.loads((build / "run-results.json").read_text(encoding="utf-8")) if (build / "run-results.json").exists() else None
+    summary = strict_json_read(build / "run-results.json") if (build / "run-results.json").exists() else None
     rows = []
     if summary:
         for case_id, result in (summary.get("cases") or {}).items():

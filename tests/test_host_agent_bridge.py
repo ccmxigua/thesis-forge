@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from concurrent.futures import ALL_COMPLETED
 import json
 import os
 import subprocess
@@ -25,9 +26,150 @@ class HostAgentBridgeTests(unittest.TestCase):
             {"THESIS_FORGE_HOST_RUNTIME": "openclaw"},
         )
         self._host_runtime_env.start()
+        self._independent_review_patch = patch.object(
+            bridge,
+            "_run_independent_obligation_coverage_review",
+            side_effect=self._fake_independent_review,
+        )
+        self._independent_review_patch.start()
+        self.addCleanup(self._independent_review_patch.stop)
 
     def tearDown(self) -> None:
         self._host_runtime_env.stop()
+
+    @staticmethod
+    def _fake_independent_review(
+        response: dict, chunk: dict, *, review_dir: Path, run_id: str,
+        chunk_index: int, attempt: int, **_kwargs,
+    ) -> dict:
+        """Offline, source-bound reviewer double for bridge orchestration tests."""
+        response_sha = bridge._response_sha256(response)
+        provenance = response.get("provenance")
+        findings = [{
+            "check_id": str(item.get("clause_id")), "verdict": "consistent",
+            "rationale": "offline bridge integration fixture",
+            "evidence_quotes": [], "identified_obligations": [],
+            "machine_obligation_ids": [],
+        } for item in response.get("clause_reviews", []) if isinstance(item, dict)]
+        out_dir = review_dir / f"independent-review-chunk-{chunk_index:04d}-attempt-{attempt:02d}"
+        audit_path = out_dir / "coverage-audit.json"
+        envelope = {
+            "protocol": "native_source_obligation_coverage_review_v1",
+            "status": "completed", "run_id": provenance.get("run_id") if isinstance(provenance, dict) else None,
+            "chunk_index": chunk_index, "attempt": attempt,
+            "candidate_response_sha256": response_sha,
+            "provenance": copy.deepcopy(provenance), "results": findings,
+        }
+        bridge._write_json(audit_path, envelope)
+        return {
+            "status": "completed", "protocol": envelope["protocol"],
+            "audit_path": audit_path.relative_to(review_dir).as_posix(),
+            "audit_sha256": bridge.sha256_file(audit_path), "run_id": run_id,
+            "chunk_index": chunk_index, "candidate_response_sha256": response_sha,
+            "summary": {"consistent": len(findings), "incomplete": 0, "uncertain": 0},
+        }
+
+    def test_independent_coverage_gate_persists_run_and_candidate_binding(self) -> None:
+        self._independent_review_patch.stop()
+        source = "表格应居中"
+        provenance = {
+            "run_id": "run-coverage-test", "source_sha256": "a" * 64,
+            "clause_sha256": "b" * 64, "evidence_sha256": "c" * 64,
+            "request_sha256": "d" * 64,
+        }
+        chunk = {
+            "provenance": provenance,
+            "clauses": [{"id": "C1", "text": source, "evidence_ids": ["E1"]}],
+            "evidence_context": {"E1": {"id": "E1", "text": source}},
+        }
+        response = {
+            "provenance": provenance,
+            "clause_reviews": [{
+                "clause_id": "C1", "classification": "covered", "reason": "centered",
+                "obligations": [{"id": "O1", "status": "covered", "reason": "center"}],
+            }],
+            "requirements": [{
+                "id": "R1", "role": "table", "clause_ids": ["C1"], "evidence_ids": ["E1"],
+                "properties": {"paragraph": {"alignment": "center"}},
+                "verification": {"checker_ids": ["docx.property_receipts"]},
+            }],
+        }
+        reviewer_result = {
+            "protocol": "native_source_obligation_coverage_review_v1",
+            "status": "completed", "request_sha256": "e" * 64,
+            "response_sha256": "f" * 64,
+            "results": [{
+                "check_id": "C1", "verdict": "consistent", "rationale": "source represented",
+                "evidence_quotes": [source], "identified_obligations": [{
+                    "source_quote": source, "disposition": "represented", "requirement_indexes": [0],
+                }],
+                "machine_obligation_ids": ["table_caption.alignment_center"],
+            }],
+            "summary": {"consistent": 1, "incomplete": 0, "uncertain": 0},
+        }
+        with tempfile.TemporaryDirectory() as td:
+            review_dir = Path(td)
+            with patch.object(bridge, "run_native_semantic_review", return_value=reviewer_result):
+                pointer = bridge._run_independent_obligation_coverage_review(
+                    response, chunk, review_dir=review_dir, run_id="run-coverage-test",
+                    chunk_index=1, attempt=1, host_runtime="codex", model="gpt-5.6-luna",
+                    timeout=10, agent_id="main", runner="exec", binary="codex",
+                    config_path=None, controller=bridge.RunController(),
+                )
+            audit_path = review_dir / pointer["audit_path"]
+            envelope = json.loads(audit_path.read_text(encoding="utf-8"))
+            self.assertEqual(pointer["status"], "completed")
+            self.assertEqual(pointer["audit_sha256"], bridge.sha256_file(audit_path))
+            self.assertEqual(envelope["candidate_response_sha256"], bridge._response_sha256(response))
+            self.assertEqual(envelope["provenance"], provenance)
+            self.assertEqual(envelope["run_id"], "run-coverage-test")
+
+    def test_independent_coverage_gate_rejects_unrepresented_source_obligation(self) -> None:
+        self._independent_review_patch.stop()
+        source = "表格应居中"
+        provenance = {"run_id": "run-coverage-test"}
+        chunk = {
+            "provenance": provenance,
+            "clauses": [{"id": "C1", "text": source, "evidence_ids": ["E1"]}],
+            "evidence_context": {"E1": {"id": "E1", "text": source}},
+        }
+        response = {
+            "provenance": provenance,
+            "clause_reviews": [{"clause_id": "C1", "classification": "covered", "reason": "covered"}],
+            "requirements": [{
+                "id": "R1", "role": "table", "clause_ids": ["C1"], "evidence_ids": ["E1"],
+                "properties": {},
+            }],
+        }
+        reviewer_result = {
+            "protocol": "native_source_obligation_coverage_review_v1",
+            "status": "completed", "request_sha256": "e" * 64,
+            "response_sha256": "f" * 64,
+            "results": [{
+                "check_id": "C1", "verdict": "incomplete", "rationale": "alignment missing",
+                "evidence_quotes": [source], "identified_obligations": [{
+                    "source_quote": source, "disposition": "unrepresented", "requirement_indexes": [],
+                }], "machine_obligation_ids": ["table_caption.alignment_center"],
+            }],
+            "summary": {"consistent": 0, "incomplete": 1, "uncertain": 0},
+        }
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(bridge, "run_native_semantic_review", return_value=reviewer_result):
+                with self.assertRaises(bridge.IndependentObligationReviewError) as caught:
+                    bridge._run_independent_obligation_coverage_review(
+                        response, chunk, review_dir=Path(td), run_id="run-coverage-test",
+                        chunk_index=1, attempt=1, host_runtime="codex", model="gpt-5.6-luna",
+                        timeout=10, agent_id="main", runner="exec", binary="codex",
+                        config_path=None, controller=bridge.RunController(),
+                    )
+            self.assertEqual(
+                caught.exception.error_records[0]["code"],
+                "independent_obligation_review_incomplete",
+            )
+            pointer = caught.exception.independent_review_audit
+            envelope = json.loads((Path(td) / pointer["audit_path"]).read_text(encoding="utf-8"))
+            self.assertEqual(pointer["status"], "rejected")
+            self.assertEqual(envelope["status"], "rejected")
 
     def _packet(self, directory: Path) -> tuple[Path, dict]:
         directory.mkdir(parents=True, exist_ok=True)
@@ -444,7 +586,10 @@ class HostAgentBridgeTests(unittest.TestCase):
         previous = self._executable_response({"provenance": {}})
         previous["requirements"][0]["properties"] = {}
         current = self._executable_response({"provenance": {}})
-        records = [{"code": "empty_requirement_properties"}]
+        records = [{
+            "code": "empty_requirement_properties",
+            "json_pointer": "$.requirements[0].properties",
+        }]
         self.assertTrue(
             bridge._retry_changes_allowed(
                 records,
@@ -538,12 +683,45 @@ class HostAgentBridgeTests(unittest.TestCase):
         ))
 
     def test_retry_allows_only_exact_fixed_text_repair(self) -> None:
-        records = [{"code": "fixed_text_evidence_mismatch"}]
+        previous = {
+            "requirements": [
+                {
+                    "role": "abstract_title_zh", "properties": {"heading": "wrong"},
+                    "clause_ids": ["C1"], "evidence_ids": ["E1"],
+                },
+                {
+                    "role": "abstract_title_zh", "properties": {"heading": "wrong other"},
+                    "clause_ids": ["C2"], "evidence_ids": ["E2"],
+                },
+            ],
+            "clause_reviews": [],
+        }
+        current = json.loads(json.dumps(previous))
+        current["requirements"][0]["properties"]["heading"] = "Exact cited text"
+        records = [{
+            "code": "fixed_text_evidence_mismatch",
+            "json_pointer": "$.requirements[0].properties.heading",
+        }]
+        chunk = {"evidence_context": {"E1": {"text": "Exact cited text"}}}
         self.assertTrue(
             bridge._retry_changes_allowed(
                 records,
-                ["$.requirements[0].properties.items[0].body_parts[0]"],
+                ["$.requirements[0].properties.heading"],
                 contract_version="2.1",
+                previous_response=previous,
+                current_response=current,
+                chunk=chunk,
+            )
+        )
+        current["requirements"][1]["properties"]["heading"] = "unrelated change"
+        self.assertFalse(
+            bridge._retry_changes_allowed(
+                records,
+                ["$.requirements[0].properties.heading", "$.requirements[1].properties.heading"],
+                contract_version="2.1",
+                previous_response=previous,
+                current_response=current,
+                chunk=chunk,
             )
         )
         self.assertFalse(
@@ -551,10 +729,13 @@ class HostAgentBridgeTests(unittest.TestCase):
                 records,
                 ["$.clause_reviews[0].classification"],
                 contract_version="2.1",
+                previous_response=previous,
+                current_response=current,
+                chunk=chunk,
             )
         )
 
-    def test_retry_allows_only_targeted_cover_binding_repair(self) -> None:
+    def test_cover_binding_retry_requires_schema_directed_proof(self) -> None:
         previous = {
             "contract_version": "3.0",
             "requirements": [{
@@ -584,7 +765,7 @@ class HostAgentBridgeTests(unittest.TestCase):
         }]
         changed = bridge._retry_change_paths(previous, current)
         self.assertTrue(changed)
-        self.assertTrue(
+        self.assertFalse(
             bridge._retry_changes_allowed(
                 records, changed, contract_version="3.0",
                 previous_response=previous, current_response=current,
@@ -734,6 +915,288 @@ class HostAgentBridgeTests(unittest.TestCase):
             )
         self.assertIsNone(repaired)
         self.assertIsNone(audit)
+
+    def test_v3_relation_completion_cannot_authorize_top_level_drift(self) -> None:
+        previous = {
+            "contract_version": "3.0",
+            "requirements": [{
+                "role": "heading_2", "properties": {"text": "5.1 结论"},
+                "clause_ids": ["C1"], "evidence_ids": ["E1"],
+                "confidence": 0.9, "reason": "已有要求",
+            }],
+            "clause_reviews": [
+                {"clause_id": "C1", "classification": "executable"},
+                {"clause_id": "C2", "classification": "executable"},
+            ],
+            "unsupported_items": [],
+            "reported_conflicts": [],
+        }
+        current = json.loads(json.dumps(previous))
+        current["requirements"].append({
+            "role": "heading_3", "properties": {"text": "5.1.1 结论"},
+            "clause_ids": ["C2"], "evidence_ids": ["E2"],
+            "confidence": 0.9, "reason": "新增要求",
+        })
+        records = [{
+            "code": "missing_derived_requirement",
+            "json_pointer": "$.clause_reviews[1]",
+            "raw_error": "$.clause_reviews[1]: executable_review_requires_derived_requirement",
+        }]
+        with patch.object(bridge, "validate_host_agent_response", return_value=[]):
+            repaired, _audit = bridge._v3_relation_completion_response(
+                previous, current, records, chunk={},
+            )
+            self.assertIsNotNone(repaired)
+
+            wrong_contract = json.loads(json.dumps(current))
+            wrong_contract["contract_version"] = "2.1"
+            repaired, audit = bridge._v3_relation_completion_response(
+                previous, wrong_contract, records, chunk={},
+            )
+            self.assertIsNone(repaired)
+            self.assertIsNone(audit)
+            error, changed = bridge._retry_semantic_change_error(
+                previous, wrong_contract, records,
+                contract_version="3.0", chunk={},
+            )
+            self.assertIsNotNone(error)
+            self.assertIn("$.contract_version", changed)
+
+            extra_field = json.loads(json.dumps(current))
+            extra_field["unrecognized_semantic_field"] = {"status": "changed"}
+            repaired, audit = bridge._v3_relation_completion_response(
+                previous, extra_field, records, chunk={},
+            )
+            self.assertIsNone(repaired)
+            self.assertIsNone(audit)
+            error, changed = bridge._retry_semantic_change_error(
+                previous, extra_field, records,
+                contract_version="3.0", chunk={},
+            )
+            self.assertIsNotNone(error)
+            self.assertIn("$.top_level.unrecognized_semantic_field", changed)
+
+            authorization: list[dict] = []
+            bound_chunk = {
+                "provenance": {
+                    "run_id": "run-retry-test", "source_sha256": "a" * 64,
+                    "evidence_sha256": "b" * 64, "clause_sha256": "c" * 64,
+                    "request_sha256": "d" * 64,
+                },
+                "batch": {"index": 1},
+                "clauses": [
+                    {"id": "C1", "text": "原条款一", "evidence_ids": ["E1"]},
+                    {"id": "C2", "text": "原条款二", "evidence_ids": ["E2"]},
+                ],
+                "evidence_context": {
+                    "E1": {"id": "E1", "text": "原条款一"},
+                    "E2": {"id": "E2", "text": "原条款二"},
+                },
+            }
+            error, changed = bridge._retry_semantic_change_error(
+                previous, current, records,
+                contract_version="3.0", chunk=bound_chunk,
+                authorization_out=authorization,
+            )
+            self.assertIsNone(error)
+            self.assertEqual(changed, ["$.requirements"])
+            self.assertEqual(len(authorization), 1)
+            entry = authorization[0]
+            self.assertEqual(entry["authorization_type"], "named_response_rule")
+            self.assertEqual(entry["old_value_sha256"], bridge._response_sha256(previous["requirements"]))
+            self.assertEqual(entry["new_value_sha256"], bridge._response_sha256(current["requirements"]))
+            self.assertFalse(entry["validator_records"])
+            self.assertTrue(entry["source_binding_complete"])
+            self.assertEqual(entry["source_binding"]["run_id"], "run-retry-test")
+            self.assertEqual(
+                {item["clause_id"] for item in entry["source_evidence_bindings"]},
+                {"C1", "C2"},
+            )
+            self.assertEqual(entry["transform"]["kind"], "constrained_model_retry")
+            self.assertTrue(entry["error_bundle_sha256"])
+            self.assertEqual(
+                entry["response_rule_evidence"][0]["code"],
+                "missing_derived_requirement",
+            )
+
+    def test_retry_reorder_cannot_transfer_a_field_repair_grant(self) -> None:
+        previous = {
+            "contract_version": "3.0",
+            "requirements": [
+                {"role": "heading_1", "properties": {"text": "一"},
+                 "clause_ids": ["C1"], "evidence_ids": ["E1"], "reason": "原文一"},
+                {"role": "heading_2", "properties": {"text": "二"},
+                 "clause_ids": ["C2"], "evidence_ids": ["E2"], "reason": "原文二"},
+            ],
+            "clause_reviews": [], "unsupported_items": [], "reported_conflicts": [],
+        }
+        reordered = json.loads(json.dumps(previous))
+        reordered["requirements"].reverse()
+        error, changed = bridge._retry_semantic_change_error(
+            previous, reordered, [{"code": "test_only"}], contract_version="3.0",
+        )
+        self.assertIsNone(error)
+        self.assertEqual(changed, [])
+
+        reordered["requirements"][0]["reason"] = "夹带的语义变化"
+        error, changed = bridge._retry_semantic_change_error(
+            previous, reordered, [{"code": "contract_validation_error"}],
+            contract_version="3.0",
+        )
+        self.assertIsNotNone(error)
+        self.assertTrue(changed)
+
+    def test_invalid_normative_basis_does_not_authorize_neighboring_review_change(self) -> None:
+        previous = {
+            "contract_version": "3.0", "requirements": [], "unsupported_items": [],
+            "reported_conflicts": [],
+            "clause_reviews": [
+                {"clause_id": "C1", "classification": "executable",
+                 "normative_basis": "informational", "reason": "条款一"},
+                {"clause_id": "C2", "classification": "executable",
+                 "normative_basis": "explicit_normative_text", "reason": "条款二"},
+            ],
+        }
+        current = copy.deepcopy(previous)
+        current["clause_reviews"][0]["normative_basis"] = "explicit_normative_text"
+        # This second change is legal according to the enum, but no validator
+        # finding authorizes changing C2.
+        current["clause_reviews"][1]["normative_basis"] = "template_structure"
+        records = [{
+            "code": "normative_basis_invalid",
+            "json_pointer": "$.clause_reviews[0].normative_basis",
+            "clause_id": "C1",
+        }]
+        error, changed = bridge._retry_semantic_change_error(
+            previous, current, records, contract_version="3.0",
+        )
+        self.assertIsNotNone(error)
+        self.assertIn("$.clause_reviews[1].normative_basis", changed)
+
+    def test_clause_review_reorder_or_duplicate_identity_cannot_transfer_grant(self) -> None:
+        previous = {
+            "contract_version": "3.0", "requirements": [], "unsupported_items": [],
+            "reported_conflicts": [],
+            "clause_reviews": [
+                {"clause_id": "C1", "classification": "executable", "reason": "一"},
+                {"clause_id": "C2", "classification": "executable", "reason": "二"},
+            ],
+        }
+        reordered = copy.deepcopy(previous)
+        reordered["clause_reviews"].reverse()
+        reordered["clause_reviews"][0]["reason"] = "夹带变化"
+        error, changed = bridge._retry_semantic_change_error(
+            previous, reordered, [{"code": "missing_clause_review"}],
+            contract_version="3.0",
+        )
+        self.assertIsNotNone(error)
+        self.assertTrue(changed)
+
+        duplicated = copy.deepcopy(previous)
+        duplicated["clause_reviews"][1]["clause_id"] = "C1"
+        error, changed = bridge._retry_semantic_change_error(
+            previous, duplicated, [{"code": "missing_clause_review"}],
+            contract_version="3.0",
+        )
+        self.assertIsNotNone(error)
+        self.assertTrue(changed)
+
+    def test_initial_dispatch_cancellation_writes_failure_audit(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            review_dir, _chunk = self._packet(Path(td) / "requirements")
+
+            class CancelBeforeDispatch(bridge.RunController):
+                def check(self) -> None:
+                    raise bridge.HostAgentCancelled("cancelled before initial dispatch")
+
+            response_out = Path(td) / "host-agent-response.json"
+            with patch.object(bridge, "_resolve_openclaw", return_value="openclaw"), \
+                 patch.object(bridge, "RunController", return_value=CancelBeforeDispatch()):
+                with self.assertRaisesRegex(bridge.HostAgentCancelled, "before initial dispatch"):
+                    bridge.run_bridge(
+                        review_dir, response_out=response_out,
+                        agent_id="main", timeout=1, max_attempts=1,
+                        openclaw_bin="openclaw", model="openai/gpt-5.6-luna",
+                    )
+
+            failure = json.loads((review_dir / "host-agent-run.json").read_text(encoding="utf-8"))
+            self.assertEqual(failure["status"], "cancelled")
+            self.assertEqual(failure["terminal_status"], "cancelled")
+            self.assertFalse(failure["merged_response_written"])
+            self.assertFalse(response_out.exists())
+            lifecycle = failure["chunk_lifecycle"][0]
+            self.assertEqual(lifecycle["status"], "not_started")
+            self.assertEqual(lifecycle["dispatch_state"], "not_dispatched")
+
+    def test_completed_sibling_is_harvested_before_concurrent_failure_audit(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            review_dir = Path(td) / "requirements"
+            clauses = [
+                {"id": "C1", "text": "正文使用宋体", "evidence_ids": ["E1"],
+                 "source_kind": "paragraph", "location": {}, "part_index": 0},
+                {"id": "C2", "text": "正文使用黑体", "evidence_ids": ["E2"],
+                 "source_kind": "paragraph", "location": {}, "part_index": 0},
+            ]
+            evidence = {"evidence": [
+                {"id": "E1", "text": clauses[0]["text"], "kind": "paragraph"},
+                {"id": "E2", "text": clauses[1]["text"], "kind": "paragraph"},
+            ]}
+            request = engine.build_llm_request([], clauses, evidence, {}, "full")
+            request = attach_request_provenance(
+                request, source_sha256="a" * 64, evidence_doc=evidence, clauses=clauses,
+                run_id="concurrent-failure-audit-test",
+            )
+            engine.prepare_host_agent_review_packets(
+                request, clauses, evidence, "a" * 64, review_dir, chunk_size=1,
+            )
+
+            def fake_chunk(**kwargs):
+                index = kwargs["chunk_index"]
+                if index == 1:
+                    raise ValueError("synthetic first chunk failure")
+                chunk = kwargs["chunk"]
+                clause = chunk["clauses"][0]
+                response = {
+                    "contract_version": chunk["contract_version"],
+                    "provenance": chunk["provenance"],
+                    "requirements": [],
+                    "clause_reviews": [{
+                        "clause_id": clause["id"], "classification": "informational",
+                        "requirement_indexes": [], "reason": "Completed sibling review.",
+                    }],
+                    "unsupported_items": [], "reported_conflicts": [],
+                }
+                kwargs["response_path"].write_text(
+                    json.dumps(response, ensure_ascii=False), encoding="utf-8",
+                )
+                return {"chunk_index": index, "attempt": 1, "status": "ok"}
+
+            response_out = Path(td) / "host-agent-response.json"
+            real_wait = bridge.wait
+
+            def wait_until_all_done(futures, return_when):
+                return real_wait(futures, return_when=ALL_COMPLETED)
+
+            with patch.object(bridge, "_resolve_openclaw", return_value="openclaw"), \
+                 patch.object(bridge, "run_host_agent_chunk", side_effect=fake_chunk), \
+                 patch.object(bridge, "wait", side_effect=wait_until_all_done):
+                with self.assertRaisesRegex(ValueError, "synthetic first chunk failure"):
+                    bridge.run_bridge(
+                        review_dir, response_out=response_out,
+                        agent_id="main", timeout=2, max_attempts=1,
+                        max_concurrency=2, openclaw_bin="openclaw",
+                        model="openai/gpt-5.6-luna",
+                    )
+
+            failure = json.loads((review_dir / "host-agent-run.json").read_text(encoding="utf-8"))
+            self.assertFalse(failure["merged_response_written"])
+            self.assertFalse(response_out.exists())
+            self.assertEqual(failure["completed_chunk_indexes"], [2])
+            self.assertEqual(failure["in_flight_chunk_indexes"], [])
+            self.assertEqual([item["chunk_index"] for item in failure["chunk_runs"]], [2])
+            lifecycle = {item["chunk_index"]: item for item in failure["chunk_lifecycle"]}
+            self.assertEqual(lifecycle[1]["status"], "failed")
+            self.assertEqual(lifecycle[2]["status"], "completed")
 
     def test_v3_relation_completion_handles_multiple_missing_clauses_and_empty_placeholder(self) -> None:
         previous = {
@@ -1824,7 +2287,7 @@ class HostAgentBridgeTests(unittest.TestCase):
             [{
                 "code": "partial_clause_coverage",
                 "json_pointer": "$.clause_reviews[0]",
-                "raw_error": "$.clause_reviews[0]: partial_clause_coverage:table.continuation.optional_caption_marked_required",
+                "raw_error": "$.clause_reviews[0]: partial_clause_coverage:table.continuation.caption_optional",
             }],
             chunk=chunk,
         )
@@ -1832,8 +2295,160 @@ class HostAgentBridgeTests(unittest.TestCase):
         self.assertFalse(
             repaired["requirements"][0]["properties"]["continuation"]["caption_required_on_continuation"]
         )
-        self.assertEqual(repairs[0]["rule_id"], "optional_continuation_caption_is_not_required")
+        self.assertEqual(repairs[0]["rule_id"], "compile_continuation_caption_requirement_v1")
         self.assertTrue(response["requirements"][0]["properties"]["continuation"]["caption_required_on_continuation"])
+
+    def test_bsu_chunk13_mixed_errors_replay_through_production_candidate_boundary(self) -> None:
+        """Replay the captured BSU failure shape without a provider call.
+
+        The real packet's two existing caption selectors are retained, while
+        their native nullable properties are empty and the continuation
+        requirement incorrectly says captions are required.  This exercises
+        the same candidate preparation function used by run_host_agent_chunk.
+        """
+        clauses = [
+            {
+                "id": "C00243",
+                "text": "表序后跟表题(可省略)和“(续)”，居中置于表上方，续表均应重复表头",
+                "evidence_ids": ["E00174"], "source_kind": "paragraph",
+                "location": {}, "part_index": 0,
+            },
+            {
+                "id": "C00246",
+                "text": "表题间空1个字距，居中置于表的上方",
+                "evidence_ids": ["E00175"], "source_kind": "paragraph",
+                "location": {}, "part_index": 0,
+            },
+        ]
+        evidence = {"evidence": [
+            {"id": "E00174", "text": "如某表需要转页接排时，在随后的各页上应重复表序。表序后跟表题(可省略)和“(续)”，居中置于表上方，续表均应重复表头。", "kind": "paragraph"},
+            {"id": "E00175", "text": "说明3：表序与表题，表序即表的编号，由“表”和从“1”开始的阿拉伯数字组成；表题即表的名称，应简明，置于表序之后，表序和表题间空1个字距，居中置于表的上方。", "kind": "paragraph"},
+        ]}
+        existing = [
+            {
+                "id": "R00530", "role": "table_caption",
+                "properties": {"position": "above", "paragraph": {"alignment": "center"}},
+                "clause_ids": ["C00243"], "evidence_ids": ["E00174"],
+                "source_text": clauses[0]["text"],
+                "verification": {"mode": "static_docx", "checks": ["核对表题位置和对齐。"], "checker_ids": ["docx.property_receipts"]},
+            },
+            {
+                "id": "R00531", "role": "table_caption",
+                "properties": {"position": "above", "paragraph": {"alignment": "center"}},
+                "clause_ids": ["C00246"], "evidence_ids": ["E00175"],
+                "source_text": clauses[1]["text"],
+                "verification": {"mode": "static_docx", "checks": ["核对表题位置和对齐。"], "checker_ids": ["docx.property_receipts"]},
+            },
+        ]
+        request = engine.build_llm_request(
+            [], clauses, evidence, {"requirements": existing}, "full",
+            contract_version="3.0",
+        )
+        request = attach_request_provenance(
+            request, source_sha256="b" * 64, evidence_doc=evidence,
+            clauses=clauses, run_id="bsu-chunk13-offline-regression",
+        )
+        chunk = engine._build_host_review_chunks(
+            request, clauses, evidence, "b" * 64, chunk_size=20,
+        )[0]
+
+        null_role_properties = {
+            "font": None, "paragraph": None, "numbering": None,
+            "position": None, "prefix": None, "separator": None,
+            "style_hint": None, "text": None, "header_content": None,
+            "bottom_border": None,
+        }
+        raw_response = {
+            "contract_version": "3.0",
+            "requirements": [
+                {
+                    "role": "table",
+                    "properties": {
+                        "style": None, "top_border_pt": None,
+                        "header_border_pt": None, "bottom_border_pt": None,
+                        "remove_vertical_borders": None, "repeat_header_row": None,
+                        "allow_row_split": None, "keep_with_caption": None,
+                        "border_widths_pt": None,
+                        "continuation": {
+                            "caption_suffix": "(续)",
+                            "repeat_header_row": True,
+                            "caption_required_on_continuation": True,
+                            "verification": "word_render",
+                        },
+                    },
+                    "clause_ids": ["C00243"], "evidence_ids": ["E00174"],
+                    "confidence": 0.98,
+                    "reason": "The continuation table properties are supported by the cited source.",
+                    "verification": {
+                        "mode": "word_render", "checks": ["核对续表属性。"],
+                        "checker_ids": ["docx.property_receipts", "docx.word_render"],
+                    },
+                },
+                {
+                    "existing_requirement_id": "R00530", "role": "table_caption",
+                    "properties": copy.deepcopy(null_role_properties),
+                    "clause_ids": ["C00243"], "evidence_ids": ["E00174"],
+                    "confidence": 0.98,
+                    "reason": "The selected existing caption requirement is supported by this occurrence.",
+                    "verification": copy.deepcopy(existing[0]["verification"]),
+                },
+                {
+                    "existing_requirement_id": "R00531", "role": "table_caption",
+                    "properties": copy.deepcopy(null_role_properties),
+                    "clause_ids": ["C00246"], "evidence_ids": ["E00175"],
+                    "confidence": 0.98,
+                    "reason": "The selected existing caption requirement is supported by this occurrence.",
+                    "verification": copy.deepcopy(existing[1]["verification"]),
+                },
+            ],
+            "clause_reviews": [
+                {
+                    "clause_id": "C00243", "classification": "executable",
+                    "normative_basis": "explicit_normative_text",
+                    "reason": "The explicit continuation-table rules are represented by linked requirements.",
+                    "obligations": [
+                        {"id": "suffix", "status": "covered", "reason": "The continuation suffix is represented."},
+                        {"id": "header", "status": "covered", "reason": "The repeated header is represented."},
+                        {"id": "caption", "status": "covered", "reason": "The caption position is represented."},
+                    ],
+                },
+                {
+                    "clause_id": "C00246", "classification": "executable",
+                    "normative_basis": "explicit_normative_text",
+                    "reason": "The explicit caption placement rule is represented by a linked requirement.",
+                    "obligations": [
+                        {"id": "caption-placement", "status": "covered", "reason": "The caption position is represented."},
+                    ],
+                },
+            ],
+            "unsupported_items": [], "reported_conflicts": [],
+        }
+        raw_before = copy.deepcopy(raw_response)
+        normalized = bridge.normalize_native_response(raw_response, chunk["response_schema"])
+        self.assertEqual(normalized["requirements"][1]["properties"], {})
+        self.assertEqual(normalized["requirements"][2]["properties"], {})
+        self.assertEqual(raw_response, raw_before, "normalization must not mutate captured raw response")
+
+        candidate, audit = bridge.prepare_native_response_candidate(raw_response, chunk)
+        self.assertEqual(
+            [item["existing_requirement_id"] for item in audit["existing_requirement_payload_projections"]],
+            ["R00530", "R00531"],
+        )
+        self.assertEqual(
+            candidate["requirements"][1]["properties"], existing[0]["properties"],
+        )
+        self.assertEqual(
+            candidate["requirements"][2]["properties"], existing[1]["properties"],
+        )
+        self.assertFalse(
+            candidate["requirements"][0]["properties"]["continuation"][
+                "caption_required_on_continuation"
+            ]
+        )
+        self.assertEqual(audit["mechanical_repair_revalidation"]["status"], "passed")
+        self.assertEqual(audit["mechanical_repairs"][0]["planner_id"], "composable_source_bound_patch_plan_v1")
+        self.assertEqual(bridge.validate_host_agent_response(candidate, chunk), [])
+        self.assertEqual(raw_response, raw_before, "candidate preparation must preserve the original response")
 
     def test_mechanical_repair_compiles_explicit_empty_table_caption_properties(self) -> None:
         response = {
@@ -2051,7 +2666,7 @@ class HostAgentBridgeTests(unittest.TestCase):
             chunk=chunk,
         ))
 
-    def test_mixed_contract_errors_are_not_mechanically_repaired(self) -> None:
+    def test_mixed_contract_errors_yield_only_a_partial_candidate(self) -> None:
         response = {"requirements": [{"properties": {"style": {}}}]}
         repaired, repairs = bridge._apply_safe_mechanical_repairs(
             response,
@@ -2068,8 +2683,11 @@ class HostAgentBridgeTests(unittest.TestCase):
                 },
             ],
         )
-        self.assertIsNone(repaired)
-        self.assertEqual(repairs, [])
+        self.assertIsNotNone(repaired)
+        self.assertEqual(repaired["requirements"][0]["properties"], {})
+        self.assertEqual(response["requirements"][0]["properties"], {"style": {}})
+        self.assertTrue(all(item["partial_candidate_only"] for item in repairs))
+        self.assertTrue(all(item["planner_id"] == "composable_source_bound_patch_plan_v1" for item in repairs))
 
     def test_unbacked_evidence_id_is_removed_deterministically(self) -> None:
         response = {
@@ -2630,6 +3248,16 @@ class HostAgentBridgeTests(unittest.TestCase):
             self.assertEqual(audit["chunk_runs"][0]["attempt"], 2)
             self.assertIn("local response contract validation failed",
                           audit["chunk_runs"][0]["attempt_failures"][0])
+            retry_ledger = audit["chunk_runs"][0]["semantic_retry_authorizations"]
+            self.assertEqual(
+                retry_ledger["status"],
+                "accepted_after_provenance_and_contract_validation",
+            )
+            self.assertEqual(
+                retry_ledger["paths"][0]["path"],
+                "$.requirements[0].verification",
+            )
+            self.assertTrue(retry_ledger["paths"][0]["validator_records"])
             second_prompt = Path(
                 run.call_args_list[1].args[0][run.call_args_list[1].args[0].index("--message-file") + 1]
             ).read_text(encoding="utf-8")
@@ -2663,7 +3291,30 @@ class HostAgentBridgeTests(unittest.TestCase):
             failure = json.loads((review_dir / "host-agent-run.json").read_text(encoding="utf-8"))
             self.assertFalse(failure["merged_response_written"])
             self.assertTrue(failure["structured_error_records"])
-            self.assertEqual(failure["structured_error_records"][-1]["code"], "semantic_retry_change")
+            self.assertEqual(
+                failure["structured_error_records"][-1]["code"],
+                "schema_contract_violation",
+            )
+            # The primary error keeps the validator's outer stage code; the
+            # more specific native-schema finding remains in the attached
+            # structured records.  Retry drift is secondary, not a replacement
+            # for the contract failure that authorized the retry.
+            self.assertEqual(failure["primary_error"]["code"], "contract_validation_error")
+            self.assertEqual(failure["primary_error"]["chunk_index"], 1)
+            self.assertTrue(failure["primary_error"]["message"])
+            self.assertTrue(any(
+                record.get("code") == "schema_contract_violation"
+                for record in failure["primary_error"]["records"]
+            ))
+            self.assertIn("semantic re-review", failure["terminal_error"]["message"])
+            self.assertEqual(failure["secondary_errors"][0]["kind"], "retry_semantic_drift")
+            self.assertEqual(failure["secondary_errors"][0]["chunk_index"], 1)
+            lifecycle = failure["chunk_lifecycle"][0]
+            self.assertTrue(lifecycle["secondary_retry_drift_failures"])
+            self.assertIn(
+                "semantic re-review",
+                lifecycle["secondary_retry_drift_failures"][-1]["error"],
+            )
 
     def test_bridge_binds_missing_native_provenance_and_preserves_raw_response(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -3246,19 +3897,60 @@ class HostAgentBridgeTests(unittest.TestCase):
             self.assertIn("attempt-02", second_key)
 
     def test_run_command_kills_and_reaps_the_process_group_on_timeout(self) -> None:
-        process = Mock(pid=1234)
-        process.communicate.side_effect = [
-            subprocess.TimeoutExpired(["openclaw"], 1),
-            ("partial stdout", "partial stderr"),
-        ]
-        with patch.object(bridge.subprocess, "Popen", return_value=process) as popen:
-            with patch.object(bridge.os, "killpg") as killpg:
-                with self.assertRaises(subprocess.TimeoutExpired):
-                    bridge._run_command(["openclaw"], timeout=1)
-        popen.assert_called_once()
-        self.assertTrue(popen.call_args.kwargs["start_new_session"])
-        killpg.assert_called_once_with(1234, bridge.signal.SIGTERM)
-        self.assertEqual(process.communicate.call_count, 2)
+        controller = bridge.RunController()
+        timeout_result = subprocess.CompletedProcess(
+            ["openclaw"], 124, "partial stdout", "partial stderr\n[process-timeout] command exceeded 7s and was terminated",
+        )
+        with patch.object(bridge, "run_process", return_value=timeout_result) as run:
+            with self.assertRaises(subprocess.TimeoutExpired) as raised:
+                bridge._run_command(["openclaw"], timeout=7, controller=controller)
+        run.assert_called_once_with(
+            ["openclaw"], cwd=bridge.ROOT, timeout=7, controller=controller,
+        )
+        self.assertEqual(raised.exception.output, "partial stdout")
+        self.assertIn("partial stderr", str(raised.exception.stderr))
+
+    def test_generic_validator_path_does_not_authorize_retry_value_change(self) -> None:
+        previous = {
+            "contract_version": "3.0", "requirements": [], "unsupported_items": [],
+            "reported_conflicts": [],
+            "clause_reviews": [{
+                "clause_id": "C1", "classification": "executable",
+                "normative_basis": "explicit_normative_text",
+            }],
+        }
+        current = copy.deepcopy(previous)
+        current["clause_reviews"][0]["normative_basis"] = "template_structure"
+        self.assertFalse(bridge._retry_changes_allowed(
+            [{
+                "code": "contract_validation_error",
+                "json_pointer": "$.clause_reviews[0].normative_basis",
+            }],
+            ["$.clause_reviews[0].normative_basis"],
+            contract_version="3.0", previous_response=previous,
+            current_response=current,
+        ))
+
+    def test_completed_chunk_set_rejects_non_integer_and_duplicate_indexes(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            response = {"requirements": [], "clause_reviews": []}
+            response_path = root / "accepted.json"
+            response_path.write_text(json.dumps(response), encoding="utf-8")
+            digest = bridge._response_sha256(response)
+            lifecycle = {
+                1: {"status": "completed", "remote_operation_state": "completed"},
+                2: {"status": "completed", "remote_operation_state": "completed"},
+            }
+            audits = [
+                {"chunk_index": 1, "accepted_response_sha256": digest, "response_path": str(response_path)},
+                {"chunk_index": 1, "accepted_response_sha256": digest, "response_path": str(response_path)},
+            ]
+            with self.assertRaisesRegex(ValueError, "each chunk exactly once"):
+                bridge._validate_completed_chunk_set(root, ["accepted.json", "accepted.json"], lifecycle, audits)
+            audits[1]["chunk_index"] = []
+            with self.assertRaisesRegex(ValueError, "each chunk exactly once"):
+                bridge._validate_completed_chunk_set(root, ["accepted.json", "accepted.json"], lifecycle, audits)
 
     def test_cancellation_after_raw_response_never_publishes_accepted_response(self) -> None:
         with tempfile.TemporaryDirectory() as td:

@@ -26,6 +26,7 @@ from typing import Any
 
 from artifact_io import atomic_write_text, paths_alias
 from process_runner import run_process
+from semantic_contract import strict_json_dumps, strict_json_read
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -69,8 +70,8 @@ def inspect_docx(path: Path) -> dict[str, Any]:
 
 def read_object(path: Path) -> dict[str, Any] | None:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        value = strict_json_read(path)
+    except (OSError, ValueError):
         return None
     return value if isinstance(value, dict) else None
 
@@ -110,7 +111,7 @@ def _reported_path(value: Any) -> Path | None:
 
 
 def _write(path: Path, payload: dict[str, Any]) -> None:
-    atomic_write_text(path, json.dumps(payload, ensure_ascii=False, indent=2) + "\n")
+    atomic_write_text(path, strict_json_dumps(payload, ensure_ascii=False, indent=2) + "\n")
 
 
 def _pre_render_checks(source: Path, validation_path: Path) -> tuple[dict[str, Any], list[str]]:

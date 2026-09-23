@@ -27,6 +27,7 @@ from lxml import etree
 from docx_fragment_import import import_body_children
 from pipeline_finding import evidence, finding
 from template_profile import NS, W, sha256
+from semantic_contract import strict_json_read
 
 R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 CT = "http://schemas.openxmlformats.org/package/2006/content-types"
@@ -873,9 +874,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--report", type=Path, required=True)
     args = parser.parse_args(argv)
     try:
-        plan = json.loads(args.plan.read_text(encoding="utf-8"))
-        metadata = json.loads(args.metadata.read_text(encoding="utf-8")) if args.metadata else {}
-        source_role_map = json.loads(args.source_role_map.read_text(encoding="utf-8")) if args.source_role_map else None
+        plan = strict_json_read(args.plan)
+        metadata = strict_json_read(args.metadata) if args.metadata else {}
+        source_role_map = strict_json_read(args.source_role_map) if args.source_role_map else None
         result = execute_assembly_plan(
             plan, args.template, args.source, args.output, metadata=metadata,
             source_section_policy=args.source_section_policy,

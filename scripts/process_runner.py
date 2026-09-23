@@ -10,7 +10,9 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
+import time
 from pathlib import Path
+from typing import Any, Mapping
 
 
 def _terminate_and_reap(process: subprocess.Popen[str]) -> tuple[str, str]:
@@ -40,6 +42,8 @@ def run_process(
     cwd: Path,
     timeout: int,
     input_text: str | None = None,
+    env: Mapping[str, str] | None = None,
+    controller: Any = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run ``command`` with a hard deadline and descendant cleanup.
 
@@ -54,22 +58,66 @@ def run_process(
         command,
         cwd=cwd,
         text=True,
+        stdin=subprocess.PIPE if input_text is not None else None,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         start_new_session=(os.name == "posix"),
+        env=dict(env) if env is not None else None,
     )
+    registered = False
     try:
-        stdout, stderr = process.communicate(input=input_text, timeout=timeout)
-    except subprocess.TimeoutExpired:
-        stdout, stderr = _terminate_and_reap(process)
-        marker = f"[process-timeout] command exceeded {timeout}s and was terminated"
-        stderr = (stderr or "") + ("\n" if stderr else "") + marker
-        return subprocess.CompletedProcess(command, 124, stdout, stderr)
+        if controller is not None:
+            controller.register(process)
+            registered = True
+        deadline = time.monotonic() + timeout
+        pending_input = input_text
+        while True:
+            if controller is not None:
+                controller.check()
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    stdout, stderr = _terminate_and_reap(process)
+                    marker = f"[process-timeout] command exceeded {timeout}s and was terminated"
+                    stderr = (stderr or "") + ("\n" if stderr else "") + marker
+                    return subprocess.CompletedProcess(command, 124, stdout, stderr)
+                wait_for = min(0.5, remaining)
+            else:
+                wait_for = max(0.001, deadline - time.monotonic())
+            try:
+                stdout, stderr = process.communicate(
+                    input=pending_input, timeout=wait_for,
+                )
+                pending_input = None
+                if controller is not None:
+                    controller.check()
+                return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+            except subprocess.TimeoutExpired:
+                pending_input = None
+                if time.monotonic() >= deadline:
+                    stdout, stderr = _terminate_and_reap(process)
+                    marker = f"[process-timeout] command exceeded {timeout}s and was terminated"
+                    stderr = (stderr or "") + ("\n" if stderr else "") + marker
+                    return subprocess.CompletedProcess(command, 124, stdout, stderr)
+                continue
+    except KeyboardInterrupt:
+        # Ctrl-C must not leave the CLI or a descendant running with our pipes
+        # open. Reap the owned process group, then preserve normal interrupt
+        # semantics for the caller so it can write its terminal receipt.
+        _terminate_and_reap(process)
+        raise
     except OSError as exc:
-        # A failed communicate still belongs to this stage; ensure no child
-        # survives before exposing a stable execution record.
+        # A failed communicate still belongs to this stage; expose a stable
+        # execution record after cleaning up the owned process group.
         _terminate_and_reap(process)
         return subprocess.CompletedProcess(
             command, 127, "", f"{type(exc).__name__}: {exc}",
         )
-    return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+    except BaseException:
+        # Controller cancellation and unexpected communicate failures must not
+        # leave a child or descendant alive with captured pipes open.
+        if process.poll() is None:
+            _terminate_and_reap(process)
+        raise
+    finally:
+        if registered:
+            controller.unregister(process)

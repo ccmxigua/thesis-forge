@@ -29,6 +29,7 @@ from lxml import etree
 from render_attestation import load_key, sign
 from artifact_io import commit_files, paths_alias, sibling_temp
 from process_runner import run_process
+from semantic_contract import strict_json_dumps, strict_json_loads, strict_json_read
 
 ROOT = Path(__file__).resolve().parents[1]
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
@@ -427,8 +428,8 @@ def main() -> int:
         if not toc_target_map_path.is_file():
             parser.error(f"TOC/PAGEREF target map does not exist: {toc_target_map_path}")
         try:
-            target_map = json.loads(toc_target_map_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+            target_map = strict_json_read(toc_target_map_path)
+        except (OSError, ValueError) as exc:
             parser.error(f"cannot read TOC/PAGEREF target map: {exc}")
         if not isinstance(target_map, dict):
             parser.error("TOC/PAGEREF target map must be a JSON object")
@@ -510,8 +511,8 @@ def main() -> int:
         if not staged_docx.is_file() or not staged_pdf.is_file():
             raise SystemExit("Word returned without creating both staged DOCX and PDF")
         try:
-            word_update = json.loads(script.stdout)
-        except json.JSONDecodeError as exc:
+            word_update = strict_json_loads(script.stdout)
+        except ValueError as exc:
             raise SystemExit(f"Word returned an invalid update summary: {script.stdout!r}") from exc
         required_summary = {"story_count", "field_count", "updated_count", "failed_count", "toc_count"}
         if (set(word_update) != required_summary or word_update["failed_count"] != 0
@@ -559,7 +560,7 @@ def main() -> int:
             if staged_report.is_file():
                 shutil.copy2(staged_report, diagnostics / "latest-failed-validation.json")
                 try:
-                    failed_evidence = json.loads(staged_report.read_text(encoding="utf-8"))
+                    failed_evidence = strict_json_read(staged_report)
                     hits = failed_evidence.get("rendered_pdf", {}).get("error_hits", [])
                     if hits:
                         codes = sorted({hit.get("code", "unknown") for hit in hits})
@@ -569,7 +570,7 @@ def main() -> int:
                 except (OSError, ValueError, TypeError):
                     pass
             raise SystemExit(detail or "Word render validation failed")
-        evidence = json.loads(staged_report.read_text(encoding="utf-8"))
+        evidence = strict_json_read(staged_report)
         if not evidence.get("renderer", {}).get("version"):
             raise SystemExit("Word version discovery failed; refusing to attest export")
         evidence["source_docx"]["path"] = str(final_docx)
@@ -594,7 +595,7 @@ def main() -> int:
         }
         evidence["attestation"] = {"algorithm": "HMAC-SHA256", "scope": "local_word_export_v1"}
         evidence["attestation"]["signature"] = sign(evidence, load_key(create=True))
-        staged_report.write_text(json.dumps(evidence, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+        staged_report.write_text(strict_json_dumps(evidence, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
         commit_files([(staged_docx, final_docx), (staged_pdf, pdf), (staged_report, report)])
     finally:
         try:

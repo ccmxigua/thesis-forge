@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any
 
 from capability_planner import METADATA_COMPOSITE_FIELDS, METADATA_LABEL_FIELDS
+from semantic_contract import strict_json_read
 
 SCHOOLS = ("bsu", "btbu", "cauc", "dlut", "neau", "szu", "tju", "ujs", "ustb", "xzhmu")
 
@@ -169,8 +170,8 @@ def classify(text: str, *, school: str | None = None, clause_id: str | None = No
 
 def load_school(base: Path, school: str) -> list[dict[str, Any]]:
     work = base / school / "work"
-    clauses = {x["id"]: x for x in json.loads((work / "requirements/requirement-clauses.json").read_text())}
-    preflight = json.loads((work / "capability-preflight.json").read_text())
+    clauses = {x["id"]: x for x in strict_json_read(work / "requirements/requirement-clauses.json")}
+    preflight = strict_json_read(work / "capability-preflight.json")
     rows = []
     for item in preflight.get("clauses", []):
         if item.get("category") != "input_prerequisite":

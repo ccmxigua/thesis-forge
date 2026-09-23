@@ -84,6 +84,10 @@ class SemanticProvenanceTests(unittest.TestCase):
                     "clause_id": clauses[0]["id"],
                     "classification": "executable",
                     "reason": "fresh bound response",
+                    "obligations": [{
+                        "id": "source_clause", "status": "covered",
+                        "reason": "The cited source rule is represented by the requirement.",
+                    }],
                 }],
                 "unsupported_items": [],
                 "reported_conflicts": [],

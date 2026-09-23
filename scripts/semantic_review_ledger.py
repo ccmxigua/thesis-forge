@@ -13,6 +13,7 @@ from typing import Any
 from compliance import classification_requires_requirement
 from host_review_contract import derived_requirement_indexes
 from semantic_contract import sha256_json
+from source_obligation_compiler import compile_known_source_obligations
 
 
 def _stable_requirement_id(requirement: dict[str, Any]) -> str:
@@ -155,18 +156,77 @@ def build_semantic_review_ledger(
     for clause_id in sorted(clause_by_id):
         clause = clause_by_id[clause_id]
         review = review_by_id.get(clause_id)
+        clause_requirement_indexes = list(reverse.get(clause_id, []))
+        source_obligation_inventory: list[dict[str, Any]] = []
+        source_text = str(clause.get("text") or clause.get("source_text_full") or "")
+        source_text_sha256 = hashlib.sha256(source_text.encode("utf-8")).hexdigest()
+        for fact in compile_known_source_obligations(source_text):
+            candidates: list[dict[str, Any]] = []
+            for requirement_index in clause_requirement_indexes:
+                requirement = requirements[requirement_index]
+                if (
+                    not isinstance(requirement, dict)
+                    or requirement.get("role") not in fact["roles"]
+                ):
+                    continue
+                value: Any = requirement.get("properties")
+                for path_part in str(fact["property_path"]).split(".")[1:]:
+                    value = value.get(path_part) if isinstance(value, dict) else None
+                candidates.append({
+                    "requirement_index": requirement_index,
+                    "requirement_id": requirement_ids.get(requirement_index),
+                    "observed_value": copy.deepcopy(value),
+                    "declared_checker_ids": copy.deepcopy(
+                        requirement.get("verification", {}).get("checker_ids", [])
+                        if isinstance(requirement.get("verification"), dict) else []
+                    ),
+                })
+            expected = fact["expected_value"]
+            matched_candidates = [
+                item for item in candidates
+                if item.get("observed_value") == expected
+                and type(item.get("observed_value")) is type(expected)
+            ]
+            required_checker_ids = list(fact.get("required_checker_ids") or [])
+            declared_checker_ids = sorted({
+                checker_id
+                for item in matched_candidates
+                for checker_id in item.get("declared_checker_ids", [])
+                if isinstance(checker_id, str)
+            })
+            missing_checker_ids = sorted(set(required_checker_ids) - set(declared_checker_ids))
+            source_obligation_inventory.append({
+                "id": fact["id"],
+                "source_clause_sha256": source_text_sha256,
+                "allowed_roles": copy.deepcopy(fact["roles"]),
+                "property_path": fact["property_path"],
+                "expected_value": copy.deepcopy(fact["expected_value"]),
+                "candidate_requirement_bindings": candidates,
+                "required_checker_ids": required_checker_ids,
+                "declared_checker_ids": declared_checker_ids,
+                "missing_checker_ids": missing_checker_ids,
+                "checker_binding_status": "bound" if not missing_checker_ids else "missing_required_checker",
+                "execution_receipt_status": "pending_generation",
+                "render_status": (
+                    "pending_word_render"
+                    if "docx.word_render" in required_checker_ids else "not_required"
+                ),
+                "compiled_by": "source_obligation_compiler",
+                "coverage_gate": "host_review_contract_role_property_check",
+                "model_echo_required": False,
+            })
         record: dict[str, Any] = {
             "clause_id": clause_id,
-            "source_text_sha256": hashlib.sha256(
-                str(clause.get("text") or "").encode("utf-8")
-            ).hexdigest(),
+            "source_text_sha256": source_text_sha256,
             "classification": review.get("classification") if isinstance(review, dict) else None,
-            "requirement_indexes": list(reverse.get(clause_id, [])) if isinstance(review, dict) else [],
+            "requirement_indexes": clause_requirement_indexes if isinstance(review, dict) else [],
             "evidence_ids": copy.deepcopy(clause.get("evidence_ids") or []),
+            "source_obligation_inventory": source_obligation_inventory,
+            "source_obligation_inventory_complete": False,
         }
         if isinstance(review, dict) and isinstance(review.get("obligations"), list):
             record["obligations"] = copy.deepcopy(review["obligations"])
-            record["obligation_decomposition"] = "explicit_model_items_validated_by_contract"
+            record["obligation_decomposition"] = "model_semantic_items_plus_code_compiled_source_facts"
         else:
             record["obligations"] = []
             record["obligation_decomposition"] = "not_supplied"
@@ -174,8 +234,9 @@ def build_semantic_review_ledger(
 
     provenance = response.get("provenance") if isinstance(response.get("provenance"), dict) else None
     return {
-        "schema_version": "1.1",
+        "schema_version": "1.2",
         "contract_version": response.get("contract_version"),
+        "source_obligation_inventory_scope": "partial_machine_recognized_supplement",
         "source": "accepted_host_review_response",
         "relationship_policy": {
             "authoritative_edge": "requirements[].clause_ids",
@@ -213,6 +274,9 @@ def build_semantic_review_ledger(
             {
                 "clause_id": item["clause_id"],
                 "obligations": copy.deepcopy(item.get("obligations") or []),
+                "source_obligation_inventory": copy.deepcopy(
+                    item.get("source_obligation_inventory") or []
+                ),
                 "status": item.get("obligation_decomposition"),
             }
             for item in clause_records

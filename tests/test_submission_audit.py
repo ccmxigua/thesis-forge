@@ -120,6 +120,13 @@ def attest(report: dict[str, object]) -> dict[str, object]:
 
 
 class SubmissionAuditTest(unittest.TestCase):
+    def test_sidecar_loader_rejects_duplicate_json_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "sidecar.json"
+            path.write_text('{"submission_ready":true,"submission_ready":false}', encoding="utf-8")
+            with self.assertRaises(ValueError):
+                submission_audit._json(path)
+
     def test_placeholders_and_unresolved_reference_residue_block_submission(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             td = Path(td); docx = td / "bad.docx"

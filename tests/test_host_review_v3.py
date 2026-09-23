@@ -85,6 +85,11 @@ class HostReviewV3Tests(unittest.TestCase):
                 "clause_id": "C1",
                 "classification": "executable",
                 "reason": "The clause is executable in DOCX.",
+                "obligations": [{
+                    "id": "source_clause",
+                    "status": "covered",
+                    "reason": "The cited source obligation is represented by the requirement.",
+                }],
             }],
             "unsupported_items": [],
             "reported_conflicts": [],
@@ -96,6 +101,127 @@ class HostReviewV3Tests(unittest.TestCase):
         self.assertIn("Role boundary for equations", instructions)
         self.assertIn("partial_clause_coverage error does not authorize changing classification", instructions)
         self.assertIn("executable_review_requires_all_obligations_covered", instructions)
+        self.assertIn("not IDs to copy into obligations[]", instructions)
+
+    def test_compiled_source_facts_are_independent_of_model_obligation_ids(self) -> None:
+        source = "表序后跟表题(可省略)和“(续)”，居中置于表上方，续表均应重复表头"
+        clauses = [{
+            "id": "C00243", "text": source, "evidence_ids": ["E1"],
+            "source_kind": "paragraph", "location": {}, "part_index": 0,
+        }]
+        evidence = {"evidence": [{"id": "E1", "text": source, "kind": "paragraph"}]}
+        request = build_llm_request(
+            [], clauses, evidence, {}, "full", contract_version=HOST_REVIEW_CONTRACT_V3,
+        )
+        request = attach_request_provenance(
+            request, source_sha256="d" * 64, evidence_doc=evidence,
+            clauses=clauses, run_id="compiled-obligation-test",
+        )
+        response = {
+            "contract_version": HOST_REVIEW_CONTRACT_V3,
+            "provenance": request["provenance"],
+            "requirements": [
+                {
+                    "role": "table",
+                    "properties": {"continuation": {
+                        "caption_suffix": "(续)", "repeat_header_row": True,
+                        "caption_required_on_continuation": False,
+                        "verification": "word_render",
+                    }},
+                    "clause_ids": ["C00243"], "evidence_ids": ["E1"],
+                    "confidence": 0.98, "reason": "续表结构属性。",
+                    "verification": {
+                        "mode": "word_render", "checks": ["核对续表属性。"],
+                        "checker_ids": ["docx.property_receipts", "docx.word_render"],
+                    },
+                },
+                {
+                    "role": "table_caption",
+                    "properties": {"position": "above", "paragraph": {"alignment": "center"}},
+                    "clause_ids": ["C00243"], "evidence_ids": ["E1"],
+                    "confidence": 0.98, "reason": "表题位置和对齐。",
+                    "verification": {
+                        "mode": "static_docx", "checks": ["核对表题位置和对齐。"],
+                        "checker_ids": ["docx.property_receipts"],
+                    },
+                },
+            ],
+            "clause_reviews": [{
+                "clause_id": "C00243", "classification": "executable",
+                "reason": "续表的明确属性由独立 requirement 表达。",
+                "obligations": [
+                    {"id": "suffix", "status": "covered", "reason": "续页标记已绑定。"},
+                    {"id": "headers", "status": "covered", "reason": "重复表头已绑定。"},
+                    {"id": "caption-placement", "status": "covered", "reason": "表题位置和对齐已绑定。"},
+                ],
+            }],
+            "unsupported_items": [], "reported_conflicts": [],
+        }
+        self.assertEqual(validate_response(response, request), [])
+
+        ledger = build_semantic_review_ledger(response, clauses)
+        inventory = ledger["clauses"][0]["source_obligation_inventory"]
+        self.assertEqual(
+            {item["id"] for item in inventory},
+            {
+                "table.continuation.caption_optional",
+                "table.continuation.caption_suffix",
+                "table.continuation.repeat_header_row",
+                "table_caption.alignment_center",
+                "table_caption.position_above",
+            },
+        )
+        self.assertTrue(all(item["model_echo_required"] is False for item in inventory))
+        self.assertTrue(all(item["checker_binding_status"] == "bound" for item in inventory))
+        self.assertTrue(all(item["execution_receipt_status"] == "pending_generation" for item in inventory))
+        self.assertFalse(ledger["clauses"][0]["source_obligation_inventory_complete"])
+        self.assertEqual(ledger["source_obligation_inventory_scope"], "partial_machine_recognized_supplement")
+        optionality = next(
+            item for item in inventory
+            if item["id"] == "table.continuation.caption_optional"
+        )
+        self.assertEqual(
+            optionality["candidate_requirement_bindings"][0]["observed_value"], False,
+        )
+        self.assertEqual(
+            optionality["candidate_requirement_bindings"][0]["requirement_id"],
+            ledger["requirements"][0]["requirement_id"],
+        )
+        self.assertEqual(ledger["schema_version"], "1.2")
+
+        invalid = json.loads(json.dumps(response))
+        invalid["requirements"][0]["properties"]["continuation"][
+            "caption_required_on_continuation"
+        ] = True
+        errors = validate_response(invalid, request)
+        self.assertTrue(any(
+            "partial_clause_coverage:table.continuation.caption_optional" in error
+            for error in errors
+        ), errors)
+        self.assertNotIn("executable_review_missing_source_inventory", str(errors))
+
+        missing_checker = json.loads(json.dumps(response))
+        missing_checker["requirements"][0]["verification"]["checker_ids"].remove(
+            "docx.word_render"
+        )
+        errors = validate_response(missing_checker, request)
+        self.assertFalse(any("missing_checker" in error for error in errors), errors)
+        from source_obligation_compiler import materialize_known_source_verification
+        projected_checker, checker_repairs = materialize_known_source_verification(
+            missing_checker, clauses,
+        )
+        self.assertTrue(checker_repairs)
+        self.assertIn(
+            "docx.word_render",
+            projected_checker["requirements"][0]["verification"]["checker_ids"],
+        )
+        incomplete_ledger = build_semantic_review_ledger(projected_checker, clauses)
+        optionality_record = next(
+            item for item in incomplete_ledger["clauses"][0]["source_obligation_inventory"]
+            if item["id"] == "table.continuation.caption_optional"
+        )
+        self.assertEqual(optionality_record["checker_binding_status"], "bound")
+        self.assertEqual(optionality_record["missing_checker_ids"], [])
 
     def test_uncovered_obligation_retry_preserves_status_and_projects_relation(self) -> None:
         clauses = [
@@ -135,7 +261,8 @@ class HostReviewV3Tests(unittest.TestCase):
                         {"id": "title_concise", "status": "unverifiable", "reason": "简明性需要语义判断。"},
                     ],
                 },
-                {"clause_id": "C2", "classification": "executable", "reason": "位置可核验。"},
+                {"clause_id": "C2", "classification": "executable", "reason": "位置可核验。",
+                 "obligations": [{"id": "placement", "status": "covered", "reason": "位置已表达。"}]},
             ],
             "unsupported_items": [],
             "reported_conflicts": [],
@@ -191,6 +318,138 @@ class HostReviewV3Tests(unittest.TestCase):
         self.assertEqual(records[0]["code"], "executable_review_obligations_uncovered")
         self.assertTrue(records[0]["semantic_review_required"])
 
+    def test_reported_conflicts_are_bound_to_current_chunk_facts(self) -> None:
+        response = self._informational_response()
+        response["reported_conflicts"] = [{
+            "type": "source_conflict",
+            "reason": "Two cited statements disagree about the same property.",
+            "clause_ids": ["C1"],
+            "evidence_ids": ["E1"],
+            "target": {"role": "body_text", "property": "font"},
+            "candidates": [{
+                "evidence_id": "E1", "value_type": "object",
+                "value_json": json.dumps({"cjk": "SimSun", "size_pt": 12}),
+            }],
+            "status": "unresolved",
+        }]
+        self.assertEqual(validate_response(response, self.request), [])
+
+    def test_typed_conflict_values_survive_native_schema_and_match_target_property(self) -> None:
+        response = self._informational_response()
+        conflict = {
+            "type": "source_conflict",
+            "reason": "Two sources disagree about font payload.",
+            "clause_ids": ["C1"],
+            "evidence_ids": ["E1"],
+            "target": {"role": "body_text", "property": "font"},
+            "conditions": [{"evidence_id": "E1", "statement": "When the body is Chinese."}],
+            "candidates": [{
+                "evidence_id": "E1", "value_type": "object",
+                "value_json": json.dumps({"cjk": "SimSun", "size_pt": 12}),
+            }],
+            "status": "requires_human_review",
+        }
+        response["reported_conflicts"] = [conflict]
+        self.assertEqual(validate_response(response, self.request), [])
+
+        native = native_output_schema(self.request["response_schema"])
+        self.assertEqual(native_schema_support_errors(native), [])
+        conflict_item = native["properties"]["reported_conflicts"]["items"]
+        self.assertEqual(conflict_item["$ref"], "#/$defs/reportedConflict")
+        candidates_schema = native["$defs"]["reportedConflict"]["properties"]["candidates"]
+        candidate_array_schema = next(
+            item for item in candidates_schema["anyOf"] if item.get("type") == "array"
+        )
+        candidate_branches = candidate_array_schema["items"]["anyOf"]
+        self.assertEqual(len(candidate_branches), 2)
+        encoded_branch = next(
+            item for item in candidate_branches
+            if "value_json" in item.get("properties", {})
+        )
+        self.assertIn("value_json", encoded_branch["required"])
+
+        wrong_type = json.loads(json.dumps(response))
+        wrong_type["reported_conflicts"][0]["candidates"][0]["value_json"] = json.dumps("SimSun")
+        wrong_type["reported_conflicts"][0]["candidates"][0]["value_type"] = "string"
+        self.assertIn("does_not_match_target_property_schema", str(
+            validate_response(wrong_type, self.request)
+        ))
+
+    def test_conflict_target_supports_nested_and_identity_selected_properties(self) -> None:
+        cases = [
+            ({"role": "body_text", "property": "font.size_pt"}, 12),
+            ({"role": "cover", "property": "fields[classification_number].label"}, "分类号"),
+        ]
+        for target, value in cases:
+            with self.subTest(target=target):
+                response = self._informational_response()
+                response["reported_conflicts"] = [{
+                    "type": "source_conflict",
+                    "reason": "同一版式属性存在两个来源候选。",
+                    "clause_ids": ["C1"],
+                    "evidence_ids": ["E1"],
+                    "target": target,
+                    "candidates": [{"evidence_id": "E1", "value": value}],
+                    "status": "unresolved",
+                }]
+                self.assertEqual(validate_response(response, self.request), [])
+
+        unknown_selector = self._informational_response()
+        unknown_selector["reported_conflicts"] = [{
+            "type": "source_conflict",
+            "reason": "候选不应被猜测。",
+            "clause_ids": ["C1"], "evidence_ids": ["E1"],
+            "target": {"role": "cover", "property": "fields[not_a_field].label"},
+            "candidates": [{"evidence_id": "E1", "value": "未知字段"}],
+            "status": "unresolved",
+        }]
+        self.assertIn("unknown_registered_role_property", str(
+            validate_response(unknown_selector, self.request)
+        ))
+
+    def test_conflict_candidate_strict_json_and_condition_evidence_are_checked(self) -> None:
+        response = self._informational_response()
+        response["reported_conflicts"] = [{
+            "type": "semantic_conflict",
+            "reason": "The alternatives cannot be reconciled.",
+            "clause_ids": ["C1"],
+            "evidence_ids": ["E1"],
+            "conditions": [{"evidence_id": "E999", "statement": "Only under case X."}],
+            "candidates": [{
+                "evidence_id": "E1", "value_type": "object",
+                "value_json": '{"font":"A","font":"B"}',
+            }],
+            "status": "unresolved",
+        }]
+        errors = validate_response(response, self.request)
+        self.assertIn("value_json_invalid:duplicate JSON object key", str(errors))
+        self.assertIn("conditions[0].evidence_id: must_reference_conflict_evidence", str(errors))
+
+    def test_reported_conflicts_reject_unknown_unbound_and_unregistered_refs(self) -> None:
+        base_conflict = {
+            "type": "semantic_conflict",
+            "reason": "The evidence cannot be reconciled automatically.",
+            "clause_ids": ["C1"],
+            "evidence_ids": ["E1"],
+            "status": "requires_human_review",
+        }
+        cases = [
+            ({**base_conflict, "clause_ids": ["C999"]}, "clause_ids: unknown:C999"),
+            ({**base_conflict, "evidence_ids": ["E999"]}, "evidence_ids: not_in_chunk:E999"),
+            ({**base_conflict, "candidates": [{"evidence_id": "E2", "value": "x"}]},
+             "must_reference_conflict_evidence"),
+            ({**base_conflict, "target": {"role": "body_text", "property": "not_registered"}},
+             "unknown_registered_role_property"),
+        ]
+        for conflict, expected in cases:
+            with self.subTest(expected=expected):
+                response = self._informational_response()
+                response["reported_conflicts"] = [conflict]
+                request = json.loads(json.dumps(self.request))
+                request["evidence_context"]["E2"] = {"id": "E2", "text": "other"}
+                errors = validate_response(response, request)
+                self.assertIn(expected, str(errors))
+
     def test_v3_schema_has_one_model_authoritative_relation(self) -> None:
         reviews_schema = self.request["response_schema"]["properties"]["clause_reviews"]["items"]
         self.assertNotIn("requirement_indexes", reviews_schema["properties"])
@@ -239,15 +498,21 @@ class HostReviewV3Tests(unittest.TestCase):
         self.assertNotIn("review/index pair", prompt)
         self.assertIn("rejected parent response sha256", prompt)
 
-    def test_ledger_is_deterministic_and_does_not_infer_obligations(self) -> None:
+    def test_ledger_preserves_model_obligations_without_inference(self) -> None:
         response = self._executable_response()
         ledger = build_semantic_review_ledger(response, self.clauses)
         self.assertEqual(ledger["relationship_policy"]["authoritative_edge"], "requirements[].clause_ids")
         self.assertEqual(ledger["edges"][0]["requirement_index"], 0)
         self.assertRegex(ledger["edges"][0]["requirement_id"], r"^R[0-9a-f]{16}$")
         self.assertEqual(ledger["requirements"][0]["requirement_id"], ledger["edges"][0]["requirement_id"])
-        self.assertEqual(ledger["clauses"][0]["obligations"], [])
-        self.assertEqual(ledger["clauses"][0]["obligation_decomposition"], "not_supplied")
+        self.assertEqual(ledger["clauses"][0]["obligations"], response["clause_reviews"][0]["obligations"])
+        self.assertEqual(
+            ledger["clauses"][0]["obligation_decomposition"],
+            "model_semantic_items_plus_code_compiled_source_facts",
+        )
+        informational = self._informational_response()
+        informational_ledger = build_semantic_review_ledger(informational, self.clauses)
+        self.assertEqual(informational_ledger["clauses"][0]["obligations"], [])
         self.assertEqual(
             ledger["response_sha256"],
             build_semantic_review_ledger(response, self.clauses)["response_sha256"],
@@ -506,9 +771,13 @@ class HostReviewV3Tests(unittest.TestCase):
         native_schema = native_output_schema(self.request["response_schema"])
         self.assertEqual(native_schema_support_errors(native_schema), [])
         self.assertNotIn("provenance", native_schema["properties"])
-        requirement_properties = native_schema["properties"]["requirements"]["items"]["properties"]["properties"]
-        self.assertGreaterEqual(len(requirement_properties["anyOf"]), 2)
-        self.assertTrue(all("$ref" in variant for variant in requirement_properties["anyOf"]))
+        requirement_branches = native_schema["properties"]["requirements"]["items"]["anyOf"]
+        body_text_branch = next(
+            branch for branch in requirement_branches
+            if branch["properties"]["role"].get("enum") == ["body_text"]
+        )
+        requirement_properties = body_text_branch["properties"]["properties"]
+        self.assertIn("$ref", requirement_properties)
         self.assertNotEqual(requirement_properties, {"type": "object", "properties": {}})
         font_schema = native_schema["$defs"]["fontSpec"]
         self.assertEqual(set(font_schema["required"]), set(font_schema["properties"]))
@@ -523,6 +792,37 @@ class HostReviewV3Tests(unittest.TestCase):
         value_schema = conditions_array["items"]["properties"]["value"]
         self.assertNotEqual(value_schema, {})
         self.assertEqual(native_schema_support_errors(value_schema), [])
+
+    def test_requirement_native_schema_binds_role_to_payload_and_normalizes_by_role(self) -> None:
+        native_schema = native_output_schema(self.request["response_schema"])
+        branches = native_schema["properties"]["requirements"]["items"]["anyOf"]
+        roles = {
+            branch["properties"]["role"]["enum"][0]
+            for branch in branches
+            if isinstance(branch.get("properties", {}).get("role"), dict)
+        }
+        self.assertIn("table_caption", roles)
+        self.assertIn("table", roles)
+
+        wrong_role = self._executable_response()
+        wrong_role["requirements"][0]["role"] = "table_caption"
+        wrong_role["requirements"][0]["properties"] = {
+            "continuation": {"caption_suffix": "(续)", "repeat_header_row": True}
+        }
+        errors = validate_response(wrong_role, self.request)
+        self.assertTrue(any("must match at least one schema" in error for error in errors), errors)
+
+        table_response = self._executable_response()
+        table_response["requirements"][0]["role"] = "table"
+        table_response["requirements"][0]["properties"] = {
+            "continuation": {"caption_suffix": "(续)", "repeat_header_row": True}
+        }
+        table_response["requirements"][0]["properties"]["continuation"]["caption_required_on_continuation"] = None
+        normalized = normalize_native_response(table_response, self.request["response_schema"])
+        self.assertNotIn(
+            "caption_required_on_continuation",
+            normalized["requirements"][0]["properties"]["continuation"],
+        )
 
     def test_empty_requirement_properties_fail_closed_with_targeted_error(self) -> None:
         response = self._executable_response()
@@ -628,7 +928,8 @@ class HostReviewV3Tests(unittest.TestCase):
         response["requirements"][0]["properties"]["paragraph"] = None
         normalized = normalize_native_response(response, self.request["response_schema"])
         self.assertNotIn("paragraph", normalized["requirements"][0]["properties"])
-        self.assertEqual(validate_response(normalized, self.request), [])
+        errors = validate_response(normalized, self.request)
+        self.assertEqual(errors, [])
 
     def test_applicability_value_domain_covers_scalars_and_in_lists(self) -> None:
         schema = applicability_value_schema()
@@ -659,7 +960,8 @@ class HostReviewV3Tests(unittest.TestCase):
         self.assertNotIn("input_prerequisites", requirement)
         self.assertNotIn("checker_ids", requirement["verification"])
         self.assertNotIn("obligations", normalized["clause_reviews"][0])
-        self.assertEqual(validate_response(normalized, self.request), [])
+        errors = validate_response(normalized, self.request)
+        self.assertIn("executable_review_requires_non_empty_inventory", str(errors))
 
     def test_exact_duplicate_requirements_are_explicitly_recorded(self) -> None:
         response = self._executable_response()

@@ -15,6 +15,7 @@ from lxml import etree
 
 from docx_semantics import normalized_fixed_text
 from template_profile import NS, W, _iter_candidates, _node_text, _selector_matches, _style_id, load_profile
+from semantic_contract import strict_json_read
 
 ROOT = Path(__file__).resolve().parents[1]
 ROMAN = re.compile(r"^[IVXLCDM]+$", re.I)
@@ -457,8 +458,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--render-layout", type=Path)
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(argv)
-    metadata = json.loads(args.thesis_profile.read_text(encoding="utf-8")) if args.thesis_profile else None
-    layout = json.loads(args.render_layout.read_text(encoding="utf-8")) if args.render_layout else None
+    metadata = strict_json_read(args.thesis_profile) if args.thesis_profile else None
+    layout = strict_json_read(args.render_layout) if args.render_layout else None
     result = audit_template(args.docx, args.profile, thesis_profile=metadata, render_layout=layout)
     args.out.parent.mkdir(parents=True, exist_ok=True)
     args.out.write_text(json.dumps(result, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")

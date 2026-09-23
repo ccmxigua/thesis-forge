@@ -30,6 +30,7 @@ from lxml import etree
 from ooxml_compatibility import NS, W, WP, audit_docx, sha256
 from template_builder import build_template
 from template_profile import compile_profile, load_profile
+from semantic_contract import strict_json_read
 
 XML_SPACE = "{http://www.w3.org/XML/1998/namespace}space"
 REL_NS = "http://schemas.openxmlformats.org/package/2006/relationships"
@@ -477,7 +478,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--replacements", type=Path, help="JSON object keyed by exact instruction or macro name")
     parser.add_argument("--work-dir", type=Path)
     args = parser.parse_args(argv)
-    replacements = json.loads(args.replacements.read_text(encoding="utf-8")) if args.replacements else {}
+    replacements = strict_json_read(args.replacements) if args.replacements else {}
     if not isinstance(replacements, dict) or not all(isinstance(v, str) for v in replacements.values()):
         parser.error("--replacements must contain a JSON object of string values")
     try:

@@ -20,6 +20,7 @@ from typing import Any
 from docx import Document
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_LINE_SPACING
 from docx.oxml.ns import qn
+from semantic_contract import strict_json_dumps, strict_json_read
 
 ALIGNMENT = {
     WD_ALIGN_PARAGRAPH.LEFT: "left",
@@ -55,7 +56,7 @@ STYLE_PROPERTIES = {
 
 
 def read_json(path: Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8"))
+    return strict_json_read(path)
 
 
 def sha256(path: Path) -> str:
@@ -405,7 +406,7 @@ def main(argv: list[str]) -> int:
     report = build_report(args.generated_docx.resolve(), args.official_template.resolve(),
                           args.format_spec.resolve(), args.official_style_map.resolve(),
                           args.generated_style_map.resolve(), requirements_only=args.requirements_only)
-    atomic_write_text(args.out, json.dumps(report, ensure_ascii=False, indent=2) + "\n")
+    atomic_write_text(args.out, strict_json_dumps(report, ensure_ascii=False, indent=2) + "\n")
     if args.markdown:
         atomic_write_text(args.markdown, markdown(report))
     print(json.dumps({"status": report["status"], "summary": report["summary"], "output": str(args.out)}, ensure_ascii=False))

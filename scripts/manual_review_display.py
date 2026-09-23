@@ -6,6 +6,7 @@ of an unresolved clause, and a visible marker is not evidence of compliance.
 from __future__ import annotations
 
 import hashlib
+import json
 import re
 from collections import Counter
 from pathlib import Path
@@ -136,13 +137,25 @@ def _text(item: dict[str, Any]) -> str:
 
     placeholder = str(item.get("placeholder_text") or "【待人工处理：请核对本项】")
     clauses = ", ".join(str(v) for v in item.get("clause_ids", []))
+    questions = ", ".join(str(v) for v in item.get("question_ids", []))
+    evidence = ", ".join(str(v) for v in item.get("evidence_ids", []))
     return (
         f"【{item['marker_id']}｜人工待审】{placeholder}"
         + (f"\n条款：{clauses}" if clauses else "")
+        + (f"\n问题编号：{questions}" if questions else "")
+        + (f"\n证据编号：{evidence}" if evidence else "")
         + f"\n原文/问题：{compact('source_text', 180)}"
         + f"\n待确认：{compact('reason', 180)}"
         + f"\n请在此人工处理：{compact('action', 140) or '核对后填写处理结果。'}"
     )
+
+
+def _canonical_sha256(value: Any) -> str:
+    payload = json.dumps(
+        value, ensure_ascii=False, sort_keys=True,
+        separators=(",", ":"), allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
 
 
 def _items(ledger: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -259,9 +272,15 @@ def append_manual_review_markers(
     front_nodes.append(break_node)
     for index, node in enumerate(front_nodes):
         doc.element.body.insert(index, node)
+    binding = ledger.get("binding") if isinstance(ledger, dict) else {}
+    binding = binding if isinstance(binding, dict) else {}
+    binding_sha256 = _canonical_sha256(binding)
     return [{
         "marker_id": item["marker_id"], "category": item.get("category"),
         "clause_ids": item.get("clause_ids", []), "requirement_ids": item.get("requirement_ids", []),
+        "question_ids": item.get("question_ids", []), "evidence_ids": item.get("evidence_ids", []),
+        "ledger_binding_sha256": binding_sha256,
+        "ledger_item_sha256": _canonical_sha256(item),
         "placeholder_text": item.get("placeholder_text"),
         **locations[item["marker_id"]],
         **({"inline": locations[item["marker_id"]]} if item["marker_id"] in (inline_locations or {}) else {}),
@@ -299,8 +318,11 @@ def audit_manual_review_markers(path: Path, ledger: dict[str, Any]) -> dict[str,
     separate mandatory step.  This audit deliberately does not claim it.
     """
     expected = {item["marker_id"] for item in _items(ledger)}
+    expected_items = {item["marker_id"]: item for item in _items(ledger)}
     counts: Counter[str] = Counter()
     style_errors = []
+    source_binding_errors = []
+    marker_text: dict[str, str] = {}
     doc = Document(path)
     for paragraph in all_body_paragraphs(doc):
         match = MARKER_START.match(paragraph.text)
@@ -308,6 +330,7 @@ def audit_manual_review_markers(path: Path, ledger: dict[str, Any]) -> dict[str,
             continue
         marker_id = match.group(1)
         counts[marker_id] += 1
+        marker_text[marker_id] = paragraph.text
         for run in paragraph.runs:
             if not run.text:
                 continue
@@ -320,10 +343,37 @@ def audit_manual_review_markers(path: Path, ledger: dict[str, Any]) -> dict[str,
                 style_errors.append(marker_id)
     missing, extra = sorted(expected - counts.keys()), sorted(counts.keys() - expected)
     duplicate = sorted(key for key, count in counts.items() if count != 1)
+    marker_bindings = []
+    ledger_binding = ledger.get("binding") if isinstance(ledger, dict) else {}
+    ledger_binding = ledger_binding if isinstance(ledger_binding, dict) else {}
+    ledger_binding_sha256 = _canonical_sha256(ledger_binding)
+    for marker_id in sorted(expected):
+        item = expected_items[marker_id]
+        paragraph_text = marker_text.get(marker_id, "")
+        question_ids = sorted(str(value) for value in item.get("question_ids", []) if value)
+        evidence_ids = sorted(str(value) for value in item.get("evidence_ids", []) if value)
+        expected_refs = (
+            (f"问题编号：{', '.join(question_ids)}" if question_ids else None),
+            (f"证据编号：{', '.join(evidence_ids)}" if evidence_ids else None),
+        )
+        if any(value is not None and value not in paragraph_text for value in expected_refs):
+            source_binding_errors.append(marker_id)
+        marker_bindings.append({
+            "marker_id": marker_id,
+            "question_ids": question_ids,
+            "evidence_ids": evidence_ids,
+            "clause_ids": sorted(str(value) for value in item.get("clause_ids", []) if value),
+            "requirement_ids": sorted(str(value) for value in item.get("requirement_ids", []) if value),
+            "ledger_binding_sha256": ledger_binding_sha256,
+            "ledger_item_sha256": _canonical_sha256(item),
+        })
     return {
-        "valid": not (missing or extra or duplicate or style_errors),
+        "valid": not (missing or extra or duplicate or style_errors or source_binding_errors),
         "expected_count": len(expected), "visible_marker_count": sum(counts.values()),
         "missing_ids": missing, "unexpected_ids": extra, "duplicate_ids": duplicate,
-        "style_errors": sorted(set(style_errors)), "docx_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+        "style_errors": sorted(set(style_errors)),
+        "source_binding_errors": sorted(set(source_binding_errors)),
+        "marker_bindings": marker_bindings,
+        "docx_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
         "visual_verification": "required", "submission_ready": False,
     }

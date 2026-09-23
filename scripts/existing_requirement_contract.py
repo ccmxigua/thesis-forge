@@ -52,7 +52,13 @@ def existing_reference_errors(
     evidence_ids = _id_set(item.get("evidence_ids"))
     if evidence_ids is None or evidence_ids != _id_set(existing.get("evidence_ids")):
         errors.append("existing_requirement_evidence_mismatch")
-    parts = [clause_map.get(cid, {}).get("text") for cid in sorted(clause_ids or [])]
+    # Keep the baseline's source occurrence order.  Sorting IDs is not a
+    # source-order rule (e.g. C10 sorts before C2) and can reject an otherwise
+    # valid existing selector even though its source binding is unchanged.
+    authoritative_clause_ids = existing.get("clause_ids")
+    if _id_set(authoritative_clause_ids) is None:
+        authoritative_clause_ids = []
+    parts = [clause_map.get(cid, {}).get("text") for cid in authoritative_clause_ids]
     if (
         not parts or any(not isinstance(part, str) or not part.strip() for part in parts)
         or normalized_source_text(existing.get("source_text"))
@@ -79,8 +85,16 @@ def project_authoritative_existing_payloads(
             continue
         existing = existing_map[item["existing_requirement_id"]]
         before, after = item.get("properties"), existing.get("properties")
-        if not isinstance(before, dict) or not before or not isinstance(after, dict) or not after:
-            continue  # Do not turn an empty/invalid model payload into an executable one.
+        if (
+            not isinstance(before, dict)
+            or not isinstance(after, dict)
+            or not after
+        ):
+            continue
+        # For an explicit reuse selector, properties are not a new model
+        # proposal.  Once role, occurrence, evidence, and exact source text
+        # are bound to the current request, code materializes the authoritative
+        # existing payload.  New requirements still cannot use this path.
         if before == after:
             continue
         item["properties"] = copy.deepcopy(after)
@@ -92,6 +106,7 @@ def project_authoritative_existing_payloads(
             "evidence_ids": sorted(item["evidence_ids"]),
             "before_properties_sha256": sha256_json(before),
             "after_properties_sha256": sha256_json(after),
+            "authorization": "current_request_bound_existing_selector",
             "rule_id": "authoritative_existing_requirement_payload",
         })
     return projected, repairs

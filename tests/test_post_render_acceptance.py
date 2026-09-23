@@ -31,6 +31,12 @@ def _write_valid_pdf(path: Path, text: str = "post-word") -> None:
 
 
 class PostRenderAcceptanceTests(unittest.TestCase):
+    def test_evidence_loader_rejects_duplicate_json_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "evidence.json"
+            path.write_text('{"valid":true,"valid":false}', encoding="utf-8")
+            self.assertIsNone(post_render.read_object(path))
+
     def _pre_render_fixture(self, root: Path) -> tuple[Path, Path, str]:
         source = root / "generated.docx"
         Document().save(source)

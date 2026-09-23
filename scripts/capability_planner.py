@@ -29,6 +29,7 @@ from format_contract_guards import (
     cover_binding_errors, input_prerequisite_errors, verification_checker_errors,
 )
 from semantic_issue_confirmation import validate_bound_ledger_for_spec
+from semantic_contract import strict_json_dumps, strict_json_read
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_REGISTRY = ROOT / "resources" / "backend-capabilities.default.json"
@@ -179,7 +180,7 @@ def role_is_executable(role: str, capability_ids: list[str]) -> bool:
 
 
 def read_json(path: Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8"))
+    return strict_json_read(path)
 
 
 def artifact_record(path: Path) -> dict[str, Any]:
@@ -199,7 +200,7 @@ def artifact_record(path: Path) -> dict[str, Any]:
 def write_json(path: Path, value: Any) -> None:
     atomic_write_text(
         path,
-        json.dumps(value, ensure_ascii=False, indent=2) + "\n",
+        strict_json_dumps(value, ensure_ascii=False, indent=2) + "\n",
     )
 
 

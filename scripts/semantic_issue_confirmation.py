@@ -15,7 +15,8 @@ from pathlib import Path
 from typing import Any
 
 from format_spec_validation import validate_instance
-from semantic_contract import sha256_json, strict_json_loads
+from question_contract import normalize_question_records
+from semantic_contract import sha256_json, strict_json_dumps, strict_json_loads, strict_json_read
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -29,12 +30,12 @@ def load_json(path: Path) -> Any:
 
 
 def _schema_errors(value: Any) -> list[str]:
-    schema = json.loads(SCHEMA_PATH.read_text(encoding="utf-8"))
+    schema = strict_json_read(SCHEMA_PATH)
     return validate_instance(value, schema)
 
 
 def _receipt_schema_errors(value: Any) -> list[str]:
-    schema = json.loads(RECEIPT_SCHEMA_PATH.read_text(encoding="utf-8"))
+    schema = strict_json_read(RECEIPT_SCHEMA_PATH)
     return validate_instance(value, schema)
 
 
@@ -49,7 +50,7 @@ def _clause_binding(clause: dict[str, Any]) -> dict[str, Any]:
 
 
 def _question_binding(question: dict[str, Any]) -> dict[str, Any]:
-    return copy.deepcopy(question)
+    return normalize_question_records([question])[0]
 
 
 def _provenance(spec: dict[str, Any]) -> dict[str, Any]:
@@ -86,6 +87,7 @@ def bind_confirmations(
     current spec/questions/clauses and cannot be supplied by a model or copied
     from a previous run.
     """
+    questions = normalize_question_records(questions)
     errors = _schema_errors(raw)
     if errors:
         raise ValueError("invalid semantic issue confirmation: " + "; ".join(errors))
@@ -118,9 +120,9 @@ def bind_confirmations(
         raise ValueError("semantic issue confirmation run_id does not match the current format spec")
 
     question_by_id = {
-        str(item.get("id")): item
+        str(item.get("question_id")): item
         for item in questions
-        if isinstance(item, dict) and item.get("id")
+        if isinstance(item, dict) and item.get("question_id")
     }
     clause_by_id = {
         str(item.get("id")): item
@@ -246,8 +248,8 @@ def validate_bound_ledger_for_spec(
         if binding["questions_sha256"] != sha256_json(questions):
             raise ValueError("semantic issue ledger questions hash does not match the current question set")
         question_by_id = {
-            str(item.get("id")): item for item in questions
-            if isinstance(item, dict) and item.get("id")
+            str(item.get("question_id")): item for item in questions
+            if isinstance(item, dict) and item.get("question_id")
         }
         for item in ledger["confirmations"]:
             question = question_by_id.get(str(item["question_id"]))
@@ -337,12 +339,16 @@ def main(argv: list[str] | None = None) -> int:
         expected_run_id=str(spec.get("run_id") or "") or None,
     )
     args.out.parent.mkdir(parents=True, exist_ok=True)
-    args.out.write_text(json.dumps(ledger, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    args.out.write_text(
+        strict_json_dumps(ledger, ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
     if args.receipt_out:
         args.receipt_out.parent.mkdir(parents=True, exist_ok=True)
         receipt = build_confirmation_receipt(ledger)
         args.receipt_out.write_text(
-            json.dumps(receipt, ensure_ascii=False, indent=2) + "\n", encoding="utf-8"
+            strict_json_dumps(receipt, ensure_ascii=False, indent=2) + "\n",
+            encoding="utf-8",
         )
     print(json.dumps({"status": "bound", "out": str(args.out),
                       "receipt": str(args.receipt_out) if args.receipt_out else None,

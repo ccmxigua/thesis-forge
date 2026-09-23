@@ -39,6 +39,24 @@ FORBIDDEN_SCHOOL_TOKENS = {
 
 
 class ArchitectureGuardTest(unittest.TestCase):
+    def test_scripts_do_not_bypass_strict_json_boundary(self) -> None:
+        violations: list[str] = []
+        for path in (ROOT / "scripts").rglob("*.py"):
+            if path.name == "semantic_contract.py":
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                    continue
+                if (isinstance(node.func.value, ast.Name) and node.func.value.id == "json"
+                        and node.func.attr in {"load", "loads"}):
+                    violations.append(f"{path.relative_to(ROOT)}:{node.lineno}")
+        self.assertEqual(
+            violations, [],
+            "script JSON inputs must use semantic_contract.strict_json_loads/read:\n"
+            + "\n".join(violations),
+        )
+
     def test_project_does_not_own_an_independent_llm_provider_client(self) -> None:
         forbidden = (
             "OPENAI_API_KEY", "OPENAI_BASE_URL", "THESIS_FORMAT_LLM",

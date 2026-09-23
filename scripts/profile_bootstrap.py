@@ -18,13 +18,14 @@ from typing import Any
 
 from format_spec_validation import load_and_validate
 from template_profile import compile_profile
+from semantic_contract import strict_json_read
 
 ROOT = Path(__file__).resolve().parents[1]
 DYNAMIC_ROLES = ("body", "acknowledgments", "references", "appendices", "academic_outputs")
 
 
 def _read(path: Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8"))
+    return strict_json_read(path)
 
 
 def _sha256(path: Path) -> str:

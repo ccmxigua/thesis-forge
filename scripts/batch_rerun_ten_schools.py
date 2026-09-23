@@ -39,7 +39,7 @@ from pdf_visual_audit import audit_pdf  # noqa: E402
 from manual_review_display import audit_manual_review_markers  # noqa: E402
 from native_semantic_review import NativeSemanticReviewError, validate_response  # noqa: E402
 from process_runner import run_process  # noqa: E402
-from semantic_contract import sha256_json  # noqa: E402
+from semantic_contract import sha256_json, strict_json_dumps, strict_json_loads  # noqa: E402
 from thesis_format_pipeline import runtime_code_fingerprint  # noqa: E402
 
 
@@ -79,8 +79,8 @@ def native_semantic_review_integrity(
             return False
         if request_path is None or response_path is None:
             return False
-        request = json.loads(request_path.read_text(encoding="utf-8"))
-        response = json.loads(response_path.read_text(encoding="utf-8"))
+        request = strict_json_loads(request_path.read_text(encoding="utf-8"))
+        response = strict_json_loads(response_path.read_text(encoding="utf-8"))
         if not isinstance(request, dict) or not isinstance(response, dict):
             return False
         request_sha256 = sha256_json(request)
@@ -96,7 +96,7 @@ def native_semantic_review_integrity(
             or request.get("document_text_sha256") != review.get("document_text_sha256")
         ):
             return False
-        document_text_sha256 = hashlib.sha256(json.dumps(
+        document_text_sha256 = hashlib.sha256(strict_json_dumps(
             [(item["check_id"], item["document_text"]) for item in checks],
             ensure_ascii=False,
             separators=(",", ":"),
@@ -106,7 +106,7 @@ def native_semantic_review_integrity(
         validated_results = validate_response(response, checks)
         if validated_results != results:
             return False
-    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError, NativeSemanticReviewError):
+    except (OSError, KeyError, TypeError, ValueError, NativeSemanticReviewError):
         return False
     return True
 
@@ -114,8 +114,8 @@ def native_semantic_review_integrity(
 def load_manifest(path: Path) -> tuple[Path, list[dict[str, Any]], Path]:
     manifest_path = path.resolve() if path.is_absolute() else (ROOT / path).resolve()
     try:
-        payload = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
+        payload = strict_json_loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
         raise ValueError(f"cannot read template manifest: {manifest_path}: {exc}") from exc
     if not isinstance(payload, dict) or payload.get("schema_version") != "1.0":
         raise ValueError("template manifest must be an object with schema_version 1.0")
@@ -195,6 +195,40 @@ def run_command(cmd: list[str], *, label: str, timeout: int = 1800) -> dict[str,
         "timed_out": result.returncode == 124 and "[process-timeout]" in (result.stderr or ""),
         "stdout_tail": result.stdout[-3000:],
         "stderr_tail": result.stderr[-3000:],
+    }
+
+
+def interrupted_case_result(case: dict[str, Any]) -> dict[str, Any]:
+    """Create a truthful terminal record when Ctrl-C interrupts one case."""
+    return {
+        "returncode": 130,
+        "case_id": case.get("id"),
+        "analysis_mode": case.get("analysis_mode"),
+        "status": "interrupted",
+        "error": "KeyboardInterrupt: operator interrupted the batch",
+        "current_stage_state": "unknown",
+        "fresh_run": {},
+        "stages": {},
+        "acceptance": {
+            "accepted": False,
+            "status": "interrupted",
+            "blockers": ["operator_interrupted; current stage outcome is unknown"],
+        },
+    }
+
+
+def failed_case_result(case: dict[str, Any], error: BaseException) -> dict[str, Any]:
+    """Record an exception without implying which stage completed."""
+    return {
+        "returncode": 2,
+        "case_id": case.get("id"),
+        "analysis_mode": case.get("analysis_mode"),
+        "status": "failed",
+        "terminal_status": "failed",
+        "current_stage_state": "unknown",
+        "error": f"{type(error).__name__}: {error}",
+        "fresh_run": {},
+        "stages": {},
     }
 
 
@@ -310,7 +344,7 @@ def attach_post_render_manifest(
     accepted: bool, case_id: str | None = None, run_id: str | None = None,
 ) -> dict[str, Any]:
     """Record the two-stage artifact chain without rewriting pre-render receipts."""
-    payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+    payload = strict_json_loads(manifest_path.read_text(encoding="utf-8"))
     old_comparison = payload.get("format_comparison")
     payload["pre_render_output"] = str(pre_render_docx.resolve())
     payload["pre_render_format_comparison"] = old_comparison
@@ -340,7 +374,7 @@ def attach_post_render_manifest(
         payload["submission_ready"] = True
     atomic_write_text(
         manifest_path,
-        json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+        strict_json_dumps(payload, ensure_ascii=False, indent=2) + "\n",
     )
     return payload
 
@@ -349,7 +383,7 @@ def canonical_profile_report(work: Path) -> dict[str, Any] | None:
     path = work / "thesis-profile.json"
     if not path.exists():
         return None
-    profile = json.loads(path.read_text(encoding="utf-8"))
+    profile = strict_json_loads(path.read_text(encoding="utf-8"))
     return {
         "path": str(path.resolve()),
         "metadata_status": profile.get("metadata_status"),
@@ -377,7 +411,7 @@ def extraction_report(work: Path, *, requirements_dir: Path | None = None,
             "merge_receipt": str(receipt.resolve()) if receipt.exists() else None,
         })
     if extraction_manifest.exists():
-        data = json.loads(extraction_manifest.read_text(encoding="utf-8"))
+        data = strict_json_loads(extraction_manifest.read_text(encoding="utf-8"))
         report.update({
             "run_id": data.get("run_id"),
             "cache_reused": data.get("cache_reused"),
@@ -385,14 +419,14 @@ def extraction_report(work: Path, *, requirements_dir: Path | None = None,
             "semantic_review_provenance": data.get("semantic_review_provenance"),
         })
     if format_spec.exists():
-        spec = json.loads(format_spec.read_text(encoding="utf-8"))
+        spec = strict_json_loads(format_spec.read_text(encoding="utf-8"))
         registry = spec.get("resource_registry") if isinstance(spec, dict) else None
         report.update({
             "declarations_present": isinstance(spec, dict) and spec.get("declarations") is not None,
             "resource_registry_present": isinstance(registry, dict),
         })
     if pipeline_manifest.exists():
-        data = json.loads(pipeline_manifest.read_text(encoding="utf-8"))
+        data = strict_json_loads(pipeline_manifest.read_text(encoding="utf-8"))
         report["pipeline_status"] = data.get("status")
         report["host_agent_review_manifest"] = data.get("host_agent_review_manifest")
     return report
@@ -419,8 +453,8 @@ def _read_artifact_json(value: Any, *, root: Path) -> tuple[Path | None, dict[st
     if path is None or not path.is_file():
         return path, None
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        payload = strict_json_loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
         return path, None
     return path, payload if isinstance(payload, dict) else None
 
@@ -549,9 +583,9 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
             blockers.append("manual_review_ledger_missing")
         else:
             try:
-                payload = json.loads(manual_path.read_text(encoding="utf-8"))
+                payload = strict_json_loads(manual_path.read_text(encoding="utf-8"))
                 manual_ledger = payload if isinstance(payload, dict) else None
-            except (OSError, json.JSONDecodeError):
+            except (OSError, ValueError):
                 manual_ledger = None
             if not isinstance(manual_ledger, dict):
                 blockers.append("manual_review_ledger_invalid")
@@ -597,9 +631,9 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
             blockers.append("manual_review_markers_missing")
         else:
             try:
-                payload = json.loads(markers_path.read_text(encoding="utf-8"))
+                payload = strict_json_loads(markers_path.read_text(encoding="utf-8"))
                 markers = payload if isinstance(payload, dict) else None
-            except (OSError, json.JSONDecodeError):
+            except (OSError, ValueError):
                 markers = None
             if not isinstance(markers, dict) or markers.get("policy") != "review_draft":
                 blockers.append("manual_review_markers_invalid")
@@ -613,9 +647,9 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
             blockers.append("capability_artifact_missing")
         else:
             try:
-                payload = json.loads(capability_path.read_text(encoding="utf-8"))
+                payload = strict_json_loads(capability_path.read_text(encoding="utf-8"))
                 capability = payload if isinstance(payload, dict) else None
-            except (OSError, json.JSONDecodeError):
+            except (OSError, ValueError):
                 capability = None
             if capability is None or capability.get("status") == "failed":
                 blockers.append("capability_artifact_invalid")
@@ -692,9 +726,9 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
             blockers.append("validation_report_missing_or_invalid")
         else:
             try:
-                payload = json.loads(validation_path.read_text(encoding="utf-8"))
+                payload = strict_json_loads(validation_path.read_text(encoding="utf-8"))
                 validation = payload if isinstance(payload, dict) else None
-            except (OSError, json.JSONDecodeError):
+            except (OSError, ValueError):
                 validation = None
             if validation is None:
                 blockers.append("validation_report_missing_or_invalid")
@@ -802,9 +836,9 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
             blockers.append("review_draft_comparison_missing")
         else:
             try:
-                payload = json.loads(comparison_path.read_text(encoding="utf-8"))
+                payload = strict_json_loads(comparison_path.read_text(encoding="utf-8"))
                 comparison = payload if isinstance(payload, dict) else None
-            except (OSError, json.JSONDecodeError):
+            except (OSError, ValueError):
                 comparison = None
             if comparison is None or comparison.get("status") != "review_draft_pending":
                 blockers.append("review_draft_comparison_status_invalid")
@@ -845,9 +879,9 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
         post_acceptance_path = None
     elif post_acceptance_path is not None and post_acceptance_path.is_file():
         try:
-            payload = json.loads(post_acceptance_path.read_text(encoding="utf-8"))
+            payload = strict_json_loads(post_acceptance_path.read_text(encoding="utf-8"))
             post_acceptance = payload if isinstance(payload, dict) else None
-        except (OSError, json.JSONDecodeError):
+        except (OSError, ValueError):
             post_acceptance = None
     # Full compliance is never accepted on the basis of the pre-render DOCX.
     # The post-Word chain is a mandatory release gate, even when its manifest
@@ -940,8 +974,8 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
     schema = None
     if schema_path and schema_path.is_file():
         try:
-            schema = json.loads(schema_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+            schema = strict_json_loads(schema_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
             schema = None
     checks["schema_validation"] = str(schema_path) if schema_path else None
     if not isinstance(schema, dict) or schema.get("valid") is not True:
@@ -951,9 +985,9 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
     capability = None
     if capability_path is not None and capability_path.is_file():
         try:
-            payload = json.loads(capability_path.read_text(encoding="utf-8"))
+            payload = strict_json_loads(capability_path.read_text(encoding="utf-8"))
             capability = payload if isinstance(payload, dict) else None
-        except (OSError, json.JSONDecodeError):
+        except (OSError, ValueError):
             capability = None
     checks["capability_preflight"] = str(capability_path) if capability_path else None
     if capability is None or capability.get("status") in {"blocked", "failed"}:
@@ -983,9 +1017,9 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
     validation = None
     if validation_path is not None and validation_path.is_file():
         try:
-            payload = json.loads(validation_path.read_text(encoding="utf-8"))
+            payload = strict_json_loads(validation_path.read_text(encoding="utf-8"))
             validation = payload if isinstance(payload, dict) else None
-        except (OSError, json.JSONDecodeError):
+        except (OSError, ValueError):
             validation = None
     checks["validation_report"] = str(validation_path) if validation_path else None
     if validation is None:
@@ -1034,9 +1068,9 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
     comparison = None
     if comparison_path is not None and comparison_path.is_file():
         try:
-            payload = json.loads(comparison_path.read_text(encoding="utf-8"))
+            payload = strict_json_loads(comparison_path.read_text(encoding="utf-8"))
             comparison = payload if isinstance(payload, dict) else None
-        except (OSError, json.JSONDecodeError):
+        except (OSError, ValueError):
             comparison = None
     checks["format_comparison"] = str(comparison_path) if comparison_path else None
     if comparison is None or comparison.get("status") != "passed":
@@ -1053,8 +1087,8 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
         render = None
         if render_path and render_path.is_file():
             try:
-                render = json.loads(render_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
+                render = strict_json_loads(render_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
                 render = None
         if not isinstance(render, dict):
             blockers.append("post_render_report_missing_or_invalid")
@@ -1082,8 +1116,8 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
         visual = None
         if visual_path and visual_path.is_file():
             try:
-                visual = json.loads(visual_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
+                visual = strict_json_loads(visual_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
                 visual = None
         if not isinstance(visual, dict) or visual.get("status") != "passed":
             blockers.append("post_render_pdf_visual_audit_not_passed")
@@ -1118,8 +1152,8 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
         audit = None
         if audit_path and audit_path.is_file():
             try:
-                audit = json.loads(audit_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
+                audit = strict_json_loads(audit_path.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
                 audit = None
         if not isinstance(audit, dict) or audit.get("submission_ready") is not True:
             blockers.append("post_render_submission_not_ready")
@@ -1268,9 +1302,9 @@ def run_case(base: Path, source: Path, case: dict[str, Any], *, prepare_host_rev
     if llm_case and auto_host_agent and prepare_result["returncode"] == 0:
         extraction_manifest = review_requirements / "extraction-manifest.json"
         try:
-            extraction = json.loads(extraction_manifest.read_text(encoding="utf-8"))
+            extraction = strict_json_loads(extraction_manifest.read_text(encoding="utf-8"))
             run_id = extraction["run_id"]
-        except (OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
+        except (OSError, ValueError, KeyError, TypeError) as exc:
             host_result = {
                 "returncode": 2,
                 "elapsed_s": 0.0,
@@ -1364,7 +1398,7 @@ def run_case(base: Path, source: Path, case: dict[str, Any], *, prepare_host_rev
         acceptance_out = post_dir / "post-render-acceptance.json"
         manifest_path = work / "pipeline-manifest.json"
         try:
-            pipeline_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            pipeline_manifest = strict_json_loads(manifest_path.read_text(encoding="utf-8"))
             extraction = pipeline_manifest.get("requirements_extraction")
             case_run_id = extraction.get("run_id") if isinstance(extraction, dict) else None
             if not isinstance(case_run_id, str) or not case_run_id:
@@ -1373,7 +1407,7 @@ def run_case(base: Path, source: Path, case: dict[str, Any], *, prepare_host_rev
             pipeline_manifest["case_run_id"] = case_run_id
             atomic_write_text(
                 manifest_path,
-                json.dumps(pipeline_manifest, ensure_ascii=False, indent=2) + "\n",
+                strict_json_dumps(pipeline_manifest, ensure_ascii=False, indent=2) + "\n",
             )
             style_record = ((pipeline_manifest.get("inputs") or {}).get("style_template")
                             if isinstance(pipeline_manifest, dict) else None)
@@ -1407,7 +1441,7 @@ def run_case(base: Path, source: Path, case: dict[str, Any], *, prepare_host_rev
                 label=f"[{case['id']}] Word render + final artifact acceptance",
                 timeout=stage_timeout,
             )
-        except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+        except (OSError, TypeError, ValueError) as exc:
             post_result = {
                 "returncode": 2,
                 "elapsed_s": 0.0,
@@ -1419,8 +1453,8 @@ def run_case(base: Path, source: Path, case: dict[str, Any], *, prepare_host_rev
         stages["post_render"] = post_result
         result = dict(post_result)
         try:
-            acceptance_payload = json.loads(acceptance_out.read_text(encoding="utf-8")) if acceptance_out.is_file() else None
-        except (OSError, json.JSONDecodeError):
+            acceptance_payload = strict_json_loads(acceptance_out.read_text(encoding="utf-8")) if acceptance_out.is_file() else None
+        except (OSError, ValueError):
             acceptance_payload = None
         attach_post_render_manifest(
             manifest_path,
@@ -1447,7 +1481,7 @@ def run_case(base: Path, source: Path, case: dict[str, Any], *, prepare_host_rev
         # cannot confuse “not run by draft policy” with an interrupted render.
         manifest_path = work / "pipeline-manifest.json"
         try:
-            pipeline_manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            pipeline_manifest = strict_json_loads(manifest_path.read_text(encoding="utf-8"))
             pipeline_manifest["post_render_status"] = "not_run_review_draft"
             pipeline_manifest["post_render_policy"] = (
                 "Word/PDF release rendering requires output-policy=submission "
@@ -1455,7 +1489,7 @@ def run_case(base: Path, source: Path, case: dict[str, Any], *, prepare_host_rev
             )
             atomic_write_text(
                 manifest_path,
-                json.dumps(pipeline_manifest, ensure_ascii=False, indent=2) + "\n",
+                strict_json_dumps(pipeline_manifest, ensure_ascii=False, indent=2) + "\n",
             )
             stages["post_render"] = {
                 "returncode": 0,
@@ -1463,7 +1497,7 @@ def run_case(base: Path, source: Path, case: dict[str, Any], *, prepare_host_rev
                 "command": [],
                 "reason": pipeline_manifest["post_render_policy"],
             }
-        except (OSError, json.JSONDecodeError, TypeError):
+        except (OSError, ValueError, TypeError):
             stages["post_render"] = {
                 "returncode": 2,
                 "status": "manifest_update_failed",
@@ -1667,13 +1701,16 @@ def main(argv: list[str] | None = None) -> int:
             "allow_supported_subset": bool(args.allow_supported_subset),
             "output_policy": args.output_policy,
             "canonical_case_order": [str(case["id"]) for case in selected],
+            "unstarted_case_ids": [
+                str(case["id"]) for case in selected if str(case["id"]) not in results
+            ],
             "terminal_status": terminal_status,
             "global_stop_reason": global_stop_reason,
             "cases": results,
         }
         atomic_write_text(
             base / "run-results.json",
-            json.dumps(payload, ensure_ascii=False, indent=2) + "\n",
+            strict_json_dumps(payload, ensure_ascii=False, indent=2) + "\n",
         )
 
     for case in selected:
@@ -1705,15 +1742,17 @@ def main(argv: list[str] | None = None) -> int:
                 word_timeout=args.word_timeout,
                 stage_timeout=args.stage_timeout,
             )
+        except KeyboardInterrupt:
+            result = interrupted_case_result(case)
+            results[str(case["id"])] = result
+            terminal_status = "interrupted"
+            global_stop_reason = (
+                f"{case['id']}: operator interruption; current stage outcome is unknown"
+            )
+            write_batch_results()
+            break
         except Exception as exc:  # keep each school independently auditable
-            result = {
-                "returncode": 2,
-                "case_id": case["id"],
-                "analysis_mode": case["analysis_mode"],
-                "error": f"{type(exc).__name__}: {exc}",
-                "fresh_run": {},
-                "stages": {},
-            }
+            result = failed_case_result(case, exc)
         result["acceptance"] = case_acceptance(result)
         results[str(case["id"])] = result
         write_batch_results()

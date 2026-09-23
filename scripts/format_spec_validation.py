@@ -14,11 +14,13 @@ from pathlib import Path
 from typing import Any
 
 try:
+    from .semantic_contract import strict_json_read
     from .resource_registry import fixed_text_sha256
     from .format_contract_guards import (
         cover_binding_errors, input_prerequisite_errors, verification_checker_errors,
     )
 except ImportError:  # direct script execution
+    from semantic_contract import strict_json_read
     from resource_registry import fixed_text_sha256
     from format_contract_guards import (
         cover_binding_errors, input_prerequisite_errors, verification_checker_errors,
@@ -171,7 +173,7 @@ def load_and_validate(
     required keys; malformed, blank, or misbound metadata is still rejected.
     Submission/full callers must keep the default.
     """
-    schema = json.loads(schema_path.read_text(encoding="utf-8"))
+    schema = strict_json_read(schema_path)
     errors = validate_instance(instance, schema)
     roles = instance.get("roles", {}) if isinstance(instance, dict) else {}
     for role, spec in roles.items() if isinstance(roles, dict) else []:

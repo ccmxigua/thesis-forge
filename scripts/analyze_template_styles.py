@@ -194,7 +194,7 @@ def analyze(path: Path) -> dict[str, Any]:
                 best = canonical[0]
                 tied = [best]
         if len(tied) > 1 or best["score"] < 70:
-            questions.append({"id": f"Q{len(questions)+1:04d}", "role": role,
+            questions.append({"question_id": f"Q{len(questions)+1:04d}", "role": role,
                               "question": "哪个 Word 样式对应此语义角色？", "candidates": candidates[:5]})
             continue
         # Structural roles may legitimately share a generic paragraph style:
@@ -202,7 +202,7 @@ def analyze(path: Path) -> dict[str, Any]:
         prior_roles = used_by.get(best["style_name"], set())
         if (prior_roles and role not in {"header", "footer", "table_text", "equation"}
                 and not safe_text_disambiguated_reuse(role, prior_roles, best)):
-            questions.append({"id": f"Q{len(questions)+1:04d}", "role": role,
+            questions.append({"question_id": f"Q{len(questions)+1:04d}", "role": role,
                               "question": "候选样式已映射到其他角色，是否复用？", "candidates": candidates[:5]})
             continue
         used_by[best["style_name"]].add(role)

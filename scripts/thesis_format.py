@@ -31,6 +31,7 @@ from host_runtime import (  # noqa: E402
     require_host_runtime,
 )
 from process_runner import run_process  # noqa: E402
+from semantic_contract import strict_json_read  # noqa: E402
 
 
 def pipeline_command(args: argparse.Namespace, *, prepare_host_review: bool = False,
@@ -209,9 +210,9 @@ def main(argv: list[str]) -> int:
             return code
         extraction_manifest = review_requirements / "extraction-manifest.json"
         try:
-            payload = json.loads(extraction_manifest.read_text(encoding="utf-8"))
+            payload = strict_json_read(extraction_manifest)
             run_id = payload["run_id"]
-        except (OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
+        except (OSError, ValueError, KeyError, TypeError) as exc:
             print(f"auto Host Agent failed: cannot read fresh run_id: {exc}", file=sys.stderr)
             return 2
         response_out = args.work_dir.resolve() / "review" / "host-agent-response.json"
@@ -278,9 +279,9 @@ def main(argv: list[str]) -> int:
                 "host-agent-run.json, and merge-receipt.json under --work-dir/review/requirements"
             )
         try:
-            extraction = json.loads(extraction_manifest.read_text(encoding="utf-8"))
+            extraction = strict_json_read(extraction_manifest)
             current_run_id = extraction["run_id"]
-        except (OSError, json.JSONDecodeError, KeyError, TypeError) as exc:
+        except (OSError, ValueError, KeyError, TypeError) as exc:
             p.error(f"cannot read fresh semantic-review run_id: {exc}")
         command = pipeline_command(
             args, llm_response=args.llm_response,

@@ -250,6 +250,11 @@ pass. The ten-school batch runner defaults to this policy. Use
 submission-mode run has been started fresh; that mode retains the full
 fail-closed capability, render, and final audit gates.
 
+`--allow-offline-review` is only a non-release test escape hatch. It requires
+`--output-policy review_draft` and cannot be combined with
+`--require-submission-ready` or `--strict-release`; a supplied response without
+current host receipts must never be presented as submission-ready.
+
 ### Visible review-draft placeholders
 
 Every ledger item must have one visible `MR-xxxx` marker in the editable DOCX.
@@ -343,9 +348,21 @@ context, and the complete chunk list. Native runs record a lifecycle entry for
 every chunk and attempt, including not-started, retrying, terminated, and
 remote-unobservable states. A failure never produces a partial merged response,
 and an existing response, audit, or attempt file is never reused. Contract 3.0
-also writes a deterministic `semantic-review-ledger.json`; it records only
-accepted requirement edges and explicit model-supplied obligations, never
-guessing a missing semantic relation.
+also writes a deterministic `semantic-review-ledger.json`; it records accepted
+requirement edges, explicit model-supplied semantic obligations, and a separate
+code-compiled inventory of narrowly recognized source facts. The model does
+not need to echo compiler IDs: the shared validator checks each known fact
+against its linked role-specific requirement properties, and the ledger records
+those candidate bindings separately. This inventory is a mechanical floor,
+not a claim that every natural-language obligation can be compiled; semantic
+decomposition remains separately required. Before a native chunk is accepted,
+the bridge makes a separate source-first coverage-review call through the same
+current host route. It must cover the exact clause set, cite source text, bind
+to the candidate response hash, and account for each identified obligation;
+an incomplete or failed review prevents chunk acceptance and merge. This is a
+fresh second review, not a different provider/model or a guarantee of
+statistically independent judgment; unobservable host model identity remains
+unverified.
 
 ### 2. Merge and format locally
 

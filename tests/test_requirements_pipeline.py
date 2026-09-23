@@ -116,6 +116,49 @@ def make_multi_section_target(path: Path) -> None:
 
 
 class RequirementsPipelineTest(unittest.TestCase):
+    def test_unresolved_reported_conflict_is_preserved_and_blocks_release(self) -> None:
+        clause = {
+            "id": "C1", "text": "正文使用宋体", "evidence_ids": ["E1"],
+            "source_kind": "paragraph", "location": {}, "part_index": 0,
+        }
+        response = {
+            "contract_version": "3.0",
+            "requirements": [],
+            "clause_reviews": [{
+                "clause_id": "C1", "classification": "informational",
+                "reason": "The source statements conflict and cannot be resolved automatically.",
+            }],
+            "unsupported_items": [],
+            "reported_conflicts": [{
+                "type": "source_conflict",
+                "reason": "Two cited source facts prescribe different body fonts.",
+                "clause_ids": ["C1"], "evidence_ids": ["E1"],
+                "target": {"role": "body_text", "property": "font"},
+                "candidates": [{
+                    "evidence_id": "E1", "value_type": "object",
+                    "value_json": json.dumps({"cjk": "SimSun", "size_pt": 12}),
+                }],
+                "status": "requires_human_review",
+            }],
+        }
+        spec, conflicts, audit = requirements_engine.merge_llm_primary(
+            Path("synthetic-source"),
+            {"schema_version": "1.0", "source_document": "synthetic-source",
+             "roles": {}, "page": {}, "requirements": [], "content_instances": []},
+            [clause], response, {"E1"},
+        )
+        self.assertEqual(spec["semantic_conflicts"], response["reported_conflicts"])
+        self.assertEqual(spec["status"], "needs_clarification")
+        self.assertIn({
+            "type": "llm_reported_conflict", "conflict_index": 0,
+            "conflict_type": "source_conflict", "status": "requires_human_review",
+            "reason": "Two cited source facts prescribe different body fonts.",
+            "clause_ids": ["C1"], "evidence_ids": ["E1"],
+        }, spec["blocking_errors"])
+        self.assertTrue(any(item.get("type") == "source_conflict" for item in conflicts))
+        gate = next(item for item in audit if item.get("type") == "post_merge_gate")
+        self.assertEqual(gate["unresolved_reported_conflict_count"], 1)
+
     def test_preprocess_infers_xrefs_without_aux(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             td = Path(td); source = td / "source.tex"; output = td / "preprocessed.tex"
@@ -494,7 +537,7 @@ b&=2\notag
             td = Path(td); req = td / "requirements.docx"; out = td / "out"; response = td / "response.json"
             make_requirements(req, ambiguous=True); run("scripts/requirements_engine.py", str(req), "--out", str(out), "--analysis-mode", "rule_only")
             q = json.loads((out / "questions.json").read_text())[0]
-            response.write_text(json.dumps({"resolutions": [{"question_id": q["id"], "unresolved": False,
+            response.write_text(json.dumps({"resolutions": [{"question_id": q["question_id"], "unresolved": False,
                 "role": "thesis_title_zh", "evidence_ids": q["evidence_ids"], "reason": "context"}]}, ensure_ascii=False))
             run("scripts/requirements_engine.py", str(req), "--out", str(out), "--analysis-mode", "rule_only", "--llm-response", str(response))
             spec = json.loads((out / "format-spec.json").read_text())
@@ -2540,7 +2583,7 @@ b&=2\notag
         self.assertEqual(requirements_engine.validate_spec(spec, {"E1", "E2"}), [])
         self.assertTrue(any("fields.variant" in str(item.get("property")) for item in conflicts), conflicts)
 
-    def test_full_compliance_blocks_applicable_backend_gap(self) -> None:
+    def test_offline_full_review_draft_records_backend_gap_without_release(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             td = Path(td); req = td / "requirements.docx"; target = td / "target.docx"
             preview = td / "preview"; response = td / "response.json"; work = td / "work"
@@ -2575,10 +2618,29 @@ b&=2\notag
                              "--work-dir", str(work), "--llm-response", str(response),
                              "--run-id", bound["provenance"]["run_id"],
                              "--analysis-mode", "llm_primary", "--compliance-mode", "full",
+                             "--output-policy", "review_draft",
                              "--allow-offline-review")
-            self.assertEqual(result.returncode, 3, result.stderr + result.stdout)
+            self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
             manifest = json.loads((work / "pipeline-manifest.json").read_text())
-            self.assertIn("full_compliance_analysis_failed", manifest["blocking_reasons"])
+            self.assertEqual(manifest["output_policy"], "review_draft")
+            self.assertEqual(manifest["capability_backend_gaps"], 1)
+            report = json.loads((work / "application" / "validation-report.json").read_text())
+            self.assertFalse(report["docx_fully_compliant"])
+            self.assertFalse(report["submission_ready"])
+            self.assertTrue((td / "output.docx").is_file())
+
+    def test_offline_review_cannot_use_submission_output_policy(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td)
+            result = run_raw(
+                "scripts/thesis_format_pipeline.py",
+                str(td / "requirements.docx"), str(td / "input.docx"), str(td / "output.docx"),
+                "--work-dir", str(td / "work"), "--llm-response", str(td / "response.json"),
+                "--analysis-mode", "llm_primary", "--compliance-mode", "full",
+                "--allow-offline-review",
+            )
+            self.assertEqual(result.returncode, 2, result.stderr + result.stdout)
+            self.assertIn("--allow-offline-review is non-release only", result.stderr)
             self.assertFalse((td / "output.docx").exists())
 
     def test_full_compliance_emits_clause_and_external_reports(self) -> None:
@@ -2620,15 +2682,20 @@ b&=2\notag
                              "--work-dir", str(work), "--llm-response", str(response),
                              "--run-id", bound["provenance"]["run_id"],
                              "--analysis-mode", "llm_primary", "--compliance-mode", "full",
+                             "--output-policy", "review_draft",
                              "--allow-offline-review")
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
             report = json.loads((work / "application" / "validation-report.json").read_text())
-            self.assertTrue(report["docx_fully_compliant"])
-            self.assertEqual(report["overall_status"], "passed")
+            self.assertFalse(report["docx_fully_compliant"])
+            self.assertFalse(report["submission_ready"])
+            self.assertEqual(report["overall_status"], "review_draft_pending")
             clauses = json.loads((work / "application" / "clause-compliance-report.json").read_text())
             self.assertEqual(clauses["docx_compliance"]["counts"]["generated_and_verified"], 1)
             checklist = json.loads((work / "application" / "external-compliance-checklist.json").read_text())
             self.assertEqual([item["clause_id"] for item in checklist], [external["id"]])
+            manifest = json.loads((work / "pipeline-manifest.json").read_text())
+            self.assertEqual(manifest["status"], "draft_manual_review")
+            self.assertFalse(manifest["submission_ready"])
 
     def test_three_line_table_pagination_rules_are_applied_and_audited(self) -> None:
         with tempfile.TemporaryDirectory() as td:

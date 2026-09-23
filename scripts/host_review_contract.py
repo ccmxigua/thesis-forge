@@ -4,14 +4,20 @@ from __future__ import annotations
 import re
 import hashlib
 import json
+import copy
 from typing import Any
 
 from compliance import classification_requires_requirement
 from evidence_context_guards import sample_content_guard
 from format_spec_validation import schema_support_errors, validate_instance
 from format_contract_guards import cover_binding_errors
+from semantic_contract import strict_json_loads
 from existing_requirement_contract import (
     existing_reference_errors, project_authoritative_existing_payloads,
+)
+from source_obligation_compiler import (
+    compile_known_source_obligations,
+    materialize_known_source_verification,
 )
 
 
@@ -170,7 +176,7 @@ def project_compatibility_indexes(
     response: dict[str, Any], clauses: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """Return a local compatibility view without changing the model response."""
-    projected = json.loads(json.dumps(response, ensure_ascii=False))
+    projected = copy.deepcopy(response)
     mapping = derived_requirement_indexes(projected, clauses)
     for review in projected.get("clause_reviews", []) if isinstance(projected.get("clause_reviews"), list) else []:
         if not isinstance(review, dict):
@@ -300,6 +306,7 @@ def contract_error_records(
                 "mixed_execution_classification_relation", "missing_clause_review",
                 "unknown_clause_relation", "non_requirement_classification_relation",
                 "unused_executable_requirement",
+                "executable_review_obligations_missing",
                 "executable_review_obligations_uncovered",
                 "non_public_administration_fields_missing",
             },
@@ -416,6 +423,8 @@ def contract_error_records(
             code = "requirement_relation_mismatch"
         elif "executable_review_requires_derived_requirement" in lowered:
             code = "missing_derived_requirement"
+        elif "executable_review_requires_non_empty_inventory" in lowered:
+            code = "executable_review_obligations_missing"
         elif "executable_review_requires_all_obligations_covered" in lowered:
             code = "executable_review_obligations_uncovered"
         elif "mixed_execution_classification_relation" in lowered:
@@ -657,60 +666,85 @@ def _keyword_obligation_gaps(
 def _table_obligation_gaps(
     clause: dict[str, Any], requirements: list[dict[str, Any]], indexes: list[int],
 ) -> list[str]:
-    """Keep continuation-table obligations atomic and evidence-backed.
+    """Validate each compiled table fact against its role-specific payload.
 
-    A continuation/table clause commonly combines the marker, repeated header,
-    caption position and caption alignment.  A table-level continuation object
-    cannot silently stand in for a separate caption requirement.  This guard
-    only checks explicit, mechanically representable obligations; it does not
-    infer an omitted semantic rule.
+    The model-authored obligation IDs are intentionally irrelevant here.  This
+    deterministic inventory is checked against actual linked requirement
+    properties so a prose ID mismatch cannot hide a missing property, and a
+    model is not required to echo code-owned IDs.
     """
-    text = re.sub(r"\s+", "", str(clause.get("text") or clause.get("source_text_full") or ""))
-    if not re.search(r"表|table", text, re.I):
-        return []
+    source_text = clause.get("text") or clause.get("source_text_full")
     selected = [
         requirements[index] for index in indexes
         if isinstance(index, int) and 0 <= index < len(requirements)
         and isinstance(requirements[index], dict)
     ]
-    table_requirements = [item for item in selected if item.get("role") == "table"]
-    caption_requirements = [item for item in selected if item.get("role") in {"table_caption", "figure_table_title"}]
+
+    def read_property(value: Any, path: str) -> Any:
+        current = value
+        for part in path.split("."):
+            if not isinstance(current, dict) or part not in current:
+                return None
+            current = current[part]
+        return current
+
+    def exact_match(actual: Any, expected: Any) -> bool:
+        if isinstance(expected, bool):
+            return isinstance(actual, bool) and actual is expected
+        return actual == expected
+
     gaps: list[str] = []
-    continuation_values = [
-        item.get("properties", {}).get("continuation")
-        for item in table_requirements
-        if isinstance(item.get("properties"), dict)
-    ]
-    continuation_values = [item for item in continuation_values if isinstance(item, dict)]
-    if "续" in text or "continuation" in text.lower():
-        if not any(item.get("caption_suffix") == "(续)" for item in continuation_values):
-            gaps.append("table.continuation.caption_suffix")
-        if "重复表头" in text or "repeatheader" in text.lower():
-            if not any(item.get("repeat_header_row") is True for item in continuation_values):
-                gaps.append("table.continuation.repeat_header_row")
-        if re.search(r"可省略|可略", text) and any(
-            item.get("caption_required_on_continuation") is True for item in continuation_values
+    for fact in compile_known_source_obligations(source_text):
+        candidates = [
+            item for item in selected
+            if item.get("role") in fact["roles"]
+        ]
+        payload_path = str(fact["property_path"])
+        if payload_path.startswith("properties."):
+            payload_path = payload_path[len("properties."):]
+        values = [
+            read_property(item.get("properties"), payload_path)
+            for item in candidates
+        ]
+        explicit_values = [value for value in values if value is not None]
+        expected = fact["expected_value"]
+        matched_requirements = [
+            item for item, value in zip(candidates, values)
+            if value is not None and exact_match(value, expected)
+        ]
+        if not matched_requirements or any(
+            not exact_match(value, expected) for value in explicit_values
         ):
-            gaps.append("table.continuation.optional_caption_marked_required")
-    if re.search(r"表上方|置于表上|表上.*居中|居中.*表上", text):
-        if not any(item.get("properties", {}).get("position") == "above" for item in caption_requirements):
-            gaps.append("table_caption.position:above")
-    if "居中" in text:
-        if not any(
-            (item.get("properties", {}).get("paragraph") or {}).get("alignment") == "center"
-            for item in caption_requirements
-        ):
-            gaps.append("table_caption.paragraph.alignment:center")
+            gaps.append(str(fact["id"]))
+            continue
+        for checker_id in fact.get("required_checker_ids", []):
+            if not any(
+                isinstance(item.get("verification"), dict)
+                and checker_id in (item["verification"].get("checker_ids") or [])
+                for item in matched_requirements
+            ):
+                gaps.append(f"{fact['id']}:missing_checker:{checker_id}")
     return gaps
 
 
-def _validate_obligations(review: dict[str, Any], review_index: int) -> list[str]:
+def _validate_obligations(
+    review: dict[str, Any], review_index: int, *,
+    require_semantic_decomposition: bool = False,
+) -> list[str]:
     obligations = review.get("obligations")
     if obligations is None:
+        if require_semantic_decomposition and classification_requires_requirement(str(review.get("classification"))):
+            return [
+                f"$.clause_reviews[{review_index}].obligations: executable_review_requires_non_empty_inventory"
+            ]
         return []
     if not isinstance(obligations, list):
         return [f"$.clause_reviews[{review_index}].obligations: must_be_array"]
     errors: list[str] = []
+    if require_semantic_decomposition and classification_requires_requirement(str(review.get("classification"))) and not obligations:
+        errors.append(
+            f"$.clause_reviews[{review_index}].obligations: executable_review_requires_non_empty_inventory"
+        )
     seen: set[str] = set()
     for index, obligation in enumerate(obligations):
         if not isinstance(obligation, dict):
@@ -731,6 +765,213 @@ def _validate_obligations(review: dict[str, Any], review_index: int) -> list[str
         errors.append(
             f"$.clause_reviews[{review_index}].obligations: executable_review_requires_all_obligations_covered"
         )
+    # ``obligations[].id`` and text are model-owned semantic decomposition.
+    # Code-owned, mechanically recognizable facts are checked independently
+    # against linked requirement payloads by _table_obligation_gaps (and the
+    # abstract/keyword guards); requiring the model to echo compiler IDs would
+    # duplicate a machine fact in a fragile output field without adding proof.
+    return errors
+
+
+def _conflict_target_property_known(
+    target: Any, role_schemas: Any, contract_root: dict[str, Any],
+) -> bool:
+    return _conflict_target_property_schema(
+        target, role_schemas, contract_root,
+    ) is not None
+
+
+def _conflict_target_property_schema(
+    target: Any, role_schemas: Any, contract_root: dict[str, Any],
+) -> dict[str, Any] | None:
+    if not isinstance(target, dict):
+        return None
+    role = target.get("role")
+    property_name = target.get("property")
+    if not isinstance(role, str) or not isinstance(property_name, str):
+        return None
+    if property_name.startswith("properties."):
+        property_name = property_name.removeprefix("properties.")
+    # Permit nested role properties and identity-selected array members such
+    # as ``font.size_pt`` and ``fields[classification_number].label``.  The
+    # selector is accepted only when the item schema explicitly enumerates
+    # that identity; it is never treated as an arbitrary array index.
+    tokens = [
+        (name, selector or None)
+        for name, selector in re.findall(
+            r"([A-Za-z_][A-Za-z0-9_-]*)(?:\[([^\]]+)\])?", property_name,
+        )
+    ]
+    if not tokens or ".".join(
+        name + (f"[{selector}]" if selector else "") for name, selector in tokens
+    ) != property_name:
+        return None
+
+    def dereference(value: Any) -> dict[str, Any] | None:
+        seen: set[str] = set()
+        while isinstance(value, dict) and isinstance(value.get("$ref"), str):
+            reference = value["$ref"]
+            if reference in seen or not reference.startswith("#/$defs/"):
+                return None
+            seen.add(reference)
+            value = contract_root.get("$defs", {}).get(reference.removeprefix("#/$defs/"))
+        return value if isinstance(value, dict) else None
+
+    schema: Any = role_schemas.get(role) if isinstance(role_schemas, dict) else None
+    for name, selector in tokens:
+        schema = dereference(schema)
+        properties = schema.get("properties") if isinstance(schema, dict) else None
+        schema = properties.get(name) if isinstance(properties, dict) else None
+        if not isinstance(schema, dict):
+            return None
+        if selector is not None:
+            array_schema = dereference(schema)
+            if not isinstance(array_schema, dict) or array_schema.get("type") != "array":
+                return None
+            item_schema = dereference(array_schema.get("items"))
+            if not isinstance(item_schema, dict) or item_schema.get("type") != "object":
+                return None
+            identity_schema = item_schema.get("properties", {}).get("id")
+            identity_schema = dereference(identity_schema)
+            allowed_ids = identity_schema.get("enum") if isinstance(identity_schema, dict) else None
+            if not isinstance(allowed_ids, list) or selector not in allowed_ids:
+                return None
+            schema = item_schema
+    return dereference(schema)
+
+
+def _conflict_candidate_value(candidate: dict[str, Any]) -> tuple[bool, Any, str | None]:
+    """Decode the closed scalar or strict-JSON conflict candidate form."""
+    if "value_json" not in candidate:
+        if "value" not in candidate:
+            return False, None, "missing_value"
+        value = candidate["value"]
+        if isinstance(value, (dict, list)):
+            return False, None, "structured_value_requires_value_json"
+        return True, value, None
+    raw = candidate.get("value_json")
+    if not isinstance(raw, str):
+        return False, None, "value_json_must_be_string"
+    try:
+        value = strict_json_loads(raw)
+    except (TypeError, ValueError, json.JSONDecodeError) as exc:
+        return False, None, f"value_json_invalid:{exc}"
+    expected_type = candidate.get("value_type")
+    actual_type = (
+        "null" if value is None else "boolean" if isinstance(value, bool)
+        else "object" if isinstance(value, dict) else "array" if isinstance(value, list)
+        else "number" if isinstance(value, (int, float)) else "string" if isinstance(value, str)
+        else "unsupported"
+    )
+    if expected_type != actual_type:
+        return False, None, f"value_type_mismatch:expected_{expected_type}_got_{actual_type}"
+    return True, value, None
+
+
+def _reported_conflict_errors(
+    response: dict[str, Any], *, clause_map: dict[str, dict[str, Any]],
+    evidence_context: dict[str, Any], role_schemas: Any, contract_root: dict[str, Any],
+) -> list[str]:
+    """Validate that reported conflicts refer only to this chunk's bound facts."""
+    conflicts = response.get("reported_conflicts")
+    if not isinstance(conflicts, list):
+        return ["$.reported_conflicts: must_be_array"]
+    evidence_ids = {str(key) for key in evidence_context}
+    errors: list[str] = []
+    for index, conflict in enumerate(conflicts):
+        if not isinstance(conflict, dict):
+            errors.append(f"$.reported_conflicts[{index}]: must_be_object")
+            continue
+        clause_values = conflict.get("clause_ids")
+        evidence_values = conflict.get("evidence_ids")
+        if not isinstance(clause_values, list) or not clause_values:
+            errors.append(f"$.reported_conflicts[{index}].clause_ids: must_be_non_empty_array")
+            clause_values = []
+        if not isinstance(evidence_values, list) or not evidence_values:
+            errors.append(f"$.reported_conflicts[{index}].evidence_ids: must_be_non_empty_array")
+            evidence_values = []
+        clause_refs = [str(value) for value in clause_values]
+        evidence_refs = [str(value) for value in evidence_values]
+        if len(clause_refs) != len(set(clause_refs)):
+            errors.append(f"$.reported_conflicts[{index}].clause_ids: duplicate")
+        if len(evidence_refs) != len(set(evidence_refs)):
+            errors.append(f"$.reported_conflicts[{index}].evidence_ids: duplicate")
+        unknown_clauses = sorted(set(clause_refs) - set(clause_map))
+        if unknown_clauses:
+            errors.append(
+                f"$.reported_conflicts[{index}].clause_ids: unknown:{','.join(unknown_clauses)}"
+            )
+        unknown_evidence = sorted(set(evidence_refs) - evidence_ids)
+        if unknown_evidence:
+            errors.append(
+                f"$.reported_conflicts[{index}].evidence_ids: not_in_chunk:{','.join(unknown_evidence)}"
+            )
+        clause_evidence = {
+            str(evidence_id)
+            for clause_id in clause_refs
+            for evidence_id in (clause_map.get(clause_id, {}).get("evidence_ids") or [])
+        }
+        unbound_evidence = sorted(set(evidence_refs) - clause_evidence)
+        if unbound_evidence:
+            errors.append(
+                f"$.reported_conflicts[{index}].evidence_ids: not_backed_by_conflict_clause:"
+                + ",".join(unbound_evidence)
+            )
+        target = conflict.get("target")
+        if target is not None and not _conflict_target_property_known(
+            target, role_schemas, contract_root,
+        ):
+            errors.append(
+                f"$.reported_conflicts[{index}].target: unknown_registered_role_property"
+            )
+        candidates = conflict.get("candidates")
+        if candidates is not None:
+            if not isinstance(candidates, list):
+                errors.append(f"$.reported_conflicts[{index}].candidates: must_be_array")
+                continue
+            for candidate_index, candidate in enumerate(candidates):
+                if not isinstance(candidate, dict):
+                    continue  # The closed schema reports the shape error.
+                candidate_evidence = str(candidate.get("evidence_id"))
+                if candidate_evidence not in evidence_refs:
+                    errors.append(
+                        f"$.reported_conflicts[{index}].candidates[{candidate_index}].evidence_id: "
+                        "must_reference_conflict_evidence"
+                    )
+                decoded, candidate_value, candidate_error = _conflict_candidate_value(candidate)
+                if not decoded:
+                    errors.append(
+                        f"$.reported_conflicts[{index}].candidates[{candidate_index}]:{candidate_error}"
+                    )
+                    continue
+                if target is not None:
+                    target_schema = _conflict_target_property_schema(
+                        target, role_schemas, contract_root,
+                    )
+                    if target_schema is not None:
+                        value_errors = validate_instance(
+                            candidate_value, target_schema, contract_root,
+                            f"$.reported_conflicts[{index}].candidates[{candidate_index}].value",
+                        )
+                        if value_errors:
+                            errors.append(
+                                f"$.reported_conflicts[{index}].candidates[{candidate_index}].value: "
+                                "does_not_match_target_property_schema"
+                            )
+        conditions = conflict.get("conditions")
+        if conditions is not None:
+            if not isinstance(conditions, list):
+                errors.append(f"$.reported_conflicts[{index}].conditions: must_be_array")
+                continue
+            for condition_index, condition in enumerate(conditions):
+                if not isinstance(condition, dict):
+                    continue  # The closed schema reports the shape error.
+                condition_evidence = str(condition.get("evidence_id") or "")
+                if condition_evidence not in evidence_refs:
+                    errors.append(
+                        f"$.reported_conflicts[{index}].conditions[{condition_index}].evidence_id: "
+                        "must_reference_conflict_evidence"
+                    )
     return errors
 
 
@@ -759,6 +1000,9 @@ def validate_response(response: Any, chunk: dict[str, Any]) -> list[str]:
     response, _ = project_authoritative_existing_payloads(
         response, existing_map, clause_map_for_binding,
     )
+    response, _ = materialize_known_source_verification(
+        response, chunk.get("clauses"),
+    )
     errors: list[str] = []
     contract_version = response.get("contract_version")
     if contract_version not in SUPPORTED_HOST_REVIEW_CONTRACTS:
@@ -769,6 +1013,29 @@ def validate_response(response: Any, chunk: dict[str, Any]) -> list[str]:
     else:
         errors.extend(schema_support_errors(response_schema))
         errors.extend(validate_instance(response, response_schema, response_schema))
+        # Emit a field-level diagnostic for the discriminated role union.
+        # Generic anyOf failures otherwise hide which role-specific payload
+        # field the provider got wrong, making retry feedback needlessly vague.
+        item_schema = (
+            response_schema.get("properties", {}).get("requirements", {}).get("items")
+            if isinstance(response_schema.get("properties"), dict) else None
+        )
+        branches = item_schema.get("anyOf") if isinstance(item_schema, dict) else None
+        if isinstance(branches, list) and isinstance(response.get("requirements"), list):
+            for index, item in enumerate(response["requirements"]):
+                if not isinstance(item, dict):
+                    continue
+                role = item.get("role")
+                branch = next((
+                    candidate for candidate in branches
+                    if isinstance(candidate, dict)
+                    and isinstance(candidate.get("properties"), dict)
+                    and candidate["properties"].get("role", {}).get("enum") == [role]
+                ), None)
+                if isinstance(branch, dict):
+                    errors.extend(validate_instance(
+                        item, branch, response_schema, f"$.requirements[{index}]",
+                    ))
 
     contract = chunk.get("requirement_contract")
     if not isinstance(contract, dict):
@@ -790,6 +1057,13 @@ def validate_response(response: Any, chunk: dict[str, Any]) -> list[str]:
     if not isinstance(evidence_context, dict):
         evidence_context = {}
     evidence_ids = {str(key) for key in evidence_context}
+    errors.extend(_reported_conflict_errors(
+        response,
+        clause_map=clause_map,
+        evidence_context=evidence_context,
+        role_schemas=role_schemas,
+        contract_root=contract_root,
+    ))
 
     requirements = response.get("requirements")
     if not isinstance(requirements, list):
@@ -984,9 +1258,12 @@ def validate_response(response: Any, chunk: dict[str, Any]) -> list[str]:
                 f"$.clause_reviews[{review_index}].normative_basis: "
                 "must be a declared evidence basis, not a classification"
             )
-        indexes = review.get("requirement_indexes")
-        errors.extend(_validate_obligations(review, review_index))
         clause = clause_map.get(clause_id)
+        indexes = review.get("requirement_indexes")
+        errors.extend(_validate_obligations(
+            review, review_index,
+            require_semantic_decomposition=(contract_version == HOST_REVIEW_CONTRACT_V3),
+        ))
         if (
             isinstance(classification, str)
             and classification_requires_requirement(classification)

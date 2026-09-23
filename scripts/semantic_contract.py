@@ -10,6 +10,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import math
 from pathlib import Path
 from typing import Any
 
@@ -25,7 +26,27 @@ def canonical_json(value: Any) -> bytes:
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
+        allow_nan=False,
     ).encode("utf-8")
+
+
+def strict_json_dumps(
+    value: Any,
+    *,
+    ensure_ascii: bool = False,
+    indent: int | None = None,
+    sort_keys: bool = False,
+    separators: tuple[str, str] | None = None,
+) -> str:
+    """Serialize standards-compliant JSON and reject NaN/Infinity values."""
+    return json.dumps(
+        value,
+        ensure_ascii=ensure_ascii,
+        indent=indent,
+        sort_keys=sort_keys,
+        separators=separators,
+        allow_nan=False,
+    )
 
 
 def strict_json_loads(text: str) -> Any:
@@ -41,11 +62,23 @@ def strict_json_loads(text: str) -> Any:
     def reject_constant(value: str) -> Any:
         raise ValueError(f"non-finite JSON number is not allowed: {value}")
 
+    def finite_float(value: str) -> float:
+        parsed = float(value)
+        if not math.isfinite(parsed):
+            raise ValueError(f"non-finite JSON number is not allowed: {value}")
+        return parsed
+
     return json.loads(
         text,
         object_pairs_hook=reject_duplicates,
         parse_constant=reject_constant,
+        parse_float=finite_float,
     )
+
+
+def strict_json_read(path: str | Path) -> Any:
+    """Read a UTF-8 JSON file using the duplicate-key/finite-number boundary."""
+    return strict_json_loads(Path(path).read_text(encoding="utf-8"))
 
 
 def sha256_bytes(value: bytes) -> str:

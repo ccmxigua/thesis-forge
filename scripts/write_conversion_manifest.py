@@ -10,6 +10,8 @@ import subprocess
 import tempfile
 from pathlib import Path
 
+from semantic_contract import strict_json_read
+
 
 def sha256(path: Path) -> str:
     digest = hashlib.sha256()
@@ -78,10 +80,8 @@ def main(argv: list[str] | None = None) -> int:
     }
     if args.dependencies is not None:
         try:
-            data['source_dependencies'] = json.loads(
-                args.dependencies.read_text(encoding='utf-8')
-            )
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            data['source_dependencies'] = strict_json_read(args.dependencies)
+        except (OSError, ValueError) as exc:
             raise ValueError(f'cannot read source dependency manifest: {exc}') from exc
 
     manifest = args.manifest.resolve()

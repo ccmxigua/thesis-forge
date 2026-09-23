@@ -60,6 +60,11 @@
     "compliance_summary": {
       "type": "object"
     },
+    "semantic_conflicts": {
+      "type": "array",
+      "description": "Unresolved, evidence-bound semantic conflicts preserved without first-wins or last-wins resolution.",
+      "items": {"$ref": "#/$defs/reportedConflict"}
+    },
     "blocking_errors": {
       "type": "array",
       "description": "Contract conflicts or other errors that make otherwise resolved requirements unsafe to execute.",
@@ -173,6 +178,59 @@
         "italic": {
           "type": "boolean"
         }
+      },
+      "additionalProperties": false
+    },
+    "reportedConflict": {
+      "type": "object",
+      "required": ["type", "reason", "clause_ids", "evidence_ids", "status"],
+      "properties": {
+        "type": {"enum": ["source_conflict", "semantic_conflict", "requirement_conflict", "applicability_conflict", "other"]},
+        "reason": {"type": "string", "minLength": 1},
+        "clause_ids": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "evidence_ids": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "target": {
+          "type": "object",
+          "required": ["role", "property"],
+          "properties": {"role": {"type": "string", "minLength": 1}, "property": {"type": "string", "minLength": 1}},
+          "additionalProperties": false
+        },
+        "conditions": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["evidence_id", "statement"],
+            "properties": {"evidence_id": {"type": "string", "minLength": 1}, "statement": {"type": "string", "minLength": 1}},
+            "additionalProperties": false
+          }
+        },
+        "candidates": {
+          "type": "array",
+          "items": {
+            "anyOf": [
+              {
+                "type": "object",
+                "required": ["evidence_id", "value"],
+                "properties": {
+                  "evidence_id": {"type": "string", "minLength": 1},
+                  "value": {"anyOf": [{"type": "string"}, {"type": "number"}, {"type": "boolean"}, {"type": "null"}]}
+                },
+                "additionalProperties": false
+              },
+              {
+                "type": "object",
+                "required": ["evidence_id", "value_type", "value_json"],
+                "properties": {
+                  "evidence_id": {"type": "string", "minLength": 1},
+                  "value_type": {"enum": ["object", "array", "string", "number", "boolean", "null"]},
+                  "value_json": {"type": "string", "minLength": 1}
+                },
+                "additionalProperties": false
+              }
+            ]
+          }
+        },
+        "status": {"enum": ["unresolved", "requires_human_review"]}
       },
       "additionalProperties": false
     },

@@ -10,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import requirements_engine as engine  # noqa: E402
+from host_review_contract import HOST_REVIEW_CONTRACT_V3  # noqa: E402
 from host_review_contract import validate_response as validate_host_review_response  # noqa: E402
 from semantic_contract import HOST_AGENT_ORIGIN, attach_request_provenance  # noqa: E402
 
@@ -138,6 +139,74 @@ class HostAgentReviewTests(unittest.TestCase):
             self.assertEqual(receipt["semantic_review_ledger_sha256"], engine.sha256_json(ledger))
             self.assertEqual(ledger["response_sha256"], receipt["aggregate_sha256"])
             self.assertEqual(metadata["semantic_review_ledger_sha256"], receipt["semantic_review_ledger_sha256"])
+
+    def test_merge_preserves_typed_conflicts_from_every_chunk(self) -> None:
+        clauses = [
+            {"id": "C1", "text": "正文使用宋体", "evidence_ids": ["E1"],
+             "source_kind": "paragraph", "location": {}, "part_index": 0},
+            {"id": "C2", "text": "正文使用黑体", "evidence_ids": ["E2"],
+             "source_kind": "paragraph", "location": {}, "part_index": 0},
+        ]
+        evidence = {"evidence": [
+            {"id": "E1", "text": clauses[0]["text"], "kind": "paragraph"},
+            {"id": "E2", "text": clauses[1]["text"], "kind": "paragraph"},
+        ]}
+        request = engine.build_llm_request(
+            [], clauses, evidence, {}, "full", contract_version=HOST_REVIEW_CONTRACT_V3,
+        )
+        request = attach_request_provenance(
+            request, source_sha256="a" * 64, evidence_doc=evidence, clauses=clauses,
+            run_id="typed-conflict-merge-test",
+        )
+        expected_conflicts = []
+        with tempfile.TemporaryDirectory() as td:
+            review_dir = Path(td) / "requirements"
+            engine.prepare_host_agent_review_packets(
+                request, clauses, evidence, "a" * 64, review_dir, chunk_size=1,
+            )
+            chunks = json.loads(
+                (review_dir / "llm-request-chunks.json").read_text(encoding="utf-8")
+            )
+            for chunk in chunks:
+                clause = chunk["clauses"][0]
+                evidence_id = clause["evidence_ids"][0]
+                conflict = {
+                    "type": "source_conflict",
+                    "reason": f"Sources for {clause['id']} disagree about body font.",
+                    "clause_ids": [clause["id"]],
+                    "evidence_ids": [evidence_id],
+                    "target": {"role": "body_text", "property": "font"},
+                    "candidates": [{
+                        "evidence_id": evidence_id,
+                        "value_type": "object",
+                        "value_json": json.dumps({"cjk": "SimSun", "size_pt": 12}),
+                    }],
+                    "status": "requires_human_review",
+                }
+                expected_conflicts.append(conflict)
+                response = {
+                    "contract_version": HOST_REVIEW_CONTRACT_V3,
+                    "provenance": chunk["provenance"],
+                    "requirements": [],
+                    "clause_reviews": [{
+                        "clause_id": clause["id"],
+                        "classification": "informational",
+                        "reason": "The source conflict is preserved for review.",
+                    }],
+                    "unsupported_items": [],
+                    "reported_conflicts": [conflict],
+                }
+                (review_dir / chunk["batch"]["response_filename"]).write_text(
+                    json.dumps(response, ensure_ascii=False), encoding="utf-8",
+                )
+
+            merged, _metadata = engine.merge_host_agent_review_packets(
+                review_dir, response_out=review_dir / "merged.json",
+            )
+
+            self.assertEqual(merged["reported_conflicts"], expected_conflicts)
+            persisted = json.loads((review_dir / "merged.json").read_text(encoding="utf-8"))
+            self.assertEqual(persisted["reported_conflicts"], expected_conflicts)
 
     def test_merge_rejects_chunk_provenance_hash_domain_mismatch(self) -> None:
         clauses = [{

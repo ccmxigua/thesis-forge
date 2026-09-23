@@ -10,9 +10,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from semantic_contract import strict_json_read
+
 
 def read_json(path: Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8"))
+    return strict_json_read(path)
 
 
 def sha256(path: Path) -> str:

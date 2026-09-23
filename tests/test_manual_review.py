@@ -7,6 +7,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from docx import Document
 from docx.oxml.ns import qn
@@ -25,6 +26,7 @@ from manual_review import (  # noqa: E402
     build_manual_review_ledger,
     filter_manual_marker_ledger,
 )
+import requirements_engine as engine  # noqa: E402
 from submission_audit import PLACEHOLDER_PATTERNS  # noqa: E402
 
 
@@ -109,6 +111,120 @@ class ManualReviewTests(unittest.TestCase):
             load_and_validate(ledger, ROOT / "schema" / "manual-review-ledger.schema.json"),
             [],
         )
+
+    def test_producer_question_shape_preserves_id_and_all_evidence_ids(self) -> None:
+        ledger = build_manual_review_ledger({}, [{
+            "id": "Q-PRODUCER-1",
+            "clause_id": "C-PRODUCER-1",
+            "question": "这条规则的适用对象是什么？",
+            "source_text": "每个关键词不超过限定长度",
+            "evidence_ids": ["E-PRODUCER-1", "E-PRODUCER-2"],
+        }])
+        item = next(item for item in ledger["items"] if item["source_type"] == "open_question")
+        self.assertEqual(item["question_ids"], ["Q-PRODUCER-1"])
+        self.assertEqual(item["evidence_ids"], ["E-PRODUCER-1", "E-PRODUCER-2"])
+
+    def test_requirements_producer_to_ledger_to_serialized_marker_keeps_source_binding(self) -> None:
+        clauses = [{
+            "id": "C-PRODUCER-1",
+            "text": "某一格式描述暂时无法映射到已注册语义角色",
+            "evidence_ids": ["E-PRODUCER-1", "E-PRODUCER-2"],
+            "context_before": "前置语境", "context_after": "后续语境",
+        }]
+        evidence_doc = {"evidence": [
+            {"id": "E-PRODUCER-1", "text": clauses[0]["text"], "kind": "paragraph"},
+            {"id": "E-PRODUCER-2", "text": clauses[0]["text"], "kind": "paragraph"},
+        ]}
+        # Keep semantic role discovery under test control while invoking the
+        # actual rule-result producer and its real question-record shape.
+        with patch.object(engine, "parse_properties", return_value={"style_hint": "unknown"}), \
+                patch.object(engine, "identify_role", return_value=(None, ["unknown"])):
+            _spec, questions, conflicts = engine.build_rule_result(
+                Path("producer-fixture.docx"), clauses,
+            )
+        self.assertEqual(conflicts, [])
+        self.assertEqual(questions[0]["question_id"], "Q0001")
+        self.assertEqual(questions[0]["evidence_ids"], ["E-PRODUCER-1", "E-PRODUCER-2"])
+
+        ledger = build_manual_review_ledger(
+            {}, questions, clauses=clauses, evidence_doc=evidence_doc,
+            binding={
+                "case_id": "producer-fixture", "run_id": "question-marker-e2e",
+                "source_sha256": "a" * 64, "clause_sha256": "b" * 64,
+                "evidence_sha256": "c" * 64,
+            },
+        )
+        self.assertEqual(len(ledger["items"]), 1)
+        item = ledger["items"][0]
+        self.assertEqual(item["question_ids"], ["Q0001"])
+        self.assertEqual(item["clause_ids"], ["C-PRODUCER-1"])
+        self.assertEqual(item["evidence_ids"], ["E-PRODUCER-1", "E-PRODUCER-2"])
+
+        document = Document()
+        receipts = append_manual_review_markers(document, ledger)
+        self.assertEqual(receipts[0]["question_ids"], ["Q0001"])
+        self.assertEqual(receipts[0]["evidence_ids"], ["E-PRODUCER-1", "E-PRODUCER-2"])
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "producer-question-marker.docx"
+            document.save(path)
+            audit = audit_manual_review_markers(path, ledger)
+        self.assertTrue(audit["valid"], audit)
+        self.assertEqual(audit["marker_bindings"][0]["question_ids"], ["Q0001"])
+        self.assertEqual(
+            audit["marker_bindings"][0]["evidence_ids"],
+            ["E-PRODUCER-1", "E-PRODUCER-2"],
+        )
+
+    def test_pipeline_question_binding_checks_clause_and_evidence_before_marker(self) -> None:
+        clauses = [{
+            "id": "C1", "text": "关键词最多七个汉字", "evidence_ids": ["E1"],
+        }]
+        evidence_doc = {"evidence": [{"id": "E1", "text": "关键词最多七个汉字"}]}
+        ledger = build_manual_review_ledger({}, [{
+            "id": "Q1", "clause_id": "C1", "evidence_ids": ["E1"],
+            "question": "这里的字符如何计数？",
+        }], clauses=clauses, evidence_doc=evidence_doc)
+        item = next(item for item in ledger["items"] if item["source_type"] == "open_question")
+        self.assertEqual(item["question_ids"], ["Q1"])
+        self.assertEqual(item["evidence_ids"], ["E1"])
+        self.assertEqual(item["source_text"], "关键词最多七个汉字")
+
+        with self.assertRaisesRegex(ValueError, "unknown source clause"):
+            build_manual_review_ledger({}, [{
+                "id": "Q1", "clause_id": "C404", "evidence_ids": ["E1"],
+                "question": "无法绑定的问题",
+            }], clauses=clauses, evidence_doc=evidence_doc)
+
+    def test_run_global_diagnostic_is_not_emitted_as_author_red_marker(self) -> None:
+        ledger = build_manual_review_ledger({}, [{
+            "question_id": "Q-RUN", "scope": "global", "evidence_ids": [],
+            "question": "需要 Host Agent 审查",
+        }], clauses=[])
+        self.assertEqual(ledger["items"], [])
+
+    def test_conflicting_question_aliases_fail_closed(self) -> None:
+        with self.assertRaisesRegex(ValueError, "question_id conflicts"):
+            build_manual_review_ledger({}, [{
+                "question_id": "Q1", "id": "Q2", "question": "确认问题",
+            }])
+        with self.assertRaisesRegex(ValueError, "evidence_id conflicts"):
+            build_manual_review_ledger({}, [{
+                "question_id": "Q1", "evidence_ids": ["E1"], "evidence_id": "E2",
+                "question": "确认问题",
+            }])
+
+    def test_question_identity_and_evidence_are_required_and_unique(self) -> None:
+        with self.assertRaisesRegex(ValueError, "question id"):
+            build_manual_review_ledger({}, [{"question": "没有稳定 ID"}])
+        with self.assertRaisesRegex(ValueError, "duplicate question_id"):
+            build_manual_review_ledger({}, [
+                {"question_id": "Q1", "question": "问题一"},
+                {"id": "Q1", "question": "问题二"},
+            ])
+        with self.assertRaisesRegex(ValueError, "contains duplicates"):
+            build_manual_review_ledger({}, [{
+                "question_id": "Q1", "evidence_ids": ["E1", "E1"],
+            }])
 
     def test_markers_are_visible_and_red(self) -> None:
         document = Document()
@@ -249,6 +365,39 @@ class ManualReviewTests(unittest.TestCase):
         self.assertEqual(result["visible_marker_count"], len(categories))
         self.assertFalse(result["submission_ready"])
         self.assertEqual(result["visual_verification"], "required")
+
+    def test_serialized_markers_keep_question_and_evidence_binding(self) -> None:
+        ledger = {
+            "binding": {
+                "case_id": "bsu", "run_id": "run-marker-binding",
+                "source_sha256": "0" * 64, "clause_sha256": "1" * 64,
+                "evidence_sha256": "2" * 64,
+            },
+            "items": [self._item(
+                source_type="open_question", question_ids=["Q00076"],
+                evidence_ids=["E00065"], clause_ids=["C00076"],
+            )],
+        }
+        document = Document()
+        receipts = append_manual_review_markers(document, ledger)
+        self.assertEqual(receipts[0]["question_ids"], ["Q00076"])
+        self.assertEqual(receipts[0]["evidence_ids"], ["E00065"])
+        marker = next(p for p in document.paragraphs if p.text.startswith("【MR-"))
+        self.assertIn("问题编号：Q00076", marker.text)
+        self.assertIn("证据编号：E00065", marker.text)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bound-markers.docx"
+            document.save(path)
+            audit = audit_manual_review_markers(path, ledger)
+            self.assertTrue(audit["valid"], audit)
+            self.assertEqual(audit["marker_bindings"][0]["question_ids"], ["Q00076"])
+            self.assertTrue(audit["marker_bindings"][0]["ledger_item_sha256"])
+
+            stale_ledger = copy.deepcopy(ledger)
+            stale_ledger["items"][0]["question_ids"] = ["Q09999"]
+            stale = audit_manual_review_markers(path, stale_ledger)
+            self.assertFalse(stale["valid"])
+            self.assertEqual(stale["source_binding_errors"], ["MR-0001"])
 
         for category in ("format_validation", "property_receipt",
                          "backend_capability_gap", "render_validation"):

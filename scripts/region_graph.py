@@ -29,6 +29,7 @@ from template_profile import (
     resource,
     selector_matches,
 )
+from semantic_contract import strict_json_read
 
 NODE_KINDS = {"fixed_protected", "dynamic_content", "generated", "optional"}
 EDGE_KINDS = {"order", "boundary", "section_policy"}
@@ -532,7 +533,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--out", type=Path, required=True)
     args = parser.parse_args(argv)
     profile_path = args.profile.resolve()
-    profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    profile = strict_json_read(profile_path)
     template_path = args.template
     if template_path is None:
         official = resource(profile, "official_docx")

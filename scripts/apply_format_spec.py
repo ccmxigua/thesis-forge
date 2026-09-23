@@ -40,6 +40,7 @@ from docx_semantics import (
     iter_document_nodes,
 )
 from format_spec_validation import load_and_validate
+from semantic_contract import strict_json_read
 from manual_review import (
     add_manual_review_items,
     filter_manual_marker_ledger,
@@ -117,7 +118,7 @@ PLACEHOLDER_CONTENT_LABELS = {
 
 
 def load_json(path: Path) -> dict[str, Any]:
-    data = json.loads(path.read_text(encoding="utf-8"))
+    data = strict_json_read(path)
     if not isinstance(data, dict): raise ValueError(f"{path} must contain an object")
     return data
 

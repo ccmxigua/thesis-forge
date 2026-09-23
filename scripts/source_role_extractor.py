@@ -19,6 +19,8 @@ from typing import Any
 
 from lxml import etree
 
+from semantic_contract import strict_json_read
+
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 NS = {"w": W}
 HEADING_STYLES = {"Heading1", "Heading2", "Heading3", "TOCHeading"}
@@ -152,7 +154,7 @@ def _heading_policy(role: str, target_headings: dict[str, str] | None) -> str:
 
 def target_headings_from_profile(profile_path: Path) -> dict[str, str]:
     """Derive target boundary text from a profile without school-specific rules."""
-    profile = json.loads(profile_path.read_text(encoding="utf-8"))
+    profile = strict_json_read(profile_path)
     result: dict[str, str] = {}
     for node in profile.get("regions", {}).get("nodes", []):
         role = node.get("content_role")

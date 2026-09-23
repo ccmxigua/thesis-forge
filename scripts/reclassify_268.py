@@ -10,6 +10,11 @@ import copy
 from collections import Counter
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SCRIPTS = os.path.join(BASE, 'scripts')
+if SCRIPTS not in sys.path:
+    sys.path.insert(0, SCRIPTS)
+from semantic_contract import strict_json_read
+
 RESPONSE_PATH = os.path.join(BASE, 'build/ten-school-current-20260721/rebuilt-reviews/dlut-response.json')
 CLAUSES_PATH = os.path.join(BASE, 'build/ten-school-current-20260721/dlut/work/requirements/requirement-clauses.json')
 AUDIT_PATH = os.path.join(BASE, 'build/ten-school-current-20260721/rebuilt-reviews/dlut-semantic-review-audit.json')
@@ -21,11 +26,10 @@ VALID_CLASSES = {
     'executable'
 }
 
-# Load data
-with open(RESPONSE_PATH) as f:
-    response = json.load(f)
-with open(CLAUSES_PATH) as f:
-    clauses = json.load(f)
+# Load persisted data with the same strict duplicate-key/finite-number policy as
+# the current pipeline.  This legacy offline utility still does not execute.
+response = strict_json_read(RESPONSE_PATH)
+clauses = strict_json_read(CLAUSES_PATH)
 
 clause_map = {c['id']: c for c in clauses}
 reviews = response['clause_reviews']

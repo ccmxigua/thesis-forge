@@ -15,12 +15,30 @@ from docx.oxml import OxmlElement
 from scripts.extract_semantic_metadata import extract
 from scripts.inspect_docx_semantics import inspect
 from scripts.role_registry import normalize_style_name, style_matches
+from scripts.semantic_contract import canonical_json, strict_json_loads, strict_json_read
 
 ROOT = Path(__file__).resolve().parents[1]
 PY = sys.executable
 
 
 class SemanticContractTest(unittest.TestCase):
+    def test_strict_json_rejects_duplicate_keys_and_non_finite_numbers(self) -> None:
+        for payload in ('{"x":1,"x":2}', '{"x":NaN}', '{"x":Infinity}',
+                        '{"x":-Infinity}', '{"x":1e999}', '{"x":-1e999}'):
+            with self.subTest(payload=payload), self.assertRaises(ValueError):
+                strict_json_loads(payload)
+        with self.assertRaises(ValueError):
+            canonical_json({"x": float("inf")})
+
+    def test_strict_json_file_reader_rejects_duplicate_keys_and_overflow(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "boundary.json"
+            for payload in ('{"x":1,"x":2}', '{"x":1e999}'):
+                with self.subTest(payload=payload):
+                    path.write_text(payload, encoding="utf-8")
+                    with self.assertRaises(ValueError):
+                        strict_json_read(path)
+
     def test_role_registry_normalizes_style_id_and_display_name(self) -> None:
         self.assertEqual(normalize_style_name("Equation Block"), normalize_style_name("equation_block"))
         self.assertTrue(style_matches("equation", style_id="EquationBlock", style_name="Equation Block"))

@@ -37,7 +37,9 @@ class ExistingRequirementContractTests(unittest.TestCase):
             "properties": {"font": {"cjk": "SimSun"}}, "clause_ids": ["C1"],
             "evidence_ids": ["E1"], "reason": "当前证据指定正文宋体。", "confidence": 1,
         }], "clause_reviews": [{"clause_id": "C1", "classification": "verify_existing",
-                                "reason": "当前证据与确定性条款一致。"}],
+                                "reason": "当前证据与确定性条款一致。",
+                                "obligations": [{"id": "source_clause", "status": "covered",
+                                                 "reason": "已由复用的确定性要求覆盖。"}]}],
             "unsupported_items": [], "reported_conflicts": []}
 
     def request(self, baseline=None):
@@ -92,9 +94,9 @@ class ExistingRequirementContractTests(unittest.TestCase):
         self.assertIn("existing_requirement_source_text_mismatch", str(validate_response(self.response, self.request())))
         self.assertIn("existing_requirement_source_text_mismatch", str(self.merge(self.response)[1]))
 
-    def test_duplicate_ids_and_empty_properties_cannot_be_projected(self):
+    def test_duplicate_ids_and_null_properties_cannot_be_projected(self):
         for field, value in [("clause_ids", ["C1", "C1"]), ("evidence_ids", ["E1", "E1"]),
-                             ("properties", {}), ("properties", None)]:
+                             ("properties", None)]:
             with self.subTest(field=field, value=value):
                 response = copy.deepcopy(self.response)
                 response["requirements"][0][field] = value
@@ -104,14 +106,32 @@ class ExistingRequirementContractTests(unittest.TestCase):
                 self.assertEqual(projected, response)
                 self.assertTrue(validate_response(response, self.request()))
 
+    def test_empty_payload_is_materialized_only_for_bound_existing_selector(self):
+        response = copy.deepcopy(self.response)
+        response["requirements"][0]["properties"] = {}
+        before = copy.deepcopy(response)
+        projected, repairs = project_authoritative_existing_payloads(
+            response, {"R00012": self.baseline["requirements"][0]}, {"C1": self.clauses[0]})
+        self.assertEqual(projected["requirements"][0]["properties"], self.baseline["requirements"][0]["properties"])
+        self.assertEqual(repairs[0]["authorization"], "current_request_bound_existing_selector")
+        self.assertEqual(response, before)
+        self.assertEqual(validate_response(response, self.request()), [])
+
     def test_multi_clause_exact_existing_requirement_is_valid(self):
-        self.clauses.append({"id": "C2", "text": "正文两端对齐", "evidence_ids": ["E2"]})
+        self.clauses = [
+            {"id": "C10", "text": "正文使用宋体", "evidence_ids": ["E1"]},
+            {"id": "C2", "text": "正文两端对齐", "evidence_ids": ["E2"]},
+        ]
         self.evidence["evidence"].append({"id": "E2", "text": "正文两端对齐"})
         existing = self.baseline["requirements"][0]
-        existing.update(clause_ids=["C1", "C2"], evidence_ids=["E1", "E2"],
+        existing.update(clause_ids=["C10", "C2"], evidence_ids=["E1", "E2"],
                         source_text="正文使用宋体 | 正文两端对齐")
-        self.response["requirements"][0].update(clause_ids=["C2", "C1"], evidence_ids=["E2", "E1"])
+        self.response["requirements"][0].update(clause_ids=["C2", "C10"], evidence_ids=["E2", "E1"])
+        self.response["clause_reviews"][0]["clause_id"] = "C10"
         self.response["clause_reviews"].append({"clause_id": "C2", "classification": "verify_existing", "reason": "复用组合要求。"})
+        self.response["clause_reviews"][1]["obligations"] = [{
+            "id": "source_clause", "status": "covered", "reason": "已由组合要求覆盖。",
+        }]
         self.assertEqual(validate_response(self.response, self.request()), [])
         self.assertNotIn("existing_requirement_", str(self.merge(self.response)[1]))
 
@@ -130,7 +150,12 @@ class ExistingRequirementContractTests(unittest.TestCase):
         for baseline, expected in [(self.baseline, ["R00012"]), ({}, None)]:
             with self.subTest(expected=expected):
                 request = self.request(baseline)
-                field = request["response_schema"]["properties"]["requirements"]["items"]["properties"]["existing_requirement_id"]
+                branches = request["response_schema"]["properties"]["requirements"]["items"]["anyOf"]
+                branch = next(
+                    item for item in branches
+                    if item["properties"]["role"]["enum"] == ["body_text"]
+                )
+                field = branch["properties"]["existing_requirement_id"]
                 self.assertEqual(field.get("enum"), expected)
                 native = native_output_schema(request["response_schema"])
                 self.assertEqual(native_schema_support_errors(native), [])
@@ -146,7 +171,14 @@ class ExistingRequirementContractTests(unittest.TestCase):
         request = attach_request_provenance(self.request(), source_sha256="a"*64,
                                             evidence_doc=self.evidence, clauses=self.clauses, run_id="test")
         chunks = _build_host_review_chunks(request, self.clauses, self.evidence, "a"*64, 1)
-        fields = [x["response_schema"]["properties"]["requirements"]["items"]["properties"]["existing_requirement_id"] for x in chunks]
+        fields = []
+        for chunk in chunks:
+            branches = chunk["response_schema"]["properties"]["requirements"]["items"]["anyOf"]
+            branch = next(
+                item for item in branches
+                if item["properties"]["role"]["enum"] == ["body_text"]
+            )
+            fields.append(branch["properties"]["existing_requirement_id"])
         self.assertEqual(fields, [{"type": "string", "enum": ["R00012"]}, {"type": "null"}])
         from semantic_contract import request_body_sha256
         for chunk in chunks:
@@ -172,7 +204,7 @@ class ExistingRequirementContractTests(unittest.TestCase):
                 errors = validate_response(response, request)
                 self.assertIn("unknown_existing_requirement_id", str(errors))
                 records = contract_error_records(errors, response=response, chunk=request)
-                self.assertTrue(all(x["identity_repair_allowed"] is False for x in records))
+                self.assertTrue(all(x.get("identity_repair_allowed", False) is False for x in records))
                 guidance = _structured_contract_repair_guidance(records, contract_version="3.0")
                 self.assertIn("fail closed", guidance)
                 self.baseline["requirements"] = [{"id": rid, "role": baseline_role,

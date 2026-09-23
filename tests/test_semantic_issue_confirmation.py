@@ -39,9 +39,9 @@ class SemanticIssueConfirmationTest(unittest.TestCase):
             {"id": "C00421", "text": "3cm左右", "evidence_ids": ["E00346"]},
         ]
         questions = [
-            {"id": "Q0001", "clause_id": "C00074", "question": "需要人工确认", "evidence_ids": ["E00063"]},
-            {"id": "Q0002", "clause_id": "C00076", "question": "需要人工确认", "evidence_ids": ["E00065"]},
-            {"id": "Q0003", "clause_id": "C00421", "question": "需要人工确认", "evidence_ids": ["E00346"]},
+            {"question_id": "Q0001", "clause_id": "C00074", "question": "需要人工确认", "evidence_ids": ["E00063"]},
+            {"question_id": "Q0002", "clause_id": "C00076", "question": "需要人工确认", "evidence_ids": ["E00065"]},
+            {"question_id": "Q0003", "clause_id": "C00421", "question": "需要人工确认", "evidence_ids": ["E00346"]},
         ]
         spec = {
             "run_id": "run-bsu-26",
@@ -175,7 +175,7 @@ class SemanticIssueConfirmationTest(unittest.TestCase):
             {"clause_id": "C00999", "status": "unresolved", "requirement_ids": []}
         )
         questions.append(
-            {"id": "Q00999", "clause_id": "C00999", "question": "仍需确认", "evidence_ids": ["E00999"]}
+            {"question_id": "Q00999", "clause_id": "C00999", "question": "仍需确认", "evidence_ids": ["E00999"]}
         )
         blockers = pipeline.requirement_blockers(
             spec, questions, "supported_subset", set(), {"C00074", "C00076", "C00421"}

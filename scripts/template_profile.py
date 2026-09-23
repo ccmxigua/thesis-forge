@@ -20,6 +20,7 @@ from typing import Any, Iterable
 from lxml import etree
 
 from format_spec_validation import load_and_validate
+from semantic_contract import strict_json_read
 
 ROOT = Path(__file__).resolve().parents[1]
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
@@ -44,7 +45,7 @@ def text_sha256(text: str) -> str:
 
 def load_profile(path: Path, *, verify_resources: bool = True) -> dict[str, Any]:
     path = path.resolve()
-    data = json.loads(path.read_text(encoding="utf-8"))
+    data = strict_json_read(path)
     errors = load_and_validate(data, ROOT / "schema" / "template-profile.schema.json")
     if errors:
         raise ValueError("invalid template profile:\n" + "\n".join(errors))

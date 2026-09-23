@@ -28,6 +28,7 @@ from existing_requirement_contract import (
 )
 from format_spec_validation import load_and_validate, validate_instance
 from format_contract_guards import normalize_verification_checker_ids
+from question_contract import bind_question_records
 from host_review_contract import (
     HOST_REVIEW_CONTRACT_V2,
     HOST_REVIEW_CONTRACT_V3,
@@ -52,6 +53,7 @@ from semantic_contract import (
     request_envelope_sha256,
     sha256_file,
     sha256_json,
+    strict_json_dumps,
     strict_json_loads,
     validate_response_provenance,
 )
@@ -60,6 +62,7 @@ from evidence_context_guards import (
     spine_clearance_external,
     SPINE_CLEARANCE_REASON,
 )
+from source_obligation_compiler import materialize_known_source_verification
 from requirements_input import RequirementsInputError, normalize_requirements_input
 from resource_registry import materialize_declaration_resources
 from semantic_review_ledger import (
@@ -67,6 +70,7 @@ from semantic_review_ledger import (
     deduplicate_exact_requirements,
 )
 from host_review_schema import build_host_review_response_schema
+from source_obligation_compiler import compile_known_source_obligation_ids
 from template_reconciliation import (
     extract_template_evidence,
     not_supplied_report,
@@ -1424,7 +1428,7 @@ def build_rule_result(source: Path, clauses: list[dict[str, Any]]) -> tuple[dict
                 candidates = [role]
         if role is None:
             questions.append({
-                "id": f"Q{len(questions)+1:04d}", "clause_id": clause["id"],
+                "question_id": f"Q{len(questions)+1:04d}", "clause_id": clause["id"],
                 "question": "该格式要求对应哪个语义角色？", "source_text": clause["text"],
                 "candidate_roles": candidates or ["unknown"], "evidence_ids": clause["evidence_ids"],
                 "context_before": clause["context_before"], "context_after": clause["context_after"],
@@ -1482,6 +1486,7 @@ def build_rule_result(source: Path, clauses: list[dict[str, Any]]) -> tuple[dict
             "status": status}
     if page:
         spec["page"] = page
+    questions = bind_question_records(questions, clauses)
     return spec, questions, conflicts
 
 
@@ -1590,6 +1595,7 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
                       mode: str = "questions",
                       runtime_context: dict[str, Any] | None = None,
                       contract_version: str = HOST_REVIEW_CONTRACT_V2) -> dict[str, Any]:
+    questions = bind_question_records(questions, clauses, evidence_doc)
     if mode == "full":
         if contract_version not in SUPPORTED_HOST_REVIEW_CONTRACTS:
             raise ValueError(f"unsupported host review contract version: {contract_version}")
@@ -1605,12 +1611,16 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
             }
             for clause in clauses
         ]
+        for packet in clause_packets:
+            packet["deterministic_obligation_keys"] = compile_known_source_obligation_ids(
+                packet.get("text")
+            )
         evidence_context = {
             str(item.get("id")): item
             for item in (evidence_doc or {}).get("evidence", [])
             if isinstance(item, dict) and item.get("id")
         }
-        format_schema = json.loads(
+        format_schema = strict_json_loads(
             (Path(__file__).resolve().parents[1] / "schema" / "format-spec.schema.json").read_text(encoding="utf-8")
         )
         role_schema_names = {
@@ -1688,6 +1698,7 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
                 "Mechanical retry gate: a partial_clause_coverage error does not authorize changing classification, obligations, clause_ids, or requirement count. Preserve the baseline classification and complete the missing role-specific requirement only when the current evidence and declared schema support it; otherwise return the baseline unchanged and let the bridge fail closed.",
                 "Mechanical retry gate: when executable_review_requires_all_obligations_covered is reported, never change a non-covered obligation to covered merely to satisfy the gate. Preserve each obligation id and status; if the current evidence/backend cannot cover one obligation, reclassify only that clause to the most accurate non-executable classification and remove its clause edge from requirements. Do not change any other review, requirement payload, evidence, or obligation.",
                 "Mechanical response gate: if a clause contains several obligations, include an obligations array with one object per obligation (id, status, reason). Status covered is allowed only when that obligation is fully represented; any residual obligation makes the parent review non-executable.",
+                "deterministic_obligation_keys are a code-owned source checklist, not IDs to copy into obligations[]. The contract independently checks their role-specific requirement properties; do not spend output tokens echoing these keys. Use obligations[] for your semantic decomposition and include any source obligations not represented by the deterministic checklist. A model-authored covered status never overrides a failed property check.",
                 "Use only the allowed requirement roles and the corresponding properties schema in requirement_contract. Never invent role names such as cover_metadata, declaration_originality, authorization_statement, or other role names absent from that contract; use cover, declarations, document_structure, or a registered text role instead.",
                 "For an existing requirement, the request-only field _eligible_clause_ids lists the exact clause occurrences whose evidence may be reused. Do not use that existing_requirement_id for any other clause_id; never copy an existing requirement from a different evidence occurrence.",
                 "When reusing an existing requirement, do not combine unrelated clauses or repeated occurrences with different evidence. Every clause_id listed in that requirement must be exactly represented by its source text and cited evidence.",
@@ -1846,6 +1857,17 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
             "authorization": "deterministic_existing_requirement_projection_v1",
             "repairs": existing_payload_repairs,
             "action": "replace_model_payload_with_exact_deterministic_baseline",
+        })
+    projected_response, source_verification_repairs = materialize_known_source_verification(
+        projected_response, clauses,
+    )
+    if source_verification_repairs:
+        audit.append({
+            "type": "source_obligation_verification_projection",
+            "rule_id": "materialize_known_source_verification_v1",
+            "semantic_inference": "none",
+            "authorization": "exact_compiled_source_obligation_checker_binding",
+            "repairs": source_verification_repairs,
         })
     reviews = copy.deepcopy(projected_response.get("clause_reviews") or []) if isinstance(projected_response, dict) else []
     requirements = projected_response.get("requirements") or [] if isinstance(projected_response, dict) else []
@@ -2135,7 +2157,7 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
         spec["semantic_review_provenance_valid"] = not any(
             item.get("type") == "llm_provenance" for item in conflicts
         )
-    schema = json.loads((Path(__file__).resolve().parents[1] / "schema" / "format-spec.schema.json").read_text(encoding="utf-8"))
+    schema = strict_json_loads((Path(__file__).resolve().parents[1] / "schema" / "format-spec.schema.json").read_text(encoding="utf-8"))
     accepted_indexes: set[int] = set()
     llm_shared_role_props: dict[str, dict[str, Any]] = {}
     # Keep conflicts between separate LLM requirements strict, but do not let
@@ -2565,12 +2587,29 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
     # defaults.  A later LLM requirement may have reintroduced a declarative
     # depth while merging, so sanitize once more at the boundary.
     spec["roles"] = _sanitize_role_specs_for_backend(spec.get("roles", {}))
-    # Reported semantic disagreements and deterministic rule cross-checks are
-    # audit findings, not automatically execution blockers: in llm_primary mode
-    # the complete evidence-citing LLM review owns interpretation.  Only contract
-    # violations and merge conflicts mean the structured response is unsafe.
+    # Preserve model-reported conflicts as typed semantic artifacts.  The
+    # response contract requires an unresolved status; neither chunk order nor
+    # merge order may choose a winner.  Each such record therefore gets an
+    # explicit release blocker while remaining available to downstream audit.
+    if isinstance(reported_conflicts, list) and reported_conflicts:
+        spec["semantic_conflicts"] = copy.deepcopy(reported_conflicts)
     blocking_types = {"llm_contract", "llm_internal_conflict", "completeness", "llm_provenance"}
     blocking_conflicts = [item for item in conflicts if item.get("type") in blocking_types]
+    unresolved_reported_conflicts = [
+        {
+            "type": "llm_reported_conflict",
+            "conflict_index": index,
+            "conflict_type": item.get("type"),
+            "status": item.get("status"),
+            "reason": item.get("reason"),
+            "clause_ids": copy.deepcopy(item.get("clause_ids") or []),
+            "evidence_ids": copy.deepcopy(item.get("evidence_ids") or []),
+        }
+        for index, item in enumerate(reported_conflicts if isinstance(reported_conflicts, list) else [])
+        if isinstance(item, dict)
+        and item.get("status") in {"unresolved", "requires_human_review"}
+    ]
+    blocking_conflicts.extend(unresolved_reported_conflicts)
     if blocking_conflicts:
         spec["blocking_errors"] = copy.deepcopy(blocking_conflicts)
     if unresolved or missing or blocking_conflicts:
@@ -2581,6 +2620,7 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
         "unresolved_clause_ids": sorted(unresolved),
         "missing_clause_ids": sorted(missing),
         "blocking_conflict_count": len(blocking_conflicts),
+        "unresolved_reported_conflict_count": len(unresolved_reported_conflicts),
         "accepted_requirement_count": len(spec.get("requirements", [])),
         "semantic_review_required": bool(unresolved or missing or blocking_conflicts),
         "output_spec_sha256": sha256_json(spec),
@@ -2954,34 +2994,84 @@ def _merge_output_path(review_dir: Path, value: Path) -> Path:
     return resolved
 
 
-def _write_json_artifacts_atomic(artifacts: list[tuple[Path, Any]]) -> None:
-    """Stage all JSON artifacts, then publish them without overwriting old files."""
+def _write_json_artifacts_atomic(
+    artifacts: list[tuple[Path, Any]],
+    *,
+    commit_marker_path: Path,
+    commit_root: Path,
+    commit_metadata: dict[str, Any],
+) -> None:
+    """Publish data first and an integrity marker last.
+
+    Individual renames are atomic, but a process or machine crash can happen
+    between them. Downstream stages therefore trust the group only when the
+    final commit marker exists and hashes every published artifact.
+    """
     if not artifacts:
         return
     paths = [path for path, _ in artifacts]
     if len(set(paths)) != len(paths):
         raise ValueError("merge artifacts must use distinct output paths")
+    commit_root = commit_root.resolve()
+    marker_path = commit_marker_path.resolve()
+    if marker_path == commit_root or commit_root not in marker_path.parents:
+        raise ValueError("merge commit marker must remain inside the commit root")
+    if marker_path in {path.resolve() for path in paths}:
+        raise ValueError("merge commit marker must be distinct from data artifacts")
+    if marker_path.exists():
+        raise ValueError(f"refusing to overwrite existing merge artifact: {marker_path}")
+    for path in paths:
+        resolved = path.resolve()
+        if resolved == commit_root or commit_root not in resolved.parents:
+            raise ValueError(f"merge artifact escapes commit root: {path} -> {resolved}")
     for path in paths:
         path.parent.mkdir(parents=True, exist_ok=True)
         if path.exists():
             raise ValueError(f"refusing to overwrite existing merge artifact: {path}")
     temporary_paths: list[tuple[Path, Path]] = []
     published_paths: list[Path] = []
+    marker_temporary: Path | None = None
+    marker_published = False
     try:
         for path, value in artifacts:
             temporary = path.with_name(f".{path.name}.tmp-{uuid4().hex}")
             temporary.write_text(
-                json.dumps(value, ensure_ascii=False, indent=2) + "\n",
+                json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
                 encoding="utf-8",
             )
             temporary_paths.append((temporary, path))
         for temporary, path in temporary_paths:
             temporary.replace(path)
             published_paths.append(path)
+        marker_payload = {
+            **copy.deepcopy(commit_metadata),
+            "artifacts": [
+                {
+                    "path": path.resolve().relative_to(commit_root).as_posix(),
+                    "sha256": sha256_file(path),
+                }
+                for path in paths
+            ],
+        }
+        marker_path.parent.mkdir(parents=True, exist_ok=True)
+        marker_temporary = marker_path.with_name(
+            f".{marker_path.name}.tmp-{uuid4().hex}"
+        )
+        marker_temporary.write_text(
+            json.dumps(marker_payload, ensure_ascii=False, indent=2, allow_nan=False) + "\n",
+            encoding="utf-8",
+        )
+        marker_temporary.replace(marker_path)
+        marker_published = True
     except Exception:
-        # No target existed before this transaction (checked above).  Remove
-        # only artifacts published by this invocation so a partial receipt can
-        # never masquerade as a complete merge after a filesystem failure.
+        # No target existed before this transaction. Remove only this
+        # invocation's files; a crash leaves no marker and is rejected by the
+        # consumer, while an ordinary exception rolls back published files.
+        if marker_published:
+            try:
+                marker_path.unlink()
+            except FileNotFoundError:
+                pass
         for path in published_paths:
             try:
                 path.unlink()
@@ -2992,6 +3082,8 @@ def _write_json_artifacts_atomic(artifacts: list[tuple[Path, Any]]) -> None:
         for temporary, _ in temporary_paths:
             if temporary.exists():
                 temporary.unlink()
+        if marker_temporary is not None and marker_temporary.exists():
+            marker_temporary.unlink()
 
 
 def merge_host_agent_review_packets(
@@ -3206,6 +3298,21 @@ def merge_host_agent_review_packets(
         "reported_conflicts": aggregate_conflicts,
     }
     aggregate, deduplication = deduplicate_exact_requirements(aggregate)
+    full_rule_spec = full_request.get("rule_spec")
+    if not isinstance(full_rule_spec, dict):
+        full_rule_spec = {}
+    existing_requirement_map = {
+        item.get("id"): item
+        for item in full_rule_spec.get("requirements", [])
+        if isinstance(item, dict) and item.get("id")
+    }
+    aggregate, existing_payload_repairs = _project_authoritative_existing_payloads(
+        aggregate, existing_requirement_map,
+        {str(item["id"]): item for item in full_clauses},
+    )
+    aggregate, source_verification_repairs = materialize_known_source_verification(
+        aggregate, full_clauses,
+    )
     aggregate_errors = validate_host_review_response(aggregate, full_request)
     if aggregate_errors:
         raise ValueError(
@@ -3214,6 +3321,7 @@ def merge_host_agent_review_packets(
         )
     ledger = build_semantic_review_ledger(aggregate, full_clauses)
     ledger_path = review_dir.resolve() / "semantic-review-ledger.json"
+    merge_commit_path = review_dir.resolve() / "merge-commit.json"
     metadata = {
         "protocol": "host_agent_semantic_review",
         "chunked": len(request_chunks) > 1,
@@ -3239,6 +3347,9 @@ def merge_host_agent_review_packets(
         "deduplication_policy": copy.deepcopy(deduplication),
         "semantic_review_ledger_path": str(ledger_path.resolve()),
         "semantic_review_ledger_sha256": sha256_json(ledger),
+        "merge_commit_path": str(merge_commit_path.resolve()),
+        "existing_requirement_payload_projection": existing_payload_repairs,
+        "source_obligation_verification_projection": source_verification_repairs,
     }
     receipt = {
         "schema_version": "1.0",
@@ -3251,7 +3362,18 @@ def merge_host_agent_review_packets(
     artifacts = [(merge_receipt_path, receipt), (ledger_path, ledger)]
     if response_out_path:
         artifacts.insert(0, (response_out_path, aggregate))
-    _write_json_artifacts_atomic(artifacts)
+    _write_json_artifacts_atomic(
+        artifacts,
+        commit_marker_path=merge_commit_path,
+        commit_root=review_dir.resolve().parent,
+        commit_metadata={
+            "schema_version": "1.0",
+            "status": "committed",
+            "protocol": "host_agent_semantic_review_merge",
+            "run_id": full_request.get("provenance", {}).get("run_id"),
+            "aggregate_sha256": sha256_json(aggregate),
+        },
+    )
     return aggregate, metadata
 
 
@@ -3270,7 +3392,8 @@ def response_contract_kind(response: Any) -> str:
 
 def merge_llm(spec: dict[str, Any], questions: list[dict[str, Any]], clauses: list[dict[str, Any]], response: dict[str, Any],
               has_rule_conflicts: bool = False) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    qmap = {q["id"]: q for q in questions}; cmap = {c["id"]: c for c in clauses}
+    questions = bind_question_records(questions, clauses)
+    qmap = {q["question_id"]: q for q in questions}; cmap = {c["id"]: c for c in clauses}
     remaining = []; audit = []; seen = set()
     for item in response.get("resolutions", []):
         qid = item.get("question_id"); q = qmap.get(qid)
@@ -3292,7 +3415,7 @@ def merge_llm(spec: dict[str, Any], questions: list[dict[str, Any]], clauses: li
             "evidence_ids": evidence, "clause_ids": [str(clause["id"])],
             "resolved_by": "llm", "confidence": .8, "source_text": clause["text"]})
         audit.append({"accepted": True, "question_id": qid, "role": role, "evidence_ids": evidence})
-    remaining.extend(q for q in questions if q["id"] not in seen)
+    remaining.extend(q for q in questions if q["question_id"] not in seen)
     spec["status"] = "needs_clarification" if remaining or has_rule_conflicts else "semantic_resolved"
     return remaining, audit
 
@@ -3350,7 +3473,7 @@ def validate_spec(spec: dict[str, Any], evidence_ids: set[str]) -> list[str]:
 def write_json(path: Path, data: Any) -> None:
     atomic_write_text(
         path,
-        json.dumps(data, ensure_ascii=False, indent=2) + "\n",
+        strict_json_dumps(data, ensure_ascii=False, indent=2) + "\n",
     )
 
 
@@ -3451,10 +3574,10 @@ def analyse(args: argparse.Namespace) -> int:
         normalization_manifest: dict[str, Any] | None = None
         if normalization_manifest_path.is_file():
             try:
-                normalization_manifest = json.loads(
+                normalization_manifest = strict_json_loads(
                     normalization_manifest_path.read_text(encoding="utf-8")
                 )
-            except (OSError, json.JSONDecodeError):
+            except (OSError, ValueError):
                 normalization_manifest = None
         extraction_manifest.update({
             "status": "failed",
@@ -3662,7 +3785,8 @@ def analyse(args: argparse.Namespace) -> int:
                 chunk_size=args.host_review_chunk_size,
             )
         if response is None:
-            questions = [{"id": "Q0001", "question": "新模板需要 LLM 完整语义解析与完整性审查",
+            questions = [{"question_id": "Q0001", "scope": "global",
+                          "question": "新模板需要 LLM 完整语义解析与完整性审查",
                           "candidate_roles": ["llm_primary_review"], "evidence_ids": [],
                           "source_text": "No LLM response was supplied."}]
             spec["status"] = "needs_clarification"
@@ -3680,11 +3804,12 @@ def analyse(args: argparse.Namespace) -> int:
                                                        expected_provenance=expected_provenance,
                                                        require_provenance=args.strict_provenance,
                                                        contract_errors=supplied_contract_errors)
-            questions = [{"id": f"Q{i+1:04d}", "question": "该条款证据不足，需要人工确认",
+            questions = [{"question_id": f"Q{i+1:04d}", "question": "该条款证据不足，需要人工确认",
                           "clause_id": cid, "source_text": next((c["text"] for c in clauses if c["id"] == cid), ""),
                           "candidate_roles": ["unknown"],
                           "evidence_ids": next((c["evidence_ids"] for c in clauses if c["id"] == cid), [])}
                          for i, cid in enumerate(spec["completeness"]["unresolved_clause_ids"])]
+            questions = bind_question_records(questions, clauses, evidence)
     else:
         llm_request = build_llm_request(questions, clauses) if questions else None
         if questions and supplied_response is not None:

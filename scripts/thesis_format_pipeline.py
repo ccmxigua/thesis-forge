@@ -22,7 +22,11 @@ from host_review_contract import (
 from pipeline_finding import evidence, finding
 from region_graph import compile_region_graph
 from section_model import compile_section_plan
-from semantic_contract import sha256_json, validate_response_provenance
+from semantic_contract import (
+    request_body_sha256, request_envelope_sha256,
+    sha256_file, sha256_json, strict_json_dumps, strict_json_loads,
+    validate_response_provenance,
+)
 from semantic_issue_confirmation import (
     bind_confirmations,
     build_confirmation_receipt,
@@ -32,6 +36,15 @@ from manual_review import (
     add_manual_review_items,
     build_manual_review_ledger,
     write_manual_review_ledger,
+)
+from native_semantic_review import (
+    OBLIGATION_COVERAGE_PROTOCOL,
+    build_obligation_coverage_request,
+    validate_obligation_coverage_response,
+)
+from requirements_engine import (
+    _chunk_projection,
+    validate_host_review_chunk_source_projection,
 )
 from artifact_io import atomic_write_text, paths_alias
 from process_runner import run_process
@@ -94,7 +107,8 @@ def validate_semantic_review_configuration(args: argparse.Namespace, parser: arg
     Full compliance is a claim about every freshly extracted clause.  It must
     therefore never silently fall back to the deterministic baseline.  The
     baseline modes remain available for explicit supported-subset development
-    and compatibility runs only.
+    and compatibility runs only.  An offline response is limited to a red
+    review draft and can never satisfy a release or submission-ready gate.
     """
     if args.prepare_host_review and args.llm_response:
         parser.error("choose exactly one semantic-review stage: --prepare-host-review or --llm-response")
@@ -102,6 +116,16 @@ def validate_semantic_review_configuration(args: argparse.Namespace, parser: arg
         parser.error("--host-agent-audit and --merge-receipt must be supplied together")
     if (args.host_agent_audit or args.merge_receipt) and not args.llm_response:
         parser.error("host-agent receipts require --llm-response")
+    if args.allow_offline_review and (
+        args.output_policy != "review_draft"
+        or args.require_submission_ready
+        or args.strict_release
+    ):
+        parser.error(
+            "--allow-offline-review is non-release only: it requires "
+            "--output-policy review_draft and cannot satisfy "
+            "--require-submission-ready or --strict-release"
+        )
     if (
         args.compliance_mode == "full"
         and args.llm_response
@@ -148,8 +172,8 @@ def validate_semantic_review_configuration(args: argparse.Namespace, parser: arg
         if not args.llm_response.is_file():
             parser.error(f"LLM response does not exist: {args.llm_response}")
         try:
-            response = json.loads(args.llm_response.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+            response = strict_json_loads(args.llm_response.read_text(encoding="utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
             parser.error(f"cannot read LLM response JSON: {exc}")
         complete = (
             isinstance(response, dict)
@@ -165,14 +189,14 @@ def validate_semantic_review_configuration(args: argparse.Namespace, parser: arg
 
 
 def read_json(path: Path) -> Any:
-    return json.loads(path.read_text(encoding="utf-8"))
+    return strict_json_loads(path.read_text(encoding="utf-8"))
 
 
 def write_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(
         path,
-        json.dumps(value, ensure_ascii=False, indent=2) + "\n",
+        strict_json_dumps(value, ensure_ascii=False, indent=2) + "\n",
     )
 
 
@@ -226,6 +250,235 @@ def _path_under(path: Path, root: Path, *, label: str) -> Path:
     if resolved == root or root not in resolved.parents:
         raise ValueError(f"{label} must remain inside the work directory: {resolved}")
     return resolved
+
+
+def _audit_artifact_path(root: Path, value: Any, *, label: str) -> Path:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{label} path is missing")
+    path = Path(value)
+    if not path.is_absolute():
+        path = root / path
+    return _path_under(path, root, label=label)
+
+
+def _validate_independent_obligation_receipts(
+    *, audit: dict[str, Any], review_root: Path, expected_run_id: str,
+    expected_request_body_sha: str, expected_request_envelope_sha: str | None,
+    expected_request_file_sha: str | None,
+) -> list[dict[str, Any]]:
+    """Revalidate each source-first audit and its raw native request/response bytes."""
+    chunk_runs = audit.get("chunk_runs")
+    chunk_count = audit.get("chunk_count")
+    if (
+        isinstance(chunk_count, bool) or not isinstance(chunk_count, int) or chunk_count <= 0
+        or not isinstance(chunk_runs, list) or len(chunk_runs) != chunk_count
+    ):
+        raise ValueError("host-agent audit must contain one independent review for every chunk")
+    lifecycle = audit.get("chunk_lifecycle")
+    if not isinstance(lifecycle, list) or len(lifecycle) != chunk_count:
+        raise ValueError("host-agent lifecycle does not cover every independently reviewed chunk")
+    lifecycle_by_index: dict[int, dict[str, Any]] = {}
+    for item in lifecycle:
+        if not isinstance(item, dict):
+            raise ValueError("host-agent lifecycle contains an invalid chunk record")
+        index = item.get("chunk_index")
+        if isinstance(index, bool) or not isinstance(index, int) or index in lifecycle_by_index:
+            raise ValueError("host-agent lifecycle has a missing or duplicate chunk index")
+        lifecycle_by_index[index] = item
+    expected_indexes = set(range(1, chunk_count + 1))
+    if set(lifecycle_by_index) != expected_indexes:
+        raise ValueError("host-agent lifecycle chunk indexes are incomplete")
+
+    manifest_path = _audit_artifact_path(
+        review_root, "host-agent-review-manifest.json",
+        label="host-agent review manifest",
+    )
+    manifest = strict_json_loads(manifest_path.read_text(encoding="utf-8"))
+    if not isinstance(manifest, dict) or manifest.get("protocol") != "host_agent_semantic_review":
+        raise ValueError("independent obligation reviews have no valid host-agent source manifest")
+    request_path = _audit_artifact_path(
+        review_root, manifest.get("request_path", "llm-request.json"),
+        label="host-agent source request",
+    )
+    chunks_path = _audit_artifact_path(
+        review_root, manifest.get("request_chunks_path", "llm-request-chunks.json"),
+        label="host-agent source request chunks",
+    )
+    full_request = strict_json_loads(request_path.read_text(encoding="utf-8"))
+    request_chunks = strict_json_loads(chunks_path.read_text(encoding="utf-8"))
+    if (
+        not isinstance(full_request, dict)
+        or not isinstance(request_chunks, list)
+        or len(request_chunks) != chunk_count
+        or request_body_sha256(full_request) != expected_request_body_sha
+        or manifest.get("request_body_sha256") != expected_request_body_sha
+        or (expected_request_envelope_sha is not None
+            and (request_envelope_sha256(full_request) != expected_request_envelope_sha
+                 or manifest.get("request_envelope_sha256") != expected_request_envelope_sha))
+        or (expected_request_file_sha is not None
+            and sha256_file(request_path) != expected_request_file_sha)
+    ):
+        raise ValueError("independent obligation source request does not match the fresh extraction")
+    full_provenance = full_request.get("provenance")
+    if not isinstance(full_provenance, dict) or full_provenance.get("run_id") != expected_run_id:
+        raise ValueError("independent obligation source request run_id does not match the fresh run")
+    validate_host_review_chunk_source_projection(full_request, request_chunks, manifest)
+    declared_projection_sha = manifest.get("chunk_projection_sha256")
+    if (
+        not isinstance(declared_projection_sha, str)
+        or declared_projection_sha != sha256_json(_chunk_projection(request_chunks))
+    ):
+        raise ValueError("independent obligation source chunk projection does not match its manifest")
+    packets_by_index: dict[int, dict[str, Any]] = {}
+    for packet in request_chunks:
+        batch = packet.get("batch") if isinstance(packet, dict) else None
+        index = batch.get("index") if isinstance(batch, dict) else None
+        if (
+            isinstance(index, bool) or not isinstance(index, int)
+            or index not in expected_indexes or index in packets_by_index
+        ):
+            raise ValueError("independent obligation source packets have missing or duplicate chunk indexes")
+        packets_by_index[index] = packet
+    if set(packets_by_index) != expected_indexes:
+        raise ValueError("independent obligation source packets do not cover every chunk")
+
+    seen_indexes: set[int] = set()
+    validated: list[dict[str, Any]] = []
+    for chunk_audit in chunk_runs:
+        if not isinstance(chunk_audit, dict):
+            raise ValueError("host-agent audit contains an invalid chunk audit")
+        index = chunk_audit.get("chunk_index")
+        if (
+            isinstance(index, bool) or not isinstance(index, int)
+            or index not in expected_indexes or index in seen_indexes
+        ):
+            raise ValueError("host-agent audit has a missing or duplicate chunk index")
+        seen_indexes.add(index)
+        lifecycle_item = lifecycle_by_index[index]
+        if (
+            lifecycle_item.get("status") != "completed"
+            or lifecycle_item.get("remote_operation_state") != "completed"
+        ):
+            raise ValueError(f"host-agent chunk {index} lifecycle is not completed")
+
+        chunk_response_path = _audit_artifact_path(
+            review_root, chunk_audit.get("response_path"),
+            label=f"accepted chunk response {index}",
+        )
+        chunk_response = read_json(chunk_response_path)
+        candidate_sha = sha256_json(chunk_response)
+        if chunk_audit.get("accepted_response_sha256") != candidate_sha:
+            raise ValueError(f"accepted chunk response {index} does not match its recorded hash")
+        provenance = chunk_response.get("provenance") if isinstance(chunk_response, dict) else None
+        independent = chunk_audit.get("independent_obligation_review")
+        if (
+            not isinstance(independent, dict)
+            or independent.get("status") != "completed"
+            or independent.get("protocol") != OBLIGATION_COVERAGE_PROTOCOL
+            or independent.get("run_id") != expected_run_id
+            or independent.get("chunk_index") != index
+            or independent.get("candidate_response_sha256") != candidate_sha
+        ):
+            raise ValueError(f"host-agent chunk {index} has no response-bound independent review")
+
+        envelope_path = _audit_artifact_path(
+            review_root, independent.get("audit_path"),
+            label=f"independent obligation audit {index}",
+        )
+        if not envelope_path.is_file() or sha256_file(envelope_path) != independent.get("audit_sha256"):
+            raise ValueError(f"independent obligation audit {index} bytes do not match its receipt")
+        envelope = read_json(envelope_path)
+        review_audit = envelope.get("review_audit") if isinstance(envelope, dict) else None
+        if (
+            not isinstance(envelope, dict)
+            or envelope.get("protocol") != OBLIGATION_COVERAGE_PROTOCOL
+            or envelope.get("status") != "completed"
+            or envelope.get("run_id") != expected_run_id
+            or envelope.get("chunk_index") != index
+            or envelope.get("candidate_response_sha256") != candidate_sha
+            or envelope.get("provenance") != provenance
+            or independent.get("candidate_response_sha256") != candidate_sha
+            or not isinstance(review_audit, dict)
+            or review_audit.get("status") != "completed"
+            or review_audit.get("protocol") != OBLIGATION_COVERAGE_PROTOCOL
+            or review_audit.get("adapter_id") != audit.get("adapter_id")
+            or review_audit.get("host_runtime") != audit.get("host_runtime")
+        ):
+            raise ValueError(f"independent obligation audit {index} is not bound to the current native run")
+
+        request_path = _audit_artifact_path(
+            review_root, review_audit.get("request_path"),
+            label=f"independent obligation request {index}",
+        )
+        reviewer_response_path = _audit_artifact_path(
+            review_root, review_audit.get("response_path"),
+            label=f"independent obligation response {index}",
+        )
+        review_request = read_json(request_path)
+        review_response = read_json(reviewer_response_path)
+        request_sha = sha256_json(review_request)
+        response_file_sha = sha256_file(reviewer_response_path)
+        if (
+            request_sha != review_audit.get("request_sha256")
+            or request_sha != envelope.get("review_request_sha256")
+            or request_sha != independent.get("review_request_sha256")
+            or response_file_sha != review_audit.get("response_sha256")
+            or response_file_sha != envelope.get("review_response_sha256")
+            or response_file_sha != independent.get("review_response_sha256")
+            or not isinstance(review_request, dict)
+            or review_request.get("protocol") != OBLIGATION_COVERAGE_PROTOCOL
+            or review_request.get("run_id") != expected_run_id
+            or review_request.get("chunk_index") != index
+            or review_request.get("provenance") != provenance
+        ):
+            raise ValueError(f"independent obligation request/response {index} failed byte or identity validation")
+        checks = review_request.get("checks")
+        clause_reviews = chunk_response.get("clause_reviews")
+        expected_clause_ids = [
+            str(item.get("clause_id")) for item in clause_reviews
+            if isinstance(item, dict) and isinstance(item.get("clause_id"), str)
+        ] if isinstance(clause_reviews, list) else []
+        check_ids = [
+            item.get("check_id") for item in checks if isinstance(item, dict)
+        ] if isinstance(checks, list) else []
+        if (
+            not isinstance(checks, list)
+            or len(checks) != len(expected_clause_ids)
+            or len(check_ids) != len(checks)
+            or len(set(check_ids)) != len(check_ids)
+            or set(check_ids) != set(expected_clause_ids)
+        ):
+            raise ValueError(f"independent obligation review {index} does not cover every accepted clause")
+        attempt = review_request.get("attempt")
+        if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt <= 0:
+            raise ValueError(f"independent obligation review {index} has an invalid attempt number")
+        expected_review_request = build_obligation_coverage_request(
+            chunk_response, packets_by_index[index],
+            run_id=expected_run_id, chunk_index=index,
+        )
+        expected_review_request["attempt"] = attempt
+        if sha256_json(review_request) != sha256_json(expected_review_request):
+            raise ValueError(
+                f"independent obligation review {index} request is not reconstructed "
+                "from the canonical source packet and accepted response"
+            )
+        normalized_results = validate_obligation_coverage_response(review_response, checks)
+        if (
+            normalized_results != envelope.get("results")
+            or normalized_results != review_audit.get("results")
+            or any(item.get("verdict") == "incomplete" for item in normalized_results)
+        ):
+            raise ValueError(f"independent obligation review {index} is incomplete or inconsistent")
+        validated.append({
+            "chunk_index": index,
+            "candidate_response_sha256": candidate_sha,
+            "audit_sha256": independent.get("audit_sha256"),
+            "review_request_sha256": request_sha,
+            "review_response_sha256": response_file_sha,
+        })
+    if seen_indexes != expected_indexes:
+        raise ValueError("host-agent audit omitted an independently reviewed chunk")
+    return sorted(validated, key=lambda item: item["chunk_index"])
 
 
 def validate_host_review_receipts(
@@ -302,27 +555,76 @@ def validate_host_review_receipts(
         raise ValueError("host-agent merge runtime context does not match the fresh request")
     if merge.get("merge_receipt_path") and Path(str(merge["merge_receipt_path"])).resolve() != receipt_path:
         raise ValueError("host-agent audit receipt path does not match the supplied receipt")
+    marker_path_value = receipt.get("merge_commit_path")
+    if not marker_path_value:
+        raise ValueError("merge receipt does not name a final merge commit marker")
+    marker_path = _path_under(
+        Path(str(marker_path_value)), work, label="merge commit marker",
+    )
+    if marker_path != (receipt_path.parent / "merge-commit.json").resolve():
+        raise ValueError("merge commit marker path does not match the receipt directory")
+    if not marker_path.is_file():
+        raise ValueError("final merge commit marker is missing")
+    marker = read_json(marker_path)
+    if (
+        marker.get("status") != "committed"
+        or marker.get("protocol") != "host_agent_semantic_review_merge"
+        or marker.get("run_id") != expected_run_id
+        or marker.get("aggregate_sha256") != receipt.get("aggregate_sha256")
+    ):
+        raise ValueError("merge commit marker is not bound to the current merge receipt")
+    marker_artifacts = marker.get("artifacts")
+    if not isinstance(marker_artifacts, list):
+        raise ValueError("merge commit marker artifacts must be an array")
+    artifact_records: dict[Path, str] = {}
+    for item in marker_artifacts:
+        if not isinstance(item, dict) or not isinstance(item.get("path"), str):
+            raise ValueError("merge commit marker contains an invalid artifact record")
+        path = _path_under(work / item["path"], work, label="merge artifact")
+        digest = item.get("sha256")
+        if not isinstance(digest, str) or len(digest) != 64 or path in artifact_records:
+            raise ValueError("merge commit marker contains an invalid hash or duplicate path")
+        if not path.is_file() or sha256_file(path) != digest:
+            raise ValueError(f"merge artifact bytes do not match the commit marker: {path}")
+        artifact_records[path] = digest
     ledger_path_value = receipt.get("semantic_review_ledger_path")
     ledger_sha = receipt.get("semantic_review_ledger_sha256")
-    if response_contract_version == HOST_REVIEW_CONTRACT_V3:
-        if not ledger_path_value or not ledger_sha:
-            raise ValueError("contract 3.0 receipt must include the semantic review ledger")
-        ledger_path = _path_under(
-            Path(str(ledger_path_value)), work, label="semantic review ledger"
-        )
-        if not ledger_path.is_file():
-            raise ValueError("semantic review ledger does not exist")
-        ledger = read_json(ledger_path)
-        if sha256_json(ledger) != ledger_sha:
-            raise ValueError("semantic review ledger hash does not match the receipt")
-        if ledger.get("response_sha256") != receipt.get("aggregate_sha256"):
-            raise ValueError("semantic review ledger is not bound to the merged response")
-        if merge.get("semantic_review_ledger_sha256") != ledger_sha:
-            raise ValueError("host-agent audit ledger hash does not match the receipt")
+    if not ledger_path_value or not ledger_sha:
+        raise ValueError("merge receipt must include the semantic review ledger")
+    ledger_path = _path_under(
+        Path(str(ledger_path_value)), work, label="semantic review ledger"
+    )
+    if set(artifact_records) != {response_path, receipt_path, ledger_path}:
+        raise ValueError("merge commit marker does not cover exactly the response, receipt, and ledger")
+    if artifact_records[response_path] != sha256_file(response_path):
+        raise ValueError("merged response bytes changed after commit")
+    if artifact_records[receipt_path] != sha256_file(receipt_path):
+        raise ValueError("merge receipt bytes changed after commit")
+    if artifact_records[ledger_path] != sha256_file(ledger_path):
+        raise ValueError("semantic review ledger bytes changed after commit")
+    ledger = read_json(ledger_path)
+    if sha256_json(ledger) != ledger_sha:
+        raise ValueError("semantic review ledger hash does not match the receipt")
+    if ledger.get("response_sha256") != receipt.get("aggregate_sha256"):
+        raise ValueError("semantic review ledger is not bound to the merged response")
+    if merge.get("semantic_review_ledger_sha256") != ledger_sha:
+        raise ValueError("host-agent audit ledger hash does not match the receipt")
+    independent_reviews = _validate_independent_obligation_receipts(
+        audit=audit, review_root=audit_path.parent.resolve(),
+        expected_run_id=str(expected_run_id),
+        expected_request_body_sha=str(expected_request_body_sha),
+        expected_request_envelope_sha=(
+            str(expected_request_envelope_sha) if expected_request_envelope_sha else None
+        ),
+        expected_request_file_sha=(
+            str(expected_request_file_sha) if expected_request_file_sha else None
+        ),
+    )
     return {
         "response": file_record(response_path),
         "host_agent_audit": file_record(audit_path),
         "merge_receipt": file_record(receipt_path),
+        "merge_commit_marker": file_record(marker_path),
         "aggregate_sha256": receipt.get("aggregate_sha256"),
         "request_sha256": expected_request_body_sha,
         "request_body_sha256": expected_request_body_sha,
@@ -331,6 +633,7 @@ def validate_host_review_receipts(
         "run_id": expected_run_id,
         "runtime_context": expected_runtime_context,
         "contract_version": response_contract_version,
+        "independent_obligation_reviews": independent_reviews,
         "semantic_review_ledger": (
             {"path": str(ledger_path), "sha256": ledger_sha}
             if response_contract_version == HOST_REVIEW_CONTRACT_V3 else None
@@ -759,7 +1062,7 @@ def _main(argv: list[str]) -> int:
     p.add_argument("--allow-unresolved", action="store_true",
                    help="unsafe expert override: continue despite unresolved style-map questions; requirement questions still block")
     p.add_argument("--allow-offline-review", action="store_true",
-                   help="explicit non-release test mode; permits full semantic compilation without a native call receipt")
+                   help="non-release test mode only; requires --output-policy review_draft and permits compilation without a native call receipt")
     p.add_argument("--preview-placeholders", action="store_true",
                    help="opt-in supported-subset preview: continue past unresolved requirement semantics while keeping the artifact non-submission-ready")
     p.add_argument(
@@ -871,7 +1174,7 @@ def _main(argv: list[str]) -> int:
     if args.allow_existing_work and manifest_path.is_file():
         try:
             candidate = read_json(manifest_path)
-        except (OSError, json.JSONDecodeError) as exc:
+        except (OSError, ValueError) as exc:
             p.error(f"cannot read existing pipeline manifest for a compatibility stage: {exc}")
         if not isinstance(candidate, dict):
             p.error("existing pipeline manifest is not a JSON object; start a fresh run directory")
@@ -1343,6 +1646,7 @@ def _main(argv: list[str]) -> int:
         if not isinstance(semantic_provenance, dict):
             semantic_provenance = {}
         clause_file_record = file_record(requirements_dir / "requirement-clauses.json")
+        evidence_doc = read_json(requirements_dir / "document-evidence.json")
         evidence_context_path = requirements_dir / "evidence-context.json"
         evidence_file_record = file_record(evidence_context_path) if evidence_context_path.is_file() else {}
         manual_review_release_gates: list[dict[str, Any]] = []
@@ -1369,6 +1673,8 @@ def _main(argv: list[str]) -> int:
             capability_report,
             questions,
             release_gates=manual_review_release_gates,
+            clauses=clauses,
+            evidence_doc=evidence_doc,
             binding={
                 "case_id": args.case_id or "standalone",
                 "run_id": spec.get("run_id"),
@@ -1770,7 +2076,7 @@ def _main(argv: list[str]) -> int:
     if args.output_policy == "review_draft" and manual_review_items_path.is_file():
         try:
             final_manual_ledger = read_json(manual_review_items_path)
-        except (OSError, json.JSONDecodeError):
+        except (OSError, ValueError):
             final_manual_ledger = None
         if isinstance(final_manual_ledger, dict):
             manifest["manual_review_summary"] = final_manual_ledger.get("summary", {})

@@ -28,6 +28,7 @@ from typing import Any
 from lxml import etree
 
 from template_profile import NS, W, compile_profile, load_profile, resource, sha256
+from semantic_contract import strict_json_read
 
 
 def _read_part(docx: Path, part: str = "word/document.xml") -> tuple[etree._Element, dict[str, bytes]]:
@@ -135,7 +136,7 @@ def build_template(profile_path: Path, output: Path, *, inputs: dict[str, Path] 
     official = resource(profile, "official_docx")
     if official is None:
         raise ValueError("profile has no official_docx")
-    compiled = json.loads(compiled_path.read_text(encoding="utf-8")) if compiled_path else compile_profile(profile_path)
+    compiled = strict_json_read(compiled_path) if compiled_path else compile_profile(profile_path)
     if compiled.get("official_docx_sha256") != sha256(official):
         raise ValueError("compiled profile is not bound to the current official template")
     root, members = _read_part(official)

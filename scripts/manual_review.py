@@ -13,6 +13,9 @@ import re
 from pathlib import Path
 from typing import Any
 
+from question_contract import bind_question_records, normalize_question_records
+from semantic_contract import strict_json_dumps
+
 from artifact_io import atomic_write_text
 
 CLAUSE_RE = re.compile(r"\bC\d{5}\b")
@@ -72,6 +75,10 @@ def _string_list(value: Any) -> list[str]:
 
 
 def _question_item(question: dict[str, Any]) -> dict[str, Any]:
+    normalized = normalize_question_records([question])
+    question = normalized[0] if normalized else {}
+    question_id = question.get("question_id")
+    evidence_ids = _string_list(question.get("evidence_ids"))
     clause_id = str(question.get("clause_id") or "")
     source_text = str(
         question.get("source_text")
@@ -86,17 +93,15 @@ def _question_item(question: dict[str, Any]) -> dict[str, Any]:
         "category": "runtime_manual_unverifiable",
         "clause_ids": [clause_id] if clause_id else [],
         "requirement_ids": [],
-        "question_ids": [str(question.get("question_id"))]
-        if question.get("question_id") else [],
-        "evidence_ids": [str(question.get("evidence_id"))]
-        if question.get("evidence_id") else [],
+        "question_ids": [str(question_id)] if question_id else [],
+        "evidence_ids": evidence_ids,
         # Keep the extracted source clause when available.  The short human
         # question is useful as the reason, but cannot locate an inline marker
         # in the generated document or explain what the reviewer must decide.
         "source_text": source_text,
         "reason": str(question.get("reason") or question.get("question") or ""),
         "action": "请人工确认该条款的适用对象、数值单位或权威解释。",
-        "placeholder_text": f"【待人工处理：{clause_id or question.get('question_id', '未绑定问题')}】",
+        "placeholder_text": f"【待人工处理：{clause_id or question_id or '未绑定问题'}】",
         "original_blocking": True,
     }
 
@@ -107,6 +112,8 @@ def build_manual_review_ledger(
     *,
     binding: dict[str, Any] | None = None,
     release_gates: list[dict[str, Any]] | None = None,
+    clauses: list[dict[str, Any]] | None = None,
+    evidence_doc: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Return a stable list of draft-only review items.
 
@@ -115,6 +122,10 @@ def build_manual_review_ledger(
     question/evidence IDs remain attached to the item.
     """
     report = capability_report if isinstance(capability_report, dict) else {}
+    if clauses is not None:
+        questions = bind_question_records(questions or [], clauses, evidence_doc)
+    else:
+        questions = normalize_question_records(questions or [])
     candidates: list[dict[str, Any]] = []
     question_clause_ids = {
         str(item.get("clause_id"))
@@ -162,7 +173,10 @@ def build_manual_review_ledger(
         })
 
     for question in questions or []:
-        if isinstance(question, dict):
+        # Run-level workflow failures are technical release gates, not author
+        # decisions. Keep them in the run manifest rather than emitting a red
+        # source marker with no clause/evidence anchor.
+        if isinstance(question, dict) and question.get("scope") != "global":
             candidates.append(_question_item(question))
 
     for gate in release_gates or []:
@@ -352,5 +366,5 @@ def write_manual_review_ledger(path: Path, ledger: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     atomic_write_text(
         path,
-        json.dumps(ledger, ensure_ascii=False, indent=2) + "\n",
+        strict_json_dumps(ledger, ensure_ascii=False, indent=2) + "\n",
     )

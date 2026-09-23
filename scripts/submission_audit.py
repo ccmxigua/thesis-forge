@@ -22,6 +22,7 @@ from lxml import etree
 from format_spec_validation import load_and_validate
 from render_attestation import load_key, verify as verify_attestation
 from artifact_io import atomic_write_text, paths_alias
+from semantic_contract import strict_json_dumps, strict_json_read
 
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -82,7 +83,7 @@ CHAPTER_CLAIM = re.compile(r"(?:全文|本文)(?:共(?:分为|有|计)?|分为|�
 def _json(path: Path | None) -> dict[str, Any]:
     if path is None:
         return {}
-    value = json.loads(path.read_text(encoding="utf-8"))
+    value = strict_json_read(path)
     if not isinstance(value, dict):
         raise ValueError(f"{path} must contain a JSON object")
     return value
@@ -1338,7 +1339,7 @@ def main(argv: list[str] | None = None) -> int:
         template_profile_path=args.template_profile.resolve() if args.template_profile else None,
         thesis_profile=_json(args.thesis_profile) if args.thesis_profile else None,
     )
-    payload = json.dumps(result, ensure_ascii=False, indent=2) + "\n"
+    payload = strict_json_dumps(result, ensure_ascii=False, indent=2) + "\n"
     if output:
         output.parent.mkdir(parents=True, exist_ok=True)
         atomic_write_text(output, payload)

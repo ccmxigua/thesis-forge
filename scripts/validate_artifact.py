@@ -19,6 +19,7 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 from redteam.extract_docx import extract_docx  # noqa: E402
 from scripts.config_v2 import load_resolved_config  # noqa: E402
+from scripts.semantic_contract import strict_json_read  # noqa: E402
 
 
 INVALID_XML_CONTROL_BYTES = re.compile(rb'[\x00-\x08\x0b\x0c\x0e-\x1f]')
@@ -100,8 +101,8 @@ def _load_expected_manifest(path: Path | None) -> dict[str, Any]:
     if path is None:
         return {}
     try:
-        value = json.loads(path.read_text(encoding='utf-8'))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        value = strict_json_read(path)
+    except (OSError, UnicodeDecodeError, ValueError) as exc:
         raise ValueError(f'invalid expected manifest {path}: {exc}') from exc
     if not isinstance(value, dict) or value.get('schema_version') != '1.0':
         raise ValueError(f'expected manifest {path} must use schema_version 1.0')
@@ -288,16 +289,16 @@ def validate(
     compatibility: dict[str, Any] | None = None
     if compatibility_report and compatibility_report.is_file():
         try:
-            compatibility = json.loads(compatibility_report.read_text(encoding='utf-8'))
+            compatibility = strict_json_read(compatibility_report)
             if compatibility.get('compatible') is not True:
                 errors.append('OOXML compatibility audit failed')
-        except (OSError, json.JSONDecodeError) as exc:
+        except (OSError, ValueError) as exc:
             errors.append(f'invalid compatibility report: {exc}')
 
     manifest_data: dict[str, Any] | None = None
     if run_manifest is not None:
         try:
-            manifest_data = json.loads(run_manifest.read_text(encoding='utf-8'))
+            manifest_data = strict_json_read(run_manifest)
             if not isinstance(manifest_data, dict):
                 raise ValueError('manifest must be a JSON object')
             artifact_hash = ((manifest_data.get('artifact') or {}).get('sha256'))
@@ -324,7 +325,7 @@ def validate(
                 csl_hash = (((manifest_data.get('sources') or {}).get('csl') or {}).get('sha256'))
                 if csl_hash and csl_hash != sha256(csl):
                     errors.append('run manifest CSL hash does not match input')
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        except (OSError, ValueError) as exc:
             errors.append(f'invalid conversion manifest: {exc}')
 
     return {

@@ -13,16 +13,18 @@ from typing import Any
 try:
     from .extract_semantic_metadata import extract
     from .inspect_docx_semantics import inspect
+    from .semantic_contract import strict_json_dumps, strict_json_read
 except ImportError:  # direct script execution
     from extract_semantic_metadata import extract
     from inspect_docx_semantics import inspect
+    from semantic_contract import strict_json_dumps, strict_json_read
 
 ROOT = Path(__file__).resolve().parents[1]
 
 
 def write_json(path: Path, value: Any) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    path.write_text(strict_json_dumps(value, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
 
 def run(name: str, command: list[str], steps: list[dict[str, Any]]) -> subprocess.CompletedProcess[str]:
@@ -87,7 +89,7 @@ def main(argv: list[str] | None = None) -> int:
                                 "status": "running", "source": str(args.source.resolve()), "steps": steps}
     source_semantics = extract(args.source)
     write_json(out / "semantic-metadata.json", source_semantics)
-    expected = json.loads(args.expected.read_text(encoding="utf-8"))
+    expected = strict_json_read(args.expected)
 
     final_semantics = None
     if args.requirements:
@@ -114,7 +116,7 @@ def main(argv: list[str] | None = None) -> int:
             write_json(manifest_path, manifest)
             print(json.dumps({"status": manifest["status"], "manifest": str(manifest_path)}, ensure_ascii=False))
             return 0
-        pipeline_manifest = json.loads((pipeline / "pipeline-manifest.json").read_text(encoding="utf-8"))
+        pipeline_manifest = strict_json_read(pipeline / "pipeline-manifest.json")
         if pipeline_manifest.get("pipeline_level") != "latex_end_to_end" or "intermediate_docx" not in pipeline_manifest:
             manifest.update(status="failed", failed_stage="school_pipeline_provenance",
                             failures=[{"failure_type": "missing_latex_end_to_end_provenance"}])

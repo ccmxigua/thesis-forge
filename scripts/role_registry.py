@@ -13,6 +13,11 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
+try:
+    from .semantic_contract import strict_json_read
+except ImportError:  # direct script/module execution
+    from semantic_contract import strict_json_read
+
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_REGISTRY = ROOT / "schema" / "role-registry.json"
 
@@ -20,7 +25,7 @@ DEFAULT_REGISTRY = ROOT / "schema" / "role-registry.json"
 @lru_cache(maxsize=None)
 def load_registry(path: str | Path = DEFAULT_REGISTRY) -> dict[str, Any]:
     registry_path = Path(path)
-    data = json.loads(registry_path.read_text(encoding="utf-8"))
+    data = strict_json_read(registry_path)
     if data.get("schema_version") != "1.0" or not isinstance(data.get("roles"), dict):
         raise ValueError(f"invalid role registry: {registry_path}")
     return data

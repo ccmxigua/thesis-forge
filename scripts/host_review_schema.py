@@ -161,6 +161,10 @@ def _resolve_schema_ref(schema: dict[str, Any], root: dict[str, Any]) -> dict[st
 
 def _schema_shape_matches(schema: dict[str, Any], value: Any, root: dict[str, Any]) -> bool:
     schema = _resolve_schema_ref(schema, root)
+    if "enum" in schema and value not in schema["enum"]:
+        return False
+    if "const" in schema and value != schema["const"]:
+        return False
     if isinstance(schema.get("anyOf"), list):
         return any(
             isinstance(item, dict) and _schema_shape_matches(item, value, root)
@@ -177,7 +181,19 @@ def _schema_shape_matches(schema: dict[str, Any], value: Any, root: dict[str, An
         # nulls from page/cover/declaration-specific fields in the response.
         declared = schema.get("properties")
         if isinstance(declared, dict) and schema.get("additionalProperties") is False:
-            return all(key in declared for key in value)
+            if any(key not in declared for key in value):
+                return False
+            # The provider-facing requirement union is discriminated by the
+            # sibling ``role`` field.  Looking only at key names would select
+            # the first object-shaped branch and could normalize a table
+            # payload under a different role.  Recurse through actual values
+            # so enums and role-specific property schemas participate.
+            required = set(schema.get("required", []) or [])
+            return all(
+                (child is None and key not in required)
+                or _schema_shape_matches(declared[key], child, root)
+                for key, child in value.items()
+            )
         return True
     if schema_type == "array":
         return isinstance(value, list)
@@ -344,6 +360,40 @@ def build_host_review_response_schema(
             fact_schema = condition_properties.get("fact")
             if isinstance(fact_schema, dict):
                 fact_schema["pattern"] = r"^(thesis_profile|source_inventory|template_profile|runtime)\."
+    reported_conflict_definition = request_defs.get("reportedConflict")
+    if isinstance(reported_conflict_definition, dict):
+        target_role = (
+            reported_conflict_definition.get("properties", {})
+            .get("target", {}).get("properties", {}).get("role")
+        )
+        if isinstance(target_role, dict):
+            target_role["enum"] = sorted(allowed_requirement_roles)
+    requirement_common_properties = {
+        "existing_requirement_id": {"type": "string", "minLength": 1},
+        "field_key": {"type": "string", "minLength": 1},
+        "clause_ids": {"type": "array", "items": {"type": "string"}},
+        "evidence_ids": {"type": "array", "items": {"type": "string"}},
+        "confidence": {"type": "number"},
+        "reason": {"type": "string", "minLength": 1},
+        "applicability": {"$ref": "#/$defs/applicabilitySpec"},
+        "input_prerequisites": {"type": "array", "items": {"$ref": "#/$defs/inputPrerequisiteSpec"}},
+        "verification": {"$ref": "#/$defs/verificationSpec"},
+    }
+    requirement_required = [
+        "role", "properties", "clause_ids", "evidence_ids", "confidence", "reason",
+    ]
+    requirement_role_branches = []
+    for role in sorted(role_schema_names):
+        branch_properties = copy.deepcopy(requirement_common_properties)
+        branch_properties["role"] = {"enum": [role]}
+        branch_properties["properties"] = {"$ref": f"#/$defs/{role_schema_names[role]}"}
+        requirement_role_branches.append({
+            "type": "object",
+            "required": requirement_required,
+            "properties": branch_properties,
+            "additionalProperties": False,
+        })
+
     response_schema: dict[str, Any] = {
         "type": "object",
         "required": ["contract_version", "requirements", "clause_reviews", "unsupported_items", "reported_conflicts"],
@@ -353,36 +403,7 @@ def build_host_review_response_schema(
                 "version", "origin", "source_sha256", "evidence_sha256",
                 "clause_sha256", "request_sha256",
             ]},
-            "requirements": {"type": "array", "items": {
-                "type": "object", "required": [
-                    "role", "properties", "clause_ids", "evidence_ids", "confidence", "reason",
-                ],
-                "properties": {
-                    "existing_requirement_id": {"type": "string", "minLength": 1},
-                    "role": {"enum": sorted(allowed_requirement_roles)},
-                    "field_key": {"type": "string", "minLength": 1},
-                    # The role is selected by the sibling ``role`` field and
-                    # is checked again by the host-independent validator.
-                    # A bare object schema projects to
-                    # ``additionalProperties: false`` with no fields, which
-                    # only permits ``{}`` and makes real style/text
-                    # properties impossible to emit.
-                    "properties": {
-                        "anyOf": [
-                            {"$ref": f"#/$defs/{role_schema_names[role]}"}
-                            for role in sorted(role_schema_names)
-                        ]
-                    },
-                    "clause_ids": {"type": "array", "items": {"type": "string"}},
-                    "evidence_ids": {"type": "array", "items": {"type": "string"}},
-                    "confidence": {"type": "number"},
-                    "reason": {"type": "string", "minLength": 1},
-                    "applicability": {"$ref": "#/$defs/applicabilitySpec"},
-                    "input_prerequisites": {"type": "array", "items": {"$ref": "#/$defs/inputPrerequisiteSpec"}},
-                    "verification": {"$ref": "#/$defs/verificationSpec"},
-                },
-                "additionalProperties": False,
-            }},
+            "requirements": {"type": "array", "items": {"anyOf": requirement_role_branches}},
             "clause_reviews": {"type": "array", "items": {
                 "type": "object",
                 "required": (
@@ -414,7 +435,9 @@ def build_host_review_response_schema(
                 "additionalProperties": False,
             }},
             "unsupported_items": {"type": "array", "items": {"type": "string"}},
-            "reported_conflicts": {"type": "array", "items": {"type": "object"}},
+            "reported_conflicts": {
+                "type": "array", "items": {"$ref": "#/$defs/reportedConflict"},
+            },
         },
         "$defs": request_defs,
         "additionalProperties": False,
@@ -427,7 +450,7 @@ def build_host_review_response_schema(
         # Scope before hashing the request, not later inside a host adapter.
         # Native optional fields become nullable; null means a NEW requirement.
         ids = sorted(set(eligible_existing_ids))
-        response_schema["properties"]["requirements"]["items"]["properties"]["existing_requirement_id"] = (
-            {"type": "string", "enum": ids} if ids else {"type": "null"}
-        )
+        existing_id_schema = {"type": "string", "enum": ids} if ids else {"type": "null"}
+        for branch in response_schema["properties"]["requirements"]["items"]["anyOf"]:
+            branch["properties"]["existing_requirement_id"] = copy.deepcopy(existing_id_schema)
     return response_schema

@@ -29,6 +29,7 @@ from apply_format_spec import (
 from format_spec_validation import load_and_validate
 from section_executor import execute_section_plan
 from section_model import audit_plan_against_docx, compile_section_plan
+from semantic_contract import strict_json_read
 
 
 DEGREE_TEXT = {"doctor": "博士", "master": "硕士"}
@@ -768,7 +769,7 @@ def main() -> int:
     }
     if len(set(resolved_paths.values())) != len(resolved_paths):
         parser.error("input DOCX, output DOCX, and repair report must be three distinct paths")
-    spec = json.loads(args.format_spec.read_text(encoding="utf-8"))
+    spec = strict_json_read(args.format_spec)
     schema_path = Path(__file__).resolve().parents[1] / "schema" / "format-spec.schema.json"
     schema_errors = load_and_validate(spec, schema_path)
     if schema_errors:

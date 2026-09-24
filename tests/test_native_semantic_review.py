@@ -157,6 +157,41 @@ class NativeSemanticReviewTests(unittest.TestCase):
             "uncertain",
         )
 
+    def test_independent_review_requires_quote_even_when_informational_clause_has_no_obligations(self) -> None:
+        check = {
+            "check_id": "C00021", "document_text": "作者姓名",
+            "review_context": {
+                "classification": "informational", "requires_requirement": False,
+                "linked_requirements": [], "machine_obligation_ids": [],
+            },
+        }
+        response = {"results": [{
+            "check_id": "C00021", "verdict": "consistent",
+            "rationale": "The source is a label and states no independent obligation.",
+            "evidence_quotes": [], "machine_obligation_ids": [],
+            "identified_obligations": [],
+        }]}
+        quoted_response = {"results": [{
+            **response["results"][0], "evidence_quotes": ["作者姓名"],
+        }]}
+        self.assertEqual(
+            validate_obligation_coverage_response(quoted_response, [check])[0]["check_id"],
+            "C00021",
+        )
+        with self.assertRaisesRegex(NativeSemanticReviewError, "requires at least 1 items"):
+            validate_obligation_coverage_response(response, [check])
+
+    def test_obligation_review_prompt_requires_quotes_for_zero_obligation_conclusions(self) -> None:
+        prompt = native_review._prompt({
+            "protocol": native_review.OBLIGATION_COVERAGE_PROTOCOL,
+            "checks": [{
+                "check_id": "C00021", "document_text": "作者姓名",
+                "review_context": {"classification": "informational"},
+            }],
+        })
+        self.assertIn("even when no obligations are identified or the clause is informational", prompt)
+        self.assertIn("Never return an empty evidence_quotes array", prompt)
+
     def _stub_codex_host(self, process_result):
         context = SimpleNamespace(
             runtime="codex", as_audit=lambda: {"host_runtime": "codex"},

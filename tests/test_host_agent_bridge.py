@@ -190,7 +190,7 @@ class HostAgentBridgeTests(unittest.TestCase):
             self.assertEqual([request["provider_attempt"] for request, _ in calls], [1, 2])
             self.assertEqual([request["attempt"] for request, _ in calls], [1, 1])
             self.assertEqual([request["provenance"] for request, _ in calls], [provenance, provenance])
-            sleep.assert_called_once_with(bridge.INDEPENDENT_REVIEW_CAPACITY_BACKOFF_SECONDS)
+            sleep.assert_called_once_with(bridge.INDEPENDENT_REVIEW_RETRY_BACKOFF_SECONDS)
 
             first_audit = review_dir / "independent-review-chunk-0003-attempt-01" / "coverage-audit.json"
             failed = json.loads(first_audit.read_text(encoding="utf-8"))
@@ -201,6 +201,138 @@ class HostAgentBridgeTests(unittest.TestCase):
             self.assertEqual(pointer["provider_attempt"], 2)
             self.assertEqual(accepted_audit["provider_attempt_history"][0]["retry_code"], "model_capacity")
             self.assertEqual(accepted_audit["candidate_response_sha256"], bridge._response_sha256(response))
+
+    @staticmethod
+    def _missing_inventory_review_case() -> tuple[dict, dict, dict]:
+        source = "提交的学位论文电子版与纸质本论文的内容一致，如因不同造成不良后果由本人自负"
+        provenance = {
+            "run_id": "run-empty-inventory-correction",
+            "source_sha256": "a" * 64,
+            "clause_sha256": "b" * 64,
+            "evidence_sha256": "c" * 64,
+            "request_sha256": "d" * 64,
+        }
+        chunk = {
+            "provenance": provenance,
+            "clauses": [{"id": "C00061", "text": source, "evidence_ids": ["E1"]}],
+            "evidence_context": {"E1": {"id": "E1", "text": source}},
+        }
+        response = {
+            "provenance": provenance,
+            "clause_reviews": [{
+                "clause_id": "C00061", "classification": "executable",
+                "reason": "This declaration must be preserved.",
+                "obligations": [{"id": "O1", "status": "covered", "reason": "fixed text"}],
+            }],
+            "requirements": [{
+                "id": "R1", "role": "declarations", "clause_ids": ["C00061"],
+                "evidence_ids": ["E1"], "properties": {"declarations": {"body": source}},
+                "verification": {"checker_ids": ["docx.declaration_text"]},
+            }],
+        }
+        request = bridge.build_obligation_coverage_request(
+            response, chunk, run_id="run-empty-inventory-correction", chunk_index=4,
+        )
+        requirement_ref = request["checks"][0]["review_context"]["linked_requirements"][0]["requirement_ref"]
+        valid_review = {
+            "protocol": bridge.OBLIGATION_COVERAGE_PROTOCOL,
+            "status": "completed", "request_sha256": "e" * 64,
+            "response_sha256": "f" * 64,
+            "results": [{
+                "check_id": "C00061", "verdict": "consistent",
+                "rationale": "The fixed declaration is represented by its linked requirement.",
+                "evidence_quotes": [source],
+                "identified_obligations": [{
+                    "source_quote": source, "disposition": "represented",
+                    "requirement_refs": [requirement_ref],
+                }],
+                "machine_obligation_ids": [],
+            }],
+            "summary": {"consistent": 1, "incomplete": 0, "uncertain": 0},
+        }
+        return chunk, response, valid_review
+
+    def test_independent_coverage_corrects_only_empty_executable_inventory_once(self) -> None:
+        self._independent_review_patch.stop()
+        chunk, response, valid_review = self._missing_inventory_review_case()
+        initial_candidate_sha = bridge._response_sha256(response)
+        calls: list[tuple[dict, dict]] = []
+
+        def reject_then_review(request: dict, **kwargs: dict) -> dict:
+            calls.append((copy.deepcopy(request), kwargs))
+            if len(calls) == 1:
+                raise bridge.MissingExecutableObligationInventoryError(["C00061"])
+            return valid_review
+
+        with tempfile.TemporaryDirectory() as td:
+            review_dir = Path(td)
+            with patch.object(bridge, "run_native_semantic_review", side_effect=reject_then_review), \
+                    patch.object(bridge.time, "sleep") as sleep:
+                pointer = bridge._run_independent_obligation_coverage_review(
+                    response, chunk, review_dir=review_dir,
+                    run_id="run-empty-inventory-correction", chunk_index=4, attempt=1,
+                    host_runtime="codex", model="gpt-5.6-luna", timeout=10,
+                    agent_id="main", runner="exec", binary="codex", config_path=None,
+                    controller=bridge.RunController(),
+                )
+
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(calls[0][0]["provenance"], calls[1][0]["provenance"])
+            self.assertEqual([item[0]["provider_attempt"] for item in calls], [1, 2])
+            self.assertNotEqual(calls[0][1]["output_dir"], calls[1][1]["output_dir"])
+            self.assertNotIn("retry_feedback", calls[0][0])
+            self.assertEqual(calls[1][0]["retry_feedback"], {
+                "code": bridge.MissingExecutableObligationInventoryError.code,
+                "clause_ids": ["C00061"],
+            })
+            sleep.assert_called_once_with(bridge.INDEPENDENT_REVIEW_RETRY_BACKOFF_SECONDS)
+            self.assertEqual(bridge._response_sha256(response), initial_candidate_sha)
+            self.assertEqual(pointer["candidate_response_sha256"], initial_candidate_sha)
+
+            first_audit_path = review_dir / (
+                "independent-review-chunk-0004-attempt-01/coverage-audit.json"
+            )
+            first_audit = json.loads(first_audit_path.read_text(encoding="utf-8"))
+            self.assertEqual(first_audit["status"], "rejected")
+            self.assertTrue(first_audit["retryable"])
+            self.assertEqual(first_audit["missing_clause_ids"], ["C00061"])
+
+            accepted_audit = json.loads((review_dir / pointer["audit_path"]).read_text(encoding="utf-8"))
+            self.assertEqual(accepted_audit["status"], "completed")
+            self.assertEqual(accepted_audit["candidate_response_sha256"], initial_candidate_sha)
+            self.assertEqual(accepted_audit["provider_attempt_history"][0]["status"], "semantic_contract_rejected")
+            self.assertEqual(accepted_audit["retry_feedback"]["clause_ids"], ["C00061"])
+
+    def test_independent_coverage_empty_inventory_correction_exhaustion_fails_closed(self) -> None:
+        self._independent_review_patch.stop()
+        chunk, response, _ = self._missing_inventory_review_case()
+        with tempfile.TemporaryDirectory() as td:
+            review_dir = Path(td)
+            with patch.object(
+                bridge, "run_native_semantic_review",
+                side_effect=bridge.MissingExecutableObligationInventoryError(["C00061"]),
+            ) as review_call, patch.object(bridge.time, "sleep") as sleep:
+                with self.assertRaises(bridge.IndependentObligationReviewError) as caught:
+                    bridge._run_independent_obligation_coverage_review(
+                        response, chunk, review_dir=review_dir,
+                        run_id="run-empty-inventory-correction", chunk_index=4, attempt=1,
+                        host_runtime="codex", model="gpt-5.6-luna", timeout=10,
+                        agent_id="main", runner="exec", binary="codex", config_path=None,
+                        controller=bridge.RunController(),
+                    )
+
+            self.assertEqual(review_call.call_count, 2)
+            sleep.assert_called_once_with(bridge.INDEPENDENT_REVIEW_RETRY_BACKOFF_SECONDS)
+            self.assertEqual(
+                caught.exception.error_records[0]["code"],
+                "independent_obligation_review_correction_exhausted",
+            )
+            self.assertEqual(len(caught.exception.error_records[0]["provider_attempt_history"]), 2)
+            for suffix in ("", "-provider-attempt-02"):
+                audit_path = review_dir / (
+                    "independent-review-chunk-0004-attempt-01" + suffix + "/coverage-audit.json"
+                )
+                self.assertEqual(json.loads(audit_path.read_text(encoding="utf-8"))["status"], "rejected")
 
     def test_independent_coverage_does_not_retry_unclassified_provider_or_contract_errors(self) -> None:
         self._independent_review_patch.stop()
@@ -267,7 +399,7 @@ class HostAgentBridgeTests(unittest.TestCase):
                     )
 
             self.assertEqual(review_call.call_count, bridge.INDEPENDENT_REVIEW_PROVIDER_MAX_ATTEMPTS)
-            sleep.assert_called_once_with(bridge.INDEPENDENT_REVIEW_CAPACITY_BACKOFF_SECONDS)
+            sleep.assert_called_once_with(bridge.INDEPENDENT_REVIEW_RETRY_BACKOFF_SECONDS)
             record = caught.exception.error_records[0]
             self.assertEqual(record["code"], "independent_obligation_review_retry_exhausted")
             self.assertEqual(record["provider_attempts"], 2)

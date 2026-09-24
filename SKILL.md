@@ -362,12 +362,26 @@ to the candidate response hash, and account for each identified obligation;
 an incomplete or failed review prevents chunk acceptance and merge. This is a
 fresh second review, not a different provider/model or a guarantee of
 statistically independent judgment; unobservable host model identity remains
-unverified. For Codex, only a structured terminal `turn.failed` that explicitly
+unverified. For Codex, a structured terminal `turn.failed` that explicitly
 reports model-capacity exhaustion may trigger one bounded retry after a
 five-second backoff. The retry uses the same requested model, run, candidate
 response, and provenance, but a fresh attempt directory recorded in the audit.
-Schema, provenance, route, semantic-coverage, timeout, and unclassified provider
-failures are not retried or rewritten as successful reviews.
+There is one additional narrowly defined correction path: if the local
+validator rejects `verdict=consistent` with an empty `identified_obligations`
+list for a clause whose current candidate requires a requirement, the bridge
+may make one fresh independent-review call for the unchanged candidate and
+provenance. Its run-bound feedback identifies only the affected clause IDs and
+requires the reviewer to re-read source spans and linked requirements; it
+never inserts or rewrites an obligation. For each fixed candidate response,
+the capacity retry and this correction share a two-call maximum, so they cannot
+compound into extra attempts. A separately corrected primary response gets a
+new review budget only after the existing bounded primary-response correction
+path produces and revalidates a new candidate. Every retry must pass the
+original validator; a repeated omission and any other semantic/schema,
+provenance, route, timeout, or unclassified provider failure remain fail-closed.
+An explicit `incomplete` verdict continues to
+use the existing bounded primary-response correction path, with the resulting
+candidate revalidated and checked for semantic drift.
 
 Both the source-first obligation review and post-format semantic review use
 run-bound source-span references. Code creates exact span IDs from the current

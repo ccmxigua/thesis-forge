@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from native_semantic_review import (  # noqa: E402
+    MissingExecutableObligationInventoryError,
     NativeSemanticReviewError,
     OBLIGATION_COVERAGE_SCHEMA,
     RetryableNativeSemanticReviewError,
@@ -183,6 +184,40 @@ class NativeSemanticReviewTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(NativeSemanticReviewError, "requires at least 1 items"):
             validate_obligation_coverage_response(response, [check])
+
+    def test_executable_consistent_review_with_empty_inventory_has_specific_error(self) -> None:
+        source = "提交的学位论文电子版与纸质本论文的内容一致，如因不同造成不良后果由本人自负"
+        check = {
+            "check_id": "C00061", "document_text": source,
+            "review_context": {
+                "classification": "executable", "requires_requirement": True,
+                "linked_requirements": [{"requirement_ref": "RR-declaration"}],
+                "machine_obligation_ids": [], "manual_review_codes": [],
+            },
+        }
+        response = {"results": [{
+            "check_id": "C00061", "verdict": "consistent",
+            "rationale": "The linked declaration appears to cover the source.",
+            "evidence_quotes": [source], "machine_obligation_ids": [],
+            "identified_obligations": [],
+        }]}
+
+        with self.assertRaises(MissingExecutableObligationInventoryError) as caught:
+            validate_obligation_coverage_response(response, [check])
+        self.assertEqual(caught.exception.clause_ids, ("C00061",))
+
+    def test_retry_prompt_limits_missing_inventory_correction_to_same_candidate(self) -> None:
+        prompt = native_review._prompt({
+            "protocol": native_review.OBLIGATION_COVERAGE_PROTOCOL,
+            "checks": [],
+            "retry_feedback": {
+                "code": MissingExecutableObligationInventoryError.code,
+                "clause_ids": ["C00061"],
+            },
+        })
+        self.assertIn("same candidate", prompt)
+        self.assertIn("C00061", prompt)
+        self.assertIn("Never invent an obligation", prompt)
 
     def test_author_input_is_pending_not_requirement_or_satisfaction(self) -> None:
         source = "以下示例内容是编写的，请作者根据需要自行撰写真实研究内容。"

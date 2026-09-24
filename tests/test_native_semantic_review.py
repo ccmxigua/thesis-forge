@@ -242,6 +242,90 @@ class NativeSemanticReviewTests(unittest.TestCase):
         with self.assertRaisesRegex(NativeSemanticReviewError, "lacks an unrepresented obligation"):
             validate_obligation_coverage_response(misleading_response, [check])
 
+    def test_only_registered_unresolved_ambiguity_can_be_deferred_to_manual_review(self) -> None:
+        source = (
+            "The Chinese abstract is a brief statement of the content of the paper, "
+            "300 to 1,000 words (the word count may be slightly extended if special requirements are encountered)."
+        )
+        check = {
+            "check_id": "C00076",
+            "document_text": source,
+            "review_context": {
+                "classification": "unresolved",
+                "requires_requirement": False,
+                "linked_requirements": [],
+                "machine_obligation_ids": [],
+                "manual_review_codes": ["abstract_target_metric_ambiguity"],
+            },
+        }
+        deferred = {"results": [{
+            "check_id": "C00076",
+            "verdict": "manual_review_required",
+            "rationale": "The named abstract language conflicts with the words metric; do not infer the target.",
+            "evidence_quotes": ["The Chinese abstract", "300 to 1,000 words"],
+            "machine_obligation_ids": [],
+            "identified_obligations": [{
+                "source_quote": "The Chinese abstract",
+                "disposition": "ambiguous",
+                "requirement_indexes": [],
+            }],
+        }]}
+        self.assertEqual(
+            validate_obligation_coverage_response(deferred, [check])[0]["verdict"],
+            "manual_review_required",
+        )
+        for unsafe in (
+            {**check, "review_context": {**check["review_context"], "classification": "executable"}},
+            {**check, "review_context": {**check["review_context"], "linked_requirements": [{"requirement_index": 0}]}},
+            {**check, "review_context": {**check["review_context"], "manual_review_codes": []}},
+        ):
+            with self.subTest(context=unsafe["review_context"]), self.assertRaises(NativeSemanticReviewError):
+                validate_obligation_coverage_response(deferred, [unsafe])
+        unrepresented = json.loads(json.dumps(deferred, ensure_ascii=False))
+        unrepresented["results"][0]["identified_obligations"].append({
+            "source_quote": "300 to 1,000 words",
+            "disposition": "unrepresented",
+            "requirement_indexes": [],
+        })
+        with self.assertRaisesRegex(NativeSemanticReviewError, "manual deferral is not authorized"):
+            validate_obligation_coverage_response(unrepresented, [check])
+
+    def test_source_clause_support_is_explicit_for_shared_requirement_edges(self) -> None:
+        chunk = {
+            "case_id": "case-1",
+            "provenance": {"run_id": "run-1", "source_sha256": "a" * 64,
+                           "clause_sha256": "b" * 64, "evidence_sha256": "c" * 64,
+                           "request_sha256": "d" * 64},
+            "clauses": [
+                {"id": "C_SOFT", "text": "关键词一般3～8个", "evidence_ids": ["E1"]},
+                {"id": "C_HARD", "text": "最少3组，最多8组", "evidence_ids": ["E2"]},
+            ],
+            "evidence_context": {},
+        }
+        response = {
+            "clause_reviews": [
+                {"clause_id": "C_SOFT", "classification": "executable", "reason": "source"},
+                {"clause_id": "C_HARD", "classification": "executable", "reason": "source"},
+            ],
+            "requirements": [{
+                "role": "content_constraints",
+                "properties": {"keywords_zh": {
+                    "min_count": 3, "max_count": 8,
+                    "count_guidance": {"min_count": 3, "max_count": 8, "strength": "general_guidance"},
+                }},
+                "clause_ids": ["C_SOFT", "C_HARD"],
+                "evidence_ids": ["E1", "E2"],
+            }],
+        }
+        packet = build_obligation_coverage_request(response, chunk, run_id="run-1", chunk_index=1)
+        check = next(item for item in packet["checks"] if item["check_id"] == "C_SOFT")
+        self.assertEqual(check["review_context"]["source_clause_support"], [{
+            "requirement_index": 0,
+            "clause_id": "C_HARD",
+            "document_text": "最少3组，最多8组",
+            "evidence_ids": ["E2"],
+        }])
+
     def test_obligation_review_prompt_defines_qualifier_fidelity(self) -> None:
         prompt = native_review._prompt({
             "protocol": native_review.OBLIGATION_COVERAGE_PROTOCOL,

@@ -17,7 +17,10 @@ from host_review_schema import native_output_schema, require_native_schema
 from host_runtime import automatic_adapter_id, require_host_runtime
 from process_runner import run_process
 from semantic_contract import sha256_json, strict_json_dumps
-from source_obligation_compiler import compile_known_source_obligation_ids
+from source_obligation_compiler import (
+    compile_known_source_obligation_ids,
+    compile_unresolved_manual_review_codes,
+)
 
 
 class NativeSemanticReviewError(RuntimeError):
@@ -73,7 +76,9 @@ OBLIGATION_COVERAGE_SCHEMA: dict[str, Any] = {
                 ],
                 "properties": {
                     "check_id": {"type": "string", "minLength": 1},
-                    "verdict": {"enum": ["consistent", "incomplete", "uncertain"]},
+                    "verdict": {"enum": [
+                        "consistent", "incomplete", "uncertain", "manual_review_required",
+                    ]},
                     "rationale": {"type": "string", "minLength": 1},
                     "evidence_quotes": {
                         "type": "array", "items": {"type": "string", "minLength": 1},
@@ -148,6 +153,30 @@ def build_obligation_coverage_request(
                 "evidence_ids": copy.deepcopy(item.get("evidence_ids") or []),
                 "verification": copy.deepcopy(item.get("verification")),
             })
+        source_clause_support = []
+        seen_support: set[tuple[int, str]] = set()
+        for linked in linked_requirements:
+            linked_index = linked["requirement_index"]
+            source_requirement = requirements[linked_index]
+            for supported_clause_id in source_requirement.get("clause_ids") or []:
+                if str(supported_clause_id) == clause_id:
+                    continue
+                supported_clause = clause_by_id.get(str(supported_clause_id))
+                if not isinstance(supported_clause, dict):
+                    continue
+                support_key = (linked_index, str(supported_clause_id))
+                if support_key in seen_support:
+                    continue
+                seen_support.add(support_key)
+                supported_text = supported_clause.get("text")
+                if not isinstance(supported_text, str):
+                    supported_text = supported_clause.get("source_text_full")
+                source_clause_support.append({
+                    "requirement_index": linked_index,
+                    "clause_id": str(supported_clause_id),
+                    "document_text": supported_text if isinstance(supported_text, str) else "",
+                    "evidence_ids": copy.deepcopy(supported_clause.get("evidence_ids") or []),
+                })
         cited_evidence_ids = set(clause.get("evidence_ids") or [])
         checks.append({
             "check_id": clause_id,
@@ -160,12 +189,14 @@ def build_obligation_coverage_request(
                 "reason": review.get("reason"),
                 "primary_obligations": copy.deepcopy(review.get("obligations") or []),
                 "linked_requirements": linked_requirements,
+                "source_clause_support": source_clause_support,
                 "cited_evidence": {
                     str(evidence_id): copy.deepcopy(evidence_context.get(str(evidence_id)))
                     for evidence_id in sorted(cited_evidence_ids)
                     if str(evidence_id) in evidence_context
                 },
                 "machine_obligation_ids": compile_known_source_obligation_ids(source_text),
+                "manual_review_codes": compile_unresolved_manual_review_codes(source_text),
             },
         })
     provenance = chunk.get("provenance") if isinstance(chunk.get("provenance"), dict) else {}
@@ -256,6 +287,12 @@ def validate_obligation_coverage_response(
                 ambiguous += 1
         verdict = result.get("verdict")
         safely_unresolved = context.get("classification") == "unresolved" and not linked
+        live_manual_codes = compile_unresolved_manual_review_codes(source_text)
+        declared_manual_codes = context.get("manual_review_codes") or []
+        if sorted(declared_manual_codes) != sorted(live_manual_codes):
+            raise NativeSemanticReviewError(
+                f"independent obligation review manual-review authorization is stale for {check_id}"
+            )
         if verdict == "consistent" and (unrepresented or (ambiguous and not safely_unresolved)):
             raise NativeSemanticReviewError(
                 f"independent obligation review verdict conflicts with its findings for {check_id}"
@@ -267,6 +304,25 @@ def validate_obligation_coverage_response(
         if verdict == "uncertain" and (not ambiguous or not safely_unresolved):
             raise NativeSemanticReviewError(
                 f"independent obligation review uncertainty is not preserved safely for {check_id}"
+            )
+        if verdict == "uncertain" and unrepresented:
+            raise NativeSemanticReviewError(
+                f"independent obligation review cannot defer unrepresented obligations as uncertainty for {check_id}"
+            )
+        if verdict == "manual_review_required" and (
+            not safely_unresolved
+            or not live_manual_codes
+            or not ambiguous
+            or unrepresented
+            or represented
+            or not result.get("identified_obligations")
+            or any(
+                item.get("disposition") != "ambiguous"
+                for item in result.get("identified_obligations", [])
+            )
+        ):
+            raise NativeSemanticReviewError(
+                f"independent obligation review manual deferral is not authorized by a current source ambiguity for {check_id}"
             )
         if verdict == "consistent" and not result.get("identified_obligations"):
             if context.get("requires_requirement") is True and not safely_unresolved:
@@ -360,7 +416,14 @@ def _prompt(request: dict[str, Any]) -> str:
             "a hardened or weakened qualifier; use uncertain only when the source itself cannot "
             "be interpreted reliably. A genuinely unresolved clause may "
             "be consistent only when the candidate preserves that uncertainty and asserts no "
-            "unsupported executable requirement. Copy machine_obligation_ids exactly. Return "
+            "unsupported executable requirement. Treat a source range encoded with strength "
+            "general_guidance as guidance, not as a blocking min/max; a separate hard limit is "
+            "supported only by a listed source_clause_support entry that explicitly mandates it. "
+            "For a clause with non-empty code-owned manual_review_codes, use "
+            "manual_review_required only when the clause is unresolved, has no linked requirement, "
+            "and the sole blocker is that registered ambiguity; list only that ambiguity as "
+            "ambiguous, never hide an unrepresented obligation under a manual deferral. "
+            "If a readable obligation is absent, use incomplete. Copy machine_obligation_ids exactly. Return "
             "exactly one result per check_id and only the JSON object required by the schema.\n\n"
             "Current run-bound audit request:\n"
             + strict_json_dumps(request, ensure_ascii=False, sort_keys=True, indent=2)
@@ -369,6 +432,9 @@ def _prompt(request: dict[str, Any]) -> str:
         "You are the native agent of the currently declared host runtime. "
         "Perform a read-only semantic compliance review of the supplied thesis passages. "
         "Do not edit, rewrite, normalize, or add thesis content. Do not infer missing facts. "
+        "A property whose strength is general_guidance is a recommendation, not a hard gate; "
+        "do not call a passage noncompliant merely for a slight deviation when the source itself "
+        "allows exceptions. Distinguish prohibit_commentary (abstract prose) from Word comment annotations. "
         "For every check_id, return exactly one verdict: satisfied, noncompliant, or uncertain. "
         "Use uncertain whenever the source rule or passage does not support a reliable judgment. "
         "Each evidence_quotes value must be copied exactly from that check's document_text. "
@@ -550,7 +616,7 @@ def run_native_semantic_review(
         raise NativeSemanticReviewError(f"native semantic response rejected: {exc}") from exc
     _write_fresh(response_path, strict_json_dumps(response, ensure_ascii=False, indent=2) + "\n")
     finished_at = datetime.now(timezone.utc).isoformat()
-    verdicts = ("consistent", "incomplete", "uncertain") if obligation_coverage_mode else (
+    verdicts = ("consistent", "incomplete", "uncertain", "manual_review_required") if obligation_coverage_mode else (
         "satisfied", "noncompliant", "uncertain",
     )
     counts = {key: sum(item["verdict"] == key for item in results) for key in verdicts}

@@ -62,7 +62,11 @@ from evidence_context_guards import (
     spine_clearance_external,
     SPINE_CLEARANCE_REASON,
 )
-from source_obligation_compiler import materialize_known_source_verification
+from source_obligation_compiler import (
+    materialize_complete_abstract_source_constraints,
+    materialize_known_source_verification,
+    materialize_soft_keyword_count_guidance,
+)
 from requirements_input import RequirementsInputError, normalize_requirements_input
 from resource_registry import materialize_declaration_resources
 from semantic_review_ledger import (
@@ -1677,6 +1681,8 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
                 "Role boundary for equations: use the top-level equations role for document-level equation layout properties declared by equationLayoutSpec, such as same_line, no_lines, alignment, number_alignment, number_parentheses, center_tab_twips, or right_tab_twips. Use the text role equation only for an exact equation/content occurrence. Never put style or an invented layout key in the equation role; if no declared equations property represents the cited rule, preserve the clause as non-executable rather than guessing.",
                 "Do not replace one field with a merely similar field (for example approval date with completion date, classification number with approval number, or Chinese abstract with English abstract). Preserve the original target language, unit, modal words, exceptions, and scope. A value that is not present in the current chunk is not evidence that it is absent from the whole run; use the supplied evidence_context and runtime context, and defer when still unknown.",
                 "If an English source block says the English is incorrect, or refers to 'the Chinese abstract' while using a words range, preserve that clause as unresolved until an authoritative user/template clarification fixes the target and metric. Likewise, do not reinterpret 'Chinese characters' in a keyword rule as an English-letter limit.",
+                "Qualifier-preservation contract: a keyword range introduced by 一般/通常/generally/usually belongs in properties.keywords_zh.count_guidance or properties.keywords_en.count_guidance with strength:'general_guidance'; do not copy it into blocking min_count/max_count unless another linked source clause independently uses explicit mandatory language. Preserve the exact source range in count_guidance.",
+                "Abstract constraints contract: map a non-binding third-person recommendation to abstract_zh.third_person_guidance, and a qualified count with an exception to abstract_zh.length_guidance; do not harden either into require_third_person/min_chars/max_chars. Use prohibit_commentary for prose that must not add commentary, not prohibit_comments (which means Word comment annotations). Map stated abstract sections, prohibited objects, and registered quality guidance to their declared abstract_zh properties. If the language target or metric is ambiguous, leave that clause unresolved; deterministic code will not guess it.",
                 "For runtime placement, use only the verified runtime_context.runtime_inventory.anchor_inventory.selected binding. Do not infer an insertion anchor from a role name, nearby heading, school name, or chunk-local context. A blocked, zero-match, or multiple-match anchor must remain non-executable.",
                 "The rule_spec is advisory evidence, not authoritative; report disagreements in conflicts.",
                 "For page numbering, identify the body start with first_heading_1, heading_text, or section_index.",
@@ -1857,6 +1863,28 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
             "authorization": "deterministic_existing_requirement_projection_v1",
             "repairs": existing_payload_repairs,
             "action": "replace_model_payload_with_exact_deterministic_baseline",
+        })
+    projected_response, abstract_source_repairs = materialize_complete_abstract_source_constraints(
+        projected_response, clauses,
+    )
+    if abstract_source_repairs:
+        audit.append({
+            "type": "complete_abstract_source_projection",
+            "rule_id": "complete_abstract_source_constraints_v1",
+            "semantic_inference": "disabled_for_registered_complete_source_bundles",
+            "authorization": "complete_registered_source_bundle_projection_v1",
+            "repairs": abstract_source_repairs,
+        })
+    projected_response, soft_keyword_repairs = materialize_soft_keyword_count_guidance(
+        projected_response, clauses,
+    )
+    if soft_keyword_repairs:
+        audit.append({
+            "type": "soft_keyword_count_guidance_projection",
+            "rule_id": "soft_keyword_count_guidance_v1",
+            "semantic_inference": "none",
+            "authorization": "source_qualified_keyword_range_projection_v1",
+            "repairs": soft_keyword_repairs,
         })
     projected_response, source_verification_repairs = materialize_known_source_verification(
         projected_response, clauses,
@@ -3310,6 +3338,12 @@ def merge_host_agent_review_packets(
         aggregate, existing_requirement_map,
         {str(item["id"]): item for item in full_clauses},
     )
+    aggregate, abstract_source_projections = materialize_complete_abstract_source_constraints(
+        aggregate, full_clauses,
+    )
+    aggregate, soft_keyword_guidance_projections = materialize_soft_keyword_count_guidance(
+        aggregate, full_clauses,
+    )
     aggregate, source_verification_repairs = materialize_known_source_verification(
         aggregate, full_clauses,
     )
@@ -3349,6 +3383,8 @@ def merge_host_agent_review_packets(
         "semantic_review_ledger_sha256": sha256_json(ledger),
         "merge_commit_path": str(merge_commit_path.resolve()),
         "existing_requirement_payload_projection": existing_payload_repairs,
+        "complete_abstract_source_projection": abstract_source_projections,
+        "soft_keyword_count_guidance_projection": soft_keyword_guidance_projections,
         "source_obligation_verification_projection": source_verification_repairs,
     }
     receipt = {

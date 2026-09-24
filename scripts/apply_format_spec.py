@@ -2161,7 +2161,10 @@ def build_semantic_content_checks(
 ) -> list[dict[str, Any]]:
     """Compile evidence-bound abstract checks for a read-only native reviewer."""
     checks: list[dict[str, Any]] = []
-    semantic_properties = ("require_third_person", "required_sections")
+    semantic_properties = (
+        "require_third_person", "third_person_guidance", "required_sections",
+        "quality_guidance", "prohibit_commentary",
+    )
     for key, role in (("abstract_zh", "abstract_body_zh"), ("abstract_en", "abstract_body_en")):
         rule = constraints.get(key, {})
         if not isinstance(rule, dict) or rule.get("target") == "unresolved":
@@ -2513,6 +2516,62 @@ def resolve_profile_constraints(spec: dict[str, Any]) -> dict[str, Any]:
         if conditional.get("require_zh_keywords_for_english_thesis"):
             constraints.setdefault("keywords_zh", {})["required"] = True
     return constraints
+
+
+def audit_nonblocking_guidance(
+    doc: Document, constraints: dict[str, Any], mappings: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Report soft source guidance as measured advice, never as a compliance finding."""
+    advisories: list[dict[str, Any]] = []
+    for key, role, language in (
+        ("abstract_zh", "abstract_body_zh", "zh"),
+        ("abstract_en", "abstract_body_en", "en"),
+    ):
+        rule = constraints.get(key, {})
+        guidance = rule.get("length_guidance") if isinstance(rule, dict) else None
+        if not isinstance(guidance, dict):
+            continue
+        paragraphs = _role_paragraphs(doc, role, mappings)
+        text = "".join(paragraph.text.strip() for paragraph in paragraphs)
+        metric = guidance.get("length_metric", "unicode_codepoints")
+        actual = _content_metric(text, metric, language) if text else None
+        minimum, maximum = guidance.get("min_chars"), guidance.get("max_chars")
+        advisories.append({
+            "property": f"{key}.length_guidance",
+            "policy": "non_blocking_general_guidance",
+            "actual": actual,
+            "required_range": {"min": minimum, "max": maximum, "metric": metric},
+            "within_guidance": (
+                None if actual is None
+                else (minimum is None or actual >= int(minimum))
+                and (maximum is None or actual <= int(maximum))
+            ),
+            "exception_text": guidance.get("exception_text", ""),
+        })
+    for key, role, language in (
+        ("keywords_zh", "keywords_zh", "zh"),
+        ("keywords_en", "keywords_en", "en"),
+    ):
+        rule = constraints.get(key, {})
+        guidance = rule.get("count_guidance") if isinstance(rule, dict) else None
+        if not isinstance(guidance, dict):
+            continue
+        paragraphs = _role_paragraphs(doc, role, mappings)
+        text = " ".join(paragraph.text.strip() for paragraph in paragraphs)
+        actual = len(_keyword_values(text, language)) if text else None
+        minimum, maximum = guidance.get("min_count"), guidance.get("max_count")
+        advisories.append({
+            "property": f"{key}.count_guidance",
+            "policy": "non_blocking_general_guidance",
+            "actual": actual,
+            "required_range": {"min": minimum, "max": maximum, "metric": "keyword_items"},
+            "within_guidance": (
+                None if actual is None
+                else (minimum is None or actual >= int(minimum))
+                and (maximum is None or actual <= int(maximum))
+            ),
+        })
+    return advisories
 
 
 def audit_document_structure(doc: Document, structure: dict[str, Any], mappings: dict[str, Any]) -> list[dict[str, Any]]:
@@ -3533,6 +3592,14 @@ def main(argv: list[str]) -> int:
     findings.extend(audit_table_rules(check, spec.get("tables", {}), render_report))
     effective_content_constraints = resolve_profile_constraints(spec)
     findings.extend(audit_content_constraints(check, effective_content_constraints, mappings))
+    guidance_advisories = audit_nonblocking_guidance(
+        check, effective_content_constraints, mappings,
+    )
+    write("guidance-advisories.json", {
+        "schema_version": "1.0",
+        "policy": "general_guidance_is_non_blocking",
+        "items": guidance_advisories,
+    })
     findings.extend(audit_document_structure(check, spec.get("document_structure", {}), mappings))
     findings.extend(audit_appendix_rules(check, spec.get("appendices", {}), spec.get("thesis_profile", {})))
     findings.extend(audit_equation_layout(check, spec.get("equations", {})))
@@ -3917,6 +3984,7 @@ def main(argv: list[str]) -> int:
               "manual_review_markers": manual_review_markers,
               "manual_review_marker_audit": manual_review_marker_audit,
               "manual_review_findings": manual_review_findings,
+              "guidance_advisories": guidance_advisories,
               "manual_review_receipts": manual_review_receipt_items(property_receipts)
               if args.output_policy == "review_draft" else [],
               "paragraphs_directly_formatted": applied_paragraphs,

@@ -17,6 +17,10 @@ from existing_requirement_contract import (
 )
 from source_obligation_compiler import (
     compile_known_source_obligations,
+    compile_soft_keyword_count_guidance,
+    compile_explicit_keyword_count_range,
+    materialize_complete_abstract_source_constraints,
+    materialize_soft_keyword_count_guidance,
     materialize_known_source_verification,
 )
 
@@ -602,13 +606,33 @@ def _abstract_obligation_gaps(
     gaps: list[str] = []
     if re.search(r"thefollowingenglishisnotcorrect|thechineseabstract|英文.{0,20}中文摘要", text, re.I):
         gaps.append("abstract_target_or_translation_ambiguous")
-    if re.search(r"300(?:字|字符).{0,24}1000(?:字|字符)|300.{0,24}1000(?:字|字符)", text):
-        if "abstract_zh.min_chars" not in properties:
-            gaps.append("abstract_zh.min_chars")
-        if "abstract_zh.max_chars" not in properties:
-            gaps.append("abstract_zh.max_chars")
-    if "第三人称" in text and properties.get("abstract_zh.require_third_person") is not True:
-        gaps.append("abstract_zh.require_third_person")
+    abstract_rule: dict[str, Any] = {}
+    for index in indexes:
+        if 0 <= index < len(requirements) and requirements[index].get("role") == "content_constraints":
+            nested = (requirements[index].get("properties") or {}).get("abstract_zh")
+            if isinstance(nested, dict):
+                abstract_rule.update(nested)
+    soft_length_qualifier = bool(
+        re.search(r"(?:一般|通常|generally|usually).{0,40}300.{0,40}1000", text, re.I)
+        or re.search(r"300.{0,40}1000.{0,80}(?:特殊需要|特殊情况|may be slightly extended|if special)", text, re.I)
+    )
+    third_person_soft = bool(re.search(r"(?:一般|通常).{0,12}第三人称|(?:usually|generally).{0,30}thirdperson", text, re.I))
+    if re.search(r"300(?:字|字符|words?).{0,40}1000|300.{0,40}1000(?:字|字符|words?)", text, re.I):
+        if soft_length_qualifier:
+            guidance = abstract_rule.get("length_guidance")
+            if not isinstance(guidance, dict) or guidance.get("strength") != "general_guidance":
+                gaps.append("abstract_zh.length_guidance")
+        else:
+            if "abstract_zh.min_chars" not in properties and "abstract_zh.min_words" not in properties:
+                gaps.append("abstract_zh.min_length")
+            if "abstract_zh.max_chars" not in properties and "abstract_zh.max_words" not in properties:
+                gaps.append("abstract_zh.max_length")
+    if "第三人称" in text:
+        if third_person_soft:
+            if abstract_rule.get("third_person_guidance") != "general_guidance":
+                gaps.append("abstract_zh.third_person_guidance")
+        elif abstract_rule.get("require_third_person") is not True:
+            gaps.append("abstract_zh.require_third_person")
     # Do not treat every occurrence of ``方法`` as a required abstract
     # section.  Template prose often says that a thesis presents a "新方法"
     # (new method) while the independent section obligation is stated later
@@ -622,7 +646,7 @@ def _abstract_obligation_gaps(
         ))
     )
     if section_list_signal:
-        required_sections = properties.get("abstract_zh.required_sections")
+        required_sections = abstract_rule.get("required_sections")
         section_text = set(required_sections) if isinstance(required_sections, list) else set()
         expected_sections = {
             "目的": "purpose", "方法": "methods", "成果": "results",
@@ -631,13 +655,27 @@ def _abstract_obligation_gaps(
         for marker, section in expected_sections.items():
             if marker in text and section not in section_text:
                 gaps.append(f"abstract_zh.required_sections:{section}")
-    if re.search(r"不得?加评论|不应?加评论|不含评论", text) and properties.get("abstract_zh.prohibit_comments") is not True:
-        gaps.append("abstract_zh.prohibit_comments")
-    if "图表" in text and "abstract_zh.prohibited_objects" not in properties:
-        gaps.append("abstract_zh.prohibited_objects:figures_or_tables")
-    if "方程式" in text and "abstract_zh.prohibited_objects" not in properties:
+    if re.search(r"不加评论和解释|不得?加评论|不应?加评论|不含评论", text) and abstract_rule.get("prohibit_commentary") is not True:
+        gaps.append("abstract_zh.prohibit_commentary")
+    quality_checks = {
+        "independent_and_complete": "独立性和完整性",
+        "reflects_central_idea": "准确反映论文的中心思想",
+        "academic_language": "规范的学术用语",
+        "logical_structure": "逻辑性强",
+        "highlight_innovation": "创造性成果",
+        "main_information_equivalent_to_thesis": "与论文等同的主要信息",
+    }
+    quality_guidance = set(abstract_rule.get("quality_guidance") or [])
+    for key, marker in quality_checks.items():
+        if marker in text and key not in quality_guidance:
+            gaps.append(f"abstract_zh.quality_guidance:{key}")
+    prohibited_objects = set(abstract_rule.get("prohibited_objects") or [])
+    if "图表" in text or re.search(r"不可出现.{0,12}图", text):
+        if not {"figures", "tables"}.issubset(prohibited_objects):
+            gaps.append("abstract_zh.prohibited_objects:figures_or_tables")
+    if "方程式" in text and "chemical_equations" not in prohibited_objects:
         gaps.append("abstract_zh.prohibited_objects:chemical_equations")
-    if re.search(r"非公知|非公开.*术语|公知.*符号", text) and "abstract_zh.prohibited_objects" not in properties:
+    if re.search(r"非公知|非公开.*术语|公知.*符号", text) and "nonpublic_symbols_and_terminology" not in prohibited_objects:
         gaps.append("abstract_zh.prohibited_objects:nonpublic_symbols_and_terminology")
     return gaps
 
@@ -660,6 +698,20 @@ def _keyword_obligation_gaps(
         gaps.append(f"{key}.max_item_chars")
     elif properties.get(f"{key}.item_length_metric") != "cjk_characters":
         gaps.append(f"{key}.item_length_metric:cjk_characters")
+    guidance = compile_soft_keyword_count_guidance(clause.get("text") or clause.get("source_text_full"))
+    if guidance:
+        count_guidance = properties.get(f"{key}.count_guidance")
+        if not isinstance(count_guidance, dict) or any(
+            count_guidance.get(field) != guidance[field]
+            for field in ("min_count", "max_count", "strength")
+        ):
+            gaps.append(f"{key}.count_guidance")
+    else:
+        hard_range = compile_explicit_keyword_count_range(clause.get("text") or clause.get("source_text_full"))
+        if hard_range:
+            for field in ("min_count", "max_count"):
+                if properties.get(f"{key}.{field}") != hard_range[field]:
+                    gaps.append(f"{key}.{field}")
     return gaps
 
 
@@ -1001,6 +1053,12 @@ def validate_response(response: Any, chunk: dict[str, Any]) -> list[str]:
         response, existing_map, clause_map_for_binding,
     )
     response, _ = materialize_known_source_verification(
+        response, chunk.get("clauses"),
+    )
+    response, _ = materialize_complete_abstract_source_constraints(
+        response, chunk.get("clauses"),
+    )
+    response, _ = materialize_soft_keyword_count_guidance(
         response, chunk.get("clauses"),
     )
     errors: list[str] = []

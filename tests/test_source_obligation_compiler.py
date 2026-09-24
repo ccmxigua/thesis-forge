@@ -8,10 +8,16 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from source_obligation_compiler import (  # noqa: E402
+    compile_abstract_source_constraints,
     compile_continuation_caption_requirement,
+    compile_explicit_keyword_count_range,
     compile_known_source_obligations,
     compile_known_source_obligation_ids,
+    compile_soft_keyword_count_guidance,
+    compile_unresolved_manual_review_codes,
+    materialize_complete_abstract_source_constraints,
     materialize_known_source_verification,
+    materialize_soft_keyword_count_guidance,
 )
 
 
@@ -165,6 +171,169 @@ class SourceObligationCompilerTests(unittest.TestCase):
         self.assertNotIn("verification", projected["requirements"][0])
         self.assertNotIn("verification", projected["requirements"][1])
         self.assertEqual(audit, [])
+
+    def test_soft_keyword_range_stays_guidance_and_separate_mandate_remains_hard(self) -> None:
+        clauses = [
+            {"id": "C69", "text": "关键词一般3～8个", "evidence_ids": ["E69"]},
+            {"id": "C72", "text": "关键词最少3组，最多8组", "evidence_ids": ["E72"]},
+            {"id": "C77", "text": "Keywords generally 3~8", "evidence_ids": ["E77"]},
+            {"id": "C80", "text": "up to 7 Chinese characters", "evidence_ids": ["E80"]},
+        ]
+        response = {"requirements": [
+            {
+                "role": "content_constraints",
+                "clause_ids": ["C69", "C72"], "evidence_ids": ["E69", "E72"],
+                "properties": {"keywords_zh": {"min_count": 3, "max_count": 8}},
+                "verification": {"checks": ["Verify the Chinese keyword count is 3 to 8."]},
+            },
+            {
+                "role": "content_constraints",
+                "clause_ids": ["C77", "C80"], "evidence_ids": ["E77", "E80"],
+                "properties": {"keywords_en": {"min_count": 3, "max_count": 8}},
+                "verification": {"checks": ["Verify the keyword count is 3 to 8."]},
+            },
+        ]}
+        self.assertEqual(compile_soft_keyword_count_guidance(clauses[0]["text"])["strength"], "general_guidance")
+        self.assertEqual(compile_soft_keyword_count_guidance(clauses[2]["text"])["language_key"], "keywords_en")
+        self.assertEqual(compile_explicit_keyword_count_range(clauses[1]["text"]), {
+            "min_count": 3, "max_count": 8,
+        })
+
+        projected, audit = materialize_soft_keyword_count_guidance(response, clauses)
+        self.assertEqual(projected["requirements"][0]["properties"]["keywords_zh"]["min_count"], 3)
+        self.assertEqual(projected["requirements"][0]["properties"]["keywords_zh"]["max_count"], 8)
+        self.assertEqual(
+            projected["requirements"][0]["properties"]["keywords_zh"]["count_guidance"],
+            {"min_count": 3, "max_count": 8, "strength": "general_guidance"},
+        )
+        english_rule = projected["requirements"][1]["properties"]["keywords_en"]
+        self.assertNotIn("min_count", english_rule)
+        self.assertNotIn("max_count", english_rule)
+        self.assertEqual(english_rule["count_guidance"]["strength"], "general_guidance")
+        self.assertEqual(projected["requirements"][1]["verification"]["checks"], [])
+        self.assertEqual(len(audit), 2)
+        again, second_audit = materialize_soft_keyword_count_guidance(projected, clauses)
+        self.assertEqual(again, projected)
+        self.assertEqual(second_audit, [])
+
+    def test_unrelated_numeric_range_does_not_authorize_keyword_hard_bounds(self) -> None:
+        clauses = [
+            {"id": "C69", "text": "关键词一般3～8个", "evidence_ids": ["E69"]},
+            {"id": "C72", "text": "摘要最少3组，最多8组", "evidence_ids": ["E72"]},
+        ]
+        response = {"requirements": [{
+            "role": "content_constraints",
+            "clause_ids": ["C69", "C72"],
+            "evidence_ids": ["E69", "E72"],
+            "properties": {"keywords_zh": {"min_count": 3, "max_count": 8}},
+            "verification": {"checks": ["Verify the Chinese keyword count is 3 to 8."]},
+        }]}
+
+        self.assertIsNone(compile_explicit_keyword_count_range(clauses[1]["text"]))
+        projected, audit = materialize_soft_keyword_count_guidance(response, clauses)
+
+        rule = projected["requirements"][0]["properties"]["keywords_zh"]
+        self.assertNotIn("min_count", rule)
+        self.assertNotIn("max_count", rule)
+        self.assertFalse(audit[0]["independently_mandatory_range_present"])
+        self.assertEqual(projected["requirements"][0]["verification"]["checks"], [])
+
+    def test_complete_abstract_bundles_materialize_but_ambiguous_english_stays_manual(self) -> None:
+        c66 = (
+            "中文摘要是论文内容的简要陈述，一般以第三人称语气撰写，"
+            "300～1000字（如遇特殊需要字数可以略多），不加评论和解释，"
+            "是一篇具有独立性和完整性的短文，能准确反映论文的中心思想，"
+            "规范的学术用语，逻辑性强、结构严谨，体现出论文的新理论、新方法、新技术等"
+        )
+        c67 = (
+            "其内容包括：目的意义、研究方法、研究成果和结论，应与论文等同的主要信息，"
+            "要突出本论文的创造性成果，不可出现图、表、化学方程式、非公知公用的符号和术语"
+        )
+        clauses = [
+            {"id": "C66", "text": c66, "evidence_ids": ["E1"],
+             "location": {"part": "document", "child_index": 5, "order": 5}},
+            {"id": "C67", "text": c67, "evidence_ids": ["E1"],
+             "location": {"part": "document", "child_index": 5, "order": 5}},
+            {"id": "C76", "text": "The Chinese abstract uses 300 to 1,000 words.", "evidence_ids": ["E2"]},
+        ]
+        self.assertIsNotNone(compile_abstract_source_constraints(c66))
+        self.assertIsNone(compile_abstract_source_constraints(c67))
+        self.assertEqual(
+            compile_unresolved_manual_review_codes(clauses[2]["text"]),
+            ["abstract_target_metric_ambiguity"],
+        )
+        response = {
+            "contract_version": "3.0",
+            "requirements": [],
+            "clause_reviews": [
+                {"clause_id": cid, "classification": "unresolved", "reason": "not represented",
+                 "obligations": [{"id": "source", "status": "unresolved", "reason": "not represented"}]}
+                for cid in ("C66", "C67")
+            ],
+        }
+        projected, audit = materialize_complete_abstract_source_constraints(response, clauses)
+        self.assertEqual(len(projected["requirements"]), 2)
+        reviews = {item["clause_id"]: item for item in projected["clause_reviews"]}
+        self.assertEqual(reviews["C66"]["classification"], "executable")
+        self.assertEqual(reviews["C67"]["classification"], "executable")
+        zh_properties = projected["requirements"][0]["properties"]["abstract_zh"]
+        self.assertEqual(zh_properties["third_person_guidance"], "general_guidance")
+        self.assertNotIn("require_third_person", zh_properties)
+        self.assertEqual(zh_properties["length_guidance"]["min_chars"], 300)
+        self.assertNotIn("min_chars", zh_properties)
+        self.assertTrue(zh_properties["prohibit_commentary"])
+        self.assertIn("main_information_equivalent_to_thesis", projected["requirements"][1]["properties"]["abstract_zh"]["quality_guidance"])
+        self.assertTrue(all(item["status"] == "covered" for review in reviews.values() for item in review["obligations"]))
+        self.assertEqual(len(audit), 2)
+        again, second_audit = materialize_complete_abstract_source_constraints(projected, clauses)
+        self.assertEqual(again, projected)
+        self.assertEqual(second_audit, [])
+
+    def test_abstract_context_is_not_joined_without_stable_source_locations(self) -> None:
+        c66 = (
+            "中文摘要是论文内容的简要陈述，一般以第三人称语气撰写，"
+            "300～1000字（如遇特殊需要字数可以略多），不加评论和解释，"
+            "是一篇具有独立性和完整性的短文，能准确反映论文的中心思想，"
+            "规范的学术用语，逻辑性强、结构严谨，体现出论文的新理论、新方法、新技术等"
+        )
+        c67 = (
+            "其内容包括：目的意义、研究方法、研究成果和结论，应与论文等同的主要信息，"
+            "要突出本论文的创造性成果，不可出现图、表、化学方程式、非公知公用的符号和术语"
+        )
+        clauses = [
+            {"id": "C66", "text": c66, "evidence_ids": ["E1"]},
+            {"id": "C67", "text": c67, "evidence_ids": ["E1"]},
+        ]
+        response = {
+            "contract_version": "3.0",
+            "requirements": [],
+            "clause_reviews": [
+                {"clause_id": cid, "classification": "unresolved", "reason": "not represented",
+                 "obligations": [{"id": "source", "status": "unresolved", "reason": "not represented"}]}
+                for cid in ("C66", "C67")
+            ],
+        }
+
+        projected, audit = materialize_complete_abstract_source_constraints(response, clauses)
+
+        self.assertEqual(len(projected["requirements"]), 1)
+        self.assertEqual(projected["requirements"][0]["clause_ids"], ["C66"])
+        review_by_id = {item["clause_id"]: item for item in projected["clause_reviews"]}
+        self.assertEqual(review_by_id["C67"]["classification"], "unresolved")
+        self.assertEqual(len(audit), 1)
+
+    def test_abstract_compiler_does_not_upgrade_partial_or_ambiguous_source(self) -> None:
+        self.assertIsNone(compile_abstract_source_constraints("中文摘要一般300～1000字，使用第三人称。"))
+        self.assertIsNone(compile_abstract_source_constraints(
+            "其内容包括：目的意义、研究方法、研究成果和结论，应与论文等同的主要信息。",
+            source_context="与摘要无关的上一段落。",
+        ))
+        self.assertEqual(
+            compile_unresolved_manual_review_codes(
+                "The Chinese abstract is a brief statement, 300 to 1,000 words."
+            ),
+            ["abstract_target_metric_ambiguity"],
+        )
 
 
 if __name__ == "__main__":

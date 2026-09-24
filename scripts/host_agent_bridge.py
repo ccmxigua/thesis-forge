@@ -184,7 +184,9 @@ from semantic_contract import (  # noqa: E402
 )
 from source_obligation_compiler import (  # noqa: E402
     compile_continuation_caption_requirement,
+    materialize_complete_abstract_source_constraints,
     materialize_known_source_verification,
+    materialize_soft_keyword_count_guidance,
 )
 
 
@@ -5219,6 +5221,12 @@ def prepare_native_response_candidate(
     response, source_verification_projections = materialize_known_source_verification(
         response, chunk.get("clauses"),
     )
+    response, abstract_source_projections = materialize_complete_abstract_source_constraints(
+        response, chunk.get("clauses"),
+    )
+    response, soft_keyword_guidance_projections = materialize_soft_keyword_count_guidance(
+        response, chunk.get("clauses"),
+    )
     mechanical_repairs: list[dict[str, Any]] = []
     mechanical_revalidation: dict[str, Any] = {
         "status": "not_needed",
@@ -5297,6 +5305,8 @@ def prepare_native_response_candidate(
 
     return response, {
         "existing_requirement_payload_projections": existing_payload_projections,
+        "complete_abstract_source_projections": abstract_source_projections,
+        "soft_keyword_count_guidance_projections": soft_keyword_guidance_projections,
         "source_obligation_verification_projections": source_verification_projections,
         "mechanical_repairs": mechanical_repairs,
         "mechanical_repair_revalidation": mechanical_revalidation,

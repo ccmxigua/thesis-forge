@@ -264,7 +264,7 @@ def _audit_artifact_path(root: Path, value: Any, *, label: str) -> Path:
 def _validate_independent_obligation_receipts(
     *, audit: dict[str, Any], review_root: Path, expected_run_id: str,
     expected_request_body_sha: str, expected_request_envelope_sha: str | None,
-    expected_request_file_sha: str | None,
+    expected_request_file_sha: str | None, output_policy: str = "submission",
 ) -> list[dict[str, Any]]:
     """Revalidate each source-first audit and its raw native request/response bytes."""
     chunk_runs = audit.get("chunk_runs")
@@ -469,21 +469,47 @@ def _validate_independent_obligation_receipts(
             or any(item.get("verdict") == "incomplete" for item in normalized_results)
         ):
             raise ValueError(f"independent obligation review {index} is incomplete or inconsistent")
+        manual_review_clause_ids = enforce_obligation_review_output_policy(
+            normalized_results, output_policy=output_policy,
+        )
         validated.append({
             "chunk_index": index,
             "candidate_response_sha256": candidate_sha,
             "audit_sha256": independent.get("audit_sha256"),
             "review_request_sha256": request_sha,
             "review_response_sha256": response_file_sha,
+            "manual_review_required_clause_ids": manual_review_clause_ids,
+            "submission_blocked_by_manual_review": bool(manual_review_clause_ids),
         })
     if seen_indexes != expected_indexes:
         raise ValueError("host-agent audit omitted an independently reviewed chunk")
     return sorted(validated, key=lambda item: item["chunk_index"])
 
 
+def enforce_obligation_review_output_policy(
+    results: list[dict[str, Any]], *, output_policy: str,
+) -> list[str]:
+    """Permit irreducible ambiguity only in an explicitly non-release draft."""
+    if output_policy not in {"review_draft", "submission"}:
+        raise ValueError(f"unsupported output policy for independent review: {output_policy!r}")
+    manual_review_clause_ids = sorted({
+        str(item.get("check_id")) for item in results
+        if isinstance(item, dict)
+        and item.get("verdict") == "manual_review_required"
+        and isinstance(item.get("check_id"), str)
+    })
+    if manual_review_clause_ids and output_policy != "review_draft":
+        raise ValueError(
+            "independent obligation review requires manual review for clause(s) "
+            + ", ".join(manual_review_clause_ids)
+            + "; submission output is blocked (use an explicit review_draft for a non-release artifact)"
+        )
+    return manual_review_clause_ids
+
+
 def validate_host_review_receipts(
     *, response_path: Path, audit_path: Path, receipt_path: Path,
-    extraction_manifest: dict[str, Any], work: Path,
+    extraction_manifest: dict[str, Any], work: Path, output_policy: str = "submission",
 ) -> dict[str, Any]:
     """Bind the final deterministic stage to the immutable host review."""
     response_path = _path_under(response_path, work, label="host response")
@@ -619,6 +645,7 @@ def validate_host_review_receipts(
         expected_request_file_sha=(
             str(expected_request_file_sha) if expected_request_file_sha else None
         ),
+        output_policy=output_policy,
     )
     return {
         "response": file_record(response_path),
@@ -1454,6 +1481,7 @@ def _main(argv: list[str]) -> int:
                 receipt_path=args.merge_receipt,
                 extraction_manifest=extraction_manifest,
                 work=work,
+                output_policy=args.output_policy,
             )
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             manifest.update(status="failed", reason="host-agent review receipt gate failed",

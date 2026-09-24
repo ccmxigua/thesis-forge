@@ -11,6 +11,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from apply_format_spec import (  # noqa: E402
     audit_content_constraints,
+    audit_nonblocking_guidance,
     manual_review_receipt_items,
     manual_review_validation_items,
     normalize_keyword_separators,
@@ -23,7 +24,7 @@ from format_spec_validation import load_and_validate  # noqa: E402
 class ContentConstraintMetricTests(unittest.TestCase):
     def _doc(self, abstract: str, keywords: str) -> Document:
         document = Document()
-        abstract_style = document.styles.add_style("AbstractBodyFixture", 1)
+        abstract_style = document.styles.add_style("AbstractBodyCN", 1)
         keyword_style = document.styles.add_style("KeywordsFixture", 1)
         document.add_paragraph(abstract, abstract_style)
         document.add_paragraph(keywords, keyword_style)
@@ -38,9 +39,37 @@ class ContentConstraintMetricTests(unittest.TestCase):
                                 "length_metric": "unicode_codepoints"},
                 "keywords_zh": {"required": True},
             },
-            {"abstract_body_zh": {"style_name": "AbstractBodyFixture"}, "keywords_zh": {"style_name": "KeywordsFixture"}},
+            {"abstract_body_zh": {"style_name": "AbstractBodyCN"}, "keywords_zh": {"style_name": "KeywordsFixture"}},
         )
         self.assertTrue(any(item["property"] == "abstract_zh.min_chars" for item in findings), findings)
+
+    def test_general_length_and_keyword_guidance_is_reported_but_never_blocks(self) -> None:
+        document = self._doc("短文", "关键词：甲；乙")
+        constraints = {
+            "abstract_zh": {"length_guidance": {
+                "min_chars": 3, "max_chars": 8,
+                "length_metric": "cjk_characters",
+                "strength": "general_guidance",
+                "exception_text": "必要时可略多",
+            }},
+            "keywords_zh": {"count_guidance": {
+                "min_count": 3, "max_count": 8,
+                "strength": "general_guidance",
+            }},
+        }
+        mappings = {
+            "abstract_body_zh": {"style_name": "AbstractBodyCN"},
+            "keywords_zh": {"style_name": "KeywordsFixture"},
+        }
+
+        advisories = audit_nonblocking_guidance(document, constraints, mappings)
+        findings = audit_content_constraints(document, constraints, mappings)
+
+        self.assertEqual(len(advisories), 2)
+        self.assertEqual([item["actual"] for item in advisories], [2, 2])
+        self.assertTrue(all(item["policy"] == "non_blocking_general_guidance" for item in advisories))
+        self.assertTrue(all(item["within_guidance"] is False for item in advisories))
+        self.assertEqual(findings, [])
 
     def test_keyword_item_limit_reports_item_without_truncation(self) -> None:
         document = self._doc("摘要", "关键词：甲乙丙丁戊己庚辛")
@@ -51,7 +80,7 @@ class ContentConstraintMetricTests(unittest.TestCase):
                 "keywords_zh": {"required": True, "max_item_chars": 7,
                                  "item_length_metric": "cjk_characters"},
             },
-            {"abstract_body_zh": {"style_name": "AbstractBodyFixture"}, "keywords_zh": {"style_name": "KeywordsFixture"}},
+            {"abstract_body_zh": {"style_name": "AbstractBodyCN"}, "keywords_zh": {"style_name": "KeywordsFixture"}},
         )
         violation = next(item for item in findings if "max_item_chars" in item["property"])
         self.assertEqual(violation["template_value"], 8)
@@ -134,7 +163,7 @@ class ContentConstraintMetricTests(unittest.TestCase):
                 },
             },
             {
-                "abstract_body_zh": {"style_name": "AbstractBodyFixture"},
+                "abstract_body_zh": {"style_name": "AbstractBodyCN"},
                 "keywords_en": {"style_name": "KeywordsFixture"},
             },
         )

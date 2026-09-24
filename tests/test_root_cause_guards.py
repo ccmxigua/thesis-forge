@@ -116,7 +116,7 @@ class RootCauseGuardTests(unittest.TestCase):
         }
         errors = validate_response(response, request)
         self.assertTrue(any("partial_clause_coverage" in error for error in errors), errors)
-        self.assertTrue(any("abstract_zh.min_chars" in error for error in errors), errors)
+        self.assertTrue(any("abstract_zh.length_guidance" in error for error in errors), errors)
 
     def test_abstract_novelty_phrase_is_not_a_section_list(self) -> None:
         clauses = [

@@ -725,6 +725,61 @@
             "require_third_person": {
               "type": "boolean"
             },
+            "third_person_guidance": {
+              "enum": [
+                "general_guidance"
+              ],
+              "description": "Non-binding source guidance; it must not be enforced as a mandatory third-person rule."
+            },
+            "length_guidance": {
+              "type": "object",
+              "required": [
+                "min_chars",
+                "max_chars",
+                "length_metric",
+                "strength",
+                "exception_text"
+              ],
+              "properties": {
+                "min_chars": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "max_chars": {
+                  "type": "integer",
+                  "minimum": 1
+                },
+                "length_metric": {
+                  "enum": [
+                    "unicode_codepoints",
+                    "cjk_characters"
+                  ]
+                },
+                "strength": {
+                  "enum": [
+                    "general_guidance"
+                  ]
+                },
+                "exception_text": {
+                  "type": "string"
+                }
+              },
+              "additionalProperties": false
+            },
+            "quality_guidance": {
+              "type": "array",
+              "items": {
+                "enum": [
+                  "independent_and_complete",
+                  "reflects_central_idea",
+                  "academic_language",
+                  "logical_structure",
+                  "highlight_innovation",
+                  "main_information_equivalent_to_thesis"
+                ]
+              },
+              "uniqueItems": true
+            },
             "required_sections": {
               "type": "array",
               "items": {
@@ -740,6 +795,10 @@
             },
             "prohibit_comments": {
               "type": "boolean"
+            },
+            "prohibit_commentary": {
+              "type": "boolean",
+              "description": "The abstract prose must not add commentary or explanation; distinct from Word comment annotations."
             },
             "prohibited_objects": {
               "type": "array",
@@ -844,6 +903,31 @@
         "max_count": {
           "type": "integer",
           "minimum": 1
+        },
+        "count_guidance": {
+          "type": "object",
+          "required": [
+            "min_count",
+            "max_count",
+            "strength"
+          ],
+          "properties": {
+            "min_count": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "max_count": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "strength": {
+              "enum": [
+                "general_guidance"
+              ]
+            }
+          },
+          "additionalProperties": false,
+          "description": "A source-qualified recommendation, not a blocking min_count/max_count."
         },
         "separator": {
           "enum": [

@@ -140,6 +140,57 @@ class HostAgentReviewTests(unittest.TestCase):
             self.assertEqual(ledger["response_sha256"], receipt["aggregate_sha256"])
             self.assertEqual(metadata["semantic_review_ledger_sha256"], receipt["semantic_review_ledger_sha256"])
 
+    def test_merge_receipt_records_source_projection_audits(self) -> None:
+        clause = {
+            "id": "C69", "text": "关键词一般3～8个", "evidence_ids": ["E69"],
+            "source_kind": "paragraph", "location": {"part": "document", "child_index": 4, "order": 4},
+            "part_index": 0,
+        }
+        evidence = {"evidence": [{"id": "E69", "text": clause["text"], "kind": "paragraph"}]}
+        request = self._request([clause], evidence)
+        with tempfile.TemporaryDirectory() as td:
+            review_dir = Path(td)
+            manifest = engine.prepare_host_agent_review_packets(
+                request, [clause], evidence, "a" * 64, review_dir, chunk_size=1,
+            )
+            chunks = json.loads((review_dir / "llm-request-chunks.json").read_text(encoding="utf-8"))
+            chunk = chunks[0]
+            response = {
+                "contract_version": "2.1",
+                "provenance": chunk["provenance"],
+                "requirements": [{
+                    "role": "content_constraints",
+                    "properties": {"keywords_zh": {"min_count": 3, "max_count": 8}},
+                    "clause_ids": ["C69"], "evidence_ids": ["E69"],
+                    "confidence": 1, "reason": "The source clause gives the keyword range.",
+                }],
+                "clause_reviews": [{
+                    "clause_id": "C69", "classification": "executable",
+                    "requirement_indexes": [0], "reason": "The source describes the keyword range.",
+                }],
+                "unsupported_items": [], "reported_conflicts": [],
+            }
+            (review_dir / chunk["batch"]["response_filename"]).write_text(
+                json.dumps(response, ensure_ascii=False), encoding="utf-8",
+            )
+
+            merged, metadata = engine.merge_host_agent_review_packets(review_dir)
+            receipt = json.loads((review_dir / "merge-receipt.json").read_text(encoding="utf-8"))
+
+            audit = receipt["soft_keyword_count_guidance_projection"]
+            self.assertEqual(audit, metadata["soft_keyword_count_guidance_projection"])
+            self.assertEqual(len(audit), 1)
+            self.assertEqual(audit[0]["source_clause_ids"], ["C69"])
+            self.assertRegex(audit[0]["before_sha256"], r"^[0-9a-f]{64}$")
+            self.assertRegex(audit[0]["after_sha256"], r"^[0-9a-f]{64}$")
+            self.assertNotIn("min_count", merged["requirements"][0]["properties"]["keywords_zh"])
+            self.assertNotIn("max_count", merged["requirements"][0]["properties"]["keywords_zh"])
+            self.assertEqual(
+                receipt["complete_abstract_source_projection"],
+                metadata["complete_abstract_source_projection"],
+            )
+            self.assertEqual(receipt["complete_abstract_source_projection"], [])
+
     def test_merge_preserves_typed_conflicts_from_every_chunk(self) -> None:
         clauses = [
             {"id": "C1", "text": "正文使用宋体", "evidence_ids": ["E1"],

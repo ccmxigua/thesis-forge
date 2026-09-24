@@ -524,6 +524,10 @@ class RootCauseGuardTests(unittest.TestCase):
                              "value_from": "thesis_profile.cover_metadata.approval_number",
                              "display_policy": "blank_when_public", "order": 1}],
                 "public_policy": "blank", "source_region": "official_admin_table",
+                "security_marking_options": [
+                    {"label": "限制", "maximum_duration": {"value": 2, "unit": "年"}},
+                    {"label": "秘密", "maximum_duration": {"value": 10, "unit": "年"}},
+                ],
             },
         }
         profile = {"security_level": "public", "cover_metadata": {
@@ -535,6 +539,10 @@ class RootCauseGuardTests(unittest.TestCase):
         administration = contract["non_public_administration"]
         self.assertEqual(administration["status"], "blank_public")
         self.assertEqual(administration["fields"][0]["value_kind"], "omitted")
+        self.assertEqual(administration["security_marking_options"], [
+            {"label": "限制", "maximum_duration": {"value": 2, "unit": "年"}},
+            {"label": "秘密", "maximum_duration": {"value": 10, "unit": "年"}},
+        ])
 
 
 if __name__ == "__main__":

@@ -923,6 +923,62 @@ class HostReviewV3Tests(unittest.TestCase):
         }
         self.assertEqual(validate_response(response, self.request), [])
 
+    def test_source_marking_options_are_projected_then_exactly_validated(self) -> None:
+        source = "密级：□限制(≤2年) □秘密(≤10年) □机密(≤20年)"
+        clauses = [{
+            "id": "C43", "text": source, "evidence_ids": ["E43"],
+            "source_kind": "table_cell", "location": {}, "part_index": 0,
+        }]
+        evidence = {"evidence": [{"id": "E43", "text": source, "kind": "table_cell"}]}
+        request = build_llm_request(
+            [], clauses, evidence, {}, "full", contract_version=HOST_REVIEW_CONTRACT_V3,
+        )
+        request = attach_request_provenance(
+            request, source_sha256="a" * 64, evidence_doc=evidence, clauses=clauses,
+            run_id="security-marking-test",
+        )
+        response = {
+            "contract_version": HOST_REVIEW_CONTRACT_V3,
+            "provenance": request["provenance"],
+            "requirements": [{
+                "role": "cover",
+                "properties": {
+                    "institution": "——", "fields": [],
+                    "non_public_administration": {
+                        "applicability": {"status": "conditional", "conditions": [{
+                            "fact": "thesis_profile.security_level", "operator": "in",
+                            "value": ["restricted", "classified"],
+                        }]},
+                        "fields": [{
+                            "id": "security_marking", "label": "密级",
+                            "value_from": "thesis_profile.cover_metadata.security_marking",
+                            "display_policy": "blank_when_public", "order": 1,
+                        }],
+                        "public_policy": "blank", "source_region": "E43",
+                    },
+                },
+                "clause_ids": ["C43"], "evidence_ids": ["E43"],
+                "confidence": 0.9, "reason": "Preserve the source administrative choices.",
+            }],
+            "clause_reviews": [{
+                "clause_id": "C43", "classification": "executable",
+                "reason": "The source gives explicit security choices and limits.",
+                "obligations": [{
+                    "id": "security_marking_options", "status": "covered",
+                    "reason": "The exact choices are preserved by the source-bound projection.",
+                }],
+            }],
+            "unsupported_items": [], "reported_conflicts": [],
+        }
+        self.assertEqual(validate_response(response, request), [])
+
+        conflicting = json.loads(json.dumps(response, ensure_ascii=False))
+        conflicting["requirements"][0]["properties"]["non_public_administration"][
+            "security_marking_options"
+        ] = [{"label": "限制", "maximum_duration": {"value": 9, "unit": "年"}}]
+        errors = validate_response(conflicting, request)
+        self.assertTrue(any("cover.security_marking_options" in error for error in errors), errors)
+
     def test_native_nullable_role_properties_are_normalized_before_local_validation(self) -> None:
         response = self._executable_response()
         response["requirements"][0]["properties"]["paragraph"] = None

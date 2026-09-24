@@ -290,6 +290,67 @@ class NativeSemanticReviewTests(unittest.TestCase):
         with self.assertRaisesRegex(NativeSemanticReviewError, "manual deferral is not authorized"):
             validate_obligation_coverage_response(unrepresented, [check])
 
+    def test_external_compliance_is_recorded_as_pending_not_docx_satisfied(self) -> None:
+        source = "北京体育大学学位评定委员会办公室盖章(有效)"
+        check = {
+            "check_id": "C00049",
+            "document_text": source,
+            "review_context": {
+                "classification": "external_compliance",
+                "requires_requirement": False,
+                "primary_obligations": [{
+                    "id": "physical_stamp", "status": "unverifiable",
+                    "reason": "Physical administrative stamping occurs outside the DOCX pipeline.",
+                }],
+                "linked_requirements": [],
+                "machine_obligation_ids": [],
+            },
+        }
+        pending = {"results": [{
+            "check_id": "C00049",
+            "verdict": "external_compliance_pending",
+            "rationale": "The source requires a real administrative stamp, which this DOCX cannot provide.",
+            "evidence_quotes": [source],
+            "machine_obligation_ids": [],
+            "identified_obligations": [{
+                "source_quote": "办公室盖章(有效)",
+                "disposition": "external_action_pending",
+                "requirement_indexes": [],
+            }],
+        }]}
+        validated = validate_obligation_coverage_response(pending, [check])
+        self.assertEqual(validated[0]["verdict"], "external_compliance_pending")
+
+        unsafe_contexts = (
+            {**check["review_context"], "requires_requirement": True},
+            {**check["review_context"], "linked_requirements": [{"requirement_index": 0}]},
+            {**check["review_context"], "primary_obligations": [{
+                "id": "physical_stamp", "status": "covered", "reason": "claimed covered",
+            }]},
+        )
+        for context in unsafe_contexts:
+            with self.subTest(context=context), self.assertRaises(NativeSemanticReviewError):
+                validate_obligation_coverage_response(pending, [{**check, "review_context": context}])
+
+        executable = {**check, "check_id": "C1", "review_context": {
+            "classification": "executable", "requires_requirement": True,
+            "linked_requirements": [{"requirement_index": 0}],
+            "machine_obligation_ids": [],
+        }}
+        forged = json.loads(json.dumps(pending, ensure_ascii=False))
+        forged["results"][0]["check_id"] = "C1"
+        with self.assertRaisesRegex(NativeSemanticReviewError, "only valid for external_compliance"):
+            validate_obligation_coverage_response(forged, [executable])
+
+    def test_external_pending_protocol_is_explicitly_non_docx_completion(self) -> None:
+        prompt = native_review._prompt({
+            "protocol": native_review.OBLIGATION_COVERAGE_PROTOCOL,
+            "checks": [],
+        })
+        self.assertIn("external_compliance_pending", prompt)
+        self.assertIn("external_action_pending", prompt)
+        self.assertIn("never DOCX satisfaction", prompt)
+
     def test_source_clause_support_is_explicit_for_shared_requirement_edges(self) -> None:
         chunk = {
             "case_id": "case-1",

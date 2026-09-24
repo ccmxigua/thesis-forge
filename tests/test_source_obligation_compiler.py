@@ -13,6 +13,7 @@ from source_obligation_compiler import (  # noqa: E402
     compile_explicit_keyword_count_range,
     compile_known_source_obligations,
     compile_known_source_obligation_ids,
+    compile_security_marking_options,
     compile_soft_keyword_count_guidance,
     compile_unresolved_manual_review_codes,
     materialize_complete_abstract_source_constraints,
@@ -22,6 +23,94 @@ from source_obligation_compiler import (  # noqa: E402
 
 
 class SourceObligationCompilerTests(unittest.TestCase):
+    def test_security_marking_choices_compile_and_project_from_exact_source(self) -> None:
+        source = "□限制(≤2年) □秘密(≤10年) □机密(≤20年)"
+        expected = [
+            {"label": "限制", "maximum_duration": {"value": 2, "unit": "年"}},
+            {"label": "秘密", "maximum_duration": {"value": 10, "unit": "年"}},
+            {"label": "机密", "maximum_duration": {"value": 20, "unit": "年"}},
+        ]
+        self.assertEqual(compile_security_marking_options(source), expected)
+        self.assertIn(
+            "cover.security_marking_options", compile_known_source_obligation_ids(source),
+        )
+        fact = next(
+            item for item in compile_known_source_obligations(source)
+            if item["id"] == "cover.security_marking_options"
+        )
+        self.assertEqual(fact["expected_value"], expected)
+        self.assertEqual(fact["required_checker_ids"], ["cover_non_public_administration"])
+
+        clause = {"id": "C43", "text": source, "evidence_ids": ["E43"]}
+        response = {
+            "clause_reviews": [{"clause_id": "C43", "classification": "covered"}],
+            "requirements": [{
+                "role": "cover",
+                "properties": {"non_public_administration": {
+                    "applicability": {"status": "conditional", "conditions": []},
+                    "fields": [{"id": "security_marking", "label": "密级", "order": 1}],
+                    "public_policy": "blank", "source_region": "official_admin_table",
+                }},
+                "clause_ids": ["C43"], "evidence_ids": ["E43"],
+            }],
+        }
+        projected, audit = materialize_known_source_verification(response, [clause])
+        self.assertEqual(
+            projected["requirements"][0]["properties"]["non_public_administration"][
+                "security_marking_options"
+            ], expected,
+        )
+        verification = projected["requirements"][0]["verification"]
+        self.assertEqual(verification["mode"], "external")
+        self.assertIn("cover_non_public_administration", verification["checker_ids"])
+        self.assertEqual(audit[0]["authorization"], "exact_source_checkbox_duration_projection_v1")
+        self.assertEqual(audit[0]["source_clause_ids"], ["C43"])
+        self.assertNotIn("security_marking_options", response["requirements"][0]["properties"][
+            "non_public_administration"
+        ])
+        _again, second_audit = materialize_known_source_verification(projected, [clause])
+        self.assertEqual(second_audit, [])
+
+    def test_security_marking_compiler_fails_closed_on_incomplete_or_ambiguous_choices(self) -> None:
+        for source in (
+            "□限制(≤2年)",
+            "□限制(≤2年) □秘密",
+            "□限制(≤2年) □限制(≤10年)",
+            "例如 □限制(≤2年) □秘密(≤10年)",
+            "如果 □限制(≤2年) □秘密(≤10年)",
+        ):
+            with self.subTest(source=source):
+                self.assertIsNone(compile_security_marking_options(source))
+
+    def test_security_marking_projection_never_overwrites_conflicts_or_guesses_links(self) -> None:
+        source = "□限制(≤2年) □秘密(≤10年)"
+        clause = {"id": "C43", "text": source, "evidence_ids": ["E43"]}
+        wrong = [{"label": "限制", "maximum_duration": {"value": 9, "unit": "年"}}]
+        base_requirement = {
+            "role": "cover", "properties": {"non_public_administration": {
+                "security_marking_options": wrong,
+            }}, "clause_ids": ["C43"], "evidence_ids": ["E43"],
+        }
+        for requirements, classification in (
+            ([base_requirement], "covered"),
+            ([base_requirement, {**base_requirement}], "covered"),
+            ([base_requirement], "external_compliance"),
+        ):
+            response = {
+                "clause_reviews": [{"clause_id": "C43", "classification": classification}],
+                "requirements": requirements,
+            }
+            projected, audit = materialize_known_source_verification(response, [clause])
+            self.assertEqual(
+                projected["requirements"][0]["properties"]["non_public_administration"][
+                    "security_marking_options"
+                ], wrong,
+            )
+            self.assertFalse(any(
+                item.get("authorization") == "exact_source_checkbox_duration_projection_v1"
+                for item in audit
+            ))
+
     def test_bsu_continuation_clause_compiles_all_explicit_obligations(self) -> None:
         source = "表序后跟表题(可省略)和“(续)”，居中置于表上方，续表均应重复表头"
         self.assertEqual(compile_continuation_caption_requirement(source)["state"], "optional")

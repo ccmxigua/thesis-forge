@@ -413,6 +413,9 @@ def _compile_non_public_administration(cover: dict[str, Any], profile: dict[str,
         "applicability": administration.get("applicability"),
         "public_policy": administration.get("public_policy"),
         "source_region": administration.get("source_region"),
+        "security_marking_options": copy.deepcopy(
+            administration.get("security_marking_options") or []
+        ),
         "security_level": security_level,
         "status": status,
         "fields": fields,

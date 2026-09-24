@@ -46,6 +46,12 @@ _COMPETING_CAPTION_POLICY = re.compile(
     re.IGNORECASE,
 )
 _QUOTE_PAIRS = (("“", "”"), ("‘", "’"), ('"', '"'), ("'", "'"))
+SECURITY_MARKING_OPTIONS_OBLIGATION_ID = "cover.security_marking_options"
+_SECURITY_MARKING_OPTION = re.compile(
+    r"[□☐]\s*(?P<label>[^□☐\s,，;；()（）]{1,24})\s*[（(]\s*"
+    r"(?:≤|不超过|至多|最多)\s*(?P<value>\d{1,4})\s*"
+    r"(?P<unit>年|月|日)\s*[）)]"
+)
 
 # These are code-owned source facts, not IDs that the model must copy into its
 # semantic decomposition.  The shared validator checks the corresponding
@@ -88,6 +94,11 @@ KNOWN_SOURCE_OBLIGATION_BINDINGS: dict[str, dict[str, Any]] = {
         "expected_value": "center",
         "required_checker_ids": ["docx.property_receipts"],
     },
+    SECURITY_MARKING_OPTIONS_OBLIGATION_ID: {
+        "roles": ["cover"],
+        "property_path": "properties.non_public_administration.security_marking_options",
+        "required_checker_ids": ["cover_non_public_administration"],
+    },
 }
 
 KNOWN_CHECKER_POLICIES: dict[str, dict[str, str]] = {
@@ -98,6 +109,12 @@ KNOWN_CHECKER_POLICIES: dict[str, dict[str, str]] = {
     "docx.word_render": {
         "mode": "word_render",
         "check": "通过 Microsoft Word 渲染结果核验这项来源义务。",
+    },
+    "cover_non_public_administration": {
+        "mode": "external",
+        "check": (
+            "核对非公开行政区域的选项及期限与当前来源一致；此项不代表已生成或验证 DOCX 行政表。"
+        ),
     },
 }
 
@@ -228,15 +245,53 @@ def compile_known_source_obligation_ids(source_text: Any) -> list[str]:
         result.append("table_caption.position_above")
     if "表" in text and "居中" in text:
         result.append("table_caption.alignment_center")
+    if compile_security_marking_options(source_text) is not None:
+        result.append(SECURITY_MARKING_OPTIONS_OBLIGATION_ID)
     return sorted(set(result))
 
 
 def compile_known_source_obligations(source_text: Any) -> list[dict[str, Any]]:
     """Return source-derived facts with their deterministic payload bindings."""
+    facts: list[dict[str, Any]] = []
+    for obligation_id in compile_known_source_obligation_ids(source_text):
+        binding = KNOWN_SOURCE_OBLIGATION_BINDINGS.get(obligation_id)
+        if binding is None:
+            continue
+        fact = {"id": obligation_id, **copy.deepcopy(binding)}
+        if obligation_id == SECURITY_MARKING_OPTIONS_OBLIGATION_ID:
+            fact["expected_value"] = compile_security_marking_options(source_text)
+        else:
+            fact["expected_value"] = copy.deepcopy(binding.get("expected_value"))
+        facts.append(fact)
+    return facts
+
+
+def compile_security_marking_options(source_text: Any) -> list[dict[str, Any]] | None:
+    """Compile explicit checkbox choices and durations without guessing.
+
+    Require a complete set of at least two choices, a distinct label for each,
+    and an explicit numeric maximum plus unit for every checkbox. Conditional,
+    example, and unmatched-checkbox text fails closed.
+    """
+    if not isinstance(source_text, str) or not source_text.strip():
+        return None
+    if _CONTEXT_UNSAFE.search(source_text):
+        return None
+    matches = list(_SECURITY_MARKING_OPTION.finditer(source_text))
+    if len(matches) < 2 or len(re.findall(r"[□☐]", source_text)) != len(matches):
+        return None
+    labels = [re.sub(r"\s+", " ", match.group("label")).strip() for match in matches]
+    if any(not label for label in labels) or len(set(labels)) != len(labels):
+        return None
     return [
-        {"id": obligation_id, **KNOWN_SOURCE_OBLIGATION_BINDINGS[obligation_id]}
-        for obligation_id in compile_known_source_obligation_ids(source_text)
-        if obligation_id in KNOWN_SOURCE_OBLIGATION_BINDINGS
+        {
+            "label": label,
+            "maximum_duration": {
+                "value": int(match.group("value")),
+                "unit": match.group("unit"),
+            },
+        }
+        for label, match in zip(labels, matches)
     ]
 
 
@@ -753,13 +808,15 @@ def materialize_complete_abstract_source_constraints(
 def materialize_known_source_verification(
     response: Any, clauses: Any,
 ) -> tuple[Any, list[dict[str, Any]]]:
-    """Project required checker bindings from exact compiled source facts.
+    """Project exact source facts and required checker bindings.
 
     The host may propose verification metadata, but it cannot omit a checker
     that the deterministic source-obligation registry requires.  Only a
     role/property value that exactly matches a compiled source fact receives
-    the binding; wrong or incomplete payloads remain unchanged and fail the
-    normal validator.  The input is never mutated.
+    the binding. A missing registered security-marking choice list is
+    materialized only on one uniquely linked cover administration requirement;
+    conflicting or ambiguous payloads are never overwritten and fail the
+    normal validator. The input is never mutated.
     """
     if not isinstance(response, dict) or not isinstance(clauses, list):
         return copy.deepcopy(response), []
@@ -767,6 +824,7 @@ def materialize_known_source_verification(
     requirements = projected.get("requirements")
     if not isinstance(requirements, list):
         return projected, []
+    property_projections: list[dict[str, Any]] = []
 
     def read_property(value: Any, path: str) -> Any:
         current = value
@@ -775,6 +833,67 @@ def materialize_known_source_verification(
                 return None
             current = current[part]
         return current
+
+    reviews = projected.get("clause_reviews")
+    review_by_id = {
+        str(item.get("clause_id")): item
+        for item in reviews if isinstance(item, dict) and isinstance(item.get("clause_id"), str)
+    } if isinstance(reviews, list) else {}
+
+    for clause in clauses:
+        if not isinstance(clause, dict) or not isinstance(clause.get("id"), str):
+            continue
+        clause_id = clause["id"]
+        source_text = clause.get("text") or clause.get("source_text_full")
+        choices = compile_security_marking_options(source_text)
+        review = review_by_id.get(clause_id, {})
+        if (
+            choices is None
+            or review.get("classification") not in {"covered", "executable", "verify_existing"}
+        ):
+            continue
+        candidates = [
+            (index, requirement) for index, requirement in enumerate(requirements)
+            if isinstance(requirement, dict)
+            and requirement.get("role") == "cover"
+            and clause_id in (requirement.get("clause_ids") or [])
+        ]
+        if len(candidates) != 1:
+            continue
+        requirement_index, requirement = candidates[0]
+        properties = requirement.get("properties")
+        administration = (
+            properties.get("non_public_administration")
+            if isinstance(properties, dict) else None
+        )
+        if not isinstance(administration, dict):
+            continue
+        current = administration.get("security_marking_options")
+        if current is not None:
+            # Exact source values are accepted; conflicting model values are
+            # left intact so the source-fact validator rejects them.
+            continue
+        before_sha256 = hashlib.sha256(json.dumps(
+            current, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()
+        administration["security_marking_options"] = copy.deepcopy(choices)
+        after_sha256 = hashlib.sha256(json.dumps(
+            choices, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()
+        property_projections.append({
+            "requirement_index": requirement_index,
+            "source_clause_ids": [clause_id],
+            "source_evidence_ids": [
+                value for value in clause.get("evidence_ids", [])
+                if isinstance(value, str) and value
+            ],
+            "source_obligation_ids": [SECURITY_MARKING_OPTIONS_OBLIGATION_ID],
+            "property_path": "properties.non_public_administration.security_marking_options",
+            "before_property_sha256": before_sha256,
+            "after_property_sha256": after_sha256,
+            "authorization": "exact_source_checkbox_duration_projection_v1",
+            "rule_id": "compile_security_marking_options_v1",
+        })
 
     bindings: dict[int, dict[str, Any]] = {}
     for clause in clauses:
@@ -820,7 +939,7 @@ def materialize_known_source_verification(
                     if checker_id in KNOWN_CHECKER_POLICIES
                 )
 
-    audit: list[dict[str, Any]] = []
+    audit: list[dict[str, Any]] = list(property_projections)
     for index, binding in sorted(bindings.items()):
         requirement = requirements[index]
         checker_ids = sorted(binding["required_checker_ids"])

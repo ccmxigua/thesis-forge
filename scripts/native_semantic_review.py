@@ -78,6 +78,7 @@ OBLIGATION_COVERAGE_SCHEMA: dict[str, Any] = {
                     "check_id": {"type": "string", "minLength": 1},
                     "verdict": {"enum": [
                         "consistent", "incomplete", "uncertain", "manual_review_required",
+                        "external_compliance_pending",
                     ]},
                     "rationale": {"type": "string", "minLength": 1},
                     "evidence_quotes": {
@@ -94,7 +95,10 @@ OBLIGATION_COVERAGE_SCHEMA: dict[str, Any] = {
                             "required": ["source_quote", "disposition", "requirement_indexes"],
                             "properties": {
                                 "source_quote": {"type": "string", "minLength": 1},
-                                "disposition": {"enum": ["represented", "unrepresented", "ambiguous"]},
+                                "disposition": {"enum": [
+                                    "represented", "unrepresented", "ambiguous",
+                                    "external_action_pending",
+                                ]},
                                 "requirement_indexes": {
                                     "type": "array", "items": {"type": "integer", "minimum": 0},
                                     "uniqueItems": True,
@@ -262,7 +266,7 @@ def validate_obligation_coverage_response(
             item.get("requirement_index") for item in linked
             if isinstance(item, dict) and isinstance(item.get("requirement_index"), int)
         }
-        represented = unrepresented = ambiguous = 0
+        represented = unrepresented = ambiguous = external_pending = 0
         for obligation in result.get("identified_obligations", []):
             quote = obligation.get("source_quote")
             if not isinstance(quote, str) or not quote or quote not in source_text:
@@ -283,9 +287,39 @@ def validate_obligation_coverage_response(
                     )
             elif disposition == "unrepresented":
                 unrepresented += 1
+            elif disposition == "external_action_pending":
+                external_pending += 1
             else:
                 ambiguous += 1
         verdict = result.get("verdict")
+        is_external_compliance = context.get("classification") == "external_compliance"
+        primary_obligations = (
+            context.get("primary_obligations")
+            if isinstance(context.get("primary_obligations"), list) else []
+        )
+        if is_external_compliance:
+            if (
+                context.get("requires_requirement") is not False
+                or linked
+                or any(
+                    not isinstance(item, dict) or item.get("status") != "unverifiable"
+                    for item in primary_obligations
+                )
+                or verdict != "external_compliance_pending"
+                or external_pending != len(result.get("identified_obligations", []))
+                or external_pending < max(1, len(primary_obligations))
+            ):
+                raise NativeSemanticReviewError(
+                    f"external_compliance clause must remain an unlinked, explicitly pending external action for {check_id}"
+                )
+            # This records a real-world action that remains outstanding; it is
+            # deliberately not a DOCX pass state.
+            by_id[check_id] = result
+            continue
+        if verdict == "external_compliance_pending" or external_pending:
+            raise NativeSemanticReviewError(
+                f"external-action disposition is only valid for external_compliance clauses: {check_id}"
+            )
         safely_unresolved = context.get("classification") == "unresolved" and not linked
         live_manual_codes = compile_unresolved_manual_review_codes(source_text)
         declared_manual_codes = context.get("manual_review_codes") or []
@@ -423,6 +457,11 @@ def _prompt(request: dict[str, Any]) -> str:
             "manual_review_required only when the clause is unresolved, has no linked requirement, "
             "and the sole blocker is that registered ambiguity; list only that ambiguity as "
             "ambiguous, never hide an unrepresented obligation under a manual deferral. "
+            "For external_compliance clauses, use external_compliance_pending only when each primary obligation "
+            "is marked unverifiable and no DOCX requirement is linked; quote and list each real-world action with "
+            "disposition external_action_pending and no requirement indexes. This records an outstanding external "
+            "action, never DOCX satisfaction. Never use this verdict for executable DOCX work or to hide a missing "
+            "requirement. "
             "If a readable obligation is absent, use incomplete. Copy machine_obligation_ids exactly. Return "
             "exactly one result per check_id and only the JSON object required by the schema.\n\n"
             "Current run-bound audit request:\n"
@@ -616,7 +655,10 @@ def run_native_semantic_review(
         raise NativeSemanticReviewError(f"native semantic response rejected: {exc}") from exc
     _write_fresh(response_path, strict_json_dumps(response, ensure_ascii=False, indent=2) + "\n")
     finished_at = datetime.now(timezone.utc).isoformat()
-    verdicts = ("consistent", "incomplete", "uncertain", "manual_review_required") if obligation_coverage_mode else (
+    verdicts = (
+        "consistent", "incomplete", "uncertain", "manual_review_required",
+        "external_compliance_pending",
+    ) if obligation_coverage_mode else (
         "satisfied", "noncompliant", "uncertain",
     )
     counts = {key: sum(item["verdict"] == key for item in results) for key in verdicts}

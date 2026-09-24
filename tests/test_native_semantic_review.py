@@ -192,6 +192,68 @@ class NativeSemanticReviewTests(unittest.TestCase):
         self.assertIn("even when no obligations are identified or the clause is informational", prompt)
         self.assertIn("Never return an empty evidence_quotes array", prompt)
 
+    def test_c00069_qualifier_hardening_is_incomplete_not_ambiguous(self) -> None:
+        source = "关键词在摘要内容后另起一行，一般3～8个，之间用分号分开"
+        check = {
+            "check_id": "C00069",
+            "document_text": source,
+            "review_context": {
+                "classification": "covered",
+                "requires_requirement": True,
+                "linked_requirements": [{"requirement_index": 1}],
+                "machine_obligation_ids": [
+                    "keywords_zh.placement_after_abstract",
+                    "keywords_zh.count_range",
+                    "keywords_zh.separator",
+                ],
+            },
+        }
+        response = {"results": [{
+            "check_id": "C00069",
+            "verdict": "incomplete",
+            "rationale": "The linked range turns the source's general guidance into a mandatory limit.",
+            "evidence_quotes": [source],
+            "machine_obligation_ids": check["review_context"]["machine_obligation_ids"],
+            "identified_obligations": [
+                {
+                    "source_quote": "关键词在摘要内容后另起一行",
+                    "disposition": "represented",
+                    "requirement_indexes": [1],
+                },
+                {
+                    "source_quote": "一般3～8个",
+                    "disposition": "unrepresented",
+                    "requirement_indexes": [1],
+                },
+                {
+                    "source_quote": "之间用分号分开",
+                    "disposition": "represented",
+                    "requirement_indexes": [1],
+                },
+            ],
+        }]}
+
+        validated = validate_obligation_coverage_response(response, [check])
+        self.assertEqual(validated[0]["verdict"], "incomplete")
+
+        misleading_response = json.loads(json.dumps(response, ensure_ascii=False))
+        misleading_response["results"][0]["identified_obligations"][1]["disposition"] = "ambiguous"
+        with self.assertRaisesRegex(NativeSemanticReviewError, "lacks an unrepresented obligation"):
+            validate_obligation_coverage_response(misleading_response, [check])
+
+    def test_obligation_review_prompt_defines_qualifier_fidelity(self) -> None:
+        prompt = native_review._prompt({
+            "protocol": native_review.OBLIGATION_COVERAGE_PROTOCOL,
+            "checks": [{
+                "check_id": "C00069",
+                "document_text": "一般3～8个",
+                "review_context": {},
+            }],
+        })
+        self.assertIn("hardening or weakening source qualifiers", prompt)
+        self.assertIn("Use ambiguous only when the source text itself cannot be interpreted reliably", prompt)
+        self.assertIn("use incomplete when any obligation is missing or materially misrepresented", prompt)
+
     def _stub_codex_host(self, process_result):
         context = SimpleNamespace(
             runtime="codex", as_audit=lambda: {"host_runtime": "codex"},

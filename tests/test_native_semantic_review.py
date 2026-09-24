@@ -96,10 +96,12 @@ class NativeSemanticReviewTests(unittest.TestCase):
         }
         packet = build_obligation_coverage_request(candidate, chunk, run_id="run-1", chunk_index=4)
         check = packet["checks"][0]
-        self.assertEqual(packet["protocol"], "native_source_obligation_coverage_review_v1")
+        self.assertEqual(packet["protocol"], "native_source_obligation_coverage_review_v2")
         self.assertEqual(packet["provenance"], chunk["provenance"])
         self.assertEqual(check["document_text"], source)
-        self.assertEqual(check["review_context"]["linked_requirements"][0]["requirement_index"], 0)
+        requirement_ref = check["review_context"]["linked_requirements"][0]["requirement_ref"]
+        self.assertTrue(requirement_ref.startswith("RR"))
+        self.assertNotIn("requirement_index", check["review_context"]["linked_requirements"][0])
         self.assertIn("table_caption.alignment_center", check["review_context"]["machine_obligation_ids"])
 
     def test_independent_obligation_review_requires_exact_full_coverage_and_safe_unresolved(self) -> None:
@@ -107,7 +109,7 @@ class NativeSemanticReviewTests(unittest.TestCase):
             "check_id": "C1", "document_text": "表格应居中",
             "review_context": {
                 "classification": "covered", "requires_requirement": True,
-                "linked_requirements": [{"requirement_index": 0}],
+                "linked_requirements": [{"requirement_ref": "RR-table-1"}],
                 "machine_obligation_ids": ["table_caption.alignment_center"],
             },
         }
@@ -117,7 +119,7 @@ class NativeSemanticReviewTests(unittest.TestCase):
             "machine_obligation_ids": ["table_caption.alignment_center"],
             "identified_obligations": [{
                 "source_quote": "表格应居中", "disposition": "represented",
-                "requirement_indexes": [0],
+                "requirement_refs": ["RR-table-1"],
             }],
         }]}
         self.assertEqual(validate_obligation_coverage_response(good, [check])[0]["verdict"], "consistent")
@@ -125,14 +127,14 @@ class NativeSemanticReviewTests(unittest.TestCase):
         bad_cases = [
             {"results": [{**good["results"][0], "machine_obligation_ids": []}]},
             {"results": [{**good["results"][0], "identified_obligations": [{
-                "source_quote": "表格应居中", "disposition": "represented", "requirement_indexes": [1],
+                "source_quote": "表格应居中", "disposition": "represented", "requirement_refs": ["RR-unknown"],
             }]}]},
             {"results": [{**good["results"][0], "evidence_quotes": ["不是原文"]}]},
             {"results": [{**good["results"][0], "identified_obligations": [{
-                "source_quote": "表格应居中", "disposition": "unrepresented", "requirement_indexes": [],
+                "source_quote": "表格应居中", "disposition": "unrepresented", "requirement_refs": [],
             }]}]},
             {"results": [{**good["results"][0], "identified_obligations": [{
-                "source_quote": "表格应居中", "disposition": "represented", "requirement_indexes": [0, 0],
+                "source_quote": "表格应居中", "disposition": "represented", "requirement_refs": ["RR-table-1", "RR-table-1"],
             }]}]},
         ]
         for response in bad_cases:
@@ -150,7 +152,7 @@ class NativeSemanticReviewTests(unittest.TestCase):
             "check_id": "C2", "verdict": "uncertain", "rationale": "The physical object is unclear.",
             "evidence_quotes": ["约3cm"], "machine_obligation_ids": [],
             "identified_obligations": [{
-                "source_quote": "约3cm", "disposition": "ambiguous", "requirement_indexes": [],
+                "source_quote": "约3cm", "disposition": "ambiguous", "requirement_refs": [],
             }],
         }]}
         self.assertEqual(
@@ -182,6 +184,66 @@ class NativeSemanticReviewTests(unittest.TestCase):
         with self.assertRaisesRegex(NativeSemanticReviewError, "requires at least 1 items"):
             validate_obligation_coverage_response(response, [check])
 
+    def test_author_input_is_pending_not_requirement_or_satisfaction(self) -> None:
+        source = "以下示例内容是编写的，请作者根据需要自行撰写真实研究内容。"
+        check = {
+            "check_id": "C00102", "document_text": source,
+            "review_context": {
+                "classification": "requires_source_content", "requires_requirement": False,
+                "linked_requirements": [], "machine_obligation_ids": [],
+            },
+        }
+        pending = {"results": [{
+            "check_id": "C00102", "verdict": "source_content_pending",
+            "rationale": "The source explicitly asks the author to replace the sample with genuine content.",
+            "evidence_quotes": ["请作者根据需要自行撰写真实研究内容"],
+            "machine_obligation_ids": [],
+            "identified_obligations": [{
+                "source_quote": "请作者根据需要自行撰写真实研究内容",
+                "disposition": "authoring_content_pending", "requirement_refs": [],
+            }],
+        }]}
+        self.assertEqual(
+            validate_obligation_coverage_response(pending, [check])[0]["verdict"],
+            "source_content_pending",
+        )
+
+        unsafe_checks = [
+            {**check, "review_context": {**check["review_context"], "classification": "informational"}},
+            {**check, "review_context": {**check["review_context"], "linked_requirements": [{"requirement_ref": "RR-old"}]}},
+        ]
+        for unsafe_check in unsafe_checks:
+            with self.subTest(context=unsafe_check["review_context"]), self.assertRaises(
+                NativeSemanticReviewError,
+            ):
+                validate_obligation_coverage_response(pending, [unsafe_check])
+
+        unrelated_source = "表格应居中，表题应置于表格上方。"
+        unrelated_check = {
+            "check_id": "C00200", "document_text": unrelated_source,
+            "review_context": {
+                "classification": "requires_source_content", "requires_requirement": False,
+                "linked_requirements": [], "machine_obligation_ids": [],
+            },
+        }
+        fabricated_pending = {"results": [{
+            "check_id": "C00200", "verdict": "source_content_pending",
+            "rationale": "The author still needs to provide content.",
+            "evidence_quotes": [unrelated_source],
+            "machine_obligation_ids": [],
+            "identified_obligations": [{
+                "source_quote": unrelated_source,
+                "disposition": "authoring_content_pending", "requirement_refs": [],
+            }],
+        }]}
+        with self.assertRaisesRegex(NativeSemanticReviewError, "explicit source authoring instruction"):
+            validate_obligation_coverage_response(fabricated_pending, [unrelated_check])
+
+        forged = json.loads(json.dumps(pending, ensure_ascii=False))
+        forged["results"][0]["identified_obligations"][0]["requirement_refs"] = ["RR-forged"]
+        with self.assertRaisesRegex(NativeSemanticReviewError, "unrelated requirement"):
+            validate_obligation_coverage_response(forged, [check])
+
     def test_obligation_review_prompt_requires_quotes_for_zero_obligation_conclusions(self) -> None:
         prompt = native_review._prompt({
             "protocol": native_review.OBLIGATION_COVERAGE_PROTOCOL,
@@ -202,7 +264,7 @@ class NativeSemanticReviewTests(unittest.TestCase):
             "review_context": {
                 "classification": "covered",
                 "requires_requirement": True,
-                "linked_requirements": [{"requirement_index": 1}],
+                "linked_requirements": [{"requirement_ref": "RR-keywords"}],
                 "machine_obligation_ids": [
                     "keywords_zh.placement_after_abstract",
                     "keywords_zh.count_range",
@@ -220,17 +282,17 @@ class NativeSemanticReviewTests(unittest.TestCase):
                 {
                     "source_quote": "关键词在摘要内容后另起一行",
                     "disposition": "represented",
-                    "requirement_indexes": [1],
+                    "requirement_refs": ["RR-keywords"],
                 },
                 {
                     "source_quote": "一般3～8个",
                     "disposition": "unrepresented",
-                    "requirement_indexes": [1],
+                    "requirement_refs": ["RR-keywords"],
                 },
                 {
                     "source_quote": "之间用分号分开",
                     "disposition": "represented",
-                    "requirement_indexes": [1],
+                    "requirement_refs": ["RR-keywords"],
                 },
             ],
         }]}
@@ -268,7 +330,7 @@ class NativeSemanticReviewTests(unittest.TestCase):
             "identified_obligations": [{
                 "source_quote": "The Chinese abstract",
                 "disposition": "ambiguous",
-                "requirement_indexes": [],
+                "requirement_refs": [],
             }],
         }]}
         self.assertEqual(
@@ -277,7 +339,7 @@ class NativeSemanticReviewTests(unittest.TestCase):
         )
         for unsafe in (
             {**check, "review_context": {**check["review_context"], "classification": "executable"}},
-            {**check, "review_context": {**check["review_context"], "linked_requirements": [{"requirement_index": 0}]}},
+            {**check, "review_context": {**check["review_context"], "linked_requirements": [{"requirement_ref": "RR-x"}]}},
             {**check, "review_context": {**check["review_context"], "manual_review_codes": []}},
         ):
             with self.subTest(context=unsafe["review_context"]), self.assertRaises(NativeSemanticReviewError):
@@ -286,7 +348,7 @@ class NativeSemanticReviewTests(unittest.TestCase):
         unrepresented["results"][0]["identified_obligations"].append({
             "source_quote": "300 to 1,000 words",
             "disposition": "unrepresented",
-            "requirement_indexes": [],
+            "requirement_refs": [],
         })
         with self.assertRaisesRegex(NativeSemanticReviewError, "manual deferral is not authorized"):
             validate_obligation_coverage_response(unrepresented, [check])
@@ -316,7 +378,7 @@ class NativeSemanticReviewTests(unittest.TestCase):
             "identified_obligations": [{
                 "source_quote": "办公室盖章(有效)",
                 "disposition": "external_action_pending",
-                "requirement_indexes": [],
+                "requirement_refs": [],
             }],
         }]}
         validated = validate_obligation_coverage_response(pending, [check])
@@ -324,7 +386,7 @@ class NativeSemanticReviewTests(unittest.TestCase):
 
         unsafe_contexts = (
             {**check["review_context"], "requires_requirement": True},
-            {**check["review_context"], "linked_requirements": [{"requirement_index": 0}]},
+            {**check["review_context"], "linked_requirements": [{"requirement_ref": "RR-x"}]},
             {**check["review_context"], "primary_obligations": [{
                 "id": "physical_stamp", "status": "covered", "reason": "claimed covered",
             }]},
@@ -335,7 +397,7 @@ class NativeSemanticReviewTests(unittest.TestCase):
 
         executable = {**check, "check_id": "C1", "review_context": {
             "classification": "executable", "requires_requirement": True,
-            "linked_requirements": [{"requirement_index": 0}],
+            "linked_requirements": [{"requirement_ref": "RR-x"}],
             "machine_obligation_ids": [],
         }}
         forged = json.loads(json.dumps(pending, ensure_ascii=False))
@@ -382,7 +444,7 @@ class NativeSemanticReviewTests(unittest.TestCase):
         packet = build_obligation_coverage_request(response, chunk, run_id="run-1", chunk_index=1)
         check = next(item for item in packet["checks"] if item["check_id"] == "C_SOFT")
         self.assertEqual(check["review_context"]["source_clause_support"], [{
-            "requirement_index": 0,
+            "requirement_ref": check["review_context"]["linked_requirements"][0]["requirement_ref"],
             "clause_id": "C_HARD",
             "document_text": "最少3组，最多8组",
             "evidence_ids": ["E2"],
@@ -400,6 +462,7 @@ class NativeSemanticReviewTests(unittest.TestCase):
         self.assertIn("hardening or weakening source qualifiers", prompt)
         self.assertIn("Use ambiguous only when the source text itself cannot be interpreted reliably", prompt)
         self.assertIn("use incomplete when any obligation is missing or materially misrepresented", prompt)
+        self.assertIn("never emit numeric positions or invent a reference", prompt)
 
     def _stub_codex_host(self, process_result):
         context = SimpleNamespace(
@@ -489,7 +552,7 @@ class NativeSemanticReviewTests(unittest.TestCase):
             "check_id": "C1", "verdict": "uncertain", "rationale": "The source is ambiguous.",
             "evidence_refs": [full_source_ref],
             "identified_obligations": [{
-                "source_ref": full_source_ref, "disposition": "ambiguous", "requirement_indexes": [],
+                "source_ref": full_source_ref, "disposition": "ambiguous", "requirement_refs": [],
             }],
         }]}
         observed = {}

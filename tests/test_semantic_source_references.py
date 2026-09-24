@@ -103,7 +103,7 @@ class SemanticSourceReferenceTests(unittest.TestCase):
         raw = {"results": [{
             "check_id": "C1", "verdict": "uncertain", "rationale": "职责范围需确认。",
             "evidence_refs": [ref], "identified_obligations": [{
-                "source_ref": ref, "disposition": "ambiguous", "requirement_indexes": [],
+                "source_ref": ref, "disposition": "ambiguous", "requirement_refs": [],
             }],
         }]}
 

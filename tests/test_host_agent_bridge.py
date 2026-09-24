@@ -54,7 +54,7 @@ class HostAgentBridgeTests(unittest.TestCase):
         out_dir = review_dir / f"independent-review-chunk-{chunk_index:04d}-attempt-{attempt:02d}"
         audit_path = out_dir / "coverage-audit.json"
         envelope = {
-            "protocol": "native_source_obligation_coverage_review_v1",
+            "protocol": bridge.OBLIGATION_COVERAGE_PROTOCOL,
             "status": "completed", "run_id": provenance.get("run_id") if isinstance(provenance, dict) else None,
             "chunk_index": chunk_index, "attempt": attempt,
             "candidate_response_sha256": response_sha,
@@ -95,13 +95,13 @@ class HostAgentBridgeTests(unittest.TestCase):
             }],
         }
         reviewer_result = {
-            "protocol": "native_source_obligation_coverage_review_v1",
+            "protocol": bridge.OBLIGATION_COVERAGE_PROTOCOL,
             "status": "completed", "request_sha256": "e" * 64,
             "response_sha256": "f" * 64,
             "results": [{
                 "check_id": "C1", "verdict": "consistent", "rationale": "source represented",
                 "evidence_quotes": [source], "identified_obligations": [{
-                    "source_quote": source, "disposition": "represented", "requirement_indexes": [0],
+                    "source_quote": source, "disposition": "represented", "requirement_refs": ["RR-test"],
                 }],
                 "machine_obligation_ids": ["table_caption.alignment_center"],
             }],
@@ -152,13 +152,13 @@ class HostAgentBridgeTests(unittest.TestCase):
             }],
         }
         review_result = {
-            "protocol": "native_source_obligation_coverage_review_v1",
+            "protocol": bridge.OBLIGATION_COVERAGE_PROTOCOL,
             "status": "completed", "request_sha256": "e" * 64,
             "response_sha256": "f" * 64,
             "results": [{
                 "check_id": "C1", "verdict": "consistent", "rationale": "source represented",
                 "evidence_quotes": [source], "identified_obligations": [{
-                    "source_quote": source, "disposition": "represented", "requirement_indexes": [0],
+                    "source_quote": source, "disposition": "represented", "requirement_refs": ["RR-test"],
                 }], "machine_obligation_ids": ["table_caption.alignment_center"],
             }],
             "summary": {"consistent": 1, "incomplete": 0, "uncertain": 0},
@@ -296,13 +296,13 @@ class HostAgentBridgeTests(unittest.TestCase):
             }],
         }
         reviewer_result = {
-            "protocol": "native_source_obligation_coverage_review_v1",
+            "protocol": bridge.OBLIGATION_COVERAGE_PROTOCOL,
             "status": "completed", "request_sha256": "e" * 64,
             "response_sha256": "f" * 64,
             "results": [{
                 "check_id": "C1", "verdict": "incomplete", "rationale": "alignment missing",
                 "evidence_quotes": [source], "identified_obligations": [{
-                    "source_quote": source, "disposition": "unrepresented", "requirement_indexes": [],
+                    "source_quote": source, "disposition": "unrepresented", "requirement_refs": [],
                 }], "machine_obligation_ids": ["table_caption.alignment_center"],
             }],
             "summary": {"consistent": 0, "incomplete": 1, "uncertain": 0},
@@ -320,6 +320,7 @@ class HostAgentBridgeTests(unittest.TestCase):
                 caught.exception.error_records[0]["code"],
                 "independent_obligation_review_incomplete",
             )
+            self.assertTrue(caught.exception.retryable)
             pointer = caught.exception.independent_review_audit
             envelope = json.loads((Path(td) / pointer["audit_path"]).read_text(encoding="utf-8"))
             self.assertEqual(pointer["status"], "rejected")
@@ -744,6 +745,93 @@ class HostAgentBridgeTests(unittest.TestCase):
         self.assertTrue(changed)
         self.assertIsNotNone(change_error)
         self.assertIn("semantic re-review", str(change_error))
+
+    def test_author_content_reclassification_retry_is_exactly_source_bound(self) -> None:
+        source = "以下示例内容是编写的，请作者根据需要自行撰写真实研究内容。"
+        provenance = {
+            "run_id": "run-authoring-retry", "source_sha256": "a" * 64,
+            "evidence_sha256": "b" * 64, "clause_sha256": "c" * 64,
+            "request_sha256": "d" * 64,
+        }
+        parent = {
+            "contract_version": "3.0",
+            "requirements": [],
+            "clause_reviews": [{
+                "clause_id": "C1", "classification": "informational",
+                "reason": "Sample wording was treated as descriptive.",
+            }],
+        }
+        candidate = copy.deepcopy(parent)
+        candidate["clause_reviews"][0]["classification"] = "requires_source_content"
+        chunk = {
+            "provenance": provenance, "batch": {"index": 1},
+            "clauses": [{"id": "C1", "text": source, "evidence_ids": ["E1"]}],
+            "evidence_context": {"E1": {"id": "E1", "text": source}},
+        }
+        record = {
+            "code": "independent_obligation_review_incomplete", "clause_id": "C1",
+            "json_pointer": "$.clause_reviews[0].classification",
+            "baseline_classification": "informational", "evidence_ids": ["E1"],
+            "missing_source_quotes": ["请作者根据需要自行撰写真实研究内容"],
+            "candidate_response_sha256": bridge._response_sha256(
+                bridge._bind_current_invocation_provenance(parent, provenance)
+            ),
+            "candidate_semantic_sha256": bridge._response_sha256(bridge._semantic_retry_view(parent)),
+            "review_request_sha256": "e" * 64, "review_response_sha256": "f" * 64,
+        }
+        with patch.object(bridge, "validate_host_agent_response", return_value=[]):
+            repaired, repair_audit = bridge._v3_authoring_content_reclassification_response(
+                parent, candidate, [record], chunk=chunk,
+            )
+            changed_paths = bridge._retry_change_paths(parent, candidate)
+            change_error, authorized_paths = bridge._retry_semantic_change_error(
+                parent, candidate, [record], contract_version="3.0", chunk=chunk,
+            )
+            authorization_ledger = bridge._retry_authorization_ledger(
+                parent, candidate, [record], changed_paths,
+                contract_version="3.0", chunk=chunk,
+            )
+
+        self.assertEqual(repaired, candidate)
+        self.assertEqual(repair_audit["affected_clause_ids"], ["C1"])
+        self.assertEqual(changed_paths, ["$.clause_reviews[0].classification"])
+        self.assertIsNone(change_error)
+        self.assertEqual(authorized_paths, changed_paths)
+        self.assertTrue(authorization_ledger[0]["source_binding_complete"])
+
+        changed_reason = copy.deepcopy(candidate)
+        changed_reason["clause_reviews"][0]["reason"] = "Unrelated rewrite"
+        with patch.object(bridge, "validate_host_agent_response", return_value=[]):
+            self.assertIsNone(bridge._v3_authoring_content_reclassification_response(
+                parent, changed_reason, [record], chunk=chunk,
+            )[0])
+
+        forged_record = {**record, "candidate_response_sha256": "0" * 64}
+        with patch.object(bridge, "validate_host_agent_response", return_value=[]):
+            self.assertIsNone(bridge._v3_authoring_content_reclassification_response(
+                parent, candidate, [forged_record], chunk=chunk,
+            )[0])
+
+        unrelated_source = "图题应居中，编号按章节递增。"
+        unrelated_chunk = copy.deepcopy(chunk)
+        unrelated_chunk["clauses"][0]["text"] = unrelated_source
+        unrelated_chunk["evidence_context"]["E1"]["text"] = unrelated_source
+        unrelated_parent = copy.deepcopy(parent)
+        unrelated_candidate = copy.deepcopy(candidate)
+        unrelated_record = {
+            **record,
+            "missing_source_quotes": [unrelated_source],
+            "candidate_response_sha256": bridge._response_sha256(
+                bridge._bind_current_invocation_provenance(unrelated_parent, provenance)
+            ),
+            "candidate_semantic_sha256": bridge._response_sha256(
+                bridge._semantic_retry_view(unrelated_parent)
+            ),
+        }
+        with patch.object(bridge, "validate_host_agent_response", return_value=[]):
+            self.assertIsNone(bridge._v3_authoring_content_reclassification_response(
+                unrelated_parent, unrelated_candidate, [unrelated_record], chunk=unrelated_chunk,
+            )[0])
 
     def test_retry_allows_only_completion_of_an_empty_requirement_payload(self) -> None:
         previous = self._executable_response({"provenance": {}})
@@ -3516,6 +3604,58 @@ class HostAgentBridgeTests(unittest.TestCase):
             ).read_text(encoding="utf-8")
             self.assertIn("local contract validation failed", second_prompt)
 
+    def test_retryable_independent_review_incompleteness_uses_bounded_primary_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            review_dir, chunk = self._packet(Path(td) / "requirements")
+            response = self._response(chunk)
+            envelope = {
+                "runId": "openclaw-run-obligation-retry", "status": "ok",
+                "provider": "openai", "model": "gpt-5.6-luna",
+                "result": {"payloads": [{"text": json.dumps(response)}]},
+            }
+            response_out = Path(td) / "host-agent-response.json"
+            fake_results = [
+                subprocess.CompletedProcess(["openclaw"], 0, json.dumps(envelope), ""),
+                subprocess.CompletedProcess(["openclaw"], 0, json.dumps(envelope), ""),
+            ]
+            calls = 0
+
+            def fail_independent_once(candidate, current_chunk, **kwargs):
+                nonlocal calls
+                calls += 1
+                if calls == 1:
+                    error = bridge.IndependentObligationReviewError(
+                        "source obligation was not represented",
+                    )
+                    error.error_records = [{
+                        "code": "independent_obligation_review_incomplete",
+                        "clause_id": "C1", "baseline_classification": "informational",
+                        "json_pointer": "$.clause_reviews[0].classification",
+                        "missing_source_quotes": ["正文使用宋体"],
+                        "candidate_response_sha256": bridge._response_sha256(candidate),
+                    }]
+                    error.independent_review_audit = {"status": "rejected", "audit_path": "rejected.json"}
+                    error.retryable = True
+                    raise error
+                return self._fake_independent_review(candidate, current_chunk, **kwargs)
+
+            self._independent_review_patch.stop()
+            with patch.object(bridge, "_run_independent_obligation_coverage_review", side_effect=fail_independent_once), \
+                    patch.object(bridge, "_run_command", side_effect=fake_results) as run:
+                audit = bridge.run_bridge(
+                    review_dir, response_out=response_out,
+                    agent_id="main", timeout=1, max_attempts=2,
+                    openclaw_bin="openclaw", model="openai/gpt-5.6-luna",
+                )
+
+            self.assertEqual(audit["status"], "merged")
+            self.assertEqual(run.call_count, 2)
+            self.assertEqual(calls, 2)
+            self.assertEqual(audit["chunk_lifecycle"][0]["attempts"][0]["status"], "retrying")
+            self.assertEqual(
+                audit["chunk_lifecycle"][0]["attempts"][0]["error_records"][0]["code"],
+                "independent_obligation_review_incomplete",
+            )
     def test_retry_cannot_hide_a_semantic_classification_change(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             review_dir, chunk = self._packet(Path(td) / "requirements")

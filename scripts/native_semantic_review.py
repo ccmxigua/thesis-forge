@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 import hashlib
 import json
 import os
+import re
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +42,44 @@ class RetryableNativeSemanticReviewError(NativeSemanticReviewError):
         self.retry_code = retry_code
 
 
+def is_explicit_authoring_content_quote(quote: Any) -> bool:
+    """Recognize only explicit source instructions for author-supplied content.
+
+    This conservative lexical gate is not a general semantic classifier. If
+    the source uses wording outside this small supported vocabulary, the
+    independent review remains unresolved instead of manufacturing a pending
+    author-input state.
+    """
+    if not isinstance(quote, str) or not quote.strip():
+        return False
+    compact = re.sub(r"\s+", "", quote).casefold()
+    chinese_sample = any(token in compact for token in (
+        "示例", "样例", "范例", "虚构", "杜撰", "编的", "编写的",
+    ))
+    chinese_author = any(token in compact for token in ("作者", "自行", "自己", "本人"))
+    chinese_action = any(token in compact for token in (
+        "撰写", "编写", "补充", "填写", "提供", "替换",
+    ))
+    chinese_genuine_content = any(token in compact for token in (
+        "真实内容", "实际内容", "真实研究", "实际研究", "本人内容",
+    ))
+    if chinese_author and chinese_action and (chinese_sample or chinese_genuine_content):
+        return True
+
+    english = quote.casefold()
+    english_sample = any(token in english for token in (
+        "example", "sample", "fictitious", "fabricated", "placeholder",
+    ))
+    english_author = bool(re.search(r"\b(author|you|yourself)\b", english))
+    english_action = bool(re.search(
+        r"\b(write|draft|provide|replace|fill\s+in|supply)\b", english,
+    ))
+    english_genuine_content = any(token in english for token in (
+        "genuine content", "actual research", "original content",
+    ))
+    return english_author and english_action and (english_sample or english_genuine_content)
+
+
 RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "required": ["results"],
@@ -67,7 +106,7 @@ RESPONSE_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
-OBLIGATION_COVERAGE_PROTOCOL = "native_source_obligation_coverage_review_v1"
+OBLIGATION_COVERAGE_PROTOCOL = "native_source_obligation_coverage_review_v2"
 OBLIGATION_COVERAGE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "required": ["results"],
@@ -84,7 +123,7 @@ OBLIGATION_COVERAGE_SCHEMA: dict[str, Any] = {
                     "check_id": {"type": "string", "minLength": 1},
                     "verdict": {"enum": [
                         "consistent", "incomplete", "uncertain", "manual_review_required",
-                        "external_compliance_pending",
+                        "external_compliance_pending", "source_content_pending",
                     ]},
                     "rationale": {"type": "string", "minLength": 1},
                     "evidence_quotes": {
@@ -98,15 +137,15 @@ OBLIGATION_COVERAGE_SCHEMA: dict[str, Any] = {
                         "type": "array",
                         "items": {
                             "type": "object",
-                            "required": ["source_quote", "disposition", "requirement_indexes"],
+                            "required": ["source_quote", "disposition", "requirement_refs"],
                             "properties": {
                                 "source_quote": {"type": "string", "minLength": 1},
                                 "disposition": {"enum": [
                                     "represented", "unrepresented", "ambiguous",
-                                    "external_action_pending",
+                                    "external_action_pending", "authoring_content_pending",
                                 ]},
-                                "requirement_indexes": {
-                                    "type": "array", "items": {"type": "integer", "minimum": 0},
+                                "requirement_refs": {
+                                    "type": "array", "items": {"type": "string", "minLength": 1},
                                     "uniqueItems": True,
                                 },
                             },
@@ -152,29 +191,37 @@ def build_obligation_coverage_request(
             source_text = ""
         review = review_by_id.get(clause_id, {})
         linked_requirements = []
+        linked_requirement_sources: list[tuple[str, dict[str, Any]]] = []
         for index, item in enumerate(requirements):
             if not isinstance(item, dict) or clause_id not in (item.get("clause_ids") or []):
                 continue
+            requirement_ref = "RR" + sha256_json({
+                "protocol": OBLIGATION_COVERAGE_PROTOCOL,
+                "run_id": run_id,
+                "chunk_index": chunk_index,
+                "check_id": clause_id,
+                "requirement_ordinal": index,
+                "requirement_sha256": sha256_json(item),
+            })[:20]
             linked_requirements.append({
-                "requirement_index": index,
+                "requirement_ref": requirement_ref,
                 "source_requirement_id": item.get("existing_requirement_id") or item.get("id"),
                 "role": item.get("role"),
                 "properties": copy.deepcopy(item.get("properties")),
                 "evidence_ids": copy.deepcopy(item.get("evidence_ids") or []),
                 "verification": copy.deepcopy(item.get("verification")),
             })
+            linked_requirement_sources.append((requirement_ref, item))
         source_clause_support = []
-        seen_support: set[tuple[int, str]] = set()
-        for linked in linked_requirements:
-            linked_index = linked["requirement_index"]
-            source_requirement = requirements[linked_index]
+        seen_support: set[tuple[str, str]] = set()
+        for requirement_ref, source_requirement in linked_requirement_sources:
             for supported_clause_id in source_requirement.get("clause_ids") or []:
                 if str(supported_clause_id) == clause_id:
                     continue
                 supported_clause = clause_by_id.get(str(supported_clause_id))
                 if not isinstance(supported_clause, dict):
                     continue
-                support_key = (linked_index, str(supported_clause_id))
+                support_key = (requirement_ref, str(supported_clause_id))
                 if support_key in seen_support:
                     continue
                 seen_support.add(support_key)
@@ -182,7 +229,7 @@ def build_obligation_coverage_request(
                 if not isinstance(supported_text, str):
                     supported_text = supported_clause.get("source_text_full")
                 source_clause_support.append({
-                    "requirement_index": linked_index,
+                    "requirement_ref": requirement_ref,
                     "clause_id": str(supported_clause_id),
                     "document_text": supported_text if isinstance(supported_text, str) else "",
                     "evidence_ids": copy.deepcopy(supported_clause.get("evidence_ids") or []),
@@ -268,26 +315,26 @@ def validate_obligation_coverage_response(
                 f"independent obligation review omitted or changed code-owned source facts for {check_id}"
             )
         linked = context.get("linked_requirements") if isinstance(context.get("linked_requirements"), list) else []
-        allowed_indexes = {
-            item.get("requirement_index") for item in linked
-            if isinstance(item, dict) and isinstance(item.get("requirement_index"), int)
+        allowed_refs = {
+            item.get("requirement_ref") for item in linked
+            if isinstance(item, dict) and isinstance(item.get("requirement_ref"), str)
         }
-        represented = unrepresented = ambiguous = external_pending = 0
+        represented = unrepresented = ambiguous = external_pending = authoring_pending = 0
         for obligation in result.get("identified_obligations", []):
             quote = obligation.get("source_quote")
             if not isinstance(quote, str) or not quote or quote not in source_text:
                 raise NativeSemanticReviewError(
                     f"independent obligation review returned a non-source obligation quote for {check_id}"
                 )
-            indexes = obligation.get("requirement_indexes") or []
-            if any(index not in allowed_indexes for index in indexes):
+            requirement_refs = obligation.get("requirement_refs") or []
+            if any(reference not in allowed_refs for reference in requirement_refs):
                 raise NativeSemanticReviewError(
                     f"independent obligation review linked an unrelated requirement for {check_id}"
                 )
             disposition = obligation.get("disposition")
             if disposition == "represented":
                 represented += 1
-                if not indexes and context.get("requires_requirement") is True:
+                if not requirement_refs and context.get("requires_requirement") is True:
                     raise NativeSemanticReviewError(
                         f"independent obligation review claims unlinked coverage for {check_id}"
                     )
@@ -295,6 +342,12 @@ def validate_obligation_coverage_response(
                 unrepresented += 1
             elif disposition == "external_action_pending":
                 external_pending += 1
+            elif disposition == "authoring_content_pending":
+                if not is_explicit_authoring_content_quote(quote):
+                    raise NativeSemanticReviewError(
+                        f"authoring-content pending lacks an explicit source authoring instruction for {check_id}"
+                    )
+                authoring_pending += 1
             else:
                 ambiguous += 1
         verdict = result.get("verdict")
@@ -325,6 +378,26 @@ def validate_obligation_coverage_response(
         if verdict == "external_compliance_pending" or external_pending:
             raise NativeSemanticReviewError(
                 f"external-action disposition is only valid for external_compliance clauses: {check_id}"
+            )
+        if verdict == "source_content_pending":
+            obligations = result.get("identified_obligations", [])
+            if (
+                context.get("classification") != "requires_source_content"
+                or context.get("requires_requirement") is not False
+                or linked
+                or not obligations
+                or authoring_pending != len(obligations)
+                or represented or unrepresented or ambiguous or external_pending
+                or any(item.get("requirement_refs") for item in obligations)
+            ):
+                raise NativeSemanticReviewError(
+                    f"source-content pending must be an unlinked authoring input for {check_id}"
+                )
+            by_id[check_id] = result
+            continue
+        if authoring_pending:
+            raise NativeSemanticReviewError(
+                f"authoring-content disposition requires source_content_pending verdict for {check_id}"
             )
         safely_unresolved = context.get("classification") == "unresolved" and not linked
         live_manual_codes = compile_unresolved_manual_review_codes(source_text)
@@ -472,9 +545,16 @@ def _prompt(request: dict[str, Any]) -> str:
             "ambiguous, never hide an unrepresented obligation under a manual deferral. "
             "For external_compliance clauses, use external_compliance_pending only when each primary obligation "
             "is marked unverifiable and no DOCX requirement is linked; quote and list each real-world action with "
-            "disposition external_action_pending and no requirement indexes. This records an outstanding external "
+            "disposition external_action_pending and no requirement_refs. This records an outstanding external "
             "action, never DOCX satisfaction. Never use this verdict for executable DOCX work or to hide a missing "
-            "requirement. "
+            "requirement. For a clause classified requires_source_content, use source_content_pending only when "
+            "the exact source explicitly requires the author to provide genuine thesis content; identify each such "
+            "source passage as authoring_content_pending and use no requirement_refs. This means the source input "
+            "is still pending, not that the content was written or a requirement satisfied. If the primary response "
+            "instead classifies that explicit authoring instruction as informational, use incomplete so the bounded "
+            "primary retry can correct only that classification. Never draft the missing thesis content. "
+            "For represented obligations, requirement_refs must contain only the exact opaque requirement_ref strings "
+            "listed under this check's linked_requirements; never emit numeric positions or invent a reference. "
             "If a readable obligation is absent, use incomplete. Code retains machine_obligation_ids "
             "from the current request; do not emit or alter them. Return "
             "exactly one result per check_id and only the JSON object required by the schema.\n\n"
@@ -694,7 +774,7 @@ def run_native_semantic_review(
     finished_at = datetime.now(timezone.utc).isoformat()
     verdicts = (
         "consistent", "incomplete", "uncertain", "manual_review_required",
-        "external_compliance_pending",
+        "external_compliance_pending", "source_content_pending",
     ) if obligation_coverage_mode else (
         "satisfied", "noncompliant", "uncertain",
     )

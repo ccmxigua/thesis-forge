@@ -472,6 +472,50 @@ def _validate_independent_obligation_receipts(
         manual_review_clause_ids = enforce_obligation_review_output_policy(
             normalized_results, output_policy=output_policy,
         )
+        checks_by_id = {
+            str(item.get("check_id")): item for item in checks
+            if isinstance(item, dict) and isinstance(item.get("check_id"), str)
+        }
+        source_content_pending_items: list[dict[str, Any]] = []
+        for result in normalized_results:
+            if result.get("verdict") != "source_content_pending":
+                continue
+            check_id = str(result.get("check_id") or "")
+            check = checks_by_id.get(check_id)
+            context = check.get("review_context") if isinstance(check, dict) else None
+            cited_evidence = (
+                context.get("cited_evidence")
+                if isinstance(context, dict) and isinstance(context.get("cited_evidence"), dict)
+                else {}
+            )
+            obligations = result.get("identified_obligations")
+            source_quotes = [
+                str(item.get("source_quote"))
+                for item in obligations or []
+                if isinstance(item, dict)
+                and item.get("disposition") == "authoring_content_pending"
+                and isinstance(item.get("source_quote"), str)
+            ]
+            if (
+                not check_id
+                or not source_quotes
+                or not cited_evidence
+                or any(
+                    not isinstance(evidence_id, str) or not evidence_id.strip()
+                    or not isinstance(evidence_item, dict)
+                    for evidence_id, evidence_item in cited_evidence.items()
+                )
+            ):
+                raise ValueError(
+                    "source-content pending receipt has no exact clause, authoring quote, "
+                    "or valid cited evidence"
+                )
+            source_content_pending_items.append({
+                "clause_id": check_id,
+                "source_quotes": source_quotes,
+                "evidence_ids": sorted(str(key) for key in cited_evidence),
+                "reason": str(result.get("rationale") or ""),
+            })
         validated.append({
             "chunk_index": index,
             "candidate_response_sha256": candidate_sha,
@@ -480,6 +524,11 @@ def _validate_independent_obligation_receipts(
             "review_response_sha256": response_file_sha,
             "manual_review_required_clause_ids": manual_review_clause_ids,
             "submission_blocked_by_manual_review": bool(manual_review_clause_ids),
+            "source_content_pending_clause_ids": sorted({
+                item["clause_id"] for item in source_content_pending_items
+            }),
+            "source_content_pending_items": source_content_pending_items,
+            "submission_blocked_by_source_content_pending": bool(source_content_pending_items),
         })
     if seen_indexes != expected_indexes:
         raise ValueError("host-agent audit omitted an independently reviewed chunk")
@@ -498,6 +547,18 @@ def enforce_obligation_review_output_policy(
         and item.get("verdict") == "manual_review_required"
         and isinstance(item.get("check_id"), str)
     })
+    source_content_pending_clause_ids = sorted({
+        str(item.get("check_id")) for item in results
+        if isinstance(item, dict)
+        and item.get("verdict") == "source_content_pending"
+        and isinstance(item.get("check_id"), str)
+    })
+    if source_content_pending_clause_ids and output_policy != "review_draft":
+        raise ValueError(
+            "independent obligation review requires genuine author content for clause(s) "
+            + ", ".join(source_content_pending_clause_ids)
+            + "; submission output is blocked (use an explicit review_draft for a non-release artifact)"
+        )
     if manual_review_clause_ids and output_policy != "review_draft":
         raise ValueError(
             "independent obligation review requires manual review for clause(s) "
@@ -505,6 +566,48 @@ def enforce_obligation_review_output_policy(
             + "; submission output is blocked (use an explicit review_draft for a non-release artifact)"
         )
     return manual_review_clause_ids
+
+
+def _source_content_pending_release_gates(
+    independent_reviews: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Project validated author-input findings into draft-only visible gates."""
+    if not isinstance(independent_reviews, list):
+        raise ValueError("independent obligation reviews must be an array")
+    gates: list[dict[str, Any]] = []
+    for independent_review in independent_reviews:
+        if not isinstance(independent_review, dict):
+            raise ValueError("independent obligation review must be an object")
+        pending_items = independent_review.get("source_content_pending_items", [])
+        if not isinstance(pending_items, list):
+            raise ValueError("independent review source-content items must be an array")
+        for pending in pending_items:
+            if not isinstance(pending, dict):
+                raise ValueError("independent review source-content item must be an object")
+            clause_id = pending.get("clause_id")
+            quotes = pending.get("source_quotes")
+            if (
+                not isinstance(clause_id, str) or not clause_id
+                or not isinstance(quotes, list) or not quotes
+                or any(not isinstance(quote, str) or not quote.strip() for quote in quotes)
+            ):
+                raise ValueError("validated independent review has a malformed source-content pending item")
+            evidence_ids = pending.get("evidence_ids", [])
+            if not isinstance(evidence_ids, list) or not evidence_ids or any(
+                not isinstance(value, str) or not value for value in evidence_ids
+            ):
+                raise ValueError("source-content pending requires non-empty evidence IDs")
+            gates.append({
+                "source_code": "independent_authoring_content_pending",
+                "category": "input_prerequisite",
+                "source_text": "\n".join(quotes),
+                "reason": "原文含明确的作者内容指令；当前输入仍待作者提供真实内容。",
+                "action": "请用本人真实研究内容替换示例或虚构内容；系统不会代写论文实质内容。完成后以 submission 模式重新开始一轮新运行。",
+                "placeholder_text": f"【待补写真实论文内容：{clause_id}】",
+                "clause_ids": [clause_id],
+                "evidence_ids": sorted(set(evidence_ids)),
+            })
+    return gates
 
 
 def validate_host_review_receipts(
@@ -1694,6 +1797,14 @@ def _main(argv: list[str]) -> int:
                 "action": "提供并绑定本校官方 DOCX 模板后，以 submission 模式重新开始一轮新运行。",
                 "placeholder_text": "【待提供：官方版式模板】",
             })
+        host_review_receipts = manifest.get("host_review_receipts")
+        independent_reviews = (
+            host_review_receipts.get("independent_obligation_reviews", [])
+            if isinstance(host_review_receipts, dict) else []
+        )
+        manual_review_release_gates.extend(
+            _source_content_pending_release_gates(independent_reviews)
+        )
         manifest["manual_review_release_gates"] = [
             gate["source_code"] for gate in manual_review_release_gates
         ]

@@ -10,6 +10,8 @@ from __future__ import annotations
 import copy
 from typing import Any
 
+from compliance import classification_requires_requirement
+
 
 def applicability_value_schema() -> dict[str, Any]:
     """Return the closed value domain used by applicability conditions.
@@ -446,6 +448,25 @@ def build_host_review_response_schema(
         response_schema["properties"]["clause_reviews"]["items"]["properties"]["requirement_indexes"] = {
             "type": "array", "items": {"type": "integer", "minimum": 0}, "uniqueItems": True,
         }
+    elif contract_version == "3.0":
+        review_template = response_schema["properties"]["clause_reviews"]["items"]
+        review_branches = []
+        for executable in (True, False):
+            classifications = sorted(
+                name for name in allowed_review_classifications
+                if classification_requires_requirement(name) == executable
+            )
+            if not classifications:
+                continue
+            branch = copy.deepcopy(review_template)
+            branch["properties"]["classification"] = {"enum": classifications}
+            if executable:
+                # Optional native fields become nullable. This field must not:
+                # the model, not a mechanical filler, supplies semantic duties.
+                branch["required"].append("obligations")
+                branch["properties"]["obligations"]["minItems"] = 1
+            review_branches.append(branch)
+        response_schema["properties"]["clause_reviews"]["items"] = {"anyOf": review_branches}
     if eligible_existing_ids is not None:
         # Scope before hashing the request, not later inside a host adapter.
         # Native optional fields become nullable; null means a NEW requirement.

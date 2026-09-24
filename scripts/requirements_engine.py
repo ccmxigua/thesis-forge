@@ -1746,8 +1746,8 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
                 ],
             )
         }
-        review_properties = request["response_schema"]["properties"]["clause_reviews"]["items"]["properties"]
         if contract_version == HOST_REVIEW_CONTRACT_V2:
+            review_properties = request["response_schema"]["properties"]["clause_reviews"]["items"]["properties"]
             request["instructions"].extend([
                 "Contract 2.1 uses clause_reviews[].requirement_indexes as a model-authored zero-based reverse relation into this response's requirements array.",
                 "For every covered, executable, or verify_existing clause_review, each requirement_indexes entry must point to a requirement whose clause_ids contains that exact clause_id; check every clause/index pair independently.",
@@ -1764,6 +1764,7 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
             request["instructions"].extend([
                 "Contract 3.0 has one authoritative relation: requirements[].clause_ids. Do not emit clause_reviews[].requirement_indexes; the bridge derives that reverse view after validation.",
                 "For a covered, executable, or verify_existing clause, emit at least one requirement whose clause_ids contains that exact clause_id. For every non-executable classification, emit no requirement for that clause.",
+                "For covered, executable, and verify_existing, obligations is a required non-empty array, never null or omitted. Independently decompose the source duties; do not copy compiler IDs or insert a generic placeholder merely to satisfy this schema.",
                 "The bridge will reject any clause_reviews[].requirement_indexes property. Never repair a relation by editing clause_ids without semantic evidence.",
             ])
         if runtime_context:

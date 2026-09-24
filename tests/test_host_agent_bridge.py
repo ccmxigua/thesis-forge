@@ -709,6 +709,15 @@ class HostAgentBridgeTests(unittest.TestCase):
         self.assertIn("field_key alone", retry)
         self.assertIn("properties.text", retry)
 
+    def test_retry_guidance_requires_real_semantic_obligation_inventory(self) -> None:
+        retry = bridge._contract_repair_guidance(
+            "$.clause_reviews[0].obligations: executable_review_requires_non_empty_inventory",
+            include_base=False,
+        )
+        self.assertIn("non-empty array of distinct semantic duties", retry)
+        self.assertIn("Do not", retry)
+        self.assertIn("generic placeholder", retry)
+
     def test_retry_guidance_binds_prerequisites_and_admin_condition(self) -> None:
         retry = bridge._contract_repair_guidance(
             "local response contract validation failed: "
@@ -2256,6 +2265,96 @@ class HostAgentBridgeTests(unittest.TestCase):
             bridge._response_sha256(response["requirements"][0]),
         )
         self.assertEqual(len(response["requirements"]), 1)
+
+    def test_external_pending_requirement_edge_is_projected_with_source_bound_audit(self) -> None:
+        source = "北京体育大学学位评定委员会办公室盖章(有效)"
+        clauses = [{
+            "id": "C1", "text": source, "evidence_ids": ["E1"],
+            "source_kind": "paragraph", "location": {}, "part_index": 0,
+        }]
+        evidence = {"evidence": [{"id": "E1", "text": source, "kind": "paragraph"}]}
+        chunk = engine.build_llm_request(
+            [], clauses, evidence, {}, "full", contract_version="3.0",
+        )
+        chunk = attach_request_provenance(
+            chunk, source_sha256="e" * 64, evidence_doc=evidence,
+            clauses=clauses, run_id="external-action-projection-test",
+        )
+        response = {
+            "contract_version": "3.0",
+            "provenance": chunk["provenance"],
+            "requirements": [{
+                "role": "body_text", "properties": {"text": source},
+                "clause_ids": ["C1"], "evidence_ids": ["E1"],
+                "confidence": 0.95, "reason": "The source requires a real-world stamp.",
+                "verification": {
+                    "mode": "external", "checks": ["Obtain and verify the actual stamp."],
+                },
+            }],
+            "clause_reviews": [{
+                "clause_id": "C1", "classification": "external_compliance",
+                "normative_basis": "external_duty", "reason": "This is a real-world action.",
+                "obligations": [{
+                    "id": "stamp", "status": "unverifiable",
+                    "reason": "The real-world stamp cannot be applied in DOCX.",
+                }],
+            }],
+            "unsupported_items": [], "reported_conflicts": [],
+        }
+        errors = bridge.validate_host_agent_response(response, chunk)
+        records = bridge.contract_error_records(errors, response=response, chunk=chunk)
+        self.assertEqual({item["code"] for item in records}, {
+            "non_requirement_classification_relation",
+        })
+
+        repaired, repairs = bridge._apply_safe_mechanical_repairs(
+            response, records, chunk=chunk,
+        )
+        self.assertIsNotNone(repaired)
+        self.assertEqual(repaired["requirements"], [])
+        self.assertEqual(repaired["clause_reviews"], response["clause_reviews"])
+        self.assertEqual(repairs[0]["rule_id"], "external_action_relation_projection_v1")
+        self.assertEqual(repairs[0]["removed_requirements"], response["requirements"])
+        self.assertTrue(repairs[0]["external_actions_remain_pending"])
+        self.assertEqual(bridge.validate_host_agent_response(repaired, chunk), [])
+
+        stale = copy.deepcopy(records)
+        stale[0]["response_sha256"] = "0" * 64
+        self.assertIsNone(bridge._apply_safe_mechanical_repairs(
+            response, stale, chunk=chunk,
+        )[0])
+
+    def test_external_pending_projection_refuses_mixed_edges_and_existing_identity(self) -> None:
+        response = {
+            "contract_version": "3.0",
+            "requirements": [{
+                "role": "body_text", "properties": {"text": "外部事项"},
+                "clause_ids": ["C1"], "evidence_ids": ["E1"],
+                "verification": {"mode": "external", "checks": ["人工核验"]},
+            }],
+            "clause_reviews": [
+                {"clause_id": "C1", "classification": "external_compliance"},
+                {"clause_id": "C2", "classification": "executable"},
+            ],
+        }
+        chunk = {"clauses": [
+            {"id": "C1", "evidence_ids": ["E1"]},
+            {"id": "C2", "evidence_ids": ["E2"]},
+        ], "evidence_context": {
+            "E1": {"id": "E1", "text": "外部事项"},
+            "E2": {"id": "E2", "text": "正文事项"},
+        }}
+        mixed = copy.deepcopy(response)
+        mixed["requirements"][0]["clause_ids"] = ["C1", "C2"]
+        records = [{"code": "non_requirement_classification_relation",
+                    "json_pointer": "$.requirements[0]", "requirement_index": 0,
+                    "response_sha256": bridge._response_sha256(mixed)}]
+        self.assertIsNone(bridge._project_external_action_requirements(mixed, records, chunk)[0])
+
+        identified = copy.deepcopy(response)
+        identified["requirements"][0]["existing_requirement_id"] = "R1"
+        records[0]["response_sha256"] = bridge._response_sha256(identified)
+        self.assertIsNone(bridge._project_external_action_requirements(identified, records, chunk)[0])
 
     def test_mechanical_repair_removes_batch_informational_requirements_by_mask(self) -> None:
         response = {

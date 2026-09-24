@@ -578,6 +578,10 @@ def _contract_repair_guidance(
         targeted.append(
             "The executable review has at least one obligation that is not fully represented. Never change that obligation status to covered merely to satisfy the gate. Preserve its id and status; reclassify only the affected clause as the most accurate non-executable status, use requirement_indexes: [] for contract 2.1 or omit the reverse index for contract 3.0, and remove that clause from every requirement edge. Keep every other review, requirement, evidence ID, property, and obligation unchanged."
         )
+    if "executable_review_requires_non_empty_inventory" in text:
+        targeted.append(
+            "For each covered, executable, or verify_existing clause_review, obligations must be a non-empty array of distinct semantic duties derived from that clause's current source. Do not omit it, return null/[], add a generic placeholder, or copy code-owned machine IDs as semantic duties. Preserve each duty's meaning and only classify the clause as executable when the source and linked requirements support that classification."
+        )
     if "item_length_metric:cjk_characters" in text:
         targeted.append(
             "Preserve the source wording 'Chinese characters' as the explicit cjk_characters metric. "
@@ -3902,6 +3906,103 @@ def _retry_authorization_ledger(
     return ledger
 
 
+def _project_external_action_requirements(
+    response: dict[str, Any], records: list[dict[str, Any]], chunk: dict[str, Any] | None,
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    """Drop only redundant DOCX edges for explicitly external, pending duties.
+
+    No classifier is changed. Existing IDs, invalid payloads, mixed relations,
+    absent evidence and stale error records are not deletion authorizations.
+    The source-first second review must still confirm external action coverage.
+    """
+    if (
+        not isinstance(chunk, dict) or response.get("contract_version") != "3.0"
+        or not records or any(
+            record.get("code") != "non_requirement_classification_relation"
+            or record.get("response_sha256") != _response_sha256(response)
+            for record in records
+        )
+    ):
+        return None, []
+    requirements = response.get("requirements")
+    clauses = chunk.get("clauses")
+    reviews = response.get("clause_reviews")
+    evidence = chunk.get("evidence_context")
+    if not all(isinstance(value, list) for value in (requirements, clauses, reviews)) or not isinstance(evidence, dict):
+        return None, []
+    clause_map = {item.get("id"): item for item in clauses if isinstance(item, dict)}
+    review_map = {item.get("clause_id"): item for item in reviews if isinstance(item, dict)}
+    if len(clause_map) != len(clauses) or len(review_map) != len(reviews):
+        return None, []
+    actual_records = contract_error_records(
+        validate_host_agent_response(response, chunk), response=response, chunk=chunk,
+    )
+    targets: set[int] = set()
+    for record in records:
+        index = record.get("requirement_index")
+        if type(index) is not int or not 0 <= index < len(requirements):
+            return None, []
+        pointer = f"$.requirements[{index}]"
+        if record.get("json_pointer") != pointer or not any(
+            item.get("code") == record["code"] and item.get("json_pointer") == pointer
+            for item in actual_records
+        ):
+            return None, []
+        # Do not erase a second error on the object by deleting its container.
+        if any(
+            (str(item.get("json_pointer") or "") == pointer
+             or str(item.get("json_pointer") or "").startswith(pointer + "."))
+            and item.get("code") != "non_requirement_classification_relation"
+            for item in actual_records
+        ):
+            return None, []
+        requirement = requirements[index]
+        if not isinstance(requirement, dict) or "existing_requirement_id" in requirement:
+            return None, []
+        verification = requirement.get("verification")
+        ids, evidence_ids = requirement.get("clause_ids"), requirement.get("evidence_ids")
+        if (
+            not isinstance(verification, dict) or verification.get("mode") != "external"
+            or not isinstance(ids, list) or not ids or any(not isinstance(cid, str) for cid in ids)
+            or len(set(ids)) != len(ids)
+            or not isinstance(evidence_ids, list) or not evidence_ids
+            or any(not isinstance(eid, str) for eid in evidence_ids)
+            or len(set(evidence_ids)) != len(evidence_ids)
+        ):
+            return None, []
+        allowed_evidence: set[str] = set()
+        for cid in ids:
+            clause, review = clause_map.get(cid), review_map.get(cid)
+            clause_evidence = clause.get("evidence_ids") if isinstance(clause, dict) else None
+            if (
+                not isinstance(clause, dict) or not isinstance(review, dict)
+                or review.get("classification") != "external_compliance"
+                or not isinstance(clause_evidence, list)
+                or any(not isinstance(eid, str) for eid in clause_evidence)
+                or any(not isinstance(item, dict) or item.get("status") != "unverifiable"
+                       for item in (review.get("obligations") or []))
+            ):
+                return None, []
+            allowed_evidence.update(clause_evidence)
+        if any(eid not in allowed_evidence or not isinstance(evidence.get(eid), dict) for eid in evidence_ids):
+            return None, []
+        targets.add(index)
+    projected = copy.deepcopy(response)
+    projected["requirements"] = [item for index, item in enumerate(projected["requirements"]) if index not in targets]
+    if not _v3_non_requirement_projection_allowed(response, projected, records, ["$.requirements"], chunk=chunk):
+        return None, []
+    return projected, [{
+        "code": "non_requirement_classification_relation",
+        "rule_id": "external_action_relation_projection_v1",
+        "json_pointer": "$.requirements", "removed_indexes": sorted(targets),
+        "removed_requirements": [copy.deepcopy(requirements[index]) for index in sorted(targets)],
+        "source_response_sha256": _response_sha256(response),
+        "repaired_response_sha256": _response_sha256(projected),
+        "source_chunk_sha256": _response_sha256(chunk),
+        "clause_reviews_unchanged": True, "external_actions_remain_pending": True,
+    }]
+
+
 def _apply_safe_mechanical_repairs_one_rule(
     response: Any, error_records: list[dict[str, Any]],
     *, chunk: dict[str, Any] | None = None,
@@ -3920,6 +4021,9 @@ def _apply_safe_mechanical_repairs_one_rule(
     """
     if not isinstance(response, dict) or not error_records:
         return None, []
+    if all(isinstance(record, dict) and record.get("code") == "non_requirement_classification_relation"
+           for record in error_records):
+        return _project_external_action_requirements(response, error_records, chunk)
     allowed_codes = {
         "unknown_property", "evidence_relation_mismatch",
         "empty_requirement_properties", "informational_requirement_forbidden",

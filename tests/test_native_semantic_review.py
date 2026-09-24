@@ -191,7 +191,8 @@ class NativeSemanticReviewTests(unittest.TestCase):
             }],
         })
         self.assertIn("even when no obligations are identified or the clause is informational", prompt)
-        self.assertIn("Never return an empty evidence_quotes array", prompt)
+        self.assertIn("Never return an empty evidence_refs array", prompt)
+        self.assertIn("Code resolves the selected ranges without changing whitespace or punctuation", prompt)
 
     def test_c00069_qualifier_hardening_is_incomplete_not_ambiguous(self) -> None:
         source = "关键词在摘要内容后另起一行，一般3～8个，之间用分号分开"
@@ -478,11 +479,17 @@ class NativeSemanticReviewTests(unittest.TestCase):
                 "linked_requirements": [], "machine_obligation_ids": [],
             },
         }
+        request = {
+            "protocol": native_review.OBLIGATION_COVERAGE_PROTOCOL,
+            "case_id": "case", "run_id": "run", "checks": [check],
+        }
+        packet = native_review.build_source_reference_packet(request)
+        full_source_ref = packet["checks"][0]["source_spans"][0]["ref_id"]
         response = {"results": [{
             "check_id": "C1", "verdict": "uncertain", "rationale": "The source is ambiguous.",
-            "evidence_quotes": ["3cm"], "machine_obligation_ids": [],
+            "evidence_refs": [full_source_ref],
             "identified_obligations": [{
-                "source_quote": "3cm", "disposition": "ambiguous", "requirement_indexes": [],
+                "source_ref": full_source_ref, "disposition": "ambiguous", "requirement_indexes": [],
             }],
         }]}
         observed = {}
@@ -501,11 +508,8 @@ class NativeSemanticReviewTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as td:
             output_dir = Path(td) / "native"
             with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
-                native_review.run_native_semantic_review(
-                    {
-                        "protocol": native_review.OBLIGATION_COVERAGE_PROTOCOL,
-                        "case_id": "case", "run_id": "run", "checks": [check],
-                    },
+                audit = native_review.run_native_semantic_review(
+                    request,
                     output_dir=output_dir, host_runtime="codex", model="gpt-5.6-luna",
                     timeout=5,
                 )
@@ -513,7 +517,14 @@ class NativeSemanticReviewTests(unittest.TestCase):
             local_schema = json.loads((output_dir / "response-schema.json").read_text(encoding="utf-8"))
             provider_schema_path = output_dir / "provider-response-schema.json"
             provider_schema = json.loads(provider_schema_path.read_text(encoding="utf-8"))
-            self.assertEqual(local_schema, OBLIGATION_COVERAGE_SCHEMA)
+            expected_packet = native_review.build_source_reference_packet(request)
+            self.assertEqual(local_schema, native_review.source_reference_schema(
+                OBLIGATION_COVERAGE_SCHEMA, expected_packet, coverage=True,
+            ))
+            canonical_schema = json.loads(
+                (output_dir / "canonical-response-schema.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(canonical_schema, OBLIGATION_COVERAGE_SCHEMA)
             self.assertEqual(observed["output_schema_path"], provider_schema_path)
             self.assertEqual(native_schema_support_errors(provider_schema), [])
 
@@ -526,6 +537,21 @@ class NativeSemanticReviewTests(unittest.TestCase):
 
             self.assertTrue(contains_unique_items(local_schema))
             self.assertFalse(contains_unique_items(provider_schema))
+            raw = json.loads((output_dir / "raw-response.json").read_text(encoding="utf-8"))
+            compiled_candidate = json.loads(
+                (output_dir / "compiled-response.json").read_text(encoding="utf-8")
+            )
+            canonical = json.loads((output_dir / "response.json").read_text(encoding="utf-8"))
+            compilation = json.loads(
+                (output_dir / "source-reference-compilation.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(raw["results"][0]["evidence_refs"], [full_source_ref])
+            self.assertNotIn("machine_obligation_ids", raw["results"][0])
+            self.assertEqual(canonical["results"][0]["evidence_quotes"], ["该处约3cm"])
+            self.assertEqual(compiled_candidate, canonical)
+            self.assertEqual(canonical["results"][0]["machine_obligation_ids"], [])
+            self.assertEqual(audit["source_reference_protocol"], "semantic_source_references_v1")
+            self.assertEqual(compilation["run_id"], "run")
 
     def test_native_runner_does_not_call_non_timeout_exit_124_a_timeout(self) -> None:
         with tempfile.TemporaryDirectory() as td:

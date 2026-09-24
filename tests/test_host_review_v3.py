@@ -452,12 +452,60 @@ class HostReviewV3Tests(unittest.TestCase):
 
     def test_v3_schema_has_one_model_authoritative_relation(self) -> None:
         reviews_schema = self.request["response_schema"]["properties"]["clause_reviews"]["items"]
-        self.assertNotIn("requirement_indexes", reviews_schema["properties"])
+        self.assertNotIn("requirement_indexes", str(reviews_schema))
+        executable_branch = next(
+            branch for branch in reviews_schema["anyOf"]
+            if "executable" in branch["properties"]["classification"]["enum"]
+        )
+        informational_branch = next(
+            branch for branch in reviews_schema["anyOf"]
+            if "informational" in branch["properties"]["classification"]["enum"]
+        )
+        self.assertIn("obligations", executable_branch["required"])
+        self.assertEqual(executable_branch["properties"]["obligations"]["minItems"], 1)
+        self.assertNotIn("obligations", informational_branch["required"])
         self.assertNotIn("Maintain requirement_indexes exactly", str(self.request["instructions"]))
         self.assertNotIn("zero-based index", str(self.request["instructions"]))
         self.assertNotIn("review/index pair", str(self.request["instructions"]))
         # The schema itself, rather than prose, is the enforcement boundary.
         self.assertEqual(validate_response(self._informational_response(), self.request), [])
+
+    def test_v3_provider_schema_requires_non_null_non_empty_executable_inventory(self) -> None:
+        local = self.request["response_schema"]
+        provider = native_output_schema(local)
+        self.assertEqual(native_schema_support_errors(provider), [])
+        branches = provider["properties"]["clause_reviews"]["items"]["anyOf"]
+        executable = next(
+            branch for branch in branches
+            if "executable" in branch["properties"]["classification"]["enum"]
+        )
+        self.assertIn("obligations", executable["required"])
+        self.assertEqual(executable["properties"]["obligations"]["type"], "array")
+        self.assertNotIn("null", str(executable["properties"]["obligations"]))
+
+        for obligations in (None, []):
+            response = self._executable_response()
+            response["clause_reviews"][0]["obligations"] = obligations
+            errors = validate_response(response, self.request)
+            self.assertTrue(errors, obligations)
+            self.assertIn("executable_review_requires_non_empty_inventory", str(errors))
+            normalized = normalize_native_response(response, local)
+            self.assertEqual(normalized["clause_reviews"][0]["obligations"], obligations)
+
+        response = self._executable_response()
+        response["clause_reviews"][0].pop("obligations")
+        errors = validate_response(response, self.request)
+        self.assertTrue(errors)
+        self.assertIn("executable_review_requires_non_empty_inventory", str(errors))
+
+    def test_legacy_21_review_schema_keeps_legacy_contract_shape(self) -> None:
+        legacy = build_llm_request(
+            [], self.clauses, self.evidence, {}, "full", contract_version="2.1",
+        )
+        item = legacy["response_schema"]["properties"]["clause_reviews"]["items"]
+        self.assertIn("properties", item)
+        self.assertIn("requirement_indexes", item["properties"])
+        self.assertNotIn("anyOf", item)
 
     def test_v3_derives_reverse_relation_and_rejects_model_duplicate(self) -> None:
         response = self._executable_response()
@@ -1015,7 +1063,7 @@ class HostReviewV3Tests(unittest.TestCase):
         self.assertNotIn("applicability", requirement)
         self.assertNotIn("input_prerequisites", requirement)
         self.assertNotIn("checker_ids", requirement["verification"])
-        self.assertNotIn("obligations", normalized["clause_reviews"][0])
+        self.assertIsNone(normalized["clause_reviews"][0]["obligations"])
         errors = validate_response(normalized, self.request)
         self.assertIn("executable_review_requires_non_empty_inventory", str(errors))
 

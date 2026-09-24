@@ -369,6 +369,21 @@ response, and provenance, but a fresh attempt directory recorded in the audit.
 Schema, provenance, route, semantic-coverage, timeout, and unclassified provider
 failures are not retried or rewritten as successful reviews.
 
+Both the source-first obligation review and post-format semantic review use
+run-bound source-span references. Code creates exact span IDs from the current
+request's `document_text`; the Host Agent selects IDs instead of retyping
+quotations or machine obligation IDs. The bridge compiles those selections back
+to the exact source bytes before applying the existing local quote, clause,
+candidate, and verdict checks. Cited evidence shown as context does not enlarge
+the selectable source catalog. Raw response, compiled response, source packet,
+and selection audit are preserved separately. Stale, unknown, duplicate, and
+cross-clause references are rejected.
+
+For contract 3.0, `covered`, `executable`, and `verify_existing` reviews
+must carry a non-empty `obligations` inventory in both the local contract and
+provider schema. The model remains responsible for semantic decomposition;
+code does not invent generic duties to satisfy the schema.
+
 ### 2. Merge and format locally
 
 After every chunk response exists, merge them with deterministic local code:

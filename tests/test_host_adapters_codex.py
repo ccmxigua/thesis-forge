@@ -149,6 +149,29 @@ class CodexAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "turn failed"):
             codex.parse_result(stdout, last_message='{"value": 1}')
 
+    def test_retryable_failure_classifier_requires_structured_terminal_capacity_error(self) -> None:
+        capacity_failure = "\n".join([
+            json.dumps({"type": "error", "message": "Selected model is at capacity."}),
+            json.dumps({
+                "type": "turn.failed",
+                "error": {"message": "Selected model is at capacity. Please try a different model."},
+            }),
+        ])
+        self.assertEqual(codex.retryable_failure_code(capacity_failure), "model_capacity")
+
+        non_capacity_failure = json.dumps({
+            "type": "turn.failed", "error": {"message": "Invalid output schema."},
+        })
+        assistant_text = json.dumps({
+            "type": "item.completed",
+            "item": {"type": "agent_message", "text": "The selected model is at capacity."},
+        })
+        self.assertIsNone(codex.retryable_failure_code(non_capacity_failure))
+        self.assertIsNone(codex.retryable_failure_code(assistant_text))
+        self.assertIsNone(codex.retryable_failure_code(
+            json.dumps({"type": "turn.completed", "message": "Selected model is at capacity."})
+        ))
+
 
 if __name__ == "__main__":
     unittest.main()

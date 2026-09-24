@@ -133,6 +133,39 @@ def _strip_json_wrapper(text: str) -> dict[str, Any]:
     return parsed
 
 
+def retryable_failure_code(stdout: str) -> str | None:
+    """Classify only explicit Codex terminal capacity failures as retryable.
+
+    Human-readable stderr and ordinary assistant text are deliberately ignored;
+    an exact capacity marker must appear in a structured ``turn.failed`` event.
+    """
+    capacity_markers = (
+        "selected model is at capacity",
+        "model is currently at capacity",
+        "model is at capacity",
+        "model at capacity",
+    )
+    for line in stdout.splitlines():
+        if not line.strip():
+            continue
+        try:
+            event = strict_json_loads(line)
+        except (ValueError, json.JSONDecodeError):
+            continue
+        if not isinstance(event, dict) or event.get("type") != "turn.failed":
+            continue
+        error = event.get("error")
+        detail = event.get("message")
+        if isinstance(error, dict):
+            detail = error.get("message") or error.get("code") or detail
+        if not isinstance(detail, str):
+            continue
+        normalized = " ".join(detail.casefold().split())
+        if any(marker in normalized for marker in capacity_markers):
+            return "model_capacity"
+    return None
+
+
 def parse_result(
     stdout: str,
     *,

@@ -362,7 +362,12 @@ to the candidate response hash, and account for each identified obligation;
 an incomplete or failed review prevents chunk acceptance and merge. This is a
 fresh second review, not a different provider/model or a guarantee of
 statistically independent judgment; unobservable host model identity remains
-unverified.
+unverified. For Codex, only a structured terminal `turn.failed` that explicitly
+reports model-capacity exhaustion may trigger one bounded retry after a
+five-second backoff. The retry uses the same requested model, run, candidate
+response, and provenance, but a fresh attempt directory recorded in the audit.
+Schema, provenance, route, semantic-coverage, timeout, and unclassified provider
+failures are not retried or rewritten as successful reviews.
 
 ### 2. Merge and format locally
 

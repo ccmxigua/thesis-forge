@@ -124,6 +124,160 @@ class HostAgentBridgeTests(unittest.TestCase):
             self.assertEqual(envelope["provenance"], provenance)
             self.assertEqual(envelope["run_id"], "run-coverage-test")
 
+    def test_independent_coverage_retries_capacity_once_with_same_model_and_fresh_attempt_dir(self) -> None:
+        self._independent_review_patch.stop()
+        source = "表格应居中"
+        provenance = {
+            "run_id": "run-capacity-retry",
+            "source_sha256": "a" * 64,
+            "clause_sha256": "b" * 64,
+            "evidence_sha256": "c" * 64,
+            "request_sha256": "d" * 64,
+        }
+        chunk = {
+            "provenance": provenance,
+            "clauses": [{"id": "C1", "text": source, "evidence_ids": ["E1"]}],
+            "evidence_context": {"E1": {"id": "E1", "text": source}},
+        }
+        response = {
+            "provenance": provenance,
+            "clause_reviews": [{
+                "clause_id": "C1", "classification": "covered", "reason": "centered",
+                "obligations": [{"id": "O1", "status": "covered", "reason": "center"}],
+            }],
+            "requirements": [{
+                "id": "R1", "role": "table", "clause_ids": ["C1"], "evidence_ids": ["E1"],
+                "properties": {"paragraph": {"alignment": "center"}},
+                "verification": {"checker_ids": ["docx.property_receipts"]},
+            }],
+        }
+        review_result = {
+            "protocol": "native_source_obligation_coverage_review_v1",
+            "status": "completed", "request_sha256": "e" * 64,
+            "response_sha256": "f" * 64,
+            "results": [{
+                "check_id": "C1", "verdict": "consistent", "rationale": "source represented",
+                "evidence_quotes": [source], "identified_obligations": [{
+                    "source_quote": source, "disposition": "represented", "requirement_indexes": [0],
+                }], "machine_obligation_ids": ["table_caption.alignment_center"],
+            }],
+            "summary": {"consistent": 1, "incomplete": 0, "uncertain": 0},
+        }
+        calls: list[tuple[dict, dict]] = []
+
+        def fail_once_for_capacity(request: dict, **kwargs: dict) -> dict:
+            calls.append((copy.deepcopy(request), kwargs))
+            if len(calls) == 1:
+                raise bridge.RetryableNativeSemanticReviewError(
+                    "Codex reported model capacity", retry_code="model_capacity",
+                )
+            return review_result
+
+        with tempfile.TemporaryDirectory() as td:
+            review_dir = Path(td)
+            with patch.object(bridge, "run_native_semantic_review", side_effect=fail_once_for_capacity), \
+                    patch.object(bridge.time, "sleep") as sleep:
+                pointer = bridge._run_independent_obligation_coverage_review(
+                    response, chunk, review_dir=review_dir, run_id="run-capacity-retry",
+                    chunk_index=3, attempt=1, host_runtime="codex", model="gpt-5.6-luna",
+                    timeout=10, agent_id="main", runner="exec", binary="codex",
+                    config_path=None, controller=bridge.RunController(),
+                )
+
+            self.assertEqual(len(calls), 2)
+            self.assertEqual([kwargs["model"] for _, kwargs in calls], ["gpt-5.6-luna"] * 2)
+            self.assertNotEqual(calls[0][1]["output_dir"], calls[1][1]["output_dir"])
+            self.assertEqual([request["provider_attempt"] for request, _ in calls], [1, 2])
+            self.assertEqual([request["attempt"] for request, _ in calls], [1, 1])
+            self.assertEqual([request["provenance"] for request, _ in calls], [provenance, provenance])
+            sleep.assert_called_once_with(bridge.INDEPENDENT_REVIEW_CAPACITY_BACKOFF_SECONDS)
+
+            first_audit = review_dir / "independent-review-chunk-0003-attempt-01" / "coverage-audit.json"
+            failed = json.loads(first_audit.read_text(encoding="utf-8"))
+            self.assertEqual(failed["retry_code"], "model_capacity")
+            self.assertTrue(failed["retryable"])
+
+            accepted_audit = json.loads((review_dir / pointer["audit_path"]).read_text(encoding="utf-8"))
+            self.assertEqual(pointer["provider_attempt"], 2)
+            self.assertEqual(accepted_audit["provider_attempt_history"][0]["retry_code"], "model_capacity")
+            self.assertEqual(accepted_audit["candidate_response_sha256"], bridge._response_sha256(response))
+
+    def test_independent_coverage_does_not_retry_unclassified_provider_or_contract_errors(self) -> None:
+        self._independent_review_patch.stop()
+        source = "表格应居中"
+        provenance = {"run_id": "run-no-retry"}
+        chunk = {
+            "provenance": provenance,
+            "clauses": [{"id": "C1", "text": source, "evidence_ids": ["E1"]}],
+            "evidence_context": {"E1": {"id": "E1", "text": source}},
+        }
+        response = {
+            "provenance": provenance,
+            "clause_reviews": [{"clause_id": "C1", "classification": "covered", "reason": "centered"}],
+            "requirements": [{
+                "id": "R1", "role": "table", "clause_ids": ["C1"], "evidence_ids": ["E1"],
+                "properties": {"paragraph": {"alignment": "center"}},
+            }],
+        }
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(
+                bridge, "run_native_semantic_review", side_effect=RuntimeError("invalid response contract"),
+            ) as review_call:
+                with self.assertRaises(bridge.IndependentObligationReviewError):
+                    bridge._run_independent_obligation_coverage_review(
+                        response, chunk, review_dir=Path(td), run_id="run-no-retry",
+                        chunk_index=1, attempt=1, host_runtime="codex", model="gpt-5.6-luna",
+                        timeout=10, agent_id="main", runner="exec", binary="codex",
+                        config_path=None, controller=bridge.RunController(),
+                    )
+            self.assertEqual(review_call.call_count, 1)
+
+    def test_independent_coverage_capacity_exhaustion_fails_closed_after_two_calls(self) -> None:
+        self._independent_review_patch.stop()
+        source = "表格应居中"
+        provenance = {"run_id": "run-capacity-exhausted"}
+        chunk = {
+            "provenance": provenance,
+            "clauses": [{"id": "C1", "text": source, "evidence_ids": ["E1"]}],
+            "evidence_context": {"E1": {"id": "E1", "text": source}},
+        }
+        response = {
+            "provenance": provenance,
+            "clause_reviews": [{"clause_id": "C1", "classification": "covered", "reason": "centered"}],
+            "requirements": [{
+                "id": "R1", "role": "table", "clause_ids": ["C1"], "evidence_ids": ["E1"],
+                "properties": {"paragraph": {"alignment": "center"}},
+            }],
+        }
+        with tempfile.TemporaryDirectory() as td:
+            review_dir = Path(td)
+            with patch.object(
+                bridge,
+                "run_native_semantic_review",
+                side_effect=bridge.RetryableNativeSemanticReviewError(
+                    "Codex reported model capacity", retry_code="model_capacity",
+                ),
+            ) as review_call, patch.object(bridge.time, "sleep") as sleep:
+                with self.assertRaises(bridge.IndependentObligationReviewError) as caught:
+                    bridge._run_independent_obligation_coverage_review(
+                        response, chunk, review_dir=review_dir, run_id="run-capacity-exhausted",
+                        chunk_index=2, attempt=1, host_runtime="codex", model="gpt-5.6-luna",
+                        timeout=10, agent_id="main", runner="exec", binary="codex",
+                        config_path=None, controller=bridge.RunController(),
+                    )
+
+            self.assertEqual(review_call.call_count, bridge.INDEPENDENT_REVIEW_PROVIDER_MAX_ATTEMPTS)
+            sleep.assert_called_once_with(bridge.INDEPENDENT_REVIEW_CAPACITY_BACKOFF_SECONDS)
+            record = caught.exception.error_records[0]
+            self.assertEqual(record["code"], "independent_obligation_review_retry_exhausted")
+            self.assertEqual(record["provider_attempts"], 2)
+            self.assertEqual(len(record["provider_attempt_history"]), 2)
+            for suffix in ("", "-provider-attempt-02"):
+                attempt_dir = review_dir / ("independent-review-chunk-0002-attempt-01" + suffix)
+                audit_path = attempt_dir / "coverage-audit.json"
+                self.assertTrue(audit_path.is_file())
+                self.assertEqual(json.loads(audit_path.read_text())["status"], "failed")
+
     def test_independent_coverage_gate_rejects_unrepresented_source_obligation(self) -> None:
         self._independent_review_patch.stop()
         source = "表格应居中"

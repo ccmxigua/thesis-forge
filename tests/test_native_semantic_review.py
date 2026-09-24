@@ -15,6 +15,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from native_semantic_review import (  # noqa: E402
     NativeSemanticReviewError,
     OBLIGATION_COVERAGE_SCHEMA,
+    RetryableNativeSemanticReviewError,
     build_obligation_coverage_request,
     validate_response,
     validate_obligation_coverage_response,
@@ -293,6 +294,35 @@ class NativeSemanticReviewTests(unittest.TestCase):
                     )
             self.assertEqual((output_dir / "stdout.jsonl").read_text(), "partial stdout")
             self.assertIn("[process-timeout]", (output_dir / "stderr.txt").read_text())
+            self.assertFalse((output_dir / "response.json").exists())
+
+    def test_native_runner_classifies_structured_codex_capacity_failure_for_bounded_retry(self) -> None:
+        stdout = "\n".join([
+            json.dumps({"type": "thread.started", "thread_id": "thread-capacity"}),
+            json.dumps({"type": "error", "message": "Selected model is at capacity."}),
+            json.dumps({
+                "type": "turn.failed",
+                "error": {"message": "Selected model is at capacity. Please try a different model."},
+            }),
+        ])
+        with tempfile.TemporaryDirectory() as td:
+            output_dir = Path(td) / "native"
+            patches = self._stub_codex_host(CompletedProcess(
+                ["codex"], 1, stdout, "provider capacity response",
+            ))
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+                with self.assertRaises(RetryableNativeSemanticReviewError) as caught:
+                    native_review.run_native_semantic_review(
+                        {
+                            "protocol": native_review.OBLIGATION_COVERAGE_PROTOCOL,
+                            "case_id": "case", "run_id": "run", "checks": self.checks,
+                        },
+                        output_dir=output_dir, host_runtime="codex", model="gpt-5.6-luna",
+                        timeout=5,
+                    )
+            self.assertEqual(caught.exception.retry_code, "model_capacity")
+            self.assertIn("turn.failed", (output_dir / "stdout.jsonl").read_text())
+            self.assertIn("provider capacity response", (output_dir / "stderr.txt").read_text())
             self.assertFalse((output_dir / "response.json").exists())
 
     def test_codex_runner_uses_provider_compatible_projection_and_keeps_local_constraints(self) -> None:

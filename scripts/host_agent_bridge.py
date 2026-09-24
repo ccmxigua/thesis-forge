@@ -38,6 +38,8 @@ PARENT_SESSION_ENV_NAMES = (
     "OPENCLAW_PARENT_SESSION_KEY",
     "OPENCLAW_SESSION_KEY",
 )
+INDEPENDENT_REVIEW_PROVIDER_MAX_ATTEMPTS = 2
+INDEPENDENT_REVIEW_CAPACITY_BACKOFF_SECONDS = 5
 
 
 class HostAgentRouteMismatch(RuntimeError):
@@ -166,6 +168,7 @@ from host_runtime import (  # noqa: E402
 )
 from native_semantic_review import (  # noqa: E402
     OBLIGATION_COVERAGE_PROTOCOL,
+    RetryableNativeSemanticReviewError,
     build_obligation_coverage_request,
     run_native_semantic_review,
 )
@@ -6129,19 +6132,26 @@ def _run_independent_obligation_coverage_review(
     binary: str | None,
     config_path: Path | None,
     controller: RunController,
+    _provider_attempt: int = 1,
+    _provider_attempt_history: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
-    """Run and persist the independent source-first coverage gate for one chunk."""
+    """Run the bound independent review, retrying only explicit Codex capacity failures."""
     coverage_request = build_obligation_coverage_request(
         response, chunk, run_id=run_id, chunk_index=chunk_index,
     )
     coverage_request["attempt"] = attempt
+    coverage_request["provider_attempt"] = _provider_attempt
     if not coverage_request.get("checks"):
         raise IndependentObligationReviewError(
             f"independent obligation review has no clauses for chunk {chunk_index}"
         )
     response_sha = _response_sha256(response)
-    output_dir = review_dir / f"independent-review-chunk-{chunk_index:04d}-attempt-{attempt:02d}"
+    base_output_dir = review_dir / f"independent-review-chunk-{chunk_index:04d}-attempt-{attempt:02d}"
+    output_dir = base_output_dir if _provider_attempt == 1 else base_output_dir.with_name(
+        f"{base_output_dir.name}-provider-attempt-{_provider_attempt:02d}"
+    )
     audit_path = output_dir / "coverage-audit.json"
+    retry_history = copy.deepcopy(_provider_attempt_history or [])
     try:
         controller.check()
         review_result = run_native_semantic_review(
@@ -6167,6 +6177,8 @@ def _run_independent_obligation_coverage_review(
             "run_id": run_id,
             "chunk_index": chunk_index,
             "attempt": attempt,
+            "provider_attempt": _provider_attempt,
+            "provider_attempt_history": retry_history,
             "candidate_response_sha256": response_sha,
             "provenance": copy.deepcopy(coverage_request.get("provenance")),
             "review_request_sha256": review_result.get("request_sha256"),
@@ -6183,6 +6195,8 @@ def _run_independent_obligation_coverage_review(
             "audit_sha256": sha256_file(audit_path),
             "run_id": run_id,
             "chunk_index": chunk_index,
+            "provider_attempt": _provider_attempt,
+            "provider_attempt_history": retry_history,
             "candidate_response_sha256": response_sha,
             "review_request_sha256": review_result.get("request_sha256"),
             "review_response_sha256": review_result.get("response_sha256"),
@@ -6220,6 +6234,82 @@ def _run_independent_obligation_coverage_review(
         return pointer
     except IndependentObligationReviewError:
         raise
+    except RetryableNativeSemanticReviewError as review_error:
+        retryable = _provider_attempt < INDEPENDENT_REVIEW_PROVIDER_MAX_ATTEMPTS
+        failure_envelope = {
+            "schema_version": "1.0",
+            "protocol": OBLIGATION_COVERAGE_PROTOCOL,
+            "status": "failed",
+            "retryable": True,
+            "retry_code": review_error.retry_code,
+            "provider_attempt": _provider_attempt,
+            "next_provider_attempt": _provider_attempt + 1 if retryable else None,
+            "run_id": run_id,
+            "chunk_index": chunk_index,
+            "attempt": attempt,
+            "candidate_response_sha256": response_sha,
+            "provenance": copy.deepcopy(coverage_request.get("provenance")),
+            "error_type": type(review_error).__name__,
+            "error": str(review_error),
+            "review_output_dir": str(output_dir.resolve()),
+        }
+        if not audit_path.exists():
+            _write_json(audit_path, failure_envelope)
+        attempt_record = {
+            "provider_attempt": _provider_attempt,
+            "status": "retryable_failure",
+            "retry_code": review_error.retry_code,
+            "error": str(review_error),
+            "audit_path": audit_path.relative_to(review_dir).as_posix(),
+            "audit_sha256": sha256_file(audit_path),
+        }
+        attempt_history = retry_history + [attempt_record]
+        if retryable:
+            controller.check()
+            time.sleep(INDEPENDENT_REVIEW_CAPACITY_BACKOFF_SECONDS)
+            controller.check()
+            return _run_independent_obligation_coverage_review(
+                response,
+                chunk,
+                review_dir=review_dir,
+                run_id=run_id,
+                chunk_index=chunk_index,
+                attempt=attempt,
+                host_runtime=host_runtime,
+                model=model,
+                timeout=timeout,
+                agent_id=agent_id,
+                runner=runner,
+                binary=binary,
+                config_path=config_path,
+                controller=controller,
+                _provider_attempt=_provider_attempt + 1,
+                _provider_attempt_history=attempt_history,
+            )
+        error = IndependentObligationReviewError(
+            f"independent source-obligation review exhausted "
+            f"{INDEPENDENT_REVIEW_PROVIDER_MAX_ATTEMPTS} provider attempts for chunk "
+            f"{chunk_index}: {review_error}"
+        )
+        error.error_records = [{
+            "code": "independent_obligation_review_retry_exhausted",
+            "retry_code": review_error.retry_code,
+            "provider_attempts": _provider_attempt,
+            "provider_attempt_history": attempt_history,
+            "candidate_response_sha256": response_sha,
+            "message": str(review_error),
+            "audit_path": audit_path.relative_to(review_dir).as_posix(),
+        }]  # type: ignore[attr-defined]
+        error.independent_review_audit = {
+            "status": "failed",
+            "audit_path": audit_path.relative_to(review_dir).as_posix(),
+            "audit_sha256": sha256_file(audit_path),
+            "candidate_response_sha256": response_sha,
+            "run_id": run_id,
+            "chunk_index": chunk_index,
+            "provider_attempt_history": attempt_history,
+        }  # type: ignore[attr-defined]
+        raise error from review_error
     except Exception as review_error:
         failure_envelope = {
             "schema_version": "1.0",
@@ -6228,6 +6318,8 @@ def _run_independent_obligation_coverage_review(
             "run_id": run_id,
             "chunk_index": chunk_index,
             "attempt": attempt,
+            "provider_attempt": _provider_attempt,
+            "provider_attempt_history": retry_history,
             "candidate_response_sha256": response_sha,
             "provenance": copy.deepcopy(coverage_request.get("provenance")),
             "error_type": type(review_error).__name__,
@@ -6241,6 +6333,8 @@ def _run_independent_obligation_coverage_review(
         )
         error.error_records = [{
             "code": "independent_obligation_review_failed",
+            "provider_attempt": _provider_attempt,
+            "provider_attempt_history": retry_history,
             "candidate_response_sha256": response_sha,
             "error_type": type(review_error).__name__,
             "message": str(review_error),
@@ -6253,6 +6347,8 @@ def _run_independent_obligation_coverage_review(
             "candidate_response_sha256": response_sha,
             "run_id": run_id,
             "chunk_index": chunk_index,
+            "provider_attempt": _provider_attempt,
+            "provider_attempt_history": retry_history,
         }  # type: ignore[attr-defined]
         raise error from review_error
 

@@ -24,6 +24,14 @@ class NativeSemanticReviewError(RuntimeError):
     """A native semantic review could not be proven valid for this run."""
 
 
+class RetryableNativeSemanticReviewError(NativeSemanticReviewError):
+    """A narrowly classified provider-side failure that may be retried safely."""
+
+    def __init__(self, message: str, *, retry_code: str) -> None:
+        super().__init__(message)
+        self.retry_code = retry_code
+
+
 RESPONSE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "required": ["results"],
@@ -516,6 +524,13 @@ def run_native_semantic_review(
         raise NativeSemanticReviewError(
             f"native semantic review exceeded {timeout} seconds"
         )
+    if adapter_id == "codex":
+        retry_code = codex_adapter.retryable_failure_code(completed.stdout or "")
+        if retry_code is not None:
+            raise RetryableNativeSemanticReviewError(
+                f"native Codex semantic review reported retryable provider failure: {retry_code}",
+                retry_code=retry_code,
+            )
     if completed.returncode != 0:
         raise NativeSemanticReviewError(
             f"native semantic review process failed ({completed.returncode}); see {stderr_path}"

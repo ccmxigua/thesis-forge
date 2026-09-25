@@ -366,6 +366,31 @@ unverified. For Codex, a structured terminal `turn.failed` that explicitly
 reports model-capacity exhaustion may trigger one bounded retry after a
 five-second backoff. The retry uses the same requested model, run, candidate
 response, and provenance, but a fresh attempt directory recorded in the audit.
+Each response representation is stage-labeled and separately hashed (decoded
+raw, normalized raw, projected candidate, validated candidate, accepted
+response). Semantic retry drift is compared raw-to-raw before any candidate
+comparison; projected candidates are compared only to projected candidates.
+Neither comparison may substitute for the other, because a code projection can
+hide a genuine model-side change. A retry-parent digest must identify the exact
+raw sidecar file that the prompt reads; a mismatch fails closed. Stop a retry
+without another model call only when the normalized raw response, blocker/repair
+plan, candidate state, and complete source/clause/evidence/run/case/chunk/schema/code
+invocation fingerprints are all unchanged. Missing or malformed fingerprints do
+not count as proof of no progress. A successful semantic retry requires its own
+decoded raw sidecar. If an undecodable attempt intervenes, semantic change
+authorization comes from the most recent earlier decoded attempt that actually
+failed review; the parse failure remains separate retry feedback and cannot
+replace that semantic blocker.
+If the prior attempt failed before any semantic JSON response could be decoded,
+the bridge may proceed only with a structured no-response record and the exact
+persisted raw-envelope artifact whose current SHA-256 matches the recorded
+receipt. Before every subsequent host call, the bridge revalidates the artifact
+receipt for every prior attempt. A successful retry compares against the most
+recent prior decoded raw response even if an intervening attempt could not be
+decoded; only a history with no decoded semantic response may state that semantic
+comparison was not possible. Any missing or changed artifact stops the chunk
+before another host call and preserves the original semantic blocker separately
+from the integrity failure.
 There is one additional narrowly defined correction path: if the local
 validator rejects `verdict=consistent` with an empty `identified_obligations`
 list for a clause whose current candidate requires a requirement, the bridge
@@ -395,6 +420,18 @@ the entire primary response, but does not create an executable property or
 pass state. `unsupported_backend` remains a full/submission blocker; capability
 planning, document generation, and release gates are unchanged and remain
 fail-closed. Missing obligations still use `incomplete`.
+For a source classified `unresolved` with a current code-registered ambiguity,
+the coverage reviewer may identify an obligation as `scope_unresolved` only
+when its execution target or metric depends on that exact ambiguity. It must
+preserve a concise obligation summary and dependency dimensions, leave
+`requirement_refs` empty, and retain the primary `unresolved` classification.
+This analysis-only disposition is bound to an exact source span in the
+versioned `obligation-analysis-ledger.json`; it never counts as represented,
+executable, satisfied, or submission-ready. Any clearly executable omission
+that is independent of the registered ambiguity remains `unrepresented` and
+blocks acceptance. A one-shot same-candidate reviewer correction can clarify
+the accounting, but an unresolved-only omission with no safe primary-response
+repair does not trigger another primary-model retry.
 If the second review still reports an unrepresented obligation, cannot prove
 an external action, or violates any other contract, the chunk fails closed.
 A separately corrected primary response gets a new review budget only after
@@ -413,8 +450,17 @@ quotations or machine obligation IDs. The bridge compiles those selections back
 to the exact source bytes before applying the existing local quote, clause,
 candidate, and verdict checks. Cited evidence shown as context does not enlarge
 the selectable source catalog. Raw response, compiled response, source packet,
-and selection audit are preserved separately. Stale, unknown, duplicate, and
-cross-clause references are rejected.
+and selection audit are preserved separately. Sentence slicing is conservative:
+decimal values and recognized single- and multi-part English abbreviations do
+not become false sentence boundaries; every selected span retains exact source
+offsets. Stale, unknown, duplicate, and cross-clause references are rejected.
+The final pipeline reloads the persisted raw native response and deterministically
+recompiles the source packet, selected references, compiled response, and analysis
+ledger; changing a sidecar and merely resealing its local hashes is insufficient.
+The registered abstract target/metric ambiguity is emitted only when it is
+grounded in operative, unquoted source wording rather than a nearby example or
+applicability condition. These source checks may suppress an ambiguity code;
+they never resolve the semantic question or create a requirement.
 
 For contract 3.0, `covered`, `executable`, and `verify_existing` reviews
 must carry a non-empty `obligations` inventory in both the local contract and

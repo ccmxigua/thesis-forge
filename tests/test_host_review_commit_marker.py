@@ -11,6 +11,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import requirements_engine as engine  # noqa: E402
+import host_agent_bridge as bridge  # noqa: E402
 import thesis_format_pipeline as pipeline  # noqa: E402
 from semantic_contract import (  # noqa: E402
     attach_request_provenance,
@@ -21,8 +22,14 @@ from semantic_contract import (  # noqa: E402
 )
 from native_semantic_review import (  # noqa: E402
     OBLIGATION_COVERAGE_PROTOCOL,
+    OBLIGATION_COVERAGE_SCHEMA,
     build_obligation_coverage_request,
     validate_obligation_coverage_response,
+)
+from semantic_source_references import (  # noqa: E402
+    REFERENCE_PROTOCOL,
+    build_source_reference_packet,
+    compile_source_reference_response,
 )
 
 
@@ -73,21 +80,43 @@ class HostReviewCommitMarkerTests(unittest.TestCase):
             response, chunk, run_id="commit-marker-test-run", chunk_index=1,
         )
         independent_request["attempt"] = 1
-        reviewer_response = {"results": [{
+        independent_request["provider_attempt"] = 1
+        source_packet = build_source_reference_packet(independent_request)
+        source_span = source_packet["checks"][0]["source_spans"][0]
+        raw_reviewer_response = {"results": [{
             "check_id": "C1",
             "verdict": "consistent",
             "rationale": "来源是说明性标题，没有遗漏可执行义务。",
-            "evidence_quotes": [clauses[0]["text"]],
+            "evidence_refs": [source_span["ref_id"]],
             "identified_obligations": [],
-            "machine_obligation_ids": [],
         }]}
+        reviewer_response, source_compilation = compile_source_reference_response(
+            raw_reviewer_response,
+            independent_request,
+            OBLIGATION_COVERAGE_SCHEMA,
+            coverage=True,
+        )
         normalized_results = validate_obligation_coverage_response(
             reviewer_response, independent_request["checks"],
         )
         request_path = independent_dir / "request.json"
+        source_packet_path = independent_dir / "source-reference-packet.json"
+        raw_reviewer_response_path = independent_dir / "raw-response.json"
         reviewer_response_path = independent_dir / "response.json"
+        compiled_response_path = independent_dir / "compiled-response.json"
+        source_compilation_path = independent_dir / "source-reference-compilation.json"
         request_path.write_text(json.dumps(independent_request, ensure_ascii=False), encoding="utf-8")
+        source_packet_path.write_text(json.dumps(source_packet, ensure_ascii=False), encoding="utf-8")
+        raw_reviewer_response_path.write_text(
+            json.dumps(raw_reviewer_response, ensure_ascii=False), encoding="utf-8",
+        )
         reviewer_response_path.write_text(json.dumps(reviewer_response, ensure_ascii=False), encoding="utf-8")
+        compiled_response_path.write_text(
+            json.dumps(reviewer_response, ensure_ascii=False), encoding="utf-8",
+        )
+        source_compilation_path.write_text(
+            json.dumps(source_compilation, ensure_ascii=False), encoding="utf-8",
+        )
         request_sha = sha256_json(independent_request)
         reviewer_response_sha = sha256_file(reviewer_response_path)
         review_audit = {
@@ -99,8 +128,23 @@ class HostReviewCommitMarkerTests(unittest.TestCase):
             "request_path": str(request_path.resolve()),
             "response_sha256": reviewer_response_sha,
             "response_path": str(reviewer_response_path.resolve()),
+            "source_reference_protocol": REFERENCE_PROTOCOL,
+            "source_reference_packet_path": str(source_packet_path.resolve()),
+            "source_reference_packet_sha256": sha256_file(source_packet_path),
+            "raw_response_path": str(raw_reviewer_response_path.resolve()),
+            "raw_response_file_sha256": sha256_file(raw_reviewer_response_path),
+            "compiled_response_path": str(compiled_response_path.resolve()),
+            "compiled_response_sha256": sha256_file(compiled_response_path),
+            "source_reference_compilation_path": str(source_compilation_path.resolve()),
+            "source_reference_compilation_sha256": sha256_file(source_compilation_path),
             "results": normalized_results,
         }
+        ledger_pointer = bridge._write_obligation_analysis_ledger(
+            review_audit, response, chunk,
+            coverage_request=independent_request,
+            output_dir=independent_dir, review_dir=review_dir,
+            run_id="commit-marker-test-run", chunk_index=1, attempt=1,
+        )
         coverage_envelope = {
             "protocol": OBLIGATION_COVERAGE_PROTOCOL,
             "status": "completed",
@@ -110,6 +154,7 @@ class HostReviewCommitMarkerTests(unittest.TestCase):
             "provenance": chunk["provenance"],
             "review_request_sha256": request_sha,
             "review_response_sha256": reviewer_response_sha,
+            "obligation_analysis_ledger": ledger_pointer,
             "results": normalized_results,
             "review_audit": review_audit,
         }
@@ -125,6 +170,8 @@ class HostReviewCommitMarkerTests(unittest.TestCase):
             "candidate_response_sha256": chunk_response_sha,
             "review_request_sha256": request_sha,
             "review_response_sha256": reviewer_response_sha,
+            "obligation_analysis_ledger_path": ledger_pointer["path"],
+            "obligation_analysis_ledger_sha256": ledger_pointer["sha256"],
         }
         audit_path = review_dir / "host-agent-run.json"
         audit_path.write_text(json.dumps({
@@ -177,6 +224,33 @@ class HostReviewCommitMarkerTests(unittest.TestCase):
         pointer["review_request_sha256"] = request_sha
         envelope_path.write_text(json.dumps(envelope, ensure_ascii=False), encoding="utf-8")
         pointer["audit_sha256"] = sha256_file(envelope_path)
+        return audit
+
+    def _reseal_source_compilation_chain_for_test(self, audit_path: Path, mutate) -> dict:
+        """Reseal every local digest after tampering with a source compilation."""
+        audit = json.loads(audit_path.read_text(encoding="utf-8"))
+        pointer = audit["chunk_runs"][0]["independent_obligation_review"]
+        envelope_path = audit_path.parent / pointer["audit_path"]
+        envelope = json.loads(envelope_path.read_text(encoding="utf-8"))
+        review_audit = envelope["review_audit"]
+        compilation_path = Path(review_audit["source_reference_compilation_path"])
+        compilation = json.loads(compilation_path.read_text(encoding="utf-8"))
+        mutate(compilation)
+        compilation_path.write_text(json.dumps(compilation, ensure_ascii=False), encoding="utf-8")
+        compilation_sha = sha256_file(compilation_path)
+        review_audit["source_reference_compilation_sha256"] = compilation_sha
+
+        ledger_pointer = envelope["obligation_analysis_ledger"]
+        ledger_path = audit_path.parent / ledger_pointer["path"]
+        ledger = json.loads(ledger_path.read_text(encoding="utf-8"))
+        ledger["source_reference_compilation_sha256"] = compilation_sha
+        ledger_path.write_text(json.dumps(ledger, ensure_ascii=False), encoding="utf-8")
+        ledger_pointer["sha256"] = sha256_file(ledger_path)
+        pointer["obligation_analysis_ledger_sha256"] = ledger_pointer["sha256"]
+
+        envelope_path.write_text(json.dumps(envelope, ensure_ascii=False), encoding="utf-8")
+        pointer["audit_sha256"] = sha256_file(envelope_path)
+        audit_path.write_text(json.dumps(audit, ensure_ascii=False), encoding="utf-8")
         return audit
 
     def test_pipeline_accepts_only_complete_byte_bound_merge_group(self) -> None:
@@ -250,6 +324,28 @@ class HostReviewCommitMarkerTests(unittest.TestCase):
                     expected_request_body_sha=request_body_sha256(
                         json.loads((audit_path.parent / "llm-request.json").read_text(encoding="utf-8"))
                     ),
+                    expected_request_envelope_sha=None,
+                    expected_request_file_sha=None,
+                )
+
+    def test_pipeline_rejects_resealed_tampered_source_span_selection(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            work = Path(td).resolve()
+            _response, audit_path, _receipt, _extraction = self._make_committed_merge(work)
+
+            def tamper(compilation: dict) -> None:
+                compilation["selections"][0]["spans"][0]["text"] = "伪造来源片段"
+
+            audit = self._reseal_source_compilation_chain_for_test(audit_path, tamper)
+            fresh_request = json.loads(
+                (audit_path.parent / "llm-request.json").read_text(encoding="utf-8")
+            )
+            with self.assertRaisesRegex(ValueError, "does not reproduce from the persisted raw response"):
+                pipeline._validate_independent_obligation_receipts(
+                    audit=audit,
+                    review_root=audit_path.parent,
+                    expected_run_id="commit-marker-test-run",
+                    expected_request_body_sha=request_body_sha256(fresh_request),
                     expected_request_envelope_sha=None,
                     expected_request_file_sha=None,
                 )

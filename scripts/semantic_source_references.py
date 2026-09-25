@@ -14,7 +14,46 @@ from format_spec_validation import validate_instance
 from semantic_contract import sha256_json
 
 
-REFERENCE_PROTOCOL = "semantic_source_references_v1"
+REFERENCE_PROTOCOL = "semantic_source_references_v2"
+
+_ENGLISH_ABBREVIATIONS = {
+    "e.g.", "i.e.", "etc.", "vs.", "dr.", "mr.", "mrs.", "ms.",
+    "prof.", "fig.", "no.", "approx.", "al.", "ph.",
+}
+_MULTI_PART_ABBREVIATION = re.compile(r"(?:[A-Za-z]{1,3}\.){2,}$")
+
+
+def _source_ranges(text: str) -> list[tuple[int, int]]:
+    """Return conservative exact sentence spans without splitting decimals/abbreviations."""
+    ranges: list[tuple[int, int]] = [(0, len(text))]
+    start = 0
+    for index, char in enumerate(text):
+        boundary = char in "。！？；!?;\n"
+        if char == ".":
+            previous = text[index - 1] if index else ""
+            following = text[index + 1] if index + 1 < len(text) else ""
+            token_match = re.search(
+                r"[A-Za-z]+(?:\.[A-Za-z]+)*\.$",
+                text[max(start, index - 24):index + 1],
+            )
+            token = token_match.group().lower() if token_match else ""
+            initial = len(token) == 2 and token[0].isalpha()
+            decimal = previous.isdigit() and following.isdigit()
+            multipart_abbreviation = bool(_MULTI_PART_ABBREVIATION.fullmatch(token))
+            boundary = (
+                not decimal and not initial
+                and token not in _ENGLISH_ABBREVIATIONS
+                and not multipart_abbreviation
+            )
+        if boundary:
+            end = index + 1
+            if text[start:end].strip():
+                ranges.append((start, end))
+            start = end
+    if start < len(text) and text[start:].strip():
+        ranges.append((start, len(text)))
+    # Keep offsets exact while preventing blank-only and duplicate spans.
+    return list(dict.fromkeys((begin, end) for begin, end in ranges if text[begin:end].strip()))
 
 
 def build_source_reference_packet(request: dict[str, Any]) -> dict[str, Any]:
@@ -33,14 +72,10 @@ def build_source_reference_packet(request: dict[str, Any]) -> dict[str, Any]:
         seen.add(check_id)
         if not isinstance(text, str) or not text.strip():
             raise ValueError(f"source reference packet has no source text for {check_id}")
-        # Keep all whitespace and punctuation. These are exact ranges, not
-        # normalized matches against some other clause or evidence paragraph.
-        ranges = [(0, len(text))]
-        ranges.extend(
-            (match.start(), match.end())
-            for match in re.finditer(r"[^。！？；\n]+[。！？；]?", text)
-            if match.group().strip()
-        )
+        # Keep all whitespace and punctuation. The whole passage remains a
+        # fallback span; conservative sentence spans improve English sources
+        # without splitting decimal numbers or common abbreviations.
+        ranges = _source_ranges(text)
         spans = []
         for start, end in dict.fromkeys(ranges):
             identity = {"request_sha256": binding, "check_id": check_id,
@@ -113,13 +148,21 @@ def compile_source_reference_response(
             result["machine_obligation_ids"] = copy.deepcopy(
                 check.get("review_context", {}).get("machine_obligation_ids", [])
             )
-            for obligation in result["identified_obligations"]:
+            obligation_selections = []
+            for obligation_index, obligation in enumerate(result["identified_obligations"]):
                 ref = obligation.pop("source_ref")
                 obligation["source_quote"] = spans[ref]["text"]
                 selected.append(ref)
+                obligation_selections.append({
+                    "obligation_index": obligation_index,
+                    "source_ref": ref,
+                    "span": copy.deepcopy(spans[ref]),
+                })
+        else:
+            obligation_selections = []
         selections.append({"check_id": check_id, "spans": [
             copy.deepcopy(spans[ref]) for ref in dict.fromkeys(selected)
-        ]})
+        ], "obligations": obligation_selections})
     if seen != set(checks):
         raise ValueError("source reference response omitted checks: " + ", ".join(sorted(set(checks) - seen)))
     return compiled, {

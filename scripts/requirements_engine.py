@@ -59,8 +59,6 @@ from semantic_contract import (
 )
 from evidence_context_guards import (
     sample_content_guard,
-    spine_clearance_external,
-    SPINE_CLEARANCE_REASON,
 )
 from source_obligation_compiler import (
     materialize_complete_abstract_source_constraints,
@@ -182,7 +180,6 @@ ALLOWED_REQUIREMENT_ROLES = set(ALL_TEXT_ROLES) | TOP_LEVEL_REQUIREMENT_ROLES | 
 MERGE_SEMANTIC_TRANSFORM_POLICY_VERSION = "merge-semantic-guards-v1"
 AUTHORIZED_MERGE_SEMANTIC_TRANSFORMS = {
     "non_normative_sample_content": "registered_evidence_context_guard_v1",
-    "physical_spine_clearance_annotation": "registered_evidence_context_guard_v1",
     "manual_empty_requirement_normalization": "registered_contract_boundary_v1",
     "declaration_placeholder_only_normalization": "registered_declaration_boundary_v1",
 }
@@ -1980,36 +1977,6 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
                 "authorization": AUTHORIZED_MERGE_SEMANTIC_TRANSFORMS["non_normative_sample_content"],
                 "semantic_inference": "deterministic_guard",
                 "changes": sample_content_changes,
-            })
-        # Word emits the modern drawing and its VML fallback as separate
-        # textbox evidence.  When the bounded source context identifies those
-        # isolated 3 cm labels as the spine demonstration, refine only their
-        # disposition to physical/external compliance.  No DOCX property is
-        # invented and the original host response remains preserved verbatim
-        # in llm-response.raw.json.
-        spine_changes = []
-        for review in reviews:
-            clause = clause_map.get(review.get("clause_id"))
-            if (clause is not None
-                    and review.get("classification") == "unresolved"
-                    and spine_clearance_external(clause, clauses)):
-                review["classification"] = "external_compliance"
-                review["requirement_indexes"] = []
-                review["reason"] = SPINE_CLEARANCE_REASON
-                spine_changes.append({
-                    "clause_id": clause["id"],
-                    "before": "unresolved",
-                    "after": "external_compliance",
-                    "reason": SPINE_CLEARANCE_REASON,
-                })
-        if spine_changes:
-            audit.append({
-                "type": "evidence_context_reclassification",
-                "guard": "physical_spine_clearance_annotation",
-                "policy_version": MERGE_SEMANTIC_TRANSFORM_POLICY_VERSION,
-                "authorization": AUTHORIZED_MERGE_SEMANTIC_TRANSFORMS["physical_spine_clearance_annotation"],
-                "semantic_inference": "deterministic_guard",
-                "changes": spine_changes,
             })
         # A manual-only observation is not an executable formatting rule.  In
         # particular, a response for a label-only clause such as C00023 used

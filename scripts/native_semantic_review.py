@@ -138,7 +138,10 @@ RESPONSE_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
-OBLIGATION_COVERAGE_PROTOCOL = "native_source_obligation_coverage_review_v3"
+OBLIGATION_COVERAGE_PROTOCOL = "native_source_obligation_coverage_review_v4"
+SCOPE_DEPENDENCY_DIMENSIONS = {
+    "abstract_target_metric_ambiguity": frozenset({"target", "metric"}),
+}
 OBLIGATION_COVERAGE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "required": ["results"],
@@ -176,8 +179,18 @@ OBLIGATION_COVERAGE_SCHEMA: dict[str, Any] = {
                                 "disposition": {"enum": [
                                     "represented", "unrepresented", "ambiguous",
                                     "external_action_pending", "authoring_content_pending",
-                                    "backend_unsupported",
+                                    "backend_unsupported", "scope_unresolved",
                                 ]},
+                                "obligation_summary": {"type": "string", "minLength": 1},
+                                "scope_dependency_codes": {
+                                    "type": "array", "items": {"type": "string", "minLength": 1},
+                                    "uniqueItems": True,
+                                },
+                                "scope_dependency_dimensions": {
+                                    "type": "array", "items": {"enum": [
+                                        "target", "metric", "condition", "strength",
+                                    ]}, "uniqueItems": True,
+                                },
                                 "requirement_refs": {
                                     "type": "array", "items": {"type": "string", "minLength": 1},
                                     "uniqueItems": True,
@@ -351,11 +364,19 @@ def validate_obligation_coverage_response(
                 f"independent obligation review omitted or changed code-owned source facts for {check_id}"
             )
         linked = context.get("linked_requirements") if isinstance(context.get("linked_requirements"), list) else []
+        safely_unresolved = context.get("classification") == "unresolved" and not linked
+        live_manual_codes = compile_unresolved_manual_review_codes(source_text)
+        declared_manual_codes = context.get("manual_review_codes") or []
+        if sorted(declared_manual_codes) != sorted(live_manual_codes):
+            raise NativeSemanticReviewError(
+                f"independent obligation review manual-review authorization is stale for {check_id}"
+            )
         allowed_refs = {
             item.get("requirement_ref") for item in linked
             if isinstance(item, dict) and isinstance(item.get("requirement_ref"), str)
         }
         represented = unrepresented = ambiguous = external_pending = authoring_pending = 0
+        scope_unresolved = 0
         backend_unsupported = 0
         for obligation in result.get("identified_obligations", []):
             quote = obligation.get("source_quote")
@@ -389,6 +410,35 @@ def validate_obligation_coverage_response(
                 backend_unsupported += 1
             elif disposition == "ambiguous":
                 ambiguous += 1
+            elif disposition == "scope_unresolved":
+                scope_unresolved += 1
+                dependency_codes = obligation.get("scope_dependency_codes") or []
+                dimensions = obligation.get("scope_dependency_dimensions") or []
+                allowed_dimensions = set().union(*(
+                    SCOPE_DEPENDENCY_DIMENSIONS.get(code, frozenset())
+                    for code in dependency_codes
+                )) if dependency_codes else set()
+                if (
+                    not isinstance(obligation.get("obligation_summary"), str)
+                    or not obligation["obligation_summary"].strip()
+                    or not safely_unresolved
+                    or not dependency_codes
+                    or not set(dependency_codes) <= set(live_manual_codes)
+                    or not dimensions
+                    or not set(dimensions) <= allowed_dimensions
+                    or requirement_refs
+                ):
+                    raise NativeSemanticReviewError(
+                        f"scope-unresolved obligation is not authorized by a current unresolved ambiguity for {check_id}"
+                    )
+            if disposition != "scope_unresolved" and any(
+                obligation.get(key) for key in (
+                    "scope_dependency_codes", "scope_dependency_dimensions",
+                )
+            ):
+                raise NativeSemanticReviewError(
+                    f"scope dependency metadata is only valid for scope_unresolved obligations: {check_id}"
+                )
         verdict = result.get("verdict")
         is_external_compliance = context.get("classification") == "external_compliance"
         primary_obligations = (
@@ -404,7 +454,7 @@ def validate_obligation_coverage_response(
                 and verdict == "incomplete"
                 and unrepresented == len(identified_obligations)
                 and unrepresented > 0
-                and not (represented or ambiguous or external_pending or authoring_pending)
+                and not (represented or ambiguous or external_pending or authoring_pending or scope_unresolved)
             ):
                 # This is not an accepted pending disposition. It is a
                 # one-shot signal to re-read the exact source as an external
@@ -449,7 +499,7 @@ def validate_obligation_coverage_response(
                 or linked
                 or not obligations
                 or authoring_pending != len(obligations)
-                or represented or unrepresented or ambiguous or external_pending
+                or represented or unrepresented or ambiguous or external_pending or scope_unresolved
                 or any(item.get("requirement_refs") for item in obligations)
             ):
                 raise NativeSemanticReviewError(
@@ -467,7 +517,7 @@ def validate_obligation_coverage_response(
                 or linked
                 or not obligations
                 or backend_unsupported != len(obligations)
-                or represented or unrepresented or ambiguous or external_pending or authoring_pending
+                or represented or unrepresented or ambiguous or external_pending or authoring_pending or scope_unresolved
                 or any(item.get("requirement_refs") for item in obligations)
             ):
                 raise NativeSemanticReviewError(
@@ -486,14 +536,9 @@ def validate_obligation_coverage_response(
             raise NativeSemanticReviewError(
                 f"authoring-content disposition requires source_content_pending verdict for {check_id}"
             )
-        safely_unresolved = context.get("classification") == "unresolved" and not linked
-        live_manual_codes = compile_unresolved_manual_review_codes(source_text)
-        declared_manual_codes = context.get("manual_review_codes") or []
-        if sorted(declared_manual_codes) != sorted(live_manual_codes):
-            raise NativeSemanticReviewError(
-                f"independent obligation review manual-review authorization is stale for {check_id}"
-            )
-        if verdict == "consistent" and (unrepresented or (ambiguous and not safely_unresolved)):
+        if verdict == "consistent" and (
+            unrepresented or scope_unresolved or (ambiguous and not safely_unresolved)
+        ):
             raise NativeSemanticReviewError(
                 f"independent obligation review verdict conflicts with its findings for {check_id}"
             )
@@ -501,7 +546,9 @@ def validate_obligation_coverage_response(
             raise NativeSemanticReviewError(
                 f"independent obligation review lacks an unrepresented obligation for {check_id}"
             )
-        if verdict == "uncertain" and (not ambiguous or not safely_unresolved):
+        if verdict == "uncertain" and (
+            not ambiguous or scope_unresolved or not safely_unresolved
+        ):
             raise NativeSemanticReviewError(
                 f"independent obligation review uncertainty is not preserved safely for {check_id}"
             )
@@ -512,12 +559,12 @@ def validate_obligation_coverage_response(
         if verdict == "manual_review_required" and (
             not safely_unresolved
             or not live_manual_codes
-            or not ambiguous
+            or not (ambiguous or scope_unresolved)
             or unrepresented
             or represented
             or not result.get("identified_obligations")
             or any(
-                item.get("disposition") != "ambiguous"
+                item.get("disposition") not in {"ambiguous", "scope_unresolved"}
                 for item in result.get("identified_obligations", [])
             )
         ):
@@ -685,6 +732,18 @@ def _prompt(request: dict[str, Any]) -> str:
             and isinstance(retry_feedback.get("clause_ids"), list)
             else []
         )
+        scope_review_checks = (
+            [
+                item for item in retry_feedback.get("checks", [])
+                if isinstance(item, dict)
+                and isinstance(item.get("check_id"), str)
+                and isinstance(item.get("missing_obligations"), list)
+            ]
+            if isinstance(retry_feedback, dict)
+            and retry_feedback.get("code") == "independent_obligation_review_incomplete"
+            and isinstance(retry_feedback.get("checks"), list)
+            else []
+        )
         retry_instruction = ""
         if external_retry_checks:
             retry_instruction = (
@@ -701,6 +760,23 @@ def _prompt(request: dict[str, Any]) -> str:
                 "Never alter the candidate, source, classification, provenance, or requirement links, and never "
                 "invent, merge, or omit an obligation. Any result that still fails the original local contract "
                 "will be rejected.\n"
+            )
+        elif scope_review_checks:
+            retry_instruction = (
+                "\nA prior independent-review response for this same immutable candidate reported the following "
+                "source-bound uncovered items:\n"
+                + strict_json_dumps(scope_review_checks, ensure_ascii=False, sort_keys=True)
+                + "\nThis is one corrective review of the same candidate, not permission to change it. For each item, "
+                "decide whether the missing execution scope itself depends on a currently listed, code-owned "
+                "manual_review_code for a clause whose primary classification is unresolved and has no linked "
+                "requirement. If so, preserve the readable obligation as scope_unresolved: write a concise "
+                "obligation_summary, select only the applicable scope_dependency_codes from that check's "
+                "manual_review_codes, select the affected dimensions (target, metric, condition, strength), and "
+                "leave requirement_refs empty. This is analysis-only; it does not satisfy the requirement or "
+                "authorize execution. Do not use scope_unresolved to hide a readable obligation whose execution "
+                "scope is independently clear; keep such an omission unrepresented. Do not change source, primary "
+                "classification, requirement links, or any candidate field, and do not invent, merge, or omit an "
+                "obligation. Any remaining independent omission stays incomplete.\n"
             )
         elif retry_clause_ids:
             retry_instruction = (
@@ -750,8 +826,13 @@ def _prompt(request: dict[str, Any]) -> str:
             "supported only by a listed source_clause_support entry that explicitly mandates it. "
             "For a clause with non-empty code-owned manual_review_codes, use "
             "manual_review_required only when the clause is unresolved, has no linked requirement, "
-            "and the sole blocker is that registered ambiguity; list only that ambiguity as "
-            "ambiguous, never hide an unrepresented obligation under a manual deferral. "
+            "and the remaining execution blocker is a registered ambiguity. A readable obligation whose "
+            "target, metric, condition, or strength depends on that registered ambiguity may be "
+            "scope_unresolved only with a concise obligation_summary, dependency codes selected from the "
+            "check's code-owned manual_review_codes, affected dependency dimensions, and empty "
+            "requirement_refs. This is analysis-only and never represented or executable. Any readable "
+            "obligation independent of that ambiguity remains unrepresented; never hide it under a manual "
+            "deferral. Use ambiguous only when the source text itself cannot be interpreted reliably. "
             "For external_compliance clauses, use external_compliance_pending only when each primary obligation "
             "is marked unverifiable and no DOCX requirement is linked; quote and list each real-world action with "
             "disposition external_action_pending and no requirement_refs. This records an outstanding external "

@@ -193,6 +193,12 @@ _ABSTRACT_SOURCE_MANUAL_REVIEW = re.compile(
     r".{0,300}?(?:the\s+chinese\s+abstract)",
     re.IGNORECASE | re.DOTALL,
 )
+_ABSTRACT_MANUAL_REVIEW_CONTEXT_UNSAFE = re.compile(
+    r"\b(?:for\s+example|e\.g\.|example|counterexample|if\s+(?:applicable|the|this|these|those)|"
+    r"where\s+applicable|only\s+if|unless)\b|"
+    r"例如|比如|示例|反例|若适用|如果适用|仅当|除非",
+    re.IGNORECASE,
+)
 
 
 def _inside_quote(text: str, offset: int) -> bool:
@@ -576,7 +582,18 @@ def compile_abstract_source_constraints(
 
 def compile_unresolved_manual_review_codes(source_text: Any) -> list[str]:
     """Return narrowly recognized source ambiguities safe for draft-only review."""
-    if isinstance(source_text, str) and _ABSTRACT_SOURCE_MANUAL_REVIEW.search(source_text):
+    if not isinstance(source_text, str):
+        return []
+    match = _ABSTRACT_SOURCE_MANUAL_REVIEW.search(source_text)
+    context = (
+        source_text[max(0, match.start() - 80):min(len(source_text), match.end() + 80)]
+        if match is not None else ""
+    )
+    if (
+        match is not None
+        and not _ABSTRACT_MANUAL_REVIEW_CONTEXT_UNSAFE.search(context)
+        and not _inside_quote(source_text, match.start())
+    ):
         return ["abstract_target_metric_ambiguity"]
     return []
 
@@ -720,6 +737,13 @@ def materialize_complete_abstract_source_constraints(
     }
     audit: list[dict[str, Any]] = []
     for clause_id, clause in sorted(clauses_by_id.items()):
+        review = reviews_by_id.get(clause_id)
+        # A source compiler may complete an already executable/covered review,
+        # but it cannot resolve a semantic question that the Host Agent left
+        # unresolved. Even a recognizable source bundle is not authority to
+        # change the review disposition or create executable requirements.
+        if not isinstance(review, dict) or review.get("classification") == "unresolved":
+            continue
         source_text = clause.get("text") or clause.get("source_text_full")
         source_context_items = []
         clause_evidence_ids = set(clause.get("evidence_ids") or [])
@@ -753,14 +777,13 @@ def materialize_complete_abstract_source_constraints(
         compiled = compile_abstract_source_constraints(
             source_text, source_context="\n".join(source_context_items),
         )
-        review = reviews_by_id.get(clause_id)
         evidence_ids = sorted({
             str(value) for value in (clause.get("evidence_ids") or [])
             if isinstance(value, str) and value
         })
-        if compiled is None or not evidence_ids or not isinstance(review, dict):
+        if compiled is None or not evidence_ids:
             continue
-        if review.get("classification") not in {"unresolved", "executable", "covered", "verify_existing"}:
+        if review.get("classification") not in {"executable", "covered", "verify_existing"}:
             continue
         linked = [
             (index, item) for index, item in enumerate(requirements)

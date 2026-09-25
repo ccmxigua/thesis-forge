@@ -471,8 +471,8 @@ class SourceObligationCompilerTests(unittest.TestCase):
             "contract_version": "3.0",
             "requirements": [],
             "clause_reviews": [
-                {"clause_id": cid, "classification": "unresolved", "reason": "not represented",
-                 "obligations": [{"id": "source", "status": "unresolved", "reason": "not represented"}]}
+                {"clause_id": cid, "classification": "executable", "reason": "source bundle identified",
+                 "obligations": []}
                 for cid in ("C66", "C67")
             ],
         }
@@ -513,7 +513,9 @@ class SourceObligationCompilerTests(unittest.TestCase):
             "contract_version": "3.0",
             "requirements": [],
             "clause_reviews": [
-                {"clause_id": cid, "classification": "unresolved", "reason": "not represented",
+                {"clause_id": cid,
+                 "classification": "executable" if cid == "C66" else "unresolved",
+                 "reason": "source bundle identified" if cid == "C66" else "not represented",
                  "obligations": [{"id": "source", "status": "unresolved", "reason": "not represented"}]}
                 for cid in ("C66", "C67")
             ],
@@ -526,6 +528,47 @@ class SourceObligationCompilerTests(unittest.TestCase):
         review_by_id = {item["clause_id"]: item for item in projected["clause_reviews"]}
         self.assertEqual(review_by_id["C67"]["classification"], "unresolved")
         self.assertEqual(len(audit), 1)
+
+    def test_unresolved_complete_abstract_bundle_is_never_projected_or_reclassified(self) -> None:
+        source = (
+            "中文摘要是论文内容的简要陈述，一般以第三人称语气撰写，"
+            "300～1000字（如遇特殊需要字数可以略多），不加评论和解释，"
+            "是一篇具有独立性和完整性的短文，能准确反映论文的中心思想，"
+            "规范的学术用语，逻辑性强、结构严谨，体现出论文的新理论、新方法、新技术等"
+        )
+        clause = {"id": "C76", "text": source, "evidence_ids": ["E76"]}
+        review = {
+            "clause_id": "C76", "classification": "unresolved",
+            "reason": "target remains semantically unresolved",
+            "obligations": [{
+                "id": "source-obligation", "status": "unresolved",
+                "reason": "the target has not been confirmed",
+            }],
+        }
+        response = {
+            "contract_version": "3.0", "requirements": [],
+            "clause_reviews": [copy.deepcopy(review)],
+        }
+
+        projected, audit = materialize_complete_abstract_source_constraints(
+            response, [clause],
+        )
+
+        self.assertEqual(projected, response)
+        self.assertEqual(projected["clause_reviews"][0]["classification"], "unresolved")
+        self.assertEqual(projected["requirements"], [])
+        self.assertEqual(audit, [])
+
+        linked_response = copy.deepcopy(response)
+        linked_response["requirements"].append({
+            "role": "content_constraints", "clause_ids": ["C76"],
+            "evidence_ids": ["E76"], "properties": {"abstract_zh": {}},
+        })
+        linked_projected, linked_audit = materialize_complete_abstract_source_constraints(
+            linked_response, [clause],
+        )
+        self.assertEqual(linked_projected, linked_response)
+        self.assertEqual(linked_audit, [])
 
     def test_abstract_compiler_does_not_upgrade_partial_or_ambiguous_source(self) -> None:
         self.assertIsNone(compile_abstract_source_constraints("中文摘要一般300～1000字，使用第三人称。"))

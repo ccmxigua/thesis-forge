@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import copy
 import hashlib
 import json
 import subprocess
@@ -38,9 +39,15 @@ from manual_review import (
     write_manual_review_ledger,
 )
 from native_semantic_review import (
+    OBLIGATION_COVERAGE_SCHEMA,
     OBLIGATION_COVERAGE_PROTOCOL,
     build_obligation_coverage_request,
     validate_obligation_coverage_response,
+)
+from semantic_source_references import (
+    REFERENCE_PROTOCOL,
+    build_source_reference_packet,
+    compile_source_reference_response,
 )
 from requirements_engine import (
     _chunk_projection,
@@ -418,6 +425,13 @@ def _validate_independent_obligation_receipts(
         review_response = read_json(reviewer_response_path)
         request_sha = sha256_json(review_request)
         response_file_sha = sha256_file(reviewer_response_path)
+        provider_attempt = review_request.get("provider_attempt", 1) if isinstance(review_request, dict) else None
+        retry_feedback = review_request.get("retry_feedback") if isinstance(review_request, dict) else None
+        allowed_retry_feedback_codes = {
+            "external_compliance_unrepresented_obligation",
+            "missing_executable_obligation_inventory",
+            "independent_obligation_review_incomplete",
+        }
         if (
             request_sha != review_audit.get("request_sha256")
             or request_sha != envelope.get("review_request_sha256")
@@ -430,6 +444,15 @@ def _validate_independent_obligation_receipts(
             or review_request.get("run_id") != expected_run_id
             or review_request.get("chunk_index") != index
             or review_request.get("provenance") != provenance
+            or isinstance(provider_attempt, bool)
+            or not isinstance(provider_attempt, int)
+            or provider_attempt <= 0
+            or (retry_feedback is not None and (
+                not isinstance(retry_feedback, dict)
+                or retry_feedback.get("code") not in allowed_retry_feedback_codes
+            ))
+            or envelope.get("retry_feedback") != retry_feedback
+            or independent.get("retry_feedback") != retry_feedback
         ):
             raise ValueError(f"independent obligation request/response {index} failed byte or identity validation")
         checks = review_request.get("checks")
@@ -457,6 +480,9 @@ def _validate_independent_obligation_receipts(
             run_id=expected_run_id, chunk_index=index,
         )
         expected_review_request["attempt"] = attempt
+        expected_review_request["provider_attempt"] = provider_attempt
+        if retry_feedback is not None:
+            expected_review_request["retry_feedback"] = copy.deepcopy(retry_feedback)
         if sha256_json(review_request) != sha256_json(expected_review_request):
             raise ValueError(
                 f"independent obligation review {index} request is not reconstructed "
@@ -469,6 +495,164 @@ def _validate_independent_obligation_receipts(
             or any(item.get("verdict") == "incomplete" for item in normalized_results)
         ):
             raise ValueError(f"independent obligation review {index} is incomplete or inconsistent")
+
+        ledger_pointer = envelope.get("obligation_analysis_ledger")
+        if (
+            not isinstance(ledger_pointer, dict)
+            or ledger_pointer.get("protocol") != "obligation_analysis_ledger_v1"
+            or ledger_pointer.get("status") != "analysis_only"
+            or ledger_pointer.get("submission_ready") is not False
+            or ledger_pointer.get("path") != independent.get("obligation_analysis_ledger_path")
+            or ledger_pointer.get("sha256") != independent.get("obligation_analysis_ledger_sha256")
+        ):
+            raise ValueError(f"independent obligation review {index} has no bound analysis-only ledger")
+        ledger_path = _audit_artifact_path(
+            review_root, ledger_pointer.get("path"),
+            label=f"obligation analysis ledger {index}",
+        )
+        if not ledger_path.is_file() or sha256_file(ledger_path) != ledger_pointer.get("sha256"):
+            raise ValueError(f"obligation analysis ledger {index} bytes do not match its receipt")
+        ledger = read_json(ledger_path)
+        compilation_path = _audit_artifact_path(
+            review_root, review_audit.get("source_reference_compilation_path"),
+            label=f"source-reference compilation {index}",
+        )
+        if (
+            not compilation_path.is_file()
+            or sha256_file(compilation_path) != review_audit.get("source_reference_compilation_sha256")
+        ):
+            raise ValueError(f"source-reference compilation {index} bytes do not match its receipt")
+        compilation = read_json(compilation_path)
+        source_packet = build_source_reference_packet(review_request)
+        source_packet_path = _audit_artifact_path(
+            review_root, review_audit.get("source_reference_packet_path"),
+            label=f"source-reference packet {index}",
+        )
+        raw_response_path = _audit_artifact_path(
+            review_root, review_audit.get("raw_response_path"),
+            label=f"raw independent response {index}",
+        )
+        compiled_response_path = _audit_artifact_path(
+            review_root, review_audit.get("compiled_response_path"),
+            label=f"compiled independent response {index}",
+        )
+        if (
+            review_audit.get("source_reference_protocol") != REFERENCE_PROTOCOL
+            or not source_packet_path.is_file()
+            or sha256_file(source_packet_path) != review_audit.get("source_reference_packet_sha256")
+            or not raw_response_path.is_file()
+            or sha256_file(raw_response_path) != review_audit.get("raw_response_file_sha256")
+            or not compiled_response_path.is_file()
+            or sha256_file(compiled_response_path) != review_audit.get("compiled_response_sha256")
+        ):
+            raise ValueError(f"independent source-reference artifacts {index} do not match their receipts")
+        persisted_source_packet = read_json(source_packet_path)
+        raw_review_response = read_json(raw_response_path)
+        persisted_compiled_response = read_json(compiled_response_path)
+        if persisted_source_packet != source_packet or persisted_compiled_response != review_response:
+            raise ValueError(f"independent source-reference artifacts {index} do not match the canonical request/response")
+        reconstructed_response, reconstructed_compilation = compile_source_reference_response(
+            raw_review_response, review_request, OBLIGATION_COVERAGE_SCHEMA, coverage=True,
+        )
+        if reconstructed_response != review_response or reconstructed_compilation != compilation:
+            raise ValueError(
+                f"source-reference compilation {index} does not reproduce from the persisted raw response"
+            )
+        source_checks = {
+            str(item.get("check_id")): item for item in source_packet.get("checks", [])
+            if isinstance(item, dict) and isinstance(item.get("check_id"), str)
+        }
+        selections = {
+            str(item.get("check_id")): item for item in compilation.get("selections", [])
+            if isinstance(item, dict) and isinstance(item.get("check_id"), str)
+        } if isinstance(compilation, dict) else {}
+        ledger_items = ledger.get("obligations") if isinstance(ledger, dict) else None
+        if (
+            not isinstance(ledger, dict)
+            or ledger.get("protocol") != "obligation_analysis_ledger_v1"
+            or ledger.get("status") != "analysis_only"
+            or ledger.get("run_id") != expected_run_id
+            or ledger.get("case_id") != review_request.get("case_id")
+            or ledger.get("chunk_index") != index
+            or ledger.get("attempt") != attempt
+            or ledger.get("candidate_response_sha256") != candidate_sha
+            or ledger.get("review_request_sha256") != request_sha
+            or ledger.get("review_response_sha256") != response_file_sha
+            or ledger.get("provenance") != provenance
+            or ledger.get("source_reference_protocol") != "semantic_source_references_v2"
+            or ledger.get("source_reference_compilation_sha256")
+            != review_audit.get("source_reference_compilation_sha256")
+            or ledger.get("submission_ready") is not False
+            or not isinstance(ledger_items, list)
+            or ledger_pointer.get("obligation_count") != len(ledger_items)
+            or not isinstance(compilation, dict)
+            or compilation.get("protocol") != "semantic_source_references_v2"
+            or compilation.get("run_id") != expected_run_id
+            or compilation.get("request_sha256") != request_sha
+            or compilation.get("packet_sha256") != sha256_json(source_packet)
+            or set(selections) != set(source_checks)
+        ):
+            raise ValueError(f"obligation analysis ledger {index} is not bound to the current review")
+        expected_ledger_items: list[dict[str, Any]] = []
+        for result in normalized_results:
+            check_id = str(result.get("check_id"))
+            selected = selections.get(check_id)
+            selected_obligations = selected.get("obligations") if isinstance(selected, dict) else None
+            identified = result.get("identified_obligations")
+            if not isinstance(selected_obligations, list) or not isinstance(identified, list) or (
+                len(selected_obligations) != len(identified)
+            ):
+                raise ValueError(f"obligation analysis ledger {index} source selections are incomplete")
+            span_catalog = {
+                item.get("ref_id"): item
+                for item in source_checks[check_id].get("source_spans", [])
+                if isinstance(item, dict) and isinstance(item.get("ref_id"), str)
+            }
+            for obligation_index, (obligation, selection) in enumerate(zip(identified, selected_obligations)):
+                span = selection.get("span") if isinstance(selection, dict) else None
+                source_ref = selection.get("source_ref") if isinstance(selection, dict) else None
+                if (
+                    not isinstance(span, dict)
+                    or selection.get("obligation_index") != obligation_index
+                    or span_catalog.get(source_ref) != span
+                    or obligation.get("source_quote") != span.get("text")
+                ):
+                    raise ValueError(f"obligation analysis ledger {index} has an invalid source-span selection")
+                identity = {
+                    "protocol": "obligation_analysis_ledger_v1",
+                    "run_id": expected_run_id,
+                    "case_id": review_request.get("case_id"),
+                    "chunk_index": index,
+                    "attempt": attempt,
+                    "candidate_response_sha256": candidate_sha,
+                    "review_request_sha256": request_sha,
+                    "review_response_sha256": response_file_sha,
+                    "check_id": check_id,
+                    "obligation_index": obligation_index,
+                    "source_ref": source_ref,
+                    "source_sha256": span.get("source_sha256"),
+                    "start": span.get("start"),
+                    "end": span.get("end"),
+                }
+                expected_ledger_items.append({
+                    "analysis_obligation_id": "AO-" + sha256_json(identity)[:24],
+                    "check_id": check_id,
+                    "source_ref": source_ref,
+                    "source_quote": span.get("text"),
+                    "source_start": span.get("start"),
+                    "source_end": span.get("end"),
+                    "source_text_sha256": span.get("source_sha256"),
+                    "obligation_summary": obligation.get("obligation_summary"),
+                    "disposition": obligation.get("disposition"),
+                    "scope_dependency_codes": copy.deepcopy(obligation.get("scope_dependency_codes") or []),
+                    "scope_dependency_dimensions": copy.deepcopy(
+                        obligation.get("scope_dependency_dimensions") or []
+                    ),
+                    "requirement_refs": copy.deepcopy(obligation.get("requirement_refs") or []),
+                    "execution_authorized": False,
+                })
+        if ledger_items != expected_ledger_items:
+            raise ValueError(f"obligation analysis ledger {index} does not match the reviewed source obligations")
         manual_review_clause_ids = enforce_obligation_review_output_policy(
             normalized_results, output_policy=output_policy,
         )

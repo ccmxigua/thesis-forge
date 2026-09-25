@@ -99,7 +99,7 @@ class NativeSemanticReviewTests(unittest.TestCase):
         }
         packet = build_obligation_coverage_request(candidate, chunk, run_id="run-1", chunk_index=4)
         check = packet["checks"][0]
-        self.assertEqual(packet["protocol"], "native_source_obligation_coverage_review_v3")
+        self.assertEqual(packet["protocol"], "native_source_obligation_coverage_review_v4")
         self.assertEqual(packet["provenance"], chunk["provenance"])
         self.assertEqual(check["document_text"], source)
         requirement_ref = check["review_context"]["linked_requirements"][0]["requirement_ref"]
@@ -470,6 +470,130 @@ class NativeSemanticReviewTests(unittest.TestCase):
         })
         with self.assertRaisesRegex(NativeSemanticReviewError, "manual deferral is not authorized"):
             validate_obligation_coverage_response(unrepresented, [check])
+
+    def test_abstract_scope_ambiguity_code_excludes_examples_conditions_and_quotes(self) -> None:
+        valid = (
+            "The Chinese abstract is described as 300 to 1,000 words, "
+            "with its applicable target still unclear."
+        )
+        self.assertEqual(
+            native_review.compile_unresolved_manual_review_codes(valid),
+            ["abstract_target_metric_ambiguity"],
+        )
+        unsafe_sources = [
+            "For example, the Chinese abstract is 300 to 1,000 words.",
+            "If applicable, the Chinese abstract is 300 to 1,000 words.",
+            'The guide quotes: "The Chinese abstract is 300 to 1,000 words."',
+        ]
+        for source in unsafe_sources:
+            with self.subTest(source=source):
+                self.assertEqual(native_review.compile_unresolved_manual_review_codes(source), [])
+                check = {
+                    "check_id": "C00076", "document_text": source,
+                    "review_context": {
+                        "classification": "unresolved", "requires_requirement": False,
+                        "linked_requirements": [], "machine_obligation_ids": [],
+                        "manual_review_codes": native_review.compile_unresolved_manual_review_codes(source),
+                    },
+                }
+                deferred = {"results": [{
+                    "check_id": "C00076", "verdict": "manual_review_required",
+                    "rationale": "Treat this scope as unresolved.",
+                    "evidence_quotes": [source], "machine_obligation_ids": [],
+                    "identified_obligations": [{
+                        "source_quote": source, "disposition": "scope_unresolved",
+                        "obligation_summary": "The target is unclear.",
+                        "scope_dependency_codes": ["abstract_target_metric_ambiguity"],
+                        "scope_dependency_dimensions": ["target"], "requirement_refs": [],
+                    }],
+                }]}
+                with self.assertRaisesRegex(NativeSemanticReviewError, "not authorized"):
+                    validate_obligation_coverage_response(deferred, [check])
+
+    def test_scope_unresolved_records_analysis_without_claiming_execution_coverage(self) -> None:
+        source = (
+            "The Chinese abstract is usually written in third person, 300 to 1,000 words; "
+            "it should not contain figures or tables."
+        )
+        check = {
+            "check_id": "C00076",
+            "document_text": source,
+            "review_context": {
+                "classification": "unresolved",
+                "requires_requirement": False,
+                "linked_requirements": [],
+                "machine_obligation_ids": [],
+                "manual_review_codes": ["abstract_target_metric_ambiguity"],
+            },
+        }
+        accepted = {"results": [{
+            "check_id": "C00076",
+            "verdict": "manual_review_required",
+            "rationale": "The source duties are identifiable but their abstract target is unresolved.",
+            "evidence_quotes": ["The Chinese abstract", "300 to 1,000 words", "figures or tables"],
+            "machine_obligation_ids": [],
+            "identified_obligations": [
+                {
+                    "source_quote": "The Chinese abstract",
+                    "disposition": "scope_unresolved",
+                    "obligation_summary": "The guidance applies to an abstract whose language target is unresolved.",
+                    "scope_dependency_codes": ["abstract_target_metric_ambiguity"],
+                    "scope_dependency_dimensions": ["target"],
+                    "requirement_refs": [],
+                },
+                {
+                    "source_quote": "300 to 1,000 words",
+                    "disposition": "scope_unresolved",
+                    "obligation_summary": "The count is stated in words but its target abstract is unresolved.",
+                    "scope_dependency_codes": ["abstract_target_metric_ambiguity"],
+                    "scope_dependency_dimensions": ["target", "metric"],
+                    "requirement_refs": [],
+                },
+                {
+                    "source_quote": "figures or tables",
+                    "disposition": "scope_unresolved",
+                    "obligation_summary": "The prohibition is readable but its target abstract is unresolved.",
+                    "scope_dependency_codes": ["abstract_target_metric_ambiguity"],
+                    "scope_dependency_dimensions": ["target"],
+                    "requirement_refs": [],
+                },
+            ],
+        }]}
+        result = validate_obligation_coverage_response(accepted, [check])[0]
+        self.assertEqual(result["verdict"], "manual_review_required")
+        self.assertTrue(all(
+            item["disposition"] == "scope_unresolved"
+            and item["requirement_refs"] == []
+            for item in result["identified_obligations"]
+        ))
+
+        cases = []
+        forged_code = json.loads(json.dumps(accepted))
+        forged_code["results"][0]["identified_obligations"][0]["scope_dependency_codes"] = ["made_up"]
+        cases.append(forged_code)
+        wrong_dimension = json.loads(json.dumps(accepted))
+        wrong_dimension["results"][0]["identified_obligations"][0]["scope_dependency_dimensions"] = ["strength"]
+        cases.append(wrong_dimension)
+        linked = json.loads(json.dumps(accepted))
+        linked_check = {
+            **check,
+            "review_context": {
+                **check["review_context"],
+                "linked_requirements": [{"requirement_ref": "RR-1"}],
+            },
+        }
+        cases.append((linked, linked_check))
+        hidden_omission = json.loads(json.dumps(accepted))
+        hidden_omission["results"][0]["identified_obligations"].append({
+            "source_quote": "figures or tables",
+            "disposition": "unrepresented",
+            "requirement_refs": [],
+        })
+        cases.append(hidden_omission)
+        for case in cases:
+            candidate, candidate_check = case if isinstance(case, tuple) else (case, check)
+            with self.subTest(case=candidate), self.assertRaises(NativeSemanticReviewError):
+                validate_obligation_coverage_response(candidate, [candidate_check])
 
     def test_external_compliance_is_recorded_as_pending_not_docx_satisfied(self) -> None:
         source = "北京体育大学学位评定委员会办公室盖章(有效)"
@@ -882,7 +1006,7 @@ class NativeSemanticReviewTests(unittest.TestCase):
             self.assertEqual(canonical["results"][0]["evidence_quotes"], ["该处约3cm"])
             self.assertEqual(compiled_candidate, canonical)
             self.assertEqual(canonical["results"][0]["machine_obligation_ids"], [])
-            self.assertEqual(audit["source_reference_protocol"], "semantic_source_references_v1")
+            self.assertEqual(audit["source_reference_protocol"], "semantic_source_references_v2")
             self.assertEqual(compilation["run_id"], "run")
 
     def test_native_runner_does_not_call_non_timeout_exit_124_a_timeout(self) -> None:

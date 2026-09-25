@@ -116,6 +116,48 @@ def make_multi_section_target(path: Path) -> None:
 
 
 class RequirementsPipelineTest(unittest.TestCase):
+    def test_unresolved_spine_annotation_is_not_reclassified_by_nearby_context(self) -> None:
+        clauses = [
+            {
+                "id": "C1", "text": "3 cm左右", "evidence_ids": ["E1"],
+                "source_kind": "paragraph", "location": {"part": "document", "child_index": 1},
+                "part_index": 0,
+            },
+            {
+                "id": "C2", "text": "书脊示范图用于印刷装订。", "evidence_ids": ["E2"],
+                "source_kind": "paragraph", "location": {"part": "document", "child_index": 2},
+                "part_index": 0,
+            },
+        ]
+        response = {
+            "contract_version": "2.1",
+            "requirements": [],
+            "clause_reviews": [
+                {"clause_id": "C1", "classification": "unresolved",
+                 "requirement_indexes": [], "reason": "具体适用对象尚待人工确认。"},
+                {"clause_id": "C2", "classification": "informational",
+                 "requirement_indexes": [], "reason": "图示说明文字。"},
+            ],
+            "unsupported_items": [],
+            "reported_conflicts": [],
+        }
+        original_response = json.loads(json.dumps(response, ensure_ascii=False))
+        spec, _conflicts, audit = requirements_engine.merge_llm_primary(
+            Path("synthetic-source"),
+            {"schema_version": "1.0", "source_document": "synthetic-source",
+             "roles": {}, "page": {}, "requirements": [], "content_instances": []},
+            clauses, response, {"E1", "E2"},
+        )
+
+        reviews = {item["clause_id"]: item for item in spec["clause_compliance"]}
+        self.assertEqual(reviews["C1"]["status"], "unresolved")
+        self.assertIn("C1", spec["completeness"]["unresolved_clause_ids"])
+        self.assertEqual(response, original_response)
+        self.assertFalse(any(
+            item.get("guard") == "physical_spine_clearance_annotation"
+            for item in audit
+        ))
+
     def test_unresolved_reported_conflict_is_preserved_and_blocks_release(self) -> None:
         clause = {
             "id": "C1", "text": "正文使用宋体", "evidence_ids": ["E1"],

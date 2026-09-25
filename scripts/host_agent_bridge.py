@@ -50,8 +50,20 @@ class HostAgentProvenanceMismatch(RuntimeError):
     """Raised when the raw response does not echo the exact chunk identity."""
 
 
+class HostAgentResponseParseError(ValueError):
+    """Raised when native host output cannot be decoded as a semantic response."""
+
+
+class HostAgentResponseUnavailableError(RuntimeError):
+    """Raised when a host invocation ended without a decodable semantic response."""
+
+
 class HostAgentCancelled(RuntimeError):
     """Raised when a bridge run is stopped before a response is accepted."""
+
+
+class RetryRawArtifactIntegrityError(ValueError):
+    """Raised when retry drift checks cannot prove both raw attempts exist."""
 
 
 class IndependentObligationReviewError(RuntimeError):
@@ -176,12 +188,14 @@ from native_semantic_review import (  # noqa: E402
     is_explicit_authoring_content_quote,
     run_native_semantic_review,
 )
+from semantic_source_references import build_source_reference_packet  # noqa: E402
 from requirements_engine import (  # noqa: E402
     merge_host_agent_review_packets,
     validate_host_review_chunk_source_projection,
 )
 from semantic_contract import (  # noqa: E402
     sha256_file,
+    sha256_json,
     strict_json_dumps,
     strict_json_loads,
     validate_response_provenance,
@@ -838,6 +852,410 @@ def _semantic_retry_view(response: Any) -> dict[str, Any] | None:
         if isinstance(response.get("unsupported_items"), list) else response.get("unsupported_items"),
         "top_level": top_level,
     }
+
+
+def _attempt_stage_snapshot(
+    stage: str, response: Any, *, path: Path | None, chunk: dict[str, Any],
+    projection_audit: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Bind a retry artifact to its representation stage and current inputs."""
+    retry_inputs = _retry_input_fingerprints(chunk)
+    provenance = chunk.get("provenance") if isinstance(chunk.get("provenance"), dict) else {}
+    runtime_context = chunk.get("runtime_context") if isinstance(chunk.get("runtime_context"), dict) else {}
+    response_schema = chunk.get("response_schema") if isinstance(chunk.get("response_schema"), dict) else {}
+    file_sha = sha256_file(path) if path is not None and path.is_file() else None
+    semantic_view = _semantic_retry_view(response)
+    projection_fingerprint = _response_sha256({
+        "projection_rule_version": "host_agent_candidate_projection_v1",
+        "code_fingerprint_sha256": runtime_context.get("code_fingerprint_sha256"),
+        "projection_audit": projection_audit or {},
+    })
+    return {
+        "stage": stage,
+        "path": str(path.resolve()) if path is not None else None,
+        "file_bytes_sha256": file_sha,
+        "canonical_json_sha256": _response_sha256(response),
+        "semantic_view_sha256": _response_sha256(semantic_view),
+        "source_sha256": provenance.get("source_sha256"),
+        "clause_sha256": provenance.get("clause_sha256"),
+        "evidence_sha256": provenance.get("evidence_sha256"),
+        "request_sha256": provenance.get("request_sha256"),
+        "run_id": provenance.get("run_id"),
+        "case_id": retry_inputs["case_id"],
+        "chunk_index": retry_inputs["chunk_index"],
+        "chunk_sha256": retry_inputs["chunk_sha256"],
+        "schema_sha256": retry_inputs["schema_sha256"],
+        "code_fingerprint_sha256": runtime_context.get("code_fingerprint_sha256"),
+        "projection_fingerprint_sha256": projection_fingerprint,
+    }
+
+
+def _retry_input_fingerprints(chunk: dict[str, Any]) -> dict[str, Any]:
+    """Return the complete invocation identity used by retry authorization."""
+    provenance = chunk.get("provenance") if isinstance(chunk.get("provenance"), dict) else {}
+    runtime_context = chunk.get("runtime_context") if isinstance(chunk.get("runtime_context"), dict) else {}
+    response_schema = chunk.get("response_schema") if isinstance(chunk.get("response_schema"), dict) else {}
+    batch = chunk.get("batch") if isinstance(chunk.get("batch"), dict) else {}
+    case_id = chunk.get("case_id", provenance.get("case_id"))
+    return {
+        "run_id": provenance.get("run_id"),
+        "case_id": case_id,
+        "source_sha256": provenance.get("source_sha256"),
+        "clause_sha256": provenance.get("clause_sha256"),
+        "evidence_sha256": provenance.get("evidence_sha256"),
+        "request_sha256": provenance.get("request_sha256"),
+        "chunk_index": batch.get("index"),
+        "chunk_sha256": _response_sha256(chunk),
+        "schema_sha256": _response_sha256(response_schema) if response_schema else None,
+        "code_fingerprint_sha256": runtime_context.get("code_fingerprint_sha256"),
+    }
+
+
+def _retry_fingerprints_complete(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    hash_fields = {
+        "source_sha256", "clause_sha256", "evidence_sha256", "request_sha256",
+        "chunk_sha256", "schema_sha256", "code_fingerprint_sha256",
+    }
+    return (
+        hash_fields <= set(value)
+        and all(
+            isinstance(value.get(key), str)
+            and re.fullmatch(r"[0-9a-f]{64}", value[key]) is not None
+            for key in hash_fields
+        )
+        and isinstance(value.get("run_id"), str)
+        and bool(value["run_id"].strip())
+        and "case_id" in value
+        and (
+            value["case_id"] is None
+            or (isinstance(value["case_id"], str) and bool(value["case_id"].strip()))
+        )
+        and isinstance(value.get("chunk_index"), int)
+        and not isinstance(value.get("chunk_index"), bool)
+        and value["chunk_index"] > 0
+    )
+
+
+def _verified_attempt_stage_path(
+    response_path: Path,
+    attempt_number: int,
+    attempt_record: dict[str, Any],
+    stage: str,
+) -> Path | None:
+    """Return an attempt artifact only when its stage receipt matches exact bytes."""
+    if stage == "decoded_raw":
+        expected_path = response_path.with_name(
+            f"{response_path.stem}.attempt-{attempt_number:02d}.raw{response_path.suffix}"
+        )
+    elif stage == "validated_candidate":
+        expected_path = response_path.with_name(
+            f"{response_path.stem}.attempt-{attempt_number:02d}{response_path.suffix}"
+        )
+    else:
+        return None
+    snapshots = attempt_record.get("stage_snapshots")
+    snapshot = next((
+        item for item in reversed(snapshots)
+        if isinstance(item, dict) and item.get("stage") == stage
+    ), None) if isinstance(snapshots, list) else None
+    if not isinstance(snapshot, dict):
+        return None
+    expected_sha = snapshot.get("file_bytes_sha256")
+    if (
+        snapshot.get("path") != str(expected_path.resolve())
+        or not isinstance(expected_sha, str)
+        or re.fullmatch(r"[0-9a-f]{64}", expected_sha) is None
+        or not expected_path.is_file()
+    ):
+        return None
+    try:
+        if sha256_file(expected_path) != expected_sha:
+            return None
+    except OSError:
+        return None
+    return expected_path
+
+
+def _validate_retry_attempt_artifact(
+    response_path: Path,
+    attempt_number: int,
+    attempt_record: dict[str, Any],
+) -> dict[str, Any]:
+    """Verify every persisted response stage before allowing a retry."""
+    raw_path = response_path.with_name(
+        f"{response_path.stem}.attempt-{attempt_number:02d}.raw{response_path.suffix}"
+    )
+    expected_raw_path = str(raw_path.resolve())
+    stage_snapshots = attempt_record.get("stage_snapshots")
+    stage_snapshots = stage_snapshots if isinstance(stage_snapshots, list) else []
+    decoded_snapshots = [
+        item for item in stage_snapshots
+        if isinstance(item, dict) and item.get("stage") == "decoded_raw"
+    ]
+    decoded_snapshot = decoded_snapshots[-1] if decoded_snapshots else None
+    retry_inputs = attempt_record.get("retry_input_fingerprints")
+
+    def fail(code: str, stage: str, path: str, reason: str) -> None:
+        error = RetryRawArtifactIntegrityError(
+            f"retry stopped: attempt {attempt_number} {stage} evidence is not intact ({reason})"
+        )
+        error.error_records = [{  # type: ignore[attr-defined]
+            "code": code,
+            "attempt": attempt_number,
+            "stage": stage,
+            "path": path,
+            "reason": reason,
+        }]
+        raise error
+
+    def validate_snapshot_binding(snapshot: dict[str, Any], stage: str) -> None:
+        if not _retry_fingerprints_complete(retry_inputs):
+            fail(
+                "retry_stage_invocation_binding_missing", stage,
+                str(snapshot.get("path") or ""),
+                "attempt has no complete invocation fingerprint receipt",
+            )
+        binding_fields = (
+            "run_id", "case_id", "source_sha256", "clause_sha256", "evidence_sha256",
+            "request_sha256", "chunk_index", "chunk_sha256", "schema_sha256",
+            "code_fingerprint_sha256",
+        )
+        if any(snapshot.get(key) != retry_inputs.get(key) for key in binding_fields):
+            fail(
+                "retry_stage_invocation_binding_mismatch", stage,
+                str(snapshot.get("path") or ""),
+                "stage receipt does not match the attempt invocation fingerprints",
+            )
+
+    if isinstance(decoded_snapshot, dict):
+        expected_sha = decoded_snapshot.get("file_bytes_sha256")
+        if decoded_snapshot.get("path") != expected_raw_path:
+            reason = "decoded raw receipt points at a different artifact"
+        elif not isinstance(expected_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_sha):
+            reason = "decoded raw receipt has no valid file hash"
+        elif not raw_path.is_file():
+            reason = "decoded raw response artifact is missing"
+        elif sha256_file(raw_path) != expected_sha:
+            reason = "decoded raw response artifact hash differs from its receipt"
+        else:
+            reason = None
+        if reason is None:
+            validate_snapshot_binding(decoded_snapshot, "decoded_raw")
+            try:
+                raw_value = _read_json(raw_path, label="receipt-verified decoded raw retry response")
+            except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+                fail(
+                    "retry_raw_artifact_unreadable", "decoded_raw", expected_raw_path,
+                    f"decoded raw response is no longer readable: {exc}",
+                )
+            if (
+                decoded_snapshot.get("canonical_json_sha256") != _response_sha256(raw_value)
+                or decoded_snapshot.get("semantic_view_sha256")
+                != _response_sha256(_semantic_retry_view(raw_value))
+            ):
+                fail(
+                    "retry_raw_artifact_receipt_mismatch", "decoded_raw", expected_raw_path,
+                    "decoded raw response canonical or semantic digest differs from its receipt",
+                )
+
+            candidate_path = response_path.with_name(
+                f"{response_path.stem}.attempt-{attempt_number:02d}{response_path.suffix}"
+            )
+            candidate_path_text = str(candidate_path.resolve())
+            candidate_snapshots = [
+                item for item in stage_snapshots
+                if isinstance(item, dict) and item.get("stage") == "validated_candidate"
+            ]
+            if len(candidate_snapshots) > 1:
+                fail(
+                    "retry_candidate_artifact_receipt_ambiguous", "validated_candidate",
+                    candidate_path_text,
+                    "attempt has multiple validated-candidate receipts",
+                )
+            candidate_receipt = None
+            if candidate_snapshots:
+                candidate_snapshot = candidate_snapshots[0]
+                candidate_sha = candidate_snapshot.get("file_bytes_sha256")
+                if candidate_snapshot.get("path") != candidate_path_text:
+                    reason = "validated candidate receipt points at a different artifact"
+                elif not isinstance(candidate_sha, str) or re.fullmatch(r"[0-9a-f]{64}", candidate_sha) is None:
+                    reason = "validated candidate receipt has no valid file hash"
+                elif not candidate_path.is_file():
+                    reason = "validated candidate artifact is missing"
+                elif sha256_file(candidate_path) != candidate_sha:
+                    reason = "validated candidate artifact hash differs from its receipt"
+                else:
+                    reason = None
+                if reason is not None:
+                    fail(
+                        "retry_candidate_artifact_receipt_mismatch", "validated_candidate",
+                        candidate_path_text, reason,
+                    )
+                validate_snapshot_binding(candidate_snapshot, "validated_candidate")
+                try:
+                    candidate_value = _read_json(
+                        candidate_path, label="receipt-verified validated retry candidate",
+                    )
+                except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+                    fail(
+                        "retry_candidate_artifact_unreadable", "validated_candidate",
+                        candidate_path_text,
+                        f"validated candidate is no longer readable: {exc}",
+                    )
+                if (
+                    candidate_snapshot.get("canonical_json_sha256")
+                    != _response_sha256(candidate_value)
+                    or candidate_snapshot.get("semantic_view_sha256")
+                    != _response_sha256(_semantic_retry_view(candidate_value))
+                ):
+                    fail(
+                        "retry_candidate_artifact_receipt_mismatch", "validated_candidate",
+                        candidate_path_text,
+                        "validated candidate canonical or semantic digest differs from its receipt",
+                    )
+                candidate_receipt = {
+                    "stage": "validated_candidate",
+                    "path": candidate_path_text,
+                    "sha256": candidate_sha,
+                    "canonical_json_sha256": candidate_snapshot["canonical_json_sha256"],
+                    "semantic_view_sha256": candidate_snapshot["semantic_view_sha256"],
+                    "projection_fingerprint_sha256": candidate_snapshot.get(
+                        "projection_fingerprint_sha256"
+                    ),
+                }
+            elif candidate_path.exists():
+                fail(
+                    "retry_candidate_artifact_receipt_missing", "validated_candidate",
+                    candidate_path_text,
+                    "validated candidate artifact exists without a stage receipt",
+                )
+            return {
+                "kind": "decoded_raw",
+                "attempt": attempt_number,
+                "path": expected_raw_path,
+                "sha256": expected_sha,
+                "validated_candidate_receipt": candidate_receipt,
+            }
+        error_code = "retry_raw_artifact_receipt_mismatch"
+        bad_path = expected_raw_path
+    else:
+        records = attempt_record.get("error_records")
+        no_response_record = next((
+            record for record in records
+            if isinstance(record, dict)
+            and record.get("code") in {
+                "host_response_parse_error", "host_response_unavailable",
+            }
+        ), None) if isinstance(records, list) else None
+        if isinstance(no_response_record, dict):
+            envelope_path = response_path.with_name(
+                f"{response_path.stem}.attempt-{attempt_number:02d}.raw-envelope.txt"
+            )
+            expected_envelope_path = str(envelope_path.resolve())
+            expected_sha = no_response_record.get("raw_envelope_sha256")
+            if raw_path.exists():
+                reason = "attempt claims no semantic response but has an unexpected raw JSON sidecar"
+                error_code = "retry_unexpected_raw_response_artifact"
+                bad_path = expected_raw_path
+            elif no_response_record.get("raw_envelope_path") != expected_envelope_path:
+                reason = "raw envelope receipt points at a different artifact"
+                error_code = "retry_raw_envelope_receipt_mismatch"
+                bad_path = expected_envelope_path
+            elif not isinstance(expected_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", expected_sha):
+                reason = "raw envelope receipt has no valid file hash"
+                error_code = "retry_raw_envelope_receipt_mismatch"
+                bad_path = expected_envelope_path
+            elif not envelope_path.is_file():
+                reason = "raw envelope artifact is missing"
+                error_code = "retry_raw_envelope_receipt_mismatch"
+                bad_path = expected_envelope_path
+            elif sha256_file(envelope_path) != expected_sha:
+                reason = "raw envelope artifact hash differs from its receipt"
+                error_code = "retry_raw_envelope_receipt_mismatch"
+                bad_path = expected_envelope_path
+            else:
+                return {
+                    "kind": "no_semantic_response",
+                    "attempt": attempt_number,
+                    "path": expected_envelope_path,
+                    "sha256": expected_sha,
+                    "reason_code": no_response_record.get("code"),
+                }
+        else:
+            reason = (
+                "attempt has neither a decoded-raw receipt nor a no-response receipt "
+                f"(record fields: {','.join(sorted(str(key) for key in attempt_record))})"
+            )
+            error_code = "retry_raw_artifact_receipt_missing"
+            bad_path = expected_raw_path
+
+    error = RetryRawArtifactIntegrityError(
+        f"retry stopped: attempt {attempt_number} artifact evidence is not intact ({reason})"
+    )
+    error.error_records = [{  # type: ignore[attr-defined]
+        "code": error_code,
+        "attempt": attempt_number,
+        "path": bad_path,
+        "reason": reason,
+    }]
+    raise error
+
+
+def _original_retry_blocker_records(
+    attempts: list[dict[str, Any]], fallback: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Prefer the first semantic blocker over later decode-only retry failures."""
+    no_response_codes = {"host_response_parse_error", "host_response_unavailable"}
+    for attempt in attempts:
+        records = attempt.get("retry_authorizing_error_records")
+        if not isinstance(records, list) or not records:
+            records = attempt.get("error_records")
+        if isinstance(records, list) and any(
+            isinstance(record, dict) and record.get("code") not in no_response_codes
+            for record in records
+        ):
+            return copy.deepcopy(records)
+    return copy.deepcopy(fallback)
+
+
+def _load_normalized_retry_raw_pair(
+    parent_path: Path, candidate_path: Path, response_schema: dict[str, Any], *,
+    parent_label: str = "retry parent raw response",
+    candidate_label: str = "retry candidate raw response",
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Load only the two model-side raw artifacts for semantic retry comparison."""
+    parent = normalize_native_response(
+        _read_json(parent_path, label=parent_label), response_schema,
+    )
+    candidate = normalize_native_response(
+        _read_json(candidate_path, label=candidate_label), response_schema,
+    )
+    return parent, candidate
+
+
+def _retry_has_no_progress(
+    parent_raw: dict[str, Any], candidate_raw: dict[str, Any],
+    parent_errors: list[Any], candidate_errors: list[Any],
+    parent_candidate_sha256: str | None, candidate_candidate_sha256: str | None,
+    parent_input_fingerprints: Any, candidate_input_fingerprints: dict[str, Any],
+) -> bool:
+    """Stop only when raw, repair plan, candidate, and complete inputs agree."""
+    if (
+        not _retry_fingerprints_complete(parent_input_fingerprints)
+        or not _retry_fingerprints_complete(candidate_input_fingerprints)
+        or parent_candidate_sha256 is None
+        or candidate_candidate_sha256 is None
+    ):
+        return False
+    return (
+        _response_sha256(_semantic_retry_view(parent_raw))
+        == _response_sha256(_semantic_retry_view(candidate_raw))
+        and _response_sha256(parent_errors) == _response_sha256(candidate_errors)
+        and parent_candidate_sha256 == candidate_candidate_sha256
+        and parent_input_fingerprints == candidate_input_fingerprints
+    )
 
 
 def _retry_change_paths(previous: Any, current: Any) -> list[str]:
@@ -3799,15 +4217,9 @@ def _retry_path_source_binding(
             "evidence": evidence_bindings,
         })
 
-    required_keys = (
-        "run_id", "source_sha256", "evidence_sha256", "clause_sha256", "request_sha256",
-    )
-    source_binding = {key: provenance.get(key) for key in required_keys}
-    if any(not isinstance(value, str) or not value for value in source_binding.values()):
+    source_binding = _retry_input_fingerprints(chunk_value)
+    if not _retry_fingerprints_complete(source_binding):
         complete = False
-    batch = chunk_value.get("batch")
-    source_binding["chunk_index"] = batch.get("index") if isinstance(batch, dict) else None
-    source_binding["chunk_sha256"] = _response_sha256(chunk_value) if chunk_value else None
     return source_binding, source_evidence_bindings, complete
 
 
@@ -5812,7 +6224,7 @@ def prepare_native_response_candidate(
         }
         if remaining_errors:
             remaining_error_records = contract_error_records(
-                remaining_errors, response=response, chunk=chunk,
+                remaining_errors, response=repaired_response, chunk=chunk,
             )
             combined_error_records: list[dict[str, Any]] = []
             seen_error_record_keys: set[tuple[str, str, str]] = set()
@@ -6028,6 +6440,13 @@ def _host_prompt(*, request_path: Path, chunk_path: Path,
         and "non_requirement_classification_relation" in retry_codes
     )
     if retry_parent_response_path is not None:
+        if retry_parent_response_sha256 is not None:
+            observed_parent_sha256 = sha256_file(retry_parent_response_path)
+            if observed_parent_sha256 != retry_parent_response_sha256:
+                raise ValueError(
+                    "retry parent path/hash binding mismatch: the supplied SHA-256 does not "
+                    "identify the exact file read by the prompt"
+                )
         retry_parent_inline = None
         try:
             parent_response = strict_json_loads(
@@ -6423,9 +6842,27 @@ def run_host_agent_chunk(
             command, timeout=timeout, controller=controller,
         )
     except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(
+        raw_envelope_path = response_path.with_name(
+            f"{response_path.stem}.raw-envelope.txt"
+        )
+        if raw_envelope_path.exists():
+            raise ValueError(
+                f"refusing to overwrite existing raw Host Agent output: {raw_envelope_path}"
+            ) from exc
+        partial_output = exc.output or ""
+        if isinstance(partial_output, bytes):
+            partial_output = partial_output.decode("utf-8", errors="replace")
+        atomic_write_text(raw_envelope_path, str(partial_output))
+        error = HostAgentResponseUnavailableError(
             f"Host Agent chunk {chunk_index}/{chunk_count} exceeded {timeout}s"
-        ) from exc
+        )
+        error.error_records = [{  # type: ignore[attr-defined]
+            "code": "host_response_unavailable",
+            "stage": "native_execution_timeout",
+            "raw_envelope_path": str(raw_envelope_path.resolve()),
+            "raw_envelope_sha256": sha256_file(raw_envelope_path),
+        }]
+        raise error from exc
     elapsed = round(time.time() - started, 1)
     raw_envelope_path = response_path.with_name(
         f"{response_path.stem}.raw-envelope.txt"
@@ -6443,22 +6880,50 @@ def run_host_agent_chunk(
         raw_stderr_path.write_text(result.stderr, encoding="utf-8")
     if result.returncode:
         detail = (result.stderr or result.stdout or "").strip()[-1600:]
-        raise RuntimeError(
+        error = HostAgentResponseUnavailableError(
             f"Host Agent chunk {chunk_index}/{chunk_count} failed with returncode "
             f"{result.returncode}: {detail}"
         )
+        error.error_records = [{  # type: ignore[attr-defined]
+            "code": "host_response_unavailable",
+            "stage": "native_execution_returncode",
+            "returncode": result.returncode,
+            "raw_envelope_path": str(raw_envelope_path.resolve()),
+            "raw_envelope_sha256": sha256_file(raw_envelope_path),
+        }]
+        raise error
     if controller is not None:
         controller.check()
     if adapter_id == "openclaw":
-        response, envelope = openclaw_adapter.parse_result(result.stdout)
+        try:
+            response, envelope = openclaw_adapter.parse_result(result.stdout)
+        except ValueError as exc:
+            error = HostAgentResponseParseError(str(exc))
+            error.error_records = [{  # type: ignore[attr-defined]
+                "code": "host_response_parse_error",
+                "stage": "native_response_decode",
+                "raw_envelope_path": str(raw_envelope_path.resolve()),
+                "raw_envelope_sha256": sha256_file(raw_envelope_path),
+            }]
+            raise error from exc
         route = verify_host_agent_route(envelope, model)
     else:
         final_message = None
         if last_message_path is not None and last_message_path.exists():
             final_message = last_message_path.read_text(encoding="utf-8")
-        response, envelope = codex_adapter.parse_result(
-            result.stdout, last_message=final_message,
-        )
+        try:
+            response, envelope = codex_adapter.parse_result(
+                result.stdout, last_message=final_message,
+            )
+        except ValueError as exc:
+            error = HostAgentResponseParseError(str(exc))
+            error.error_records = [{  # type: ignore[attr-defined]
+                "code": "host_response_parse_error",
+                "stage": "native_response_decode",
+                "raw_envelope_path": str(raw_envelope_path.resolve()),
+                "raw_envelope_sha256": sha256_file(raw_envelope_path),
+            }]
+            raise error from exc
         route = {
             "provider": None,
             "model": None,
@@ -6497,7 +6962,29 @@ def run_host_agent_chunk(
             "Host Agent response provenance conflict: "
             + ", ".join(provenance_mismatch_fields)
         )
-    response, candidate_audit = prepare_native_response_candidate(raw_response, chunk)
+    response_schema = (
+        chunk.get("response_schema")
+        if isinstance(chunk.get("response_schema"), dict) else {}
+    )
+    decoded_raw_snapshot = _attempt_stage_snapshot(
+        "decoded_raw", raw_response, path=raw_response_path, chunk=chunk,
+    )
+    try:
+        normalized_raw_response = normalize_native_response(raw_response, response_schema)
+        response, candidate_audit = prepare_native_response_candidate(raw_response, chunk)
+    except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+        exc.retry_stage_snapshots = [decoded_raw_snapshot]  # type: ignore[attr-defined]
+        raise
+    attempt_stage_snapshots = [
+        decoded_raw_snapshot,
+        _attempt_stage_snapshot(
+            "normalized_raw", normalized_raw_response, path=None, chunk=chunk,
+        ),
+        _attempt_stage_snapshot(
+            "projected_candidate", response, path=None, chunk=chunk,
+            projection_audit=candidate_audit,
+        ),
+    ]
     existing_payload_projections = candidate_audit[
         "existing_requirement_payload_projections"
     ]
@@ -6521,6 +7008,10 @@ def run_host_agent_chunk(
         response_path,
         strict_json_dumps(response, ensure_ascii=False, indent=2) + "\n",
     )
+    attempt_stage_snapshots.append(_attempt_stage_snapshot(
+        "validated_candidate", response, path=response_path, chunk=chunk,
+        projection_audit=candidate_audit,
+    ))
     audit = {
         "adapter_id": adapter_id,
         "chunk_index": chunk_index,
@@ -6538,6 +7029,7 @@ def run_host_agent_chunk(
         "codex_output_schema_path": str(output_schema_path.resolve()) if output_schema_path else None,
         "codex_output_schema_sha256": sha256_file(output_schema_path) if output_schema_path else None,
         "status": envelope.get("status", "ok"),
+        "candidate_status": "locally_validated_pending_independent_review",
         "returncode": result.returncode,
         "elapsed_s": elapsed,
         "runner": "codex-exec" if adapter_id == "codex" else (
@@ -6560,7 +7052,15 @@ def run_host_agent_chunk(
         "raw_response_path": str(raw_response_path.resolve()),
         "raw_response_sha256": _response_sha256(raw_response),
         "accepted_response_sha256": _response_sha256(response),
+        "attempt_stage_snapshots": attempt_stage_snapshots,
+        "projection_audit_sha256": _response_sha256(candidate_audit),
         "existing_requirement_payload_projections": existing_payload_projections,
+        "complete_abstract_source_projections": candidate_audit[
+            "complete_abstract_source_projections"
+        ],
+        "soft_keyword_count_guidance_projections": candidate_audit[
+            "soft_keyword_count_guidance_projections"
+        ],
         "source_obligation_verification_projections": source_verification_projections,
         "mechanical_repair_policy": (
             "remove_informational_only_requirement_v1 is the only relation projection; "
@@ -6651,6 +7151,17 @@ def _validate_completed_chunk_set(
             or independent_envelope.get("candidate_response_sha256") != accepted_sha256
             or independent_envelope.get("provenance") != response_provenance
             or independent.get("candidate_response_sha256") != accepted_sha256
+            or not isinstance(independent_envelope.get("obligation_analysis_ledger"), dict)
+            or independent_envelope["obligation_analysis_ledger"].get("path") != independent.get(
+                "obligation_analysis_ledger_path"
+            )
+            or independent_envelope["obligation_analysis_ledger"].get("sha256") != independent.get(
+                "obligation_analysis_ledger_sha256"
+            )
+            or independent_envelope["obligation_analysis_ledger"].get("protocol")
+            != "obligation_analysis_ledger_v1"
+            or independent_envelope["obligation_analysis_ledger"].get("status") != "analysis_only"
+            or independent_envelope["obligation_analysis_ledger"].get("submission_ready") is not False
         ):
             raise ValueError(f"Host Agent chunk {index} independent review is not bound to its accepted response")
         findings = independent_envelope.get("results")
@@ -6667,6 +7178,196 @@ def _validate_completed_chunk_set(
             for item in findings
         ) or reviewed_clause_ids != expected_clause_ids:
             raise ValueError(f"Host Agent chunk {index} independent review contains incomplete coverage")
+        ledger_relative = independent.get("obligation_analysis_ledger_path")
+        if not isinstance(ledger_relative, str) or not ledger_relative:
+            raise ValueError(f"Host Agent chunk {index} has no obligation analysis ledger")
+        ledger_path = _bound_path(
+            review_dir, ledger_relative,
+            label=f"obligation analysis ledger path {index}",
+        )
+        if not ledger_path.is_file() or sha256_file(ledger_path) != independent.get(
+            "obligation_analysis_ledger_sha256"
+        ):
+            raise ValueError(f"Host Agent chunk {index} obligation analysis ledger hash mismatch")
+        ledger = _read_json(ledger_path, label=f"obligation analysis ledger {index}")
+        ledger_obligations = ledger.get("obligations") if isinstance(ledger, dict) else None
+        ledger_pointer = independent_envelope["obligation_analysis_ledger"]
+        if (
+            not isinstance(ledger, dict)
+            or ledger.get("protocol") != "obligation_analysis_ledger_v1"
+            or ledger.get("status") != "analysis_only"
+            or ledger.get("run_id") != response_provenance.get("run_id")
+            or ledger.get("chunk_index") != index
+            or ledger.get("candidate_response_sha256") != accepted_sha256
+            or ledger.get("provenance") != response_provenance
+            or ledger.get("submission_ready") is not False
+            or not isinstance(ledger_obligations, list)
+            or ledger_pointer.get("obligation_count") != len(ledger_obligations)
+            or any(
+                not isinstance(item, dict)
+                or item.get("execution_authorized") is not False
+                or not isinstance(item.get("source_ref"), str)
+                or not isinstance(item.get("source_quote"), str)
+                or not isinstance(item.get("source_text_sha256"), str)
+                or not isinstance(item.get("requirement_refs"), list)
+                for item in ledger_obligations
+            )
+        ):
+            raise ValueError(f"Host Agent chunk {index} obligation analysis ledger is not safely bound")
+
+
+def _write_obligation_analysis_ledger(
+    review_result: dict[str, Any], response: dict[str, Any], chunk: dict[str, Any], *,
+    coverage_request: dict[str, Any], output_dir: Path, review_dir: Path,
+    run_id: str, chunk_index: int, attempt: int,
+) -> dict[str, Any]:
+    """Persist source-span-bound obligation analysis, never execution authority."""
+    compilation_path_value = review_result.get("source_reference_compilation_path")
+    if not isinstance(compilation_path_value, str) or not compilation_path_value:
+        raise ValueError("completed independent review has no source-reference compilation path")
+    compilation_path = _bound_path(
+        output_dir, compilation_path_value,
+        label="source-reference compilation path",
+    )
+    if not compilation_path.is_file():
+        raise ValueError("source-reference compilation artifact is missing")
+    compilation = _read_json(compilation_path, label="source-reference compilation")
+    expected_request_sha256 = sha256_json(coverage_request)
+    expected_packet = build_source_reference_packet(coverage_request)
+    if (
+        not isinstance(compilation, dict)
+        or compilation.get("protocol") != "semantic_source_references_v2"
+        or compilation.get("run_id") != run_id
+        or compilation.get("request_sha256") != expected_request_sha256
+        or review_result.get("request_sha256") != expected_request_sha256
+        or compilation.get("packet_sha256") != sha256_json(expected_packet)
+        or review_result.get("source_reference_compilation_sha256") != sha256_file(compilation_path)
+    ):
+        raise ValueError("source-reference compilation is not bound to the current review")
+    source_checks = {
+        item.get("check_id"): item
+        for item in expected_packet.get("checks", [])
+        if isinstance(item, dict) and isinstance(item.get("check_id"), str)
+    }
+    selections = {
+        item.get("check_id"): item
+        for item in compilation.get("selections", [])
+        if isinstance(item, dict) and isinstance(item.get("check_id"), str)
+    }
+    provenance = chunk.get("provenance") if isinstance(chunk.get("provenance"), dict) else {}
+    candidate_sha = _response_sha256(response)
+    obligations: list[dict[str, Any]] = []
+    result_items = review_result.get("results") or []
+    if {item.get("check_id") for item in result_items if isinstance(item, dict)} != set(source_checks):
+        raise ValueError("independent review results do not cover the current source checks")
+    if set(selections) != set(source_checks):
+        raise ValueError("source-reference compilation does not cover the current source checks")
+    for result in result_items:
+        if not isinstance(result, dict):
+            raise ValueError("independent review contains a non-object result")
+        check_id = result.get("check_id")
+        selection = selections.get(check_id) if isinstance(check_id, str) else None
+        current_check = source_checks.get(check_id) if isinstance(check_id, str) else None
+        selected_obligations = selection.get("obligations") if isinstance(selection, dict) else None
+        identified = result.get("identified_obligations")
+        if (
+            not isinstance(current_check, dict)
+            or not isinstance(selected_obligations, list)
+            or not isinstance(identified, list)
+        ):
+            raise ValueError(f"source-span obligation selections are missing for {check_id}")
+        if len(selected_obligations) != len(identified):
+            raise ValueError(f"source-span obligation selection count mismatch for {check_id}")
+        for obligation_index, (obligation, selected) in enumerate(zip(identified, selected_obligations)):
+            span = selected.get("span") if isinstance(selected, dict) else None
+            source_text = current_check.get("document_text")
+            catalog = {
+                item.get("ref_id"): item
+                for item in current_check.get("source_spans", [])
+                if isinstance(item, dict) and isinstance(item.get("ref_id"), str)
+            }
+            if (
+                not isinstance(obligation, dict)
+                or not isinstance(span, dict)
+                or selected.get("obligation_index") != obligation_index
+                or selected.get("source_ref") != span.get("ref_id")
+                or selected.get("source_ref") not in catalog
+                or catalog.get(selected.get("source_ref")) != span
+                or obligation.get("source_quote") != span.get("text")
+                or not isinstance(source_text, str)
+                or isinstance(span.get("start"), bool)
+                or not isinstance(span.get("start"), int)
+                or isinstance(span.get("end"), bool)
+                or not isinstance(span.get("end"), int)
+                or not (0 <= span["start"] < span["end"] <= len(source_text))
+                or source_text[span["start"] : span["end"]] != span.get("text")
+                or span.get("source_sha256") != sha256_json(source_text)
+            ):
+                raise ValueError(f"source-span obligation binding is invalid for {check_id}")
+            identity = {
+                "protocol": "obligation_analysis_ledger_v1",
+                "run_id": run_id,
+                "case_id": chunk.get("case_id"),
+                "chunk_index": chunk_index,
+                "attempt": attempt,
+                "candidate_response_sha256": candidate_sha,
+                "review_request_sha256": review_result.get("request_sha256"),
+                "review_response_sha256": review_result.get("response_sha256"),
+                "check_id": check_id,
+                "obligation_index": obligation_index,
+                "source_ref": selected.get("source_ref"),
+                "source_sha256": span.get("source_sha256"),
+                "start": span.get("start"),
+                "end": span.get("end"),
+            }
+            obligations.append({
+                "analysis_obligation_id": "AO-" + _response_sha256(identity)[:24],
+                "check_id": check_id,
+                "source_ref": selected["source_ref"],
+                "source_quote": span["text"],
+                "source_start": span["start"],
+                "source_end": span["end"],
+                "source_text_sha256": span["source_sha256"],
+                "obligation_summary": obligation.get("obligation_summary"),
+                "disposition": obligation.get("disposition"),
+                "scope_dependency_codes": copy.deepcopy(
+                    obligation.get("scope_dependency_codes") or []
+                ),
+                "scope_dependency_dimensions": copy.deepcopy(
+                    obligation.get("scope_dependency_dimensions") or []
+                ),
+                "requirement_refs": copy.deepcopy(obligation.get("requirement_refs") or []),
+                "execution_authorized": False,
+            })
+        ledger = {
+        "schema_version": "1.0",
+        "protocol": "obligation_analysis_ledger_v1",
+        "status": "analysis_only",
+        "run_id": run_id,
+        "case_id": chunk.get("case_id"),
+        "chunk_index": chunk_index,
+        "attempt": attempt,
+        "candidate_response_sha256": candidate_sha,
+        "review_request_sha256": review_result.get("request_sha256"),
+        "review_response_sha256": review_result.get("response_sha256"),
+        "provenance": copy.deepcopy(provenance),
+        "source_reference_protocol": compilation.get("protocol"),
+        "source_reference_compilation_sha256": sha256_file(compilation_path),
+        "submission_ready": False,
+        "obligations": obligations,
+    }
+    ledger_path = output_dir / "obligation-analysis-ledger.json"
+    if ledger_path.exists():
+        raise ValueError(f"refusing to overwrite obligation analysis ledger: {ledger_path}")
+    _write_json(ledger_path, ledger)
+    return {
+        "path": ledger_path.relative_to(review_dir).as_posix(),
+        "sha256": sha256_file(ledger_path),
+        "protocol": ledger["protocol"],
+        "status": ledger["status"],
+        "obligation_count": len(obligations),
+        "submission_ready": False,
+    }
 
 
 def _run_independent_obligation_coverage_review(
@@ -6722,6 +7423,12 @@ def _run_independent_obligation_coverage_review(
             config_path=config_path,
             controller=controller,
         )
+        ledger_pointer = _write_obligation_analysis_ledger(
+            review_result, response, chunk,
+            coverage_request=coverage_request,
+            output_dir=output_dir, review_dir=review_dir,
+            run_id=run_id, chunk_index=chunk_index, attempt=attempt,
+        )
         incomplete_results = [
             item for item in (review_result.get("results") or [])
             if isinstance(item, dict) and item.get("verdict") == "incomplete"
@@ -6740,6 +7447,7 @@ def _run_independent_obligation_coverage_review(
             "provenance": copy.deepcopy(coverage_request.get("provenance")),
             "review_request_sha256": review_result.get("request_sha256"),
             "review_response_sha256": review_result.get("response_sha256"),
+            "obligation_analysis_ledger": copy.deepcopy(ledger_pointer),
             "results": copy.deepcopy(review_result.get("results") or []),
             "summary": copy.deepcopy(review_result.get("summary") or {}),
             "review_audit": review_result,
@@ -6759,6 +7467,9 @@ def _run_independent_obligation_coverage_review(
             "review_request_sha256": review_result.get("request_sha256"),
             "review_response_sha256": review_result.get("response_sha256"),
             "summary": copy.deepcopy(review_result.get("summary") or {}),
+            "obligation_analysis_ledger_path": ledger_pointer["path"],
+            "obligation_analysis_ledger_sha256": ledger_pointer["sha256"],
+            "obligation_analysis_ledger_status": ledger_pointer["status"],
         }
         if incomplete_results:
             clause_map = {
@@ -6771,11 +7482,54 @@ def _run_independent_obligation_coverage_review(
                 if isinstance(item, dict) and isinstance(item.get("clause_id"), str)
             }
             candidate_semantic_sha = _response_sha256(_semantic_retry_view(response))
+            coverage_checks = {
+                str(check.get("check_id")): check
+                for check in coverage_request.get("checks", [])
+                if isinstance(check, dict) and isinstance(check.get("check_id"), str)
+            }
+            ledger_obligations = _read_json(
+                _bound_path(
+                    review_dir, ledger_pointer["path"],
+                    label="obligation analysis ledger",
+                ), label="obligation analysis ledger",
+            ).get("obligations", [])
             error_records = []
+            correction_checks = []
+            primary_repairable = False
             for item in incomplete_results:
                 clause_id = str(item.get("check_id") or "")
                 clause = clause_map.get(clause_id, {})
+                check = coverage_checks.get(clause_id, {})
+                review_context = check.get("review_context") if isinstance(check, dict) else {}
+                review_context = review_context if isinstance(review_context, dict) else {}
                 review_index = review_indexes.get(clause_id)
+                missing_obligations = [
+                    copy.deepcopy(obligation)
+                    for obligation in ledger_obligations
+                    if isinstance(obligation, dict)
+                    and obligation.get("check_id") == clause_id
+                    and obligation.get("disposition") == "unrepresented"
+                ]
+                missing_quotes = list(dict.fromkeys(
+                    obligation.get("source_quote")
+                    for obligation in missing_obligations
+                    if isinstance(obligation.get("source_quote"), str)
+                ))
+                repairable = review_context.get("requires_requirement") is True
+                primary_repairable = primary_repairable or repairable
+                correction_checks.append({
+                    "check_id": clause_id,
+                    "missing_obligations": [
+                        {
+                            "analysis_obligation_id": obligation.get("analysis_obligation_id"),
+                            "source_ref": obligation.get("source_ref"),
+                            "source_quote": obligation.get("source_quote"),
+                            "source_start": obligation.get("source_start"),
+                            "source_end": obligation.get("source_end"),
+                        }
+                        for obligation in missing_obligations
+                    ],
+                })
                 error_records.append({
                     "code": "independent_obligation_review_incomplete",
                     "clause_id": clause_id,
@@ -6790,24 +7544,62 @@ def _run_independent_obligation_coverage_review(
                     ), None),
                     "evidence_ids": copy.deepcopy(clause.get("evidence_ids") or []),
                     "message": item.get("rationale"),
-                    "missing_source_quotes": [
-                        obligation.get("source_quote")
-                        for obligation in item.get("identified_obligations", [])
-                        if isinstance(obligation, dict)
-                        and obligation.get("disposition") == "unrepresented"
-                    ],
+                    "missing_obligations": missing_obligations,
+                    "missing_source_quotes": missing_quotes,
+                    "primary_repairable": repairable,
                     "candidate_response_sha256": response_sha,
                     "candidate_semantic_sha256": candidate_semantic_sha,
                     "review_request_sha256": review_result.get("request_sha256"),
                     "review_response_sha256": review_result.get("response_sha256"),
                 })
+            if _provider_attempt < INDEPENDENT_REVIEW_PROVIDER_MAX_ATTEMPTS:
+                retry_feedback = {
+                    "code": "independent_obligation_review_incomplete",
+                    "checks": correction_checks,
+                }
+                attempt_record = {
+                    "provider_attempt": _provider_attempt,
+                    "status": "source_coverage_incomplete",
+                    "candidate_response_sha256": response_sha,
+                    "missing_obligation_count": sum(
+                        len(item.get("missing_obligations") or [])
+                        for item in correction_checks
+                    ),
+                    "audit_path": pointer["audit_path"],
+                    "audit_sha256": pointer["audit_sha256"],
+                    "obligation_analysis_ledger_path": ledger_pointer["path"],
+                    "obligation_analysis_ledger_sha256": ledger_pointer["sha256"],
+                }
+                attempt_history = retry_history + [attempt_record]
+                controller.check()
+                time.sleep(INDEPENDENT_REVIEW_RETRY_BACKOFF_SECONDS)
+                controller.check()
+                return _run_independent_obligation_coverage_review(
+                    response,
+                    chunk,
+                    review_dir=review_dir,
+                    run_id=run_id,
+                    chunk_index=chunk_index,
+                    attempt=attempt,
+                    host_runtime=host_runtime,
+                    model=model,
+                    timeout=timeout,
+                    agent_id=agent_id,
+                    runner=runner,
+                    binary=binary,
+                    config_path=config_path,
+                    controller=controller,
+                    _provider_attempt=_provider_attempt + 1,
+                    _provider_attempt_history=attempt_history,
+                    _retry_feedback=retry_feedback,
+                )
             error = IndependentObligationReviewError(
                 f"independent source-obligation review found incomplete coverage in "
                 f"{len(incomplete_results)} clause(s) of chunk {chunk_index}"
             )
             error.error_records = error_records  # type: ignore[attr-defined]
             error.independent_review_audit = pointer  # type: ignore[attr-defined]
-            error.retryable = True  # type: ignore[attr-defined]
+            error.retryable = primary_repairable  # type: ignore[attr-defined]
             raise error
         return pointer
     except ExternalComplianceCorrectionRequiredError as review_error:
@@ -7316,8 +8108,12 @@ def run_bridge(
             ), None)
         attempts = primary_lifecycle.get("attempts", []) if isinstance(primary_lifecycle, dict) else []
         primary_attempt = attempts[-1] if attempts and isinstance(attempts[-1], dict) else {}
-        primary_records = primary_attempt.get("error_records")
-        if not isinstance(primary_records, list):
+        primary_records = primary_attempt.get("retry_authorizing_error_records")
+        if not isinstance(primary_records, list) or not primary_records:
+            primary_records = primary_attempt.get("error_records")
+        if not isinstance(primary_records, list) or not primary_records:
+            primary_records = getattr(error, "primary_error_records", None)
+        if not isinstance(primary_records, list) or not primary_records:
             primary_records = getattr(error, "error_records", [])
         if not isinstance(primary_records, list):
             primary_records = []
@@ -7352,6 +8148,19 @@ def run_bridge(
         for index, item in sorted(lifecycle_items.items()):
             if not isinstance(item, dict):
                 continue
+            for integrity in item.get("secondary_retry_integrity_failures", []):
+                if isinstance(integrity, dict):
+                    secondary_errors.append({
+                        "kind": "retry_raw_artifact_integrity",
+                        "chunk_index": index,
+                        "message": integrity.get("error"),
+                        "missing_raw_paths": copy.deepcopy(
+                            integrity.get("missing_raw_paths") or []
+                        ),
+                        "primary_error_records": copy.deepcopy(
+                            integrity.get("primary_error_records") or []
+                        ),
+                    })
             for drift in item.get("secondary_retry_drift_failures", []):
                 if isinstance(drift, dict):
                     secondary_errors.append({
@@ -7521,12 +8330,44 @@ def run_bridge(
                         ],
                     )
                 retry_parent_response_path = None
+                retry_artifact_receipts: list[dict[str, Any]] = []
                 if attempt > 1:
-                    candidate_parent_path = response_path.with_name(
-                        f"{response_path.stem}.attempt-{attempt - 1:02d}.raw{response_path.suffix}"
-                    )
-                    if candidate_parent_path.is_file():
-                        retry_parent_response_path = candidate_parent_path
+                    with lifecycle_lock:
+                        prior_attempt_records = copy.deepcopy(
+                            chunk_lifecycle[index].get("attempts", [])[:-1]
+                        )
+                    for prior_attempt_number, prior_attempt_record in enumerate(
+                        prior_attempt_records, start=1,
+                    ):
+                        if not isinstance(prior_attempt_record, dict):
+                            error = RetryRawArtifactIntegrityError(
+                                f"retry stopped: attempt {prior_attempt_number} receipt is malformed"
+                            )
+                            error.error_records = [{  # type: ignore[attr-defined]
+                                "code": "retry_attempt_receipt_malformed",
+                                "attempt": prior_attempt_number,
+                            }]
+                            error.primary_error_records = _original_retry_blocker_records(  # type: ignore[attr-defined]
+                                prior_attempt_records, retry_error_records,
+                            )
+                            raise error
+                        try:
+                            receipt = _validate_retry_attempt_artifact(
+                                response_path, prior_attempt_number, prior_attempt_record,
+                            )
+                        except RetryRawArtifactIntegrityError as integrity_error:
+                            integrity_error.primary_error_records = _original_retry_blocker_records(  # type: ignore[attr-defined]
+                                prior_attempt_records, retry_error_records,
+                            )
+                            raise
+                        retry_artifact_receipts.append(receipt)
+                    if retry_artifact_receipts:
+                        immediate_parent_receipt = retry_artifact_receipts[-1]
+                        retry_parent_response_path = Path(immediate_parent_receipt["path"])
+                        with lifecycle_lock:
+                            chunk_lifecycle[index]["retry_parent_response_sha256"] = (
+                                immediate_parent_receipt["sha256"]
+                            )
                 audit = run_host_agent_chunk(
                     request_path=request_path,
                     chunk_path=chunks_path,
@@ -7560,142 +8401,368 @@ def run_bridge(
                         if failures else None
                     ),
                 )
+                with lifecycle_lock:
+                    if chunk_lifecycle[index].get("attempts"):
+                        chunk_lifecycle[index]["attempts"][-1]["stage_snapshots"] = copy.deepcopy(
+                            audit.get("attempt_stage_snapshots", [])
+                        )
+                        chunk_lifecycle[index]["attempts"][-1]["candidate_status"] = audit.get(
+                            "candidate_status"
+                        )
                 if attempt > 1:
-                    previous_raw_path = response_path.with_name(
-                        f"{response_path.stem}.attempt-{attempt - 1:02d}.raw{response_path.suffix}"
+                    current_raw_path = attempt_response_path.with_name(
+                        f"{attempt_response_path.stem}.raw{attempt_response_path.suffix}"
                     )
-                    if previous_raw_path.is_file():
-                        previous_response = normalize_native_response(
-                            _read_json(
+                    response_schema = (
+                        chunk.get("response_schema")
+                        if isinstance(chunk.get("response_schema"), dict) else {}
+                    )
+                    semantic_parent_receipt = next((
+                        receipt for receipt in reversed(retry_artifact_receipts)
+                        if receipt.get("kind") == "decoded_raw"
+                    ), None)
+                    semantic_parent_attempt_record = next((
+                        record for record in prior_attempt_records
+                        if isinstance(record, dict)
+                        and isinstance(semantic_parent_receipt, dict)
+                        and record.get("attempt") == semantic_parent_receipt.get("attempt")
+                    ), {})
+                    semantic_parent_error_records = (
+                        semantic_parent_attempt_record.get("retry_authorizing_error_records")
+                        or semantic_parent_attempt_record.get("error_records")
+                        or []
+                    )
+                    if not isinstance(semantic_parent_error_records, list):
+                        semantic_parent_error_records = []
+                    previous_raw_path = (
+                        Path(semantic_parent_receipt["path"])
+                        if isinstance(semantic_parent_receipt, dict)
+                        else response_path.with_name(
+                            f"{response_path.stem}.attempt-{attempt - 1:02d}.raw{response_path.suffix}"
+                        )
+                    )
+                    if not current_raw_path.is_file():
+                        missing_paths = [str(current_raw_path.resolve())]
+                        comparison_audit = {
+                            "policy": "same_stage_raw_to_raw_plus_candidate_to_candidate_v1",
+                            "status": "blocked_missing_raw_artifact",
+                            "missing_raw_paths": missing_paths,
+                            "candidate_comparison_status": "not_attempted",
+                        }
+                        audit["retry_stage_comparison"] = comparison_audit
+                        error = RetryRawArtifactIntegrityError(
+                            "retry raw-to-raw drift check cannot run because the current raw response artifact is missing"
+                        )
+                        error.error_records = [{  # type: ignore[attr-defined]
+                            "code": "retry_raw_artifact_missing",
+                            "comparison_stage": "normalized_raw_to_normalized_raw",
+                            "missing_paths": missing_paths,
+                            "primary_error_records": _original_retry_blocker_records(
+                                prior_attempt_records, retry_error_records,
+                            ),
+                        }]
+                        error.primary_error_records = _original_retry_blocker_records(  # type: ignore[attr-defined]
+                            prior_attempt_records, retry_error_records,
+                        )
+                        with lifecycle_lock:
+                            chunk_lifecycle[index].setdefault(
+                                "secondary_retry_integrity_failures", []
+                            ).append({
+                                "error": str(error),
+                                "comparison_stage": "normalized_raw_to_normalized_raw",
+                                "missing_raw_paths": missing_paths,
+                                "primary_error_records": _original_retry_blocker_records(
+                                    prior_attempt_records, retry_error_records,
+                                ),
+                                "integrity_error_records": copy.deepcopy(error.error_records),
+                            })
+                        raise error
+                    if semantic_parent_receipt is None and retry_artifact_receipts:
+                        unparsed_parent = retry_artifact_receipts[-1]
+                        audit["retry_stage_comparison"] = {
+                            "policy": "same_stage_raw_to_raw_plus_candidate_to_candidate_v1",
+                            "status": "no_prior_semantic_response",
+                            "parent_attempt_receipts": copy.deepcopy(retry_artifact_receipts),
+                            "parent_raw_envelope_path": unparsed_parent["path"],
+                            "parent_raw_envelope_sha256": unparsed_parent["sha256"],
+                            "candidate_raw_path": str(current_raw_path.resolve()),
+                            "candidate_raw_sha256": sha256_file(current_raw_path),
+                            "candidate_comparison_status": "not_attempted_no_prior_decoded_semantic_json",
+                        }
+                    if (
+                        semantic_parent_receipt is not None
+                        and previous_raw_path.is_file()
+                        and current_raw_path.is_file()
+                    ):
+                        previous_raw, current_raw = _load_normalized_retry_raw_pair(
                             previous_raw_path,
-                            label=f"Host Agent previous raw response {index} attempt {attempt - 1}",
-                            ),
-                            chunk.get("response_schema") if isinstance(chunk.get("response_schema"), dict) else {},
-                        )
-                        response_schema = (
-                            chunk.get("response_schema")
-                            if isinstance(chunk.get("response_schema"), dict)
-                            else {}
-                        )
-                        current_response = normalize_native_response(
-                            _read_json(
-                                attempt_response_path,
-                                label=f"Host Agent response {index} attempt {attempt}",
-                            ),
+                            current_raw_path,
                             response_schema,
+                            parent_label=(
+                                f"Host Agent previous decoded raw response {index} attempt "
+                                f"{semantic_parent_receipt['attempt']}"
+                            ),
+                            candidate_label=(
+                                f"Host Agent current raw response {index} attempt {attempt}"
+                            ),
                         )
-                        relation_repair, relation_repair_audit = _v3_relation_completion_response(
-                            previous_response,
-                            current_response,
-                            retry_error_records,
-                            chunk=chunk,
-                        )
-                        if relation_repair is not None:
-                            relation_repair = _bind_current_invocation_provenance(
-                                relation_repair, provenance,
-                            )
-                            atomic_write_text(
-                                attempt_response_path,
-                                strict_json_dumps(relation_repair, ensure_ascii=False, indent=2) + "\n",
-                            )
-                            current_response = relation_repair
-                            audit.setdefault("semantic_retry_repairs", []).append(
-                                relation_repair_audit
-                            )
-                        obligation_repair, obligation_repair_audit = (
-                            _v3_uncovered_obligation_reclassification_response(
-                                previous_response,
-                                current_response,
-                                retry_error_records,
-                                chunk=chunk,
-                            )
-                        )
-                        if obligation_repair is not None:
-                            obligation_repair = _bind_current_invocation_provenance(
-                                obligation_repair, provenance,
-                            )
-                            atomic_write_text(
-                                attempt_response_path,
-                                strict_json_dumps(obligation_repair, ensure_ascii=False, indent=2) + "\n",
-                            )
-                            current_response = obligation_repair
-                            audit.setdefault("semantic_retry_repairs", []).append(
-                                obligation_repair_audit
-                            )
-                        authoring_repair, authoring_repair_audit = (
-                            _v3_authoring_content_reclassification_response(
-                                previous_response,
-                                current_response,
-                                retry_error_records,
-                                chunk=chunk,
-                            )
-                        )
-                        if authoring_repair is not None:
-                            authoring_repair = _bind_current_invocation_provenance(
-                                authoring_repair, provenance,
-                            )
-                            atomic_write_text(
-                                attempt_response_path,
-                                strict_json_dumps(authoring_repair, ensure_ascii=False, indent=2) + "\n",
-                            )
-                            current_response = authoring_repair
-                            audit.setdefault("semantic_retry_repairs", []).append(
-                                authoring_repair_audit
-                            )
+                        retry_parent_response = previous_raw
+                        retry_candidate_response = current_raw
                         change_error, semantic_changes = _retry_semantic_change_error(
-                            previous_response,
-                            current_response,
-                            retry_error_records,
+                            previous_raw,
+                            current_raw,
+                            semantic_parent_error_records,
                             contract_version=contract_version,
                             chunk=chunk,
                             authorization_out=pending_retry_authorizations,
                         )
-                        retry_parent_response = previous_response
-                        retry_candidate_response = current_response
+                        comparison_audit: dict[str, Any] = {
+                            "policy": "same_stage_raw_to_raw_plus_candidate_to_candidate_v1",
+                            "raw_parent_attempt": semantic_parent_receipt["attempt"],
+                            "raw_candidate_attempt": attempt,
+                            "intervening_attempt_receipts": [
+                                copy.deepcopy(receipt)
+                                for receipt in retry_artifact_receipts
+                                if receipt["attempt"] > semantic_parent_receipt["attempt"]
+                            ],
+                            "raw_parent_file_sha256": sha256_file(previous_raw_path),
+                            "raw_candidate_file_sha256": sha256_file(current_raw_path),
+                            "raw_parent_canonical_sha256": _response_sha256(previous_raw),
+                            "raw_candidate_canonical_sha256": _response_sha256(current_raw),
+                            "raw_semantic_changed_paths": list(semantic_changes),
+                            "authorization_parent_attempt": semantic_parent_receipt["attempt"],
+                            "authorization_error_records_sha256": _response_sha256(
+                                semantic_parent_error_records
+                            ),
+                            "candidate_comparison_status": "not_attempted",
+                        }
                         if change_error is not None:
+                            comparison_audit["raw_drift_error"] = str(change_error)
+                            audit["retry_stage_comparison"] = comparison_audit
                             with lifecycle_lock:
-                                chunk_lifecycle[index].setdefault("semantic_retry_changes", []).extend(
-                                    semantic_changes
-                                )
                                 chunk_lifecycle[index].setdefault(
                                     "secondary_retry_drift_failures", []
                                 ).append({
                                     "error": str(change_error),
+                                    "comparison_stage": "normalized_raw_to_normalized_raw",
                                     "changed_paths": list(semantic_changes),
-                                    "parent_response_sha256": _response_sha256(previous_response),
-                                    "candidate_response_sha256": _response_sha256(current_response),
-                                    "primary_error_records": copy.deepcopy(retry_error_records),
+                                    "parent_response_sha256": _response_sha256(previous_raw),
+                                    "candidate_response_sha256": _response_sha256(current_raw),
+                                    "primary_error_records": copy.deepcopy(
+                                        semantic_parent_error_records
+                                    ),
+                                    "drift_error_records": copy.deepcopy(
+                                        getattr(change_error, "error_records", [])
+                                    ),
                                 })
-                            change_error.error_records = copy.deepcopy(  # type: ignore[attr-defined]
-                                retry_error_records
+                                chunk_lifecycle[index].setdefault(
+                                    "semantic_retry_changes", []
+                                ).extend(semantic_changes)
+                            # Preserve the drift error's own paths and records;
+                            # the original blocker is retained separately.
+                            change_error.primary_error_records = copy.deepcopy(  # type: ignore[attr-defined]
+                                semantic_parent_error_records
                             )
                             raise change_error
+
+                        current_candidate = _read_json(
+                            attempt_response_path,
+                            label=f"Host Agent projected candidate {index} attempt {attempt}",
+                        )
+                        previous_candidate: dict[str, Any] | None = None
+                        previous_projection_audit: dict[str, Any] | None = None
+                        persisted_candidate_receipt = semantic_parent_receipt.get(
+                            "validated_candidate_receipt"
+                        ) if isinstance(semantic_parent_receipt, dict) else None
+                        if isinstance(persisted_candidate_receipt, dict):
+                            # Revalidate the exact persisted candidate after the
+                            # provider call as well as before dispatch.  Compare
+                            # the same representation stage that its receipt
+                            # attests to; do not silently substitute a freshly
+                            # regenerated candidate for the recorded artifact.
+                            refreshed_parent_receipt = _validate_retry_attempt_artifact(
+                                response_path,
+                                int(semantic_parent_receipt["attempt"]),
+                                semantic_parent_attempt_record,
+                            )
+                            refreshed_candidate_receipt = refreshed_parent_receipt.get(
+                                "validated_candidate_receipt"
+                            )
+                            if (
+                                not isinstance(refreshed_candidate_receipt, dict)
+                                or refreshed_candidate_receipt.get("sha256")
+                                != persisted_candidate_receipt.get("sha256")
+                            ):
+                                integrity_error = RetryRawArtifactIntegrityError(
+                                    "retry stopped: receipt-verified parent candidate changed before comparison"
+                                )
+                                integrity_error.error_records = [{  # type: ignore[attr-defined]
+                                    "code": "retry_candidate_artifact_receipt_mismatch",
+                                    "attempt": semantic_parent_receipt["attempt"],
+                                    "stage": "validated_candidate",
+                                    "path": persisted_candidate_receipt.get("path"),
+                                    "reason": "candidate receipt changed between retry dispatch and comparison",
+                                }]
+                                integrity_error.primary_error_records = copy.deepcopy(  # type: ignore[attr-defined]
+                                    semantic_parent_error_records
+                                )
+                                raise integrity_error
+                            previous_candidate = _read_json(
+                                Path(str(persisted_candidate_receipt["path"])),
+                                label="receipt-verified parent validated candidate",
+                            )
+                            comparison_audit["candidate_comparison_status"] = (
+                                "completed_from_receipt_verified_candidate"
+                            )
+                            comparison_audit["parent_candidate_receipt"] = copy.deepcopy(
+                                refreshed_candidate_receipt
+                            )
+                        else:
+                            # A decoded response can fail before the bridge can
+                            # materialize any candidate.  Keep that state
+                            # explicit; if a deterministic projection is
+                            # possible, record that it was regenerated rather
+                            # than claiming a persisted candidate receipt.
+                            try:
+                                previous_candidate, previous_projection_audit = (
+                                    prepare_native_response_candidate(previous_raw, chunk)
+                                )
+                                previous_candidate = _bind_current_invocation_provenance(
+                                    previous_candidate, provenance,
+                                )
+                                comparison_audit["candidate_comparison_status"] = (
+                                    "completed_from_regenerated_candidate_no_prior_receipt"
+                                )
+                            except (OSError, ValueError, TypeError, json.JSONDecodeError) as projection_error:
+                                comparison_audit["candidate_comparison_status"] = "parent_candidate_unavailable"
+                                comparison_audit["parent_candidate_error"] = str(projection_error)
+
+                        candidate_repairs: list[dict[str, Any]] = []
+                        if previous_candidate is not None:
+                            relation_repair, relation_repair_audit = _v3_relation_completion_response(
+                                previous_candidate, current_candidate,
+                                semantic_parent_error_records, chunk=chunk,
+                            )
+                            if relation_repair is not None:
+                                current_candidate = _bind_current_invocation_provenance(
+                                    relation_repair, provenance,
+                                )
+                                candidate_repairs.append(relation_repair_audit)
+                            obligation_repair, obligation_repair_audit = (
+                                _v3_uncovered_obligation_reclassification_response(
+                                    previous_candidate, current_candidate,
+                                    semantic_parent_error_records, chunk=chunk,
+                                )
+                            )
+                            if obligation_repair is not None:
+                                current_candidate = _bind_current_invocation_provenance(
+                                    obligation_repair, provenance,
+                                )
+                                candidate_repairs.append(obligation_repair_audit)
+                            authoring_repair, authoring_repair_audit = (
+                                _v3_authoring_content_reclassification_response(
+                                    previous_candidate, current_candidate,
+                                    semantic_parent_error_records, chunk=chunk,
+                                )
+                            )
+                            if authoring_repair is not None:
+                                current_candidate = _bind_current_invocation_provenance(
+                                    authoring_repair, provenance,
+                                )
+                                candidate_repairs.append(authoring_repair_audit)
+                            candidate_changes = _retry_change_paths(
+                                previous_candidate, current_candidate,
+                            )
+                            comparison_audit.update({
+                                "parent_candidate_canonical_sha256": _response_sha256(previous_candidate),
+                                "candidate_candidate_canonical_sha256": _response_sha256(current_candidate),
+                                "candidate_changed_paths": candidate_changes,
+                                "parent_projection_audit_sha256": (
+                                    _response_sha256(previous_projection_audit)
+                                    if previous_projection_audit is not None else None
+                                ),
+                                "parent_projection_fingerprint_sha256": (
+                                    persisted_candidate_receipt.get(
+                                        "projection_fingerprint_sha256"
+                                    ) if isinstance(persisted_candidate_receipt, dict) else None
+                                ),
+                                "candidate_projection_audit_sha256": audit.get(
+                                    "projection_audit_sha256"
+                                ),
+                                "candidate_projection_only_drift": bool(
+                                    not semantic_changes and candidate_changes and not candidate_repairs
+                                ),
+                                "candidate_repairs": candidate_repairs,
+                            })
+                            if comparison_audit["candidate_projection_only_drift"]:
+                                projection_error = ValueError(
+                                    "deterministic candidate projection changed while normalized raw responses were identical"
+                                )
+                                projection_error.error_records = [{  # type: ignore[attr-defined]
+                                    "code": "retry_candidate_projection_nondeterministic",
+                                    "comparison_stage": "projected_candidate_to_projected_candidate",
+                                    "changed_paths": candidate_changes,
+                                    "parent_projection_sha256": comparison_audit[
+                                        "parent_projection_audit_sha256"
+                                    ],
+                                    "candidate_projection_sha256": comparison_audit[
+                                        "candidate_projection_audit_sha256"
+                                    ],
+                                }]
+                                audit["retry_stage_comparison"] = comparison_audit
+                                projection_error.primary_error_records = copy.deepcopy(  # type: ignore[attr-defined]
+                                    semantic_parent_error_records
+                                )
+                                raise projection_error
+                            if candidate_repairs:
+                                atomic_write_text(
+                                    attempt_response_path,
+                                    strict_json_dumps(current_candidate, ensure_ascii=False, indent=2) + "\n",
+                                )
+                                audit.setdefault("semantic_retry_repairs", []).extend(
+                                    candidate_repairs
+                                )
+                                for snapshot in audit.get("attempt_stage_snapshots", []):
+                                    if isinstance(snapshot, dict) and snapshot.get("stage") == "validated_candidate":
+                                        audit["attempt_stage_snapshots"].remove(snapshot)
+                                        break
+                                audit.setdefault("attempt_stage_snapshots", []).append(
+                                    _attempt_stage_snapshot(
+                                        "validated_candidate", current_candidate,
+                                        path=attempt_response_path, chunk=chunk,
+                                        projection_audit={
+                                            "projection_audit_sha256": audit.get(
+                                                "projection_audit_sha256"
+                                            ),
+                                            "semantic_retry_repairs": candidate_repairs,
+                                        },
+                                    )
+                                )
+                        audit["retry_stage_comparison"] = comparison_audit
                         if semantic_changes:
                             audit["semantic_retry_changes"] = semantic_changes
                             if all(
                                 isinstance(record, dict)
                                 and record.get("code") == "informational_requirement_forbidden"
-                                for record in retry_error_records
+                                for record in semantic_parent_error_records
                             ):
-                                audit["semantic_retry_change_policy"] = (
-                                    "code_owned_informational_projection"
-                                )
+                                audit["semantic_retry_change_policy"] = "code_owned_informational_projection"
                             elif all(
                                 isinstance(record, dict)
                                 and record.get("code") in {
                                     "missing_clause_review", "contract_validation_error",
                                 }
-                                for record in retry_error_records
+                                for record in semantic_parent_error_records
                             ) and any(
                                 isinstance(record, dict)
                                 and record.get("code") == "missing_clause_review"
-                                for record in retry_error_records
+                                for record in semantic_parent_error_records
                             ):
                                 audit["semantic_retry_change_policy"] = (
                                     "code_owned_missing_clause_review_completion"
                                 )
                             else:
-                                audit["semantic_retry_change_policy"] = "mechanical_only"
+                                audit["semantic_retry_change_policy"] = "authorized_normalized_raw_change"
                 response = _read_json(
                     attempt_response_path,
                     label=f"Host Agent response {index} attempt {attempt}",
@@ -7752,6 +8819,19 @@ def run_bridge(
                     }
                 def publish_accepted_response() -> None:
                     attempt_response_path.replace(response_path)
+                    audit.setdefault("attempt_stage_snapshots", []).append(
+                        _attempt_stage_snapshot(
+                            "accepted_response", response,
+                            path=response_path, chunk=chunk,
+                            projection_audit={
+                                "projection_audit_sha256": audit.get("projection_audit_sha256"),
+                                "independent_obligation_review": audit.get(
+                                    "independent_obligation_review"
+                                ),
+                            },
+                        )
+                    )
+                    audit["candidate_status"] = "accepted_after_independent_review"
                     audit["response_path"] = str(response_path.resolve())
                     audit["accepted_response_sha256"] = _response_sha256(response)
                     audit["attempt_failures"] = failures
@@ -7766,6 +8846,10 @@ def run_bridge(
                         if chunk_lifecycle[index].get("attempts"):
                             chunk_lifecycle[index]["attempts"][-1].update(
                                 status="completed", finished_at=finished,
+                                stage_snapshots=copy.deepcopy(
+                                    audit.get("attempt_stage_snapshots", [])
+                                ),
+                                candidate_status=audit.get("candidate_status"),
                             )
 
                 controller.publish_if_running(publish_accepted_response)
@@ -7784,6 +8868,29 @@ def run_bridge(
                 raise
             except (OSError, ValueError, RuntimeError) as exc:
                 controller.check()
+                if isinstance(exc, RetryRawArtifactIntegrityError):
+                    error_records = copy.deepcopy(getattr(exc, "error_records", []))
+                    primary_records = copy.deepcopy(
+                        getattr(exc, "primary_error_records", retry_error_records)
+                    )
+                    with lifecycle_lock:
+                        if chunk_lifecycle[index].get("attempts"):
+                            chunk_lifecycle[index]["attempts"][-1].update(
+                                status="failed",
+                                finished_at=datetime.now(timezone.utc).isoformat(),
+                                error_type=type(exc).__name__,
+                                error=str(exc),
+                                error_records=error_records,
+                                retry_authorizing_error_records=primary_records,
+                            )
+                        chunk_lifecycle[index].update(
+                            status="failed",
+                            finished_at=datetime.now(timezone.utc).isoformat(),
+                            remote_operation_state="unknown",
+                            error=str(exc),
+                            structured_error_records=error_records,
+                        )
+                    raise
                 if (
                     isinstance(exc, IndependentObligationReviewError)
                     and not getattr(exc, "retryable", False)
@@ -7808,87 +8915,154 @@ def run_bridge(
                             structured_error_records=copy.deepcopy(error_records),
                         )
                     raise
-                previous_error_records = copy.deepcopy(retry_error_records)
-                if attempt > 1 and previous_error_records:
-                    previous_raw_path = response_path.with_name(
-                        f"{response_path.stem}.attempt-{attempt - 1:02d}.raw{response_path.suffix}"
+                semantic_drift_records = getattr(exc, "error_records", None)
+                if (
+                    isinstance(semantic_drift_records, list)
+                    and any(
+                        isinstance(record, dict)
+                        and record.get("code") == "semantic_retry_change"
+                        for record in semantic_drift_records
                     )
-                    current_raw_path = attempt_response_path.with_name(
-                        f"{attempt_response_path.stem}.raw{attempt_response_path.suffix}"
+                ):
+                    primary_records = copy.deepcopy(
+                        getattr(exc, "primary_error_records", retry_error_records)
                     )
-                    response_schema = chunk.get("response_schema")
-                    if (
-                        previous_raw_path.is_file()
-                        and current_raw_path.is_file()
-                        and isinstance(response_schema, dict)
-                    ):
-                        try:
-                            previous_response = normalize_native_response(
-                                _read_json(
-                                    previous_raw_path,
-                                    label=f"Host Agent previous raw response {index} attempt {attempt - 1}",
-                                ),
-                                response_schema,
+                    with lifecycle_lock:
+                        if chunk_lifecycle[index].get("attempts"):
+                            chunk_lifecycle[index]["attempts"][-1].update(
+                                status="failed",
+                                finished_at=datetime.now(timezone.utc).isoformat(),
+                                error_type=type(exc).__name__,
+                                error=str(exc),
+                                error_records=copy.deepcopy(semantic_drift_records),
+                                retry_authorizing_error_records=primary_records,
+                                retry_input_fingerprints=_retry_input_fingerprints(chunk),
                             )
-                            current_response = normalize_native_response(
-                                _read_json(
-                                    current_raw_path,
-                                    label=f"Host Agent raw response {index} attempt {attempt}",
-                                ),
-                                response_schema,
-                            )
-                            if _response_sha256(previous_response) == _response_sha256(current_response):
-                                with lifecycle_lock:
-                                    chunk_lifecycle[index].setdefault(
-                                        "no_progress_events", []
-                                    ).append({
-                                        "attempt": attempt,
-                                        "response_sha256": _response_sha256(current_response),
-                                        "reason": "retry_response_identical_to_parent",
-                                    })
-                            change_error, semantic_changes = _retry_semantic_change_error(
-                                previous_response,
-                                current_response,
-                                previous_error_records,
-                                contract_version=contract_version,
-                                chunk=chunk,
-                            )
-                            if semantic_changes:
-                                with lifecycle_lock:
-                                    chunk_lifecycle[index].setdefault(
-                                        "semantic_retry_changes", []
-                                    ).extend(semantic_changes)
-                            if change_error is not None:
-                                with lifecycle_lock:
-                                    chunk_lifecycle[index].setdefault(
-                                        "secondary_retry_drift_failures", []
-                                    ).append({
-                                        "error": str(change_error),
-                                        "changed_paths": list(semantic_changes),
-                                        "parent_response_sha256": _response_sha256(previous_response),
-                                        "candidate_response_sha256": _response_sha256(current_response),
-                                        "primary_error": str(exc),
-                                    })
-                        except (OSError, ValueError, TypeError, json.JSONDecodeError):
-                            # The primary contract failure remains authoritative
-                            # when an attempt cannot be decoded for the
-                            # secondary retry-drift audit.
-                            pass
+                        chunk_lifecycle[index].setdefault(
+                            "structured_error_records", []
+                        ).extend(copy.deepcopy(semantic_drift_records))
+                        chunk_lifecycle[index].update(
+                            status="failed",
+                            finished_at=datetime.now(timezone.utc).isoformat(),
+                            remote_operation_state="unknown",
+                            error=str(exc),
+                            retry_authorizing_error_records=primary_records,
+                        )
+                    raise
                 failures.append(str(exc))
                 error_records = getattr(exc, "error_records", None)
+                retry_stage_snapshots = getattr(exc, "retry_stage_snapshots", None)
+                if (
+                    not isinstance(retry_stage_snapshots, list)
+                    and isinstance(audit, dict)
+                    and isinstance(audit.get("attempt_stage_snapshots"), list)
+                ):
+                    retry_stage_snapshots = audit["attempt_stage_snapshots"]
+                if isinstance(retry_stage_snapshots, list):
+                    with lifecycle_lock:
+                        if chunk_lifecycle[index].get("attempts"):
+                            chunk_lifecycle[index]["attempts"][-1]["stage_snapshots"] = copy.deepcopy(
+                                retry_stage_snapshots
+                            )
                 if isinstance(error_records, list):
                     with lifecycle_lock:
                         chunk_lifecycle[index].setdefault("structured_error_records", []).extend(
                             copy.deepcopy(error_records)
                         )
                     retry_error_records = copy.deepcopy(error_records)
-                parent_response_path = attempt_response_path
-                if not parent_response_path.exists():
-                    raw_candidate = attempt_response_path.with_name(
-                        f"{attempt_response_path.stem}.raw{attempt_response_path.suffix}"
-                    )
-                    if raw_candidate.exists():
-                        parent_response_path = raw_candidate
+                no_progress_event: dict[str, Any] | None = None
+                if attempt > 1 and retry_artifact_receipts:
+                    semantic_parent_receipt = next((
+                        receipt for receipt in reversed(retry_artifact_receipts)
+                        if receipt.get("kind") == "decoded_raw"
+                    ), None)
+                    parent_attempt_record = next((
+                        record for record in prior_attempt_records
+                        if isinstance(record, dict)
+                        and isinstance(semantic_parent_receipt, dict)
+                        and record.get("attempt") == semantic_parent_receipt.get("attempt")
+                    ), None)
+                    with lifecycle_lock:
+                        current_attempt_record = copy.deepcopy(
+                            chunk_lifecycle[index].get("attempts", [])[-1]
+                        ) if chunk_lifecycle[index].get("attempts") else {}
+                    response_schema = chunk.get("response_schema")
+                    if (
+                        isinstance(semantic_parent_receipt, dict)
+                        and isinstance(parent_attempt_record, dict)
+                        and isinstance(response_schema, dict)
+                    ):
+                        parent_raw_path = Path(semantic_parent_receipt["path"])
+                        current_raw_path = _verified_attempt_stage_path(
+                            response_path, attempt, current_attempt_record, "decoded_raw",
+                        )
+                        parent_candidate_path = _verified_attempt_stage_path(
+                            response_path, int(semantic_parent_receipt["attempt"]),
+                            parent_attempt_record, "validated_candidate",
+                        )
+                        current_candidate_path = _verified_attempt_stage_path(
+                            response_path, attempt, current_attempt_record, "validated_candidate",
+                        )
+                        if all((current_raw_path, parent_candidate_path, current_candidate_path)):
+                            try:
+                                parent_raw, current_raw = _load_normalized_retry_raw_pair(
+                                    parent_raw_path, current_raw_path, response_schema,
+                                    parent_label="receipt-verified retry semantic parent",
+                                    candidate_label="receipt-verified current failed retry",
+                                )
+                                parent_candidate = normalize_native_response(
+                                    _read_json(parent_candidate_path, label="verified parent candidate"),
+                                    response_schema,
+                                )
+                                current_candidate = normalize_native_response(
+                                    _read_json(current_candidate_path, label="verified current candidate"),
+                                    response_schema,
+                                )
+                                parent_errors = (
+                                    parent_attempt_record.get("retry_authorizing_error_records")
+                                    or parent_attempt_record.get("error_records")
+                                    or []
+                                )
+                                current_errors = error_records if isinstance(error_records, list) else []
+                                retry_inputs = _retry_input_fingerprints(chunk)
+                                prior_input = parent_attempt_record.get("retry_input_fingerprints")
+                                previous_candidate_sha = _response_sha256(
+                                    _semantic_retry_view(parent_candidate)
+                                )
+                                current_candidate_sha = _response_sha256(
+                                    _semantic_retry_view(current_candidate)
+                                )
+                                if _retry_has_no_progress(
+                                    parent_raw, current_raw, parent_errors, current_errors,
+                                    previous_candidate_sha, current_candidate_sha,
+                                    prior_input, retry_inputs,
+                                ):
+                                    no_progress_event = {
+                                        "attempt": attempt,
+                                        "raw_parent_attempt": semantic_parent_receipt["attempt"],
+                                        "reason": "same_receipted_raw_same_repair_plan_same_candidate_same_invocation",
+                                        "normalized_raw_semantic_sha256": _response_sha256(
+                                            _semantic_retry_view(current_raw)
+                                        ),
+                                        "repair_plan_sha256": _response_sha256(current_errors),
+                                        "parent_candidate_semantic_sha256": previous_candidate_sha,
+                                        "candidate_semantic_sha256": current_candidate_sha,
+                                        "input_fingerprints": retry_inputs,
+                                    }
+                            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+                                # No-progress is only an optimization. If any
+                                # receipt or representation cannot be proved,
+                                # retain the primary failure and use the bounded
+                                # attempt limit instead of guessing.
+                                no_progress_event = None
+                raw_candidate = attempt_response_path.with_name(
+                    f"{attempt_response_path.stem}.raw{attempt_response_path.suffix}"
+                )
+                # The next prompt reads the raw sidecar first. Hash that exact
+                # file so the prompt path and its parent digest cannot diverge.
+                parent_response_path = (
+                    raw_candidate if raw_candidate.is_file() else attempt_response_path
+                )
                 if parent_response_path.exists():
                     try:
                         parent_sha = sha256_file(parent_response_path)
@@ -7896,6 +9070,37 @@ def run_bridge(
                             chunk_lifecycle[index]["retry_parent_response_sha256"] = parent_sha
                     except OSError:
                         pass
+                if no_progress_event is not None:
+                    failures.append(str(exc))
+                    with lifecycle_lock:
+                        chunk_lifecycle[index].setdefault("no_progress_events", []).append(
+                            no_progress_event
+                        )
+                        if chunk_lifecycle[index].get("attempts"):
+                            chunk_lifecycle[index]["attempts"][-1].update(
+                                status="failed",
+                                finished_at=datetime.now(timezone.utc).isoformat(),
+                                error_type=type(exc).__name__,
+                                error=str(exc),
+                                error_records=copy.deepcopy(
+                                    error_records if isinstance(error_records, list) else []
+                                ),
+                                retry_authorizing_error_records=copy.deepcopy(
+                                    getattr(exc, "primary_error_records", [])
+                                ),
+                                retry_input_fingerprints=_retry_input_fingerprints(chunk),
+                                no_progress=no_progress_event,
+                            )
+                        chunk_lifecycle[index].update(
+                            status="failed",
+                            finished_at=datetime.now(timezone.utc).isoformat(),
+                            remote_operation_state="unknown",
+                            error="retry stopped because the raw response, repair plan, candidate, and inputs made no progress",
+                        )
+                    raise ValueError(
+                        "Host Agent retry stopped: no progress under identical full invocation "
+                        "fingerprints, normalized raw response, repair plan, and candidate"
+                    ) from exc
                 with lifecycle_lock:
                     if chunk_lifecycle[index].get("attempts"):
                         repair_audit = getattr(exc, "mechanical_repair_audit", None)
@@ -7905,6 +9110,10 @@ def run_bridge(
                             error_type=type(exc).__name__,
                             error=str(exc),
                             error_records=copy.deepcopy(error_records) if isinstance(error_records, list) else [],
+                            retry_authorizing_error_records=copy.deepcopy(
+                                getattr(exc, "primary_error_records", [])
+                            ),
+                            retry_input_fingerprints=_retry_input_fingerprints(chunk),
                             mechanical_repair_audit=(
                                 copy.deepcopy(repair_audit)
                                 if isinstance(repair_audit, dict) else None

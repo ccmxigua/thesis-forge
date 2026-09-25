@@ -104,6 +104,8 @@ class SemanticSourceReferenceTests(unittest.TestCase):
             "check_id": "C1", "verdict": "uncertain", "rationale": "职责范围需确认。",
             "evidence_refs": [ref], "identified_obligations": [{
                 "source_ref": ref, "disposition": "ambiguous", "requirement_refs": [],
+            }, {
+                "source_ref": ref, "disposition": "ambiguous", "requirement_refs": [],
             }],
         }]}
 
@@ -111,7 +113,7 @@ class SemanticSourceReferenceTests(unittest.TestCase):
             OBLIGATION_COVERAGE_SCHEMA, packet, coverage=True,
         )
         self.assertEqual(raw["results"][0].get("machine_obligation_ids"), None)
-        compiled, _ = compile_source_reference_response(
+        compiled, audit = compile_source_reference_response(
             raw, request, OBLIGATION_COVERAGE_SCHEMA, coverage=True,
         )
         result = compiled["results"][0]
@@ -119,7 +121,47 @@ class SemanticSourceReferenceTests(unittest.TestCase):
         self.assertEqual(result["evidence_quotes"], ["签字后提交。"])
         self.assertEqual(result["identified_obligations"][0]["source_quote"], "签字后提交。")
         self.assertEqual(result["identified_obligations"][0]["disposition"], "ambiguous")
+        self.assertEqual(len(audit["selections"][0]["obligations"]), 2)
+        self.assertEqual(
+            [item["obligation_index"] for item in audit["selections"][0]["obligations"]],
+            [0, 1],
+        )
+        self.assertEqual(
+            audit["selections"][0]["obligations"][0]["source_ref"],
+            audit["selections"][0]["obligations"][1]["source_ref"],
+        )
         self.assertNotIn("machine_obligation_ids", wire_schema["properties"]["results"]["items"]["anyOf"][0]["properties"])
+
+    def test_english_source_spans_preserve_offsets_and_do_not_split_decimals_or_abbreviations(self) -> None:
+        text = (
+            "The Chinese abstract is 300 to 1,000 words. It cites e.g. prior work, "
+            "including value 1.5, and usually ends here!\nA new paragraph follows."
+        )
+        request = {"run_id": "r-en", "checks": [{"check_id": "C-en", "document_text": text}]}
+        spans = build_source_reference_packet(request)["checks"][0]["source_spans"]
+        sentence_spans = [span for span in spans if (span["start"], span["end"]) != (0, len(text))]
+        self.assertTrue(sentence_spans)
+        self.assertTrue(all(text[span["start"]:span["end"]] == span["text"] for span in spans))
+        rendered = [span["text"] for span in sentence_spans]
+        self.assertTrue(any("300 to 1,000 words." in span for span in rendered))
+        self.assertTrue(any("e.g. prior work" in span and "1.5" in span for span in rendered))
+        self.assertTrue(any(span.endswith("usually ends here!") for span in rendered))
+        self.assertTrue(any("A new paragraph follows." in span for span in rendered))
+        self.assertFalse(any(span.rstrip().endswith("e.g.") for span in rendered))
+        self.assertFalse(any(span.rstrip().endswith("1.") for span in rendered))
+
+    def test_multipart_english_abbreviations_remain_inside_their_source_sentence(self) -> None:
+        text = "Use U.S. standards. Use Ph.D. data. Use M.Sc. results. Check No. 3. Next sentence."
+        request = {"run_id": "r-abbr", "checks": [{"check_id": "C-abbr", "document_text": text}]}
+        spans = build_source_reference_packet(request)["checks"][0]["source_spans"]
+        sentence_spans = [span for span in spans if (span["start"], span["end"]) != (0, len(text))]
+        self.assertTrue(all(text[span["start"]:span["end"]] == span["text"] for span in spans))
+        rendered = [span["text"] for span in sentence_spans]
+        self.assertTrue(any(span.lstrip().startswith("Use U.S. standards.") for span in rendered))
+        self.assertTrue(any(span.lstrip().startswith("Use Ph.D. data.") for span in rendered))
+        self.assertTrue(any(span.lstrip().startswith("Use M.Sc. results.") for span in rendered))
+        self.assertTrue(any(span.lstrip().startswith("Check No. 3.") for span in rendered))
+        self.assertTrue(any(span.lstrip().startswith("Next sentence.") for span in rendered))
 
     def test_empty_or_malformed_source_check_fails_before_model_invocation(self) -> None:
         for checks in ([], [{"check_id": "C1", "document_text": "  "}], [None]):

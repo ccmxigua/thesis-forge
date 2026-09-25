@@ -602,14 +602,21 @@ class HostAgentBridgeTests(unittest.TestCase):
                 else:
                     self.assertTrue(audit["retryable"])
 
-    def _packet(self, directory: Path) -> tuple[Path, dict]:
+    def _packet(
+        self, directory: Path, *, contract_version: str | None = None,
+    ) -> tuple[Path, dict]:
         directory.mkdir(parents=True, exist_ok=True)
         clauses = [{
             "id": "C1", "text": "正文使用宋体", "evidence_ids": ["E1"],
             "source_kind": "paragraph", "location": {}, "part_index": 0,
         }]
         evidence = {"evidence": [{"id": "E1", "text": "正文使用宋体", "kind": "paragraph"}]}
-        request = engine.build_llm_request([], clauses, evidence, {}, "full")
+        if contract_version is None:
+            request = engine.build_llm_request([], clauses, evidence, {}, "full")
+        else:
+            request = engine.build_llm_request(
+                [], clauses, evidence, {}, "full", contract_version=contract_version,
+            )
         request = attach_request_provenance(
             request, source_sha256="a" * 64, evidence_doc=evidence, clauses=clauses,
             run_id="run-bridge-test",
@@ -3546,6 +3553,168 @@ class HostAgentBridgeTests(unittest.TestCase):
             }],
         )
         self.assertIsNone(rejected)
+
+    def test_cover_security_marking_is_migrated_only_from_exact_linked_source(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            _review_dir, chunk = self._packet(
+                Path(td) / "requirements", contract_version="3.0",
+            )
+            clause_source = "封面密  级"
+            evidence_source = "封面密  级："
+            chunk["clauses"] = [{
+                "id": "C1", "text": clause_source, "evidence_ids": ["E1"],
+                "source_kind": "paragraph", "location": {}, "part_index": 0,
+            }]
+            chunk["evidence_context"] = {
+                "E1": {"id": "E1", "text": evidence_source},
+            }
+            contract_version = chunk["contract_version"]
+            security_field = {
+                "id": "security_marking", "label": "密  级：",
+                "value_from": "thesis_profile.cover_metadata.security_marking",
+                "display_policy": "if_present", "order": 3,
+            }
+            response = {
+                "contract_version": contract_version,
+                "provenance": chunk["provenance"],
+                "requirements": [{
+                    "role": "cover",
+                    "properties": {
+                        "institution": "",
+                        "fields": [
+                            {
+                                "id": "classification_number", "label": "分类号：",
+                                "value_from": "thesis_profile.cover_metadata.classification_number",
+                                "display_policy": "required", "order": 1,
+                            },
+                            {
+                                "id": "unit_code", "label": "学校代码：",
+                                "value_from": "thesis_profile.cover_metadata.unit_code",
+                                "display_policy": "if_present", "order": 2,
+                            },
+                            security_field,
+                        ],
+                        "non_public_administration": None,
+                        "before_role": "document_start",
+                        "missing_value_policy": "placeholder",
+                        "missing_value_placeholder": "——",
+                        "layout_id": "linear",
+                    },
+                    "clause_ids": ["C1"], "evidence_ids": ["E1"],
+                    "confidence": 0.98,
+                    "reason": "来源明确标注封面密级字段。",
+                    "applicability": {"status": "always"},
+                    "input_prerequisites": [],
+                    "verification": {"mode": "word_render", "checks": ["核验封面字段"]},
+                }],
+                "clause_reviews": [{
+                    "clause_id": "C1", "classification": "executable",
+                    "reason": "来源明确规定封面密级字段。",
+                    "normative_basis": "template_structure",
+                }],
+                "unsupported_items": [], "reported_conflicts": [],
+            }
+            if contract_version == "2.1":
+                response["clause_reviews"][0]["requirement_indexes"] = [0]
+            else:
+                response["clause_reviews"][0]["obligations"] = [{
+                    "id": "cover_security_label", "status": "covered",
+                    "reason": "精确字段标签已由来源支持。",
+                }]
+
+            errors = bridge.validate_host_agent_response(response, chunk)
+            self.assertTrue(errors)
+            records = bridge.contract_error_records(errors, response=response, chunk=chunk)
+            self.assertIn("cover_binding_violation", {item["code"] for item in records})
+            repaired, audit = bridge._apply_safe_mechanical_repairs(
+                response, records, chunk=chunk,
+            )
+            self.assertIsNotNone(repaired, repr(records))
+            assert repaired is not None
+            self.assertEqual(bridge.validate_host_agent_response(repaired, chunk), [])
+
+            repaired_properties = repaired["requirements"][0]["properties"]
+            self.assertEqual(repaired_properties["institution"], "——")
+            self.assertEqual(
+                repaired_properties["fields"],
+                response["requirements"][0]["properties"]["fields"][:2],
+            )
+            admin = repaired_properties["non_public_administration"]
+            self.assertEqual(admin["fields"], [security_field])
+            self.assertEqual(admin["public_policy"], "blank")
+            self.assertEqual(admin["source_region"], "cover")
+            self.assertEqual(
+                admin["applicability"]["conditions"],
+                [{
+                    "fact": "thesis_profile.security_level", "operator": "in",
+                    "value": ["restricted", "classified"],
+                }],
+            )
+            migration = next(
+                item for item in audit
+                if item.get("rule_id") == "source_bound_cover_security_marking_migration_v1"
+            )
+            self.assertEqual(migration["source_clause_ids"], ["C1"])
+            self.assertEqual(migration["source_evidence_ids"], ["E1"])
+            self.assertEqual(
+                migration["authorized_changed_paths"],
+                [
+                    "$.requirements[0].properties.fields",
+                    "$.requirements[0].properties.non_public_administration",
+                ],
+            )
+
+            candidate, candidate_audit = bridge.prepare_native_response_candidate(
+                response, chunk,
+            )
+            self.assertEqual(bridge.validate_host_agent_response(candidate, chunk), [])
+            self.assertEqual(
+                candidate_audit["mechanical_repairs"][0]["rule_id"],
+                "source_bound_cover_security_marking_migration_v1",
+            )
+
+    def test_cover_security_marking_migration_fails_closed_without_exact_source_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            _review_dir, chunk = self._packet(Path(td) / "requirements")
+            source = "封面设置密级字段"
+            chunk["clauses"] = [{
+                "id": "C1", "text": source, "evidence_ids": ["E1"],
+                "source_kind": "paragraph", "location": {}, "part_index": 0,
+            }]
+            chunk["evidence_context"] = {"E1": {"id": "E1", "text": source}}
+            response = {
+                "contract_version": chunk["contract_version"],
+                "requirements": [{
+                    "role": "cover",
+                    "properties": {
+                        "institution": "——",
+                        "fields": [{
+                            "id": "security_marking", "label": "密级：",
+                            "value_from": "thesis_profile.cover_metadata.security_marking",
+                            "display_policy": "if_present", "order": 1,
+                        }],
+                        "non_public_administration": None,
+                    },
+                    "clause_ids": ["C1"], "evidence_ids": ["E1"],
+                    "confidence": 0.9, "reason": "封面字段",
+                }],
+                "clause_reviews": [],
+            }
+            record = {
+                "code": "cover_binding_violation",
+                "json_pointer": "$.requirements[0].properties.fields[0]",
+                "raw_error": "$.requirements[0].properties.fields[0]: administrative label '密级' must be declared under cover.non_public_administration, not ordinary cover.fields",
+                "response_sha256": bridge._response_sha256(response),
+            }
+            self.assertIsNone(
+                bridge._project_source_bound_cover_security_marking(
+                    copy.deepcopy(response), record, chunk=chunk,
+                    baseline_response_sha256=bridge._response_sha256(response),
+                )
+            )
+            self.assertIsNone(
+                bridge._apply_safe_mechanical_repairs(response, [record], chunk=chunk)[0]
+            )
 
     def test_missing_admin_fields_become_bound_manual_review_without_guessing(self) -> None:
         with tempfile.TemporaryDirectory() as td:

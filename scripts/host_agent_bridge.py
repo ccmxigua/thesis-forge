@@ -138,6 +138,7 @@ if str(SCRIPTS) not in sys.path:
 from existing_requirement_contract import (  # noqa: E402
     project_authoritative_existing_payloads,
 )
+from format_contract_guards import normalize_label  # noqa: E402
 
 from host_adapters import codex as codex_adapter  # noqa: E402
 from process_runner import run_process  # noqa: E402
@@ -4193,9 +4194,189 @@ def _project_external_action_requirements(
     }]
 
 
+def _project_source_bound_cover_security_marking(
+    response: dict[str, Any],
+    record: dict[str, Any],
+    *,
+    chunk: dict[str, Any] | None,
+    baseline_response_sha256: str,
+) -> dict[str, Any] | None:
+    """Move one exactly evidenced security-marking field into its schema region.
+
+    This is intentionally narrower than a model-authored cover rewrite: the
+    validator must identify the exact field path, the field must already use
+    the canonical security-marking id/value source, and both the linked clause
+    and linked evidence must contain that exact label. No ordinary field is
+    regenerated, reordered, or otherwise normalized.
+    """
+    if not isinstance(chunk, dict):
+        return None
+    if record.get("response_sha256") != baseline_response_sha256:
+        return None
+    pointer = str(record.get("json_pointer") or "")
+    match = re.fullmatch(
+        r"\$\.requirements\[(\d+)\]\.properties\.fields\[(\d+)\]", pointer,
+    )
+    if match is None:
+        return None
+    requirement_index, field_index = map(int, match.groups())
+    requirements = response.get("requirements")
+    if (
+        not isinstance(requirements, list)
+        or requirement_index >= len(requirements)
+        or not isinstance(requirements[requirement_index], dict)
+    ):
+        return None
+    requirement = requirements[requirement_index]
+    properties = requirement.get("properties")
+    if requirement.get("role") != "cover" or not isinstance(properties, dict):
+        return None
+    fields = properties.get("fields")
+    if not isinstance(fields, list) or field_index >= len(fields):
+        return None
+    field = fields[field_index]
+    if not isinstance(field, dict):
+        return None
+    # Do not guess mappings for embargo ranges, approval metadata, or unknown
+    # labels here. Those require their own source-specific proof and rules.
+    normalized_label = normalize_label(field.get("label"))
+    if (
+        normalized_label not in {"密级", "申请密级"}
+        or field.get("id") != "security_marking"
+        or field.get("value_from") != "thesis_profile.cover_metadata.security_marking"
+        or field.get("display_policy") not in {"required", "if_present"}
+        or type(field.get("order")) is not int
+        or field["order"] < 1
+        or set(field) != {"id", "label", "value_from", "display_policy", "order"}
+    ):
+        return None
+    raw_error = str(record.get("raw_error") or "")
+    if (
+        f"administrative label {normalized_label!r} must be declared under "
+        "cover.non_public_administration, not ordinary cover.fields"
+    ) not in raw_error:
+        return None
+    if properties.get("non_public_administration") is not None:
+        return None
+
+    # Require one unambiguous source clause/evidence pair linked by this same
+    # requirement. A field label elsewhere in the chunk is not authorization.
+    requirement_clause_ids = requirement.get("clause_ids")
+    requirement_evidence_ids = requirement.get("evidence_ids")
+    clauses = chunk.get("clauses")
+    evidence_context = chunk.get("evidence_context")
+    if not all(isinstance(value, list) and value for value in (
+        requirement_clause_ids, requirement_evidence_ids, clauses,
+    )) or not isinstance(evidence_context, dict):
+        return None
+    clause_id_set = {str(value) for value in requirement_clause_ids}
+    evidence_id_set = {str(value) for value in requirement_evidence_ids}
+    clause_label_pattern = re.compile(re.escape(normalized_label))
+    label_pattern = re.compile(re.escape(normalized_label) + r"[：:]")
+    source_clause_ids: set[str] = set()
+    source_evidence_ids: set[str] = set()
+    for clause in clauses:
+        if not isinstance(clause, dict) or str(clause.get("id") or "") not in clause_id_set:
+            continue
+        clause_id = str(clause.get("id"))
+        clause_text = clause.get("text") or clause.get("source_text_full")
+        if not isinstance(clause_text, str):
+            continue
+        # Clause extraction may trim terminal punctuation from a table-cell
+        # label. The exact punctuation-bearing form must still exist in the
+        # linked evidence record below.
+        if clause_label_pattern.search(re.sub(r"\s+", "", clause_text)) is None:
+            continue
+        linked_evidence_ids = {
+            str(value) for value in clause.get("evidence_ids", [])
+        } & evidence_id_set
+        exact_evidence_ids = {
+            evidence_id for evidence_id in linked_evidence_ids
+            if isinstance(evidence_context.get(evidence_id), dict)
+            and isinstance(evidence_context[evidence_id].get("text"), str)
+            and label_pattern.search(re.sub(
+                r"\s+", "", evidence_context[evidence_id]["text"],
+            )) is not None
+        }
+        if exact_evidence_ids:
+            source_clause_ids.add(clause_id)
+            source_evidence_ids.update(exact_evidence_ids)
+    if len(source_clause_ids) != 1 or not source_evidence_ids:
+        return None
+
+    reviews = response.get("clause_reviews")
+    if not isinstance(reviews, list):
+        return None
+    linked_reviews = [
+        review for review in reviews
+        if isinstance(review, dict)
+        and str(review.get("clause_id") or "") in source_clause_ids
+    ]
+    if (
+        len(linked_reviews) != 1
+        or linked_reviews[0].get("classification") not in {
+            "covered", "executable", "verify_existing",
+        }
+    ):
+        return None
+
+    ordinary_fields = [item for index, item in enumerate(fields) if index != field_index]
+    if any(
+        isinstance(item, dict)
+        and (
+            item.get("id") == "security_marking"
+            or normalize_label(item.get("label")) in {"密级", "申请密级"}
+        )
+        for item in ordinary_fields
+    ):
+        return None
+
+    before_response = copy.deepcopy(response)
+    moved_field = copy.deepcopy(field)
+    fields.pop(field_index)
+    properties["non_public_administration"] = {
+        "applicability": {
+            "status": "conditional",
+            "conditions": [{
+                "fact": "thesis_profile.security_level",
+                "operator": "in",
+                "value": ["restricted", "classified"],
+            }],
+        },
+        "fields": [moved_field],
+        "public_policy": "blank",
+        "source_region": "cover",
+    }
+    return {
+        "code": "cover_binding_violation",
+        "rule_id": "source_bound_cover_security_marking_migration_v1",
+        "json_pointer": pointer,
+        "moved_field": moved_field,
+        "target_pointer": (
+            f"$.requirements[{requirement_index}].properties"
+            ".non_public_administration.fields[0]"
+        ),
+        "source_clause_ids": sorted(source_clause_ids),
+        "source_evidence_ids": sorted(source_evidence_ids),
+        "source_text_sha256": _response_sha256([
+            next(
+                str(clause.get("text") or clause.get("source_text_full") or "")
+                for clause in clauses
+                if isinstance(clause, dict)
+                and str(clause.get("id") or "") == clause_id
+            )
+            for clause_id in sorted(source_clause_ids)
+        ]),
+        "baseline_response_sha256": baseline_response_sha256,
+        "repaired_response_sha256": _response_sha256(response),
+        "authorized_changed_paths": _retry_change_paths(before_response, response),
+    }
+
+
 def _apply_safe_mechanical_repairs_one_rule(
     response: Any, error_records: list[dict[str, Any]],
     *, chunk: dict[str, Any] | None = None,
+    baseline_response_sha256: str | None = None,
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
     """Apply only validator-directed, bounded JSON repairs.
 
@@ -4219,6 +4400,7 @@ def _apply_safe_mechanical_repairs_one_rule(
         "empty_requirement_properties", "informational_requirement_forbidden",
         "applicability_fact_namespace", "partial_clause_coverage",
         "cover_institution_placeholder", "contract_validation_error",
+        "cover_binding_violation",
         "schema_contract_violation", "requirement_relation_mismatch",
         "non_public_administration_fields_missing",
     }
@@ -4230,6 +4412,63 @@ def _apply_safe_mechanical_repairs_one_rule(
         return None, []
     repaired = copy.deepcopy(response)
     repairs: list[dict[str, Any]] = []
+    baseline_sha256 = baseline_response_sha256 or _response_sha256(response)
+    cover_binding_records = [
+        record for record in error_records
+        if isinstance(record, dict) and record.get("code") == "cover_binding_violation"
+    ]
+    migrated_cover_binding_pointers: set[str] = set()
+    if cover_binding_records:
+        field_records: list[dict[str, Any]] = []
+        companion_null_records: list[dict[str, Any]] = []
+        field_indexes: set[int] = set()
+        for record in cover_binding_records:
+            pointer = str(record.get("json_pointer") or "")
+            field_match = re.fullmatch(
+                r"\$\.requirements\[(\d+)\]\.properties\.fields\[(\d+)\]",
+                pointer,
+            )
+            null_admin_match = re.fullmatch(
+                r"\$\.requirements\[(\d+)\]\.properties\.non_public_administration",
+                pointer,
+            )
+            if field_match is not None:
+                field_records.append(record)
+                field_indexes.add(int(field_match.group(1)))
+            elif (
+                null_admin_match is not None
+                and "expected object, got null" in str(record.get("raw_error") or "")
+            ):
+                companion_null_records.append(record)
+            else:
+                return None, []
+        unique_field_pointers = {
+            str(record.get("json_pointer") or "") for record in field_records
+        }
+        if (
+            len(unique_field_pointers) != 1
+            or len(field_indexes) != 1
+            or not field_records
+            or any(
+                int(re.search(r"requirements\[(\d+)\]", str(item.get("json_pointer") or "")).group(1))
+                not in field_indexes
+                for item in companion_null_records
+            )
+        ):
+            return None, []
+        migration = _project_source_bound_cover_security_marking(
+            repaired,
+            field_records[0],
+            chunk=chunk,
+            baseline_response_sha256=baseline_sha256,
+        )
+        if migration is None:
+            return None, []
+        repairs.append(migration)
+        migrated_cover_binding_pointers = unique_field_pointers | {
+            str(record.get("json_pointer") or "")
+            for record in companion_null_records
+        }
 
     # A source can require a non-public thesis approval/marking statement
     # without specifying the actual administrative form fields. The schema
@@ -5138,6 +5377,13 @@ def _apply_safe_mechanical_repairs_one_rule(
                     "rule_id": "compile_neutral_cover_institution_placeholder_v1",
                     "reason": "cover chunk has no trusted institution value",
                 })
+        elif record.get("code") == "cover_binding_violation":
+            # Applied once above against the exact frozen source candidate.
+            # Retain this validator record so parent anyOf errors remain
+            # demonstrably subordinate to the source-bound child repair.
+            if str(record.get("json_pointer") or "") in migrated_cover_binding_pointers:
+                continue
+            return None, []
         elif (
             record.get("code") == "contract_validation_error"
             and "items must be unique" in raw_error
@@ -5176,13 +5422,14 @@ def _apply_safe_mechanical_repairs_one_rule(
         elif record.get("code") == "contract_validation_error":
             # A parent anyOf/schema error is diagnostic when a more specific
             # child record in the same payload identifies the exact repair.
-            if (
-                re.fullmatch(r"\$\.requirements\[(\d+)\]\.properties", pointer)
-                and any(
-                    isinstance(other, dict)
-                    and str(other.get("json_pointer") or "").startswith(pointer + ".")
-                    for other in error_records
+            if re.fullmatch(r"\$\.requirements\[\d+\](?:\.properties)?", pointer) and any(
+                isinstance(other, dict)
+                and str(other.get("json_pointer") or "").startswith(pointer + ".")
+                and (
+                    str(other.get("code") or "") != "contract_validation_error"
+                    or "items must be unique" in str(other.get("raw_error") or "")
                 )
+                for other in error_records
             ):
                 continue
             return None, []
@@ -5430,6 +5677,7 @@ def _apply_safe_mechanical_repairs(
     # such complete plan exists do we fall back to independent object groups.
     whole_candidate, whole_repairs = _apply_safe_mechanical_repairs_one_rule(
         response, error_records, chunk=chunk,
+        baseline_response_sha256=_response_sha256(response),
     )
     if whole_candidate is not None and whole_repairs:
         before_hash = _response_sha256(response)
@@ -5457,6 +5705,7 @@ def _apply_safe_mechanical_repairs(
         before_group_hash = _response_sha256(candidate)
         trial, repairs = _apply_safe_mechanical_repairs_one_rule(
             candidate, records, chunk=chunk,
+            baseline_response_sha256=_response_sha256(response),
         )
         if trial is None or not repairs:
             continue

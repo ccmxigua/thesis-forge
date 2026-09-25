@@ -24,6 +24,7 @@ from native_semantic_review import (  # noqa: E402
 )
 import native_semantic_review as native_review  # noqa: E402
 from host_review_schema import native_schema_support_errors  # noqa: E402
+from compliance import FORMAT_BLOCKING_STATES, normalized_state  # noqa: E402
 
 
 class NativeSemanticReviewTests(unittest.TestCase):
@@ -98,7 +99,7 @@ class NativeSemanticReviewTests(unittest.TestCase):
         }
         packet = build_obligation_coverage_request(candidate, chunk, run_id="run-1", chunk_index=4)
         check = packet["checks"][0]
-        self.assertEqual(packet["protocol"], "native_source_obligation_coverage_review_v2")
+        self.assertEqual(packet["protocol"], "native_source_obligation_coverage_review_v3")
         self.assertEqual(packet["provenance"], chunk["provenance"])
         self.assertEqual(check["document_text"], source)
         requirement_ref = check["review_context"]["linked_requirements"][0]["requirement_ref"]
@@ -161,6 +162,87 @@ class NativeSemanticReviewTests(unittest.TestCase):
             validate_obligation_coverage_response(safe_uncertain, [unresolved_check])[0]["verdict"],
             "uncertain",
         )
+
+    def test_backend_unsupported_is_analysis_only_and_strictly_bound_to_primary_state(self) -> None:
+        machine_id = "cover.security_marking_options.shorter_duration_allowed"
+        source = "注：限制★2年(可少于2年)"
+        check = {
+            "check_id": "C00050", "document_text": source,
+            "review_context": {
+                "classification": "unsupported_backend", "requires_requirement": False,
+                "primary_obligations": [], "linked_requirements": [],
+                "machine_obligation_ids": [machine_id],
+            },
+        }
+        accepted = {"results": [{
+            "check_id": "C00050", "verdict": "backend_unsupported",
+            "rationale": "The source qualifier is identified, but the current backend has no executor.",
+            "evidence_quotes": [source], "machine_obligation_ids": [machine_id],
+            "identified_obligations": [{
+                "source_quote": "可少于2年", "disposition": "backend_unsupported",
+                "requirement_refs": [],
+            }],
+        }]}
+        result = validate_obligation_coverage_response(accepted, [check])
+        self.assertEqual(result[0]["verdict"], "backend_unsupported")
+        primary_state = normalized_state(check["review_context"]["classification"])
+        self.assertEqual(primary_state, "unsupported_backend")
+        self.assertIn(primary_state, FORMAT_BLOCKING_STATES)
+
+        bad_responses = [
+            {"results": [{**accepted["results"][0], "verdict": "consistent"}]},
+            {"results": [{**accepted["results"][0], "identified_obligations": []}]},
+            {"results": [{**accepted["results"][0], "identified_obligations": [{
+                **accepted["results"][0]["identified_obligations"][0],
+                "disposition": "unrepresented",
+            }]}]},
+            {"results": [{**accepted["results"][0], "identified_obligations": [
+                accepted["results"][0]["identified_obligations"][0], {
+                    "source_quote": "限制★2年", "disposition": "unrepresented",
+                    "requirement_refs": [],
+                },
+            ]}]},
+        ]
+        for response in bad_responses:
+            with self.subTest(response=response), self.assertRaises(NativeSemanticReviewError):
+                validate_obligation_coverage_response(response, [check])
+
+        linked_check = {
+            **check,
+            "review_context": {
+                **check["review_context"],
+                "linked_requirements": [{"requirement_ref": "RR-cover"}],
+            },
+        }
+        with self.assertRaisesRegex(NativeSemanticReviewError, "analysis disposition"):
+            validate_obligation_coverage_response(accepted, [linked_check])
+
+        executable_check = {
+            **check,
+            "review_context": {
+                **check["review_context"], "classification": "executable",
+                "requires_requirement": True,
+            },
+        }
+        with self.assertRaisesRegex(NativeSemanticReviewError, "analysis disposition"):
+            validate_obligation_coverage_response(accepted, [executable_check])
+
+    def test_unsupported_backend_cannot_be_called_consistent_or_release_ready(self) -> None:
+        check = {
+            "check_id": "C00050", "document_text": "可少于2年",
+            "review_context": {
+                "classification": "unsupported_backend", "requires_requirement": False,
+                "primary_obligations": [], "linked_requirements": [],
+                "machine_obligation_ids": [],
+            },
+        }
+        response = {"results": [{
+            "check_id": "C00050", "verdict": "consistent",
+            "rationale": "The source was reviewed.", "evidence_quotes": ["可少于2年"],
+            "machine_obligation_ids": [], "identified_obligations": [],
+        }]}
+        with self.assertRaisesRegex(NativeSemanticReviewError, "cannot be marked consistent"):
+            validate_obligation_coverage_response(response, [check])
 
     def test_independent_review_requires_quote_even_when_informational_clause_has_no_obligations(self) -> None:
         check = {
@@ -641,6 +723,15 @@ class NativeSemanticReviewTests(unittest.TestCase):
         self.assertIn("Use ambiguous only when the source text itself cannot be interpreted reliably", prompt)
         self.assertIn("use incomplete when any obligation is missing or materially misrepresented", prompt)
         self.assertIn("never emit numeric positions or invent a reference", prompt)
+
+    def test_backend_unsupported_prompt_is_explicitly_analysis_only(self) -> None:
+        prompt = native_review._prompt({
+            "protocol": native_review.OBLIGATION_COVERAGE_PROTOCOL,
+            "checks": [],
+        })
+        self.assertIn("analysis-only accounting", prompt)
+        self.assertIn("not DOCX satisfaction", prompt)
+        self.assertIn("never changes the primary unsupported_backend classification", prompt)
 
     def _stub_codex_host(self, process_result):
         context = SimpleNamespace(

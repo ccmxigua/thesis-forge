@@ -47,10 +47,20 @@ _COMPETING_CAPTION_POLICY = re.compile(
 )
 _QUOTE_PAIRS = (("“", "”"), ("‘", "’"), ('"', '"'), ("'", "'"))
 SECURITY_MARKING_OPTIONS_OBLIGATION_ID = "cover.security_marking_options"
+SECURITY_MARKING_SHORTER_ALLOWANCE_OBLIGATION_ID = (
+    "cover.security_marking_options.shorter_duration_allowed"
+)
 _SECURITY_MARKING_OPTION = re.compile(
     r"[□☐]\s*(?P<label>[^□☐\s,，;；()（）]{1,24})\s*[（(]\s*"
     r"(?:≤|不超过|至多|最多)\s*(?P<value>\d{1,4})\s*"
     r"(?P<unit>年|月|日)\s*[）)]"
+)
+_SECURITY_MARKING_SHORTER_ALLOWANCE = re.compile(
+    r"(?:^|[：:，,;；。\s])"
+    r"(?P<label>[^□☐\s,，;；:：。★☆*()（）]{1,24}?)\s*★\s*"
+    r"(?P<value>\d{1,4})\s*(?P<unit>年|月|日)\s*[（(]\s*"
+    r"可少于\s*(?P<shorter_value>\d{1,4})\s*"
+    r"(?P<shorter_unit>年|月|日)\s*[）)]"
 )
 
 # These are code-owned source facts, not IDs that the model must copy into its
@@ -97,6 +107,13 @@ KNOWN_SOURCE_OBLIGATION_BINDINGS: dict[str, dict[str, Any]] = {
     SECURITY_MARKING_OPTIONS_OBLIGATION_ID: {
         "roles": ["cover"],
         "property_path": "properties.non_public_administration.security_marking_options",
+        "match_mode": "security_marking_options",
+        "required_checker_ids": ["cover_non_public_administration"],
+    },
+    SECURITY_MARKING_SHORTER_ALLOWANCE_OBLIGATION_ID: {
+        "roles": ["cover"],
+        "property_path": "properties.non_public_administration.security_marking_options",
+        "match_mode": "security_marking_option",
         "required_checker_ids": ["cover_non_public_administration"],
     },
 }
@@ -247,6 +264,8 @@ def compile_known_source_obligation_ids(source_text: Any) -> list[str]:
         result.append("table_caption.alignment_center")
     if compile_security_marking_options(source_text) is not None:
         result.append(SECURITY_MARKING_OPTIONS_OBLIGATION_ID)
+    if compile_security_marking_shorter_allowances(source_text) is not None:
+        result.append(SECURITY_MARKING_SHORTER_ALLOWANCE_OBLIGATION_ID)
     return sorted(set(result))
 
 
@@ -260,10 +279,94 @@ def compile_known_source_obligations(source_text: Any) -> list[dict[str, Any]]:
         fact = {"id": obligation_id, **copy.deepcopy(binding)}
         if obligation_id == SECURITY_MARKING_OPTIONS_OBLIGATION_ID:
             fact["expected_value"] = compile_security_marking_options(source_text)
+        elif obligation_id == SECURITY_MARKING_SHORTER_ALLOWANCE_OBLIGATION_ID:
+            fact["expected_value"] = compile_security_marking_shorter_allowances(source_text)
         else:
             fact["expected_value"] = copy.deepcopy(binding.get("expected_value"))
         facts.append(fact)
     return facts
+
+
+def compile_security_marking_shorter_allowances(
+    source_text: Any,
+) -> list[dict[str, Any]] | None:
+    """Compile exact starred options whose parenthetical permits a shorter term.
+
+    This deliberately recognizes only the explicit ``label★N年(可少于N年)``
+    form. A missing/mismatched number or unit, an unparsed ``可少于`` phrase,
+    duplicate labels, or example/conditional context fails closed.
+    """
+    if not isinstance(source_text, str) or not source_text.strip():
+        return None
+    if _CONTEXT_UNSAFE.search(source_text):
+        return None
+    matches = list(_SECURITY_MARKING_SHORTER_ALLOWANCE.finditer(source_text))
+    if not matches or source_text.count("可少于") != len(matches):
+        return None
+    labels: list[str] = []
+    compiled: list[dict[str, Any]] = []
+    for match in matches:
+        label = re.sub(r"\s+", " ", match.group("label")).strip()
+        value = int(match.group("value"))
+        shorter_value = int(match.group("shorter_value"))
+        unit = match.group("unit")
+        if (
+            not label
+            or value != shorter_value
+            or unit != match.group("shorter_unit")
+        ):
+            return None
+        labels.append(label)
+        compiled.append({
+            "label": label,
+            "maximum_duration": {"value": value, "unit": unit},
+            "shorter_duration_allowed": True,
+        })
+    if len(set(labels)) != len(labels):
+        return None
+    return compiled
+
+
+def source_fact_value_matches(
+    actual: Any, expected: Any, match_mode: str | None = None,
+) -> bool:
+    """Compare a candidate payload with a code-compiled source fact."""
+    if match_mode is None:
+        if isinstance(expected, bool):
+            return isinstance(actual, bool) and actual is expected
+        return actual == expected
+    if match_mode not in {"security_marking_options", "security_marking_option"}:
+        return False
+    if not isinstance(actual, list) or not isinstance(expected, list) or not expected:
+        return False
+    actual_by_label: dict[str, list[dict[str, Any]]] = {}
+    for item in actual:
+        if not isinstance(item, dict) or not isinstance(item.get("label"), str):
+            return False
+        actual_by_label.setdefault(item["label"], []).append(item)
+    if any(not isinstance(item, dict) or not isinstance(item.get("label"), str) for item in expected):
+        return False
+    expected_labels = [item["label"] for item in expected]
+    if len(set(expected_labels)) != len(expected_labels):
+        return False
+    if match_mode == "security_marking_options":
+        if len(actual) != len(expected) or set(actual_by_label) != set(expected_labels):
+            return False
+    for wanted in expected:
+        candidates = actual_by_label.get(wanted["label"], [])
+        if len(candidates) != 1:
+            return False
+        candidate = candidates[0]
+        if not set(candidate).difference(wanted).issubset({"shorter_duration_allowed"}):
+            return False
+        for key, value in wanted.items():
+            actual_value = candidate.get(key)
+            if isinstance(value, bool):
+                if not isinstance(actual_value, bool) or actual_value is not value:
+                    return False
+            elif actual_value != value:
+                return False
+    return True
 
 
 def compile_security_marking_options(source_text: Any) -> list[dict[str, Any]] | None:
@@ -856,7 +959,8 @@ def materialize_known_source_verification(
             (index, requirement) for index, requirement in enumerate(requirements)
             if isinstance(requirement, dict)
             and requirement.get("role") == "cover"
-            and clause_id in (requirement.get("clause_ids") or [])
+            and isinstance(requirement.get("clause_ids"), list)
+            and clause_id in requirement["clause_ids"]
         ]
         if len(candidates) != 1:
             continue
@@ -884,7 +988,10 @@ def materialize_known_source_verification(
             "requirement_index": requirement_index,
             "source_clause_ids": [clause_id],
             "source_evidence_ids": [
-                value for value in clause.get("evidence_ids", [])
+                value for value in (
+                    clause.get("evidence_ids")
+                    if isinstance(clause.get("evidence_ids"), list) else []
+                )
                 if isinstance(value, str) and value
             ],
             "source_obligation_ids": [SECURITY_MARKING_OPTIONS_OBLIGATION_ID],
@@ -893,6 +1000,84 @@ def materialize_known_source_verification(
             "after_property_sha256": after_sha256,
             "authorization": "exact_source_checkbox_duration_projection_v1",
             "rule_id": "compile_security_marking_options_v1",
+        })
+
+    for clause in clauses:
+        if not isinstance(clause, dict) or not isinstance(clause.get("id"), str):
+            continue
+        clause_id = clause["id"]
+        source_text = clause.get("text") or clause.get("source_text_full")
+        allowances = compile_security_marking_shorter_allowances(source_text)
+        review = review_by_id.get(clause_id, {})
+        if (
+            allowances is None
+            or review.get("classification") not in {"covered", "executable", "verify_existing"}
+        ):
+            continue
+        candidates = [
+            (index, requirement) for index, requirement in enumerate(requirements)
+            if isinstance(requirement, dict)
+            and requirement.get("role") == "cover"
+            and clause_id in (requirement.get("clause_ids") or [])
+        ]
+        if len(candidates) != 1:
+            continue
+        requirement_index, requirement = candidates[0]
+        properties = requirement.get("properties")
+        administration = (
+            properties.get("non_public_administration")
+            if isinstance(properties, dict) else None
+        )
+        options = (
+            administration.get("security_marking_options")
+            if isinstance(administration, dict) else None
+        )
+        if not isinstance(options, list):
+            continue
+        before = copy.deepcopy(options)
+        safe_to_project = True
+        for allowance in allowances:
+            matches = [
+                item for item in options
+                if isinstance(item, dict) and item.get("label") == allowance["label"]
+            ]
+            if len(matches) != 1:
+                safe_to_project = False
+                break
+            item = matches[0]
+            if item.get("maximum_duration") != allowance["maximum_duration"]:
+                safe_to_project = False
+                break
+            if "shorter_duration_allowed" in item and item["shorter_duration_allowed"] is not True:
+                safe_to_project = False
+                break
+        if not safe_to_project:
+            continue
+        for allowance in allowances:
+            next(item for item in options if item.get("label") == allowance["label"])[
+                "shorter_duration_allowed"
+            ] = True
+        if options == before:
+            continue
+        before_sha256 = hashlib.sha256(json.dumps(
+            before, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()
+        after_sha256 = hashlib.sha256(json.dumps(
+            options, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()
+        property_projections.append({
+            "requirement_index": requirement_index,
+            "source_clause_ids": [clause_id],
+            "source_evidence_ids": [
+                value for value in clause.get("evidence_ids", [])
+                if isinstance(value, str) and value
+            ],
+            "source_obligation_ids": [SECURITY_MARKING_SHORTER_ALLOWANCE_OBLIGATION_ID],
+            "property_path": "properties.non_public_administration.security_marking_options",
+            "before_property_sha256": before_sha256,
+            "after_property_sha256": after_sha256,
+            "authorization": "exact_source_security_marking_qualifier_projection_v1",
+            "rule_id": "compile_security_marking_shorter_allowances_v1",
         })
 
     bindings: dict[int, dict[str, Any]] = {}
@@ -913,11 +1098,9 @@ def materialize_known_source_verification(
                 property_path = str(fact["property_path"]).removeprefix("properties.")
                 actual = read_property(requirement.get("properties"), property_path)
                 expected = fact["expected_value"]
-                value_matches = (
-                    isinstance(expected, bool)
-                    and isinstance(actual, bool)
-                    and actual is expected
-                ) or (not isinstance(expected, bool) and actual == expected)
+                value_matches = source_fact_value_matches(
+                    actual, expected, fact.get("match_mode"),
+                )
                 if not value_matches:
                     continue
                 entry = bindings.setdefault(index, {

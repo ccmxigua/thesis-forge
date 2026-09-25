@@ -138,7 +138,7 @@ RESPONSE_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
-OBLIGATION_COVERAGE_PROTOCOL = "native_source_obligation_coverage_review_v2"
+OBLIGATION_COVERAGE_PROTOCOL = "native_source_obligation_coverage_review_v3"
 OBLIGATION_COVERAGE_SCHEMA: dict[str, Any] = {
     "type": "object",
     "required": ["results"],
@@ -156,6 +156,7 @@ OBLIGATION_COVERAGE_SCHEMA: dict[str, Any] = {
                     "verdict": {"enum": [
                         "consistent", "incomplete", "uncertain", "manual_review_required",
                         "external_compliance_pending", "source_content_pending",
+                        "backend_unsupported",
                     ]},
                     "rationale": {"type": "string", "minLength": 1},
                     "evidence_quotes": {
@@ -175,6 +176,7 @@ OBLIGATION_COVERAGE_SCHEMA: dict[str, Any] = {
                                 "disposition": {"enum": [
                                     "represented", "unrepresented", "ambiguous",
                                     "external_action_pending", "authoring_content_pending",
+                                    "backend_unsupported",
                                 ]},
                                 "requirement_refs": {
                                     "type": "array", "items": {"type": "string", "minLength": 1},
@@ -354,6 +356,7 @@ def validate_obligation_coverage_response(
             if isinstance(item, dict) and isinstance(item.get("requirement_ref"), str)
         }
         represented = unrepresented = ambiguous = external_pending = authoring_pending = 0
+        backend_unsupported = 0
         for obligation in result.get("identified_obligations", []):
             quote = obligation.get("source_quote")
             if not isinstance(quote, str) or not quote or quote not in source_text:
@@ -382,7 +385,9 @@ def validate_obligation_coverage_response(
                         f"authoring-content pending lacks an explicit source authoring instruction for {check_id}"
                     )
                 authoring_pending += 1
-            else:
+            elif disposition == "backend_unsupported":
+                backend_unsupported += 1
+            elif disposition == "ambiguous":
                 ambiguous += 1
         verdict = result.get("verdict")
         is_external_compliance = context.get("classification") == "external_compliance"
@@ -452,6 +457,31 @@ def validate_obligation_coverage_response(
                 )
             by_id[check_id] = result
             continue
+        is_backend_unsupported = context.get("classification") == "unsupported_backend"
+        if verdict == "backend_unsupported" or backend_unsupported:
+            obligations = result.get("identified_obligations", [])
+            if (
+                not is_backend_unsupported
+                or verdict != "backend_unsupported"
+                or context.get("requires_requirement") is not False
+                or linked
+                or not obligations
+                or backend_unsupported != len(obligations)
+                or represented or unrepresented or ambiguous or external_pending or authoring_pending
+                or any(item.get("requirement_refs") for item in obligations)
+            ):
+                raise NativeSemanticReviewError(
+                    f"backend_unsupported is only an analysis disposition for a fully identified, "
+                    f"unlinked unsupported_backend clause: {check_id}"
+                )
+            # This records complete source analysis while preserving the
+            # unsupported execution state; it is never a DOCX or release pass.
+            by_id[check_id] = result
+            continue
+        if is_backend_unsupported and verdict == "consistent":
+            raise NativeSemanticReviewError(
+                f"unsupported_backend clause cannot be marked consistent or executable: {check_id}"
+            )
         if authoring_pending:
             raise NativeSemanticReviewError(
                 f"authoring-content disposition requires source_content_pending verdict for {check_id}"
@@ -732,6 +762,13 @@ def _prompt(request: dict[str, Any]) -> str:
             "is still pending, not that the content was written or a requirement satisfied. If the primary response "
             "instead classifies that explicit authoring instruction as informational, use incomplete so the bounded "
             "primary retry can correct only that classification. Never draft the missing thesis content. "
+            "For a clause classified unsupported_backend, use verdict backend_unsupported only when the source is "
+            "readable, every identified obligation is explicitly enumerated with disposition backend_unsupported, "
+            "and there is no linked requirement or requirement reference because the current backend cannot execute "
+            "or verify it. This is analysis-only accounting: it is not DOCX satisfaction, executability, or release "
+            "readiness, and it never changes the primary unsupported_backend classification. If any obligation is "
+            "missing or the backend limitation is not established, use incomplete instead. Never use this disposition "
+            "for another classification or to hide a linked/missing requirement. "
             "For represented obligations, requirement_refs must contain only the exact opaque requirement_ref strings "
             "listed under this check's linked_requirements; never emit numeric positions or invent a reference. "
             "If a readable obligation is absent, use incomplete. Code retains machine_obligation_ids "
@@ -956,7 +993,7 @@ def run_native_semantic_review(
     finished_at = datetime.now(timezone.utc).isoformat()
     verdicts = (
         "consistent", "incomplete", "uncertain", "manual_review_required",
-        "external_compliance_pending", "source_content_pending",
+        "external_compliance_pending", "source_content_pending", "backend_unsupported",
     ) if obligation_coverage_mode else (
         "satisfied", "noncompliant", "uncertain",
     )

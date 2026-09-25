@@ -13,6 +13,8 @@ import host_agent_bridge as bridge  # noqa: E402
 from format_spec_validation import schema_support_errors, validate_instance  # noqa: E402
 from host_review_contract import (  # noqa: E402
     HOST_REVIEW_CONTRACT_V3,
+    _security_marking_qualifier_binding_errors,
+    _table_obligation_gaps,
     contract_error_records,
     derived_requirement_indexes,
     provenance_error_records,
@@ -94,6 +96,67 @@ class HostReviewV3Tests(unittest.TestCase):
             "unsupported_items": [],
             "reported_conflicts": [],
         }
+
+    def test_shorter_security_marking_fact_requires_exact_allowance_property(self) -> None:
+        clause = {"id": "C50", "text": "注：限制★2年(可少于2年)"}
+        requirement = {
+            "role": "cover",
+            "properties": {"non_public_administration": {
+                "security_marking_options": [
+                    {"label": "限制", "maximum_duration": {"value": 2, "unit": "年"}},
+                    {"label": "秘密", "maximum_duration": {"value": 10, "unit": "年"}},
+                ],
+            }},
+            "verification": {"checker_ids": ["cover_non_public_administration"]},
+        }
+        self.assertEqual(
+            _table_obligation_gaps(clause, [requirement], [0]),
+            ["cover.security_marking_options.shorter_duration_allowed"],
+        )
+        requirement["properties"]["non_public_administration"]["security_marking_options"][0][
+            "shorter_duration_allowed"
+        ] = True
+        self.assertEqual(_table_obligation_gaps(clause, [requirement], [0]), [])
+        requirement["properties"]["non_public_administration"]["security_marking_options"][0][
+            "shorter_duration_allowed"
+        ] = False
+        self.assertEqual(
+            _table_obligation_gaps(clause, [requirement], [0]),
+            ["cover.security_marking_options.shorter_duration_allowed"],
+        )
+
+    def test_shorter_security_marking_flag_requires_direct_source_binding(self) -> None:
+        option = {
+            "label": "限制", "maximum_duration": {"value": 2, "unit": "年"},
+            "shorter_duration_allowed": True,
+        }
+        requirement = {
+            "role": "cover", "clause_ids": ["C50"],
+            "properties": {"non_public_administration": {
+                "security_marking_options": [option],
+            }},
+        }
+        response = {"requirements": [requirement]}
+        source_clause = {"id": "C50", "text": "注：限制★2年(可少于2年)"}
+        self.assertEqual(
+            _security_marking_qualifier_binding_errors(response, [source_clause]), [],
+        )
+        unrelated_clause = {"id": "C43", "text": "□限制(≤2年) □秘密(≤10年)"}
+        requirement["clause_ids"] = ["C43"]
+        self.assertEqual(
+            _security_marking_qualifier_binding_errors(response, [unrelated_clause]),
+            ["$.requirements[0].properties.non_public_administration"
+             ".security_marking_options[0].shorter_duration_allowed: "
+             "must_be_bound_to_linked_source_clause"],
+        )
+        requirement["clause_ids"] = ["C50"]
+        option["shorter_duration_allowed"] = False
+        self.assertEqual(
+            _security_marking_qualifier_binding_errors(response, [source_clause]),
+            ["$.requirements[0].properties.non_public_administration"
+             ".security_marking_options[0].shorter_duration_allowed: "
+             "must_be_source_compiled_true"],
+        )
 
     def test_request_explains_multi_role_clause_and_equation_role_boundary(self) -> None:
         instructions = "\n".join(self.request["instructions"])

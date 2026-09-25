@@ -2040,6 +2040,10 @@
                   }
                 },
                 "additionalProperties": false
+              },
+              "shorter_duration_allowed": {
+                "type": "boolean",
+                "description": "True only when the current source explicitly states that the marked maximum term may be shorter."
               }
             },
             "additionalProperties": false

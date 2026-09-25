@@ -16,7 +16,9 @@ from existing_requirement_contract import (
     existing_reference_errors, project_authoritative_existing_payloads,
 )
 from source_obligation_compiler import (
+    SECURITY_MARKING_SHORTER_ALLOWANCE_OBLIGATION_ID,
     compile_known_source_obligations,
+    source_fact_value_matches,
     compile_soft_keyword_count_guidance,
     compile_explicit_keyword_count_range,
     materialize_complete_abstract_source_constraints,
@@ -740,11 +742,6 @@ def _table_obligation_gaps(
             current = current[part]
         return current
 
-    def exact_match(actual: Any, expected: Any) -> bool:
-        if isinstance(expected, bool):
-            return isinstance(actual, bool) and actual is expected
-        return actual == expected
-
     gaps: list[str] = []
     for fact in compile_known_source_obligations(source_text):
         candidates = [
@@ -762,10 +759,14 @@ def _table_obligation_gaps(
         expected = fact["expected_value"]
         matched_requirements = [
             item for item, value in zip(candidates, values)
-            if value is not None and exact_match(value, expected)
+            if value is not None and source_fact_value_matches(
+                value, expected, fact.get("match_mode"),
+            )
         ]
         if not matched_requirements or any(
-            not exact_match(value, expected) for value in explicit_values
+            not source_fact_value_matches(
+                value, expected, fact.get("match_mode"),
+            ) for value in explicit_values
         ):
             gaps.append(str(fact["id"]))
             continue
@@ -777,6 +778,73 @@ def _table_obligation_gaps(
             ):
                 gaps.append(f"{fact['id']}:missing_checker:{checker_id}")
     return gaps
+
+
+def _security_marking_qualifier_binding_errors(
+    response: dict[str, Any], clauses: Any,
+) -> list[str]:
+    """Reject model-authored shorter-term flags without a linked source fact."""
+    requirements = response.get("requirements")
+    if not isinstance(requirements, list) or not isinstance(clauses, list):
+        return []
+    clauses_by_id = {
+        item.get("id"): item for item in clauses
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    errors: list[str] = []
+    for requirement_index, requirement in enumerate(requirements):
+        if not isinstance(requirement, dict) or requirement.get("role") != "cover":
+            continue
+        properties = requirement.get("properties")
+        administration = (
+            properties.get("non_public_administration")
+            if isinstance(properties, dict) else None
+        )
+        options = (
+            administration.get("security_marking_options")
+            if isinstance(administration, dict) else None
+        )
+        if not isinstance(options, list):
+            continue
+        flagged = [
+            (option_index, option) for option_index, option in enumerate(options)
+            if isinstance(option, dict) and "shorter_duration_allowed" in option
+        ]
+        if not flagged:
+            continue
+        clause_ids = requirement.get("clause_ids")
+        linked_clauses = []
+        if isinstance(clause_ids, list):
+            linked_clauses = [
+                clauses_by_id[clause_id]
+                for clause_id in clause_ids
+                if isinstance(clause_id, str) and clause_id in clauses_by_id
+            ]
+        source_facts = [
+            fact for clause in linked_clauses
+            for fact in compile_known_source_obligations(
+                clause.get("text") or clause.get("source_text_full")
+            )
+            if fact.get("id") == SECURITY_MARKING_SHORTER_ALLOWANCE_OBLIGATION_ID
+        ]
+        for option_index, option in flagged:
+            pointer = (
+                f"$.requirements[{requirement_index}].properties.non_public_administration"
+                f".security_marking_options[{option_index}].shorter_duration_allowed"
+            )
+            if option.get("shorter_duration_allowed") is not True:
+                errors.append(f"{pointer}: must_be_source_compiled_true")
+                continue
+            source_backed = any(
+                source_fact_value_matches(
+                    options, [expected_option], "security_marking_option",
+                )
+                for fact in source_facts
+                for expected_option in fact.get("expected_value", [])
+            )
+            if not source_backed:
+                errors.append(f"{pointer}: must_be_bound_to_linked_source_clause")
+    return errors
 
 
 def _validate_obligations(
@@ -1062,6 +1130,9 @@ def validate_response(response: Any, chunk: dict[str, Any]) -> list[str]:
         response, chunk.get("clauses"),
     )
     errors: list[str] = []
+    errors.extend(_security_marking_qualifier_binding_errors(
+        response, chunk.get("clauses"),
+    ))
     contract_version = response.get("contract_version")
     if contract_version not in SUPPORTED_HOST_REVIEW_CONTRACTS:
         errors.append(f"contract_version_unsupported:{contract_version!r}")

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import sys
 import unittest
 from pathlib import Path
@@ -14,11 +15,13 @@ from source_obligation_compiler import (  # noqa: E402
     compile_known_source_obligations,
     compile_known_source_obligation_ids,
     compile_security_marking_options,
+    compile_security_marking_shorter_allowances,
     compile_soft_keyword_count_guidance,
     compile_unresolved_manual_review_codes,
     materialize_complete_abstract_source_constraints,
     materialize_known_source_verification,
     materialize_soft_keyword_count_guidance,
+    source_fact_value_matches,
 )
 
 
@@ -81,6 +84,119 @@ class SourceObligationCompilerTests(unittest.TestCase):
         ):
             with self.subTest(source=source):
                 self.assertIsNone(compile_security_marking_options(source))
+
+    def test_shorter_security_marking_qualifier_compiles_exact_source_fact(self) -> None:
+        source = "注：限制★2年(可少于2年)"
+        expected = [{
+            "label": "限制",
+            "maximum_duration": {"value": 2, "unit": "年"},
+            "shorter_duration_allowed": True,
+        }]
+        self.assertEqual(compile_security_marking_shorter_allowances(source), expected)
+        obligation_id = "cover.security_marking_options.shorter_duration_allowed"
+        self.assertIn(obligation_id, compile_known_source_obligation_ids(source))
+        fact = next(
+            item for item in compile_known_source_obligations(source)
+            if item["id"] == obligation_id
+        )
+        self.assertEqual(fact["expected_value"], expected)
+        self.assertEqual(fact["match_mode"], "security_marking_option")
+
+        multi = "注：限制★2年(可少于2年)；秘密★10年(可少于10年)"
+        self.assertEqual(len(compile_security_marking_shorter_allowances(multi) or []), 2)
+
+    def test_shorter_security_marking_qualifier_fails_closed_on_mismatch_or_example(self) -> None:
+        for source in (
+            "注：限制★2年(可少于3年)",
+            "注：限制★2年(可少于2月)",
+            "注：限制★2年(可少于2年)，机密可少于20年",
+            "例如：限制★2年(可少于2年)",
+            "注：限制★2年(可少于2年)；限制★2年(可少于2年)",
+        ):
+            with self.subTest(source=source):
+                self.assertIsNone(compile_security_marking_shorter_allowances(source))
+
+    def test_security_marking_fact_match_allows_only_known_optional_qualifier(self) -> None:
+        expected = [{
+            "label": "限制", "maximum_duration": {"value": 2, "unit": "年"},
+        }]
+        with_qualifier = [{**expected[0], "shorter_duration_allowed": True}]
+        with_unknown_property = [{**expected[0], "invented_policy": "yes"}]
+        self.assertTrue(source_fact_value_matches(
+            with_qualifier, expected, "security_marking_options",
+        ))
+        self.assertFalse(source_fact_value_matches(
+            with_unknown_property, expected, "security_marking_options",
+        ))
+
+    def test_shorter_security_marking_qualifier_projects_only_exact_linked_values(self) -> None:
+        source = "注：限制★2年(可少于2年)"
+        clause = {"id": "C50", "text": source, "evidence_ids": ["E50"]}
+        base = {
+            "label": "限制", "maximum_duration": {"value": 2, "unit": "年"},
+        }
+        response = {
+            "clause_reviews": [{"clause_id": "C50", "classification": "executable"}],
+            "requirements": [{
+                "role": "cover", "clause_ids": ["C50"], "evidence_ids": ["E50"],
+                "properties": {"non_public_administration": {
+                    "security_marking_options": [
+                        base,
+                        {"label": "秘密", "maximum_duration": {"value": 10, "unit": "年"}},
+                    ],
+                }},
+                "verification": {"mode": "static_docx", "checks": [], "checker_ids": []},
+            }],
+        }
+        projected, audit = materialize_known_source_verification(response, [clause])
+        self.assertTrue(projected["requirements"][0]["properties"]["non_public_administration"]
+                        ["security_marking_options"][0]["shorter_duration_allowed"])
+        qualifier_audit = next(
+            item for item in audit
+            if item.get("authorization") == "exact_source_security_marking_qualifier_projection_v1"
+        )
+        self.assertEqual(qualifier_audit["source_clause_ids"], ["C50"])
+        self.assertEqual(qualifier_audit["source_evidence_ids"], ["E50"])
+        self.assertIn(
+            "cover_non_public_administration",
+            projected["requirements"][0]["verification"]["checker_ids"],
+        )
+        _again, second_audit = materialize_known_source_verification(projected, [clause])
+        self.assertEqual(second_audit, [])
+
+        conflicting = copy.deepcopy(response)
+        conflicting["requirements"][0]["properties"]["non_public_administration"][
+            "security_marking_options"][0]["shorter_duration_allowed"] = False
+        unchanged, conflict_audit = materialize_known_source_verification(conflicting, [clause])
+        self.assertFalse(unchanged["requirements"][0]["properties"]["non_public_administration"]
+                         ["security_marking_options"][0]["shorter_duration_allowed"])
+        self.assertFalse(any(
+            item.get("authorization") == "exact_source_security_marking_qualifier_projection_v1"
+            for item in conflict_audit
+        ))
+
+    def test_shorter_security_marking_qualifier_does_not_promote_unsupported_or_unlinked_requirements(self) -> None:
+        source = "注：限制★2年(可少于2年)"
+        clause = {"id": "C50", "text": source, "evidence_ids": ["E50"]}
+        response = {
+            "clause_reviews": [{"clause_id": "C50", "classification": "unsupported_backend"}],
+            "requirements": [{
+                "role": "cover", "clause_ids": ["C42"], "evidence_ids": ["E42"],
+                "properties": {"non_public_administration": {
+                    "security_marking_options": [
+                        {"label": "限制", "maximum_duration": {"value": 2, "unit": "年"}},
+                        {"label": "秘密", "maximum_duration": {"value": 10, "unit": "年"}},
+                    ],
+                }},
+            }],
+        }
+        projected, audit = materialize_known_source_verification(response, [clause])
+        self.assertNotIn(
+            "shorter_duration_allowed",
+            projected["requirements"][0]["properties"]["non_public_administration"]
+            ["security_marking_options"][0],
+        )
+        self.assertEqual(audit, [])
 
     def test_security_marking_projection_never_overwrites_conflicts_or_guesses_links(self) -> None:
         source = "□限制(≤2年) □秘密(≤10年)"

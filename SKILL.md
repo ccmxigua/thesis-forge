@@ -386,6 +386,15 @@ requirement reference and preserve the exact source-quote inventory that
 triggered the correction. The bridge never creates an obligation or changes
 the candidate, and the ordinary external-pending validator remains
 authoritative.
+For a clause already classified `unsupported_backend`, the independent review
+may instead record `verdict=backend_unsupported` only when it enumerates every
+identified source obligation with `disposition=backend_unsupported`, the
+candidate has no linked requirement, and every `requirement_refs` list is
+empty. This is analysis-only accounting: it prevents an unnecessary retry of
+the entire primary response, but does not create an executable property or
+pass state. `unsupported_backend` remains a full/submission blocker; capability
+planning, document generation, and release gates are unchanged and remain
+fail-closed. Missing obligations still use `incomplete`.
 If the second review still reports an unrepresented obligation, cannot prove
 an external action, or violates any other contract, the chunk fails closed.
 A separately corrected primary response gets a new review budget only after

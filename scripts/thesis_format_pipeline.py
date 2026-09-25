@@ -477,7 +477,20 @@ def _validate_independent_obligation_receipts(
             if isinstance(item, dict) and isinstance(item.get("check_id"), str)
         }
         source_content_pending_items: list[dict[str, Any]] = []
+        backend_unsupported_items: list[dict[str, Any]] = []
         for result in normalized_results:
+            if result.get("verdict") == "backend_unsupported":
+                backend_unsupported_items.append({
+                    "clause_id": str(result.get("check_id") or ""),
+                    "source_quotes": [
+                        str(item.get("source_quote"))
+                        for item in result.get("identified_obligations", [])
+                        if isinstance(item, dict)
+                        and item.get("disposition") == "backend_unsupported"
+                        and isinstance(item.get("source_quote"), str)
+                    ],
+                    "reason": str(result.get("rationale") or ""),
+                })
             if result.get("verdict") != "source_content_pending":
                 continue
             check_id = str(result.get("check_id") or "")
@@ -524,6 +537,11 @@ def _validate_independent_obligation_receipts(
             "review_response_sha256": response_file_sha,
             "manual_review_required_clause_ids": manual_review_clause_ids,
             "submission_blocked_by_manual_review": bool(manual_review_clause_ids),
+            "backend_unsupported_clause_ids": sorted({
+                item["clause_id"] for item in backend_unsupported_items if item["clause_id"]
+            }),
+            "backend_unsupported_items": backend_unsupported_items,
+            "submission_blocked_by_backend_unsupported": bool(backend_unsupported_items),
             "source_content_pending_clause_ids": sorted({
                 item["clause_id"] for item in source_content_pending_items
             }),

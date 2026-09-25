@@ -946,6 +946,9 @@ class NativeSemanticReviewTests(unittest.TestCase):
             "evidence_refs": [full_source_ref],
             "identified_obligations": [{
                 "source_ref": full_source_ref, "disposition": "ambiguous", "requirement_refs": [],
+                "obligation_summary": None,
+                "scope_dependency_codes": None,
+                "scope_dependency_dimensions": None,
             }],
         }]}
         observed = {}
@@ -1003,11 +1006,34 @@ class NativeSemanticReviewTests(unittest.TestCase):
             )
             self.assertEqual(raw["results"][0]["evidence_refs"], [full_source_ref])
             self.assertNotIn("machine_obligation_ids", raw["results"][0])
+            self.assertIsNone(
+                raw["results"][0]["identified_obligations"][0]["scope_dependency_codes"]
+            )
             self.assertEqual(canonical["results"][0]["evidence_quotes"], ["该处约3cm"])
             self.assertEqual(compiled_candidate, canonical)
+            self.assertNotIn(
+                "scope_dependency_codes",
+                canonical["results"][0]["identified_obligations"][0],
+            )
+            self.assertNotIn(
+                "scope_dependency_dimensions",
+                canonical["results"][0]["identified_obligations"][0],
+            )
+            self.assertNotIn(
+                "obligation_summary",
+                canonical["results"][0]["identified_obligations"][0],
+            )
             self.assertEqual(canonical["results"][0]["machine_obligation_ids"], [])
             self.assertEqual(audit["source_reference_protocol"], "semantic_source_references_v2")
             self.assertEqual(compilation["run_id"], "run")
+            self.assertEqual(
+                compilation["provider_nullable_normalization"]["policy"],
+                "strict_native_optional_nulls_to_omitted_v1",
+            )
+            self.assertEqual(
+                compilation["raw_response_sha256"],
+                native_review.sha256_json(raw),
+            )
 
     def test_native_runner_does_not_call_non_timeout_exit_124_a_timeout(self) -> None:
         with tempfile.TemporaryDirectory() as td:

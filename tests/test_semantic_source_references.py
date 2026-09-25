@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from native_semantic_review import OBLIGATION_COVERAGE_SCHEMA, RESPONSE_SCHEMA
+from semantic_contract import sha256_json
 from semantic_source_references import (
     build_source_reference_packet,
     compile_source_reference_response,
@@ -131,6 +132,83 @@ class SemanticSourceReferenceTests(unittest.TestCase):
             audit["selections"][0]["obligations"][1]["source_ref"],
         )
         self.assertNotIn("machine_obligation_ids", wire_schema["properties"]["results"]["items"]["anyOf"][0]["properties"])
+
+    def test_codex_nullable_optional_obligations_normalize_with_raw_hash_preserved(self) -> None:
+        request = {"protocol": "coverage", "run_id": "run-null", "checks": [{
+            "check_id": "C1", "document_text": "摘要字数应符合规定。",
+            "review_context": {"machine_obligation_ids": ["abstract.word_count"]},
+        }, {
+            "check_id": "C2", "document_text": "关键词最多七个汉字。",
+            "review_context": {"machine_obligation_ids": ["keywords.maximum"]},
+        }]}
+        packet = build_source_reference_packet(request)
+        first_ref = packet["checks"][0]["source_spans"][0]["ref_id"]
+        second_ref = packet["checks"][1]["source_spans"][0]["ref_id"]
+        raw = {"results": [{
+            "check_id": "C1", "verdict": "uncertain", "rationale": "范围需要核实。",
+            "evidence_refs": [first_ref], "identified_obligations": [{
+                "source_ref": first_ref, "disposition": "scope_unresolved", "requirement_refs": [],
+                "scope_dependency_codes": None, "scope_dependency_dimensions": None,
+                "obligation_summary": None,
+            }],
+        }, {
+            "check_id": "C2", "verdict": "uncertain", "rationale": "适用口径需要核实。",
+            "evidence_refs": [second_ref], "identified_obligations": [{
+                "source_ref": second_ref, "disposition": "scope_unresolved", "requirement_refs": [],
+                "scope_dependency_codes": ["keywords.maximum"],
+                "scope_dependency_dimensions": ["target"],
+                "obligation_summary": "关键词数量限制的具体适用对象。",
+            }],
+        }]}
+        raw_before = copy.deepcopy(raw)
+        with self.assertRaisesRegex(ValueError, "source reference response rejected"):
+            compile_source_reference_response(
+                raw, request, OBLIGATION_COVERAGE_SCHEMA, coverage=True,
+            )
+        compiled, audit = compile_source_reference_response(
+            raw, request, OBLIGATION_COVERAGE_SCHEMA, coverage=True,
+            provider_nullable_optionals=True,
+        )
+
+        obligation = compiled["results"][0]["identified_obligations"][0]
+        self.assertNotIn("scope_dependency_codes", obligation)
+        self.assertNotIn("scope_dependency_dimensions", obligation)
+        self.assertNotIn("obligation_summary", obligation)
+        preserved = compiled["results"][1]["identified_obligations"][0]
+        self.assertEqual(preserved["scope_dependency_codes"], ["keywords.maximum"])
+        self.assertEqual(preserved["scope_dependency_dimensions"], ["target"])
+        self.assertEqual(preserved["obligation_summary"], "关键词数量限制的具体适用对象。")
+        self.assertEqual(raw, raw_before)
+        self.assertEqual(audit["raw_response_sha256"], sha256_json(raw_before))
+        normalized_input = copy.deepcopy(raw_before)
+        normalized_obligation = normalized_input["results"][0]["identified_obligations"][0]
+        normalized_obligation.pop("scope_dependency_codes")
+        normalized_obligation.pop("scope_dependency_dimensions")
+        normalized_obligation.pop("obligation_summary")
+        self.assertEqual(
+            audit["provider_nullable_normalization"],
+            {
+                "policy": "strict_native_optional_nulls_to_omitted_v1",
+                "provider_response_sha256": sha256_json(raw_before),
+                "canonical_input_response_sha256": sha256_json(normalized_input),
+            },
+        )
+
+        required_null = copy.deepcopy(raw_before)
+        required_null["results"][0]["rationale"] = None
+        with self.assertRaisesRegex(ValueError, "source reference response rejected"):
+            compile_source_reference_response(
+                required_null, request, OBLIGATION_COVERAGE_SCHEMA, coverage=True,
+                provider_nullable_optionals=True,
+            )
+
+        unknown_null = copy.deepcopy(raw_before)
+        unknown_null["results"][0]["identified_obligations"][0]["provider_extra"] = None
+        with self.assertRaisesRegex(ValueError, "source reference response rejected"):
+            compile_source_reference_response(
+                unknown_null, request, OBLIGATION_COVERAGE_SCHEMA, coverage=True,
+                provider_nullable_optionals=True,
+            )
 
     def test_english_source_spans_preserve_offsets_and_do_not_split_decimals_or_abbreviations(self) -> None:
         text = (

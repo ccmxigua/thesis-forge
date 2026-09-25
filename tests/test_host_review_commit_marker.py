@@ -88,13 +88,21 @@ class HostReviewCommitMarkerTests(unittest.TestCase):
             "verdict": "consistent",
             "rationale": "来源是说明性标题，没有遗漏可执行义务。",
             "evidence_refs": [source_span["ref_id"]],
-            "identified_obligations": [],
+            "identified_obligations": [{
+                "source_ref": source_span["ref_id"],
+                "disposition": "represented",
+                "requirement_refs": [],
+                "obligation_summary": None,
+                "scope_dependency_codes": None,
+                "scope_dependency_dimensions": None,
+            }],
         }]}
         reviewer_response, source_compilation = compile_source_reference_response(
             raw_reviewer_response,
             independent_request,
             OBLIGATION_COVERAGE_SCHEMA,
             coverage=True,
+            provider_nullable_optionals=True,
         )
         normalized_results = validate_obligation_coverage_response(
             reviewer_response, independent_request["checks"],
@@ -263,6 +271,62 @@ class HostReviewCommitMarkerTests(unittest.TestCase):
             )
             self.assertEqual(result["run_id"], "commit-marker-test-run")
             self.assertEqual(result["merge_commit_marker"]["path"], str((receipt.parent / "merge-commit.json").resolve()))
+
+    def test_pipeline_replays_codex_nullable_raw_response_and_rejects_raw_byte_changes(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            work = Path(td).resolve()
+            response, audit_path, receipt, extraction = self._make_committed_merge(work)
+            audit = json.loads(audit_path.read_text(encoding="utf-8"))
+            pointer = audit["chunk_runs"][0]["independent_obligation_review"]
+            envelope = json.loads((audit_path.parent / pointer["audit_path"]).read_text(encoding="utf-8"))
+            review_audit = envelope["review_audit"]
+            raw_path = Path(review_audit["raw_response_path"])
+            raw = json.loads(raw_path.read_text(encoding="utf-8"))
+            raw_obligation = raw["results"][0]["identified_obligations"][0]
+            self.assertIsNone(raw_obligation["obligation_summary"])
+            self.assertIsNone(raw_obligation["scope_dependency_codes"])
+            self.assertIsNone(raw_obligation["scope_dependency_dimensions"])
+
+            result = pipeline.validate_host_review_receipts(
+                response_path=response, audit_path=audit_path, receipt_path=receipt,
+                extraction_manifest=extraction, work=work,
+            )
+            self.assertEqual(result["run_id"], "commit-marker-test-run")
+
+            raw_path.write_text(raw_path.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "source-reference artifacts .* do not match their receipts"):
+                pipeline.validate_host_review_receipts(
+                    response_path=response, audit_path=audit_path, receipt_path=receipt,
+                    extraction_manifest=extraction, work=work,
+                )
+
+    def test_pipeline_replay_keeps_nullable_optionals_strict_for_non_codex_adapter(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            work = Path(td).resolve()
+            _response, audit_path, _receipt, _extraction = self._make_committed_merge(work)
+            audit = json.loads(audit_path.read_text(encoding="utf-8"))
+            pointer = audit["chunk_runs"][0]["independent_obligation_review"]
+            envelope_path = audit_path.parent / pointer["audit_path"]
+            envelope = json.loads(envelope_path.read_text(encoding="utf-8"))
+            envelope["review_audit"]["adapter_id"] = "openclaw"
+            envelope["review_audit"]["host_runtime"] = "openclaw"
+            audit["adapter_id"] = "openclaw"
+            audit["host_runtime"] = "openclaw"
+            envelope_path.write_text(json.dumps(envelope, ensure_ascii=False), encoding="utf-8")
+            pointer["audit_sha256"] = sha256_file(envelope_path)
+            fresh_request = json.loads(
+                (audit_path.parent / "llm-request.json").read_text(encoding="utf-8")
+            )
+
+            with self.assertRaisesRegex(ValueError, "source reference response rejected"):
+                pipeline._validate_independent_obligation_receipts(
+                    audit=audit,
+                    review_root=audit_path.parent,
+                    expected_run_id="commit-marker-test-run",
+                    expected_request_body_sha=request_body_sha256(fresh_request),
+                    expected_request_envelope_sha=None,
+                    expected_request_file_sha=None,
+                )
 
     def test_pipeline_rejects_response_bytes_changed_after_commit(self) -> None:
         with tempfile.TemporaryDirectory() as td:

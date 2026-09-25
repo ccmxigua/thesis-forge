@@ -252,7 +252,11 @@ def normalize_native_response(
             normalized: dict[str, Any] = {}
             for key, child in value.items():
                 child_schema = properties.get(key)
-                if child is None and key not in required:
+                # Only a declared optional property may use null as the
+                # provider's omission sentinel. Preserve unknown keys (even
+                # null-valued ones) so the local additionalProperties check
+                # rejects them instead of normalization erasing the violation.
+                if child is None and key in properties and key not in required:
                     continue
                 if isinstance(child_schema, dict):
                     normalized[key] = normalize(child, child_schema)

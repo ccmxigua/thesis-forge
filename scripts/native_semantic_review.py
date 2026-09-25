@@ -1059,6 +1059,7 @@ def run_native_semantic_review(
         _write_fresh(raw_response_path, strict_json_dumps(response, ensure_ascii=False, indent=2) + "\n")
         response, compilation = compile_source_reference_response(
             response, request, canonical_schema, coverage=obligation_coverage_mode,
+            provider_nullable_optionals=adapter_id == "codex",
         )
         _write_fresh(compilation_path, strict_json_dumps(compilation, ensure_ascii=False, indent=2) + "\n")
         _write_fresh(

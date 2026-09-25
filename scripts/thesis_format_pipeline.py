@@ -553,6 +553,7 @@ def _validate_independent_obligation_receipts(
             raise ValueError(f"independent source-reference artifacts {index} do not match the canonical request/response")
         reconstructed_response, reconstructed_compilation = compile_source_reference_response(
             raw_review_response, review_request, OBLIGATION_COVERAGE_SCHEMA, coverage=True,
+            provider_nullable_optionals=review_audit.get("adapter_id") == "codex",
         )
         if reconstructed_response != review_response or reconstructed_compilation != compilation:
             raise ValueError(

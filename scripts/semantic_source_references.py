@@ -11,6 +11,7 @@ import re
 from typing import Any
 
 from format_spec_validation import validate_instance
+from host_review_schema import normalize_native_response
 from semantic_contract import sha256_json
 
 
@@ -124,15 +125,29 @@ def source_reference_schema(
 
 def compile_source_reference_response(
     response: Any, request: dict[str, Any], canonical_schema: dict[str, Any], *, coverage: bool,
+    provider_nullable_optionals: bool = False,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Resolve only selections from this immutable request; never repair prose."""
+    """Resolve only selections from this immutable request; never repair prose.
+
+    Codex strict structured output represents local optional properties as
+    required nullable fields. When ``provider_nullable_optionals`` is true,
+    normalize only those schema-optional nulls to omission before canonical
+    validation. Keep the parsed provider response hash in the receipt so this
+    deterministic projection cannot obscure the original model output.
+    """
     packet = build_source_reference_packet(request)
-    errors = validate_instance(response, source_reference_schema(canonical_schema, packet, coverage=coverage))
+    validation_schema = source_reference_schema(canonical_schema, packet, coverage=coverage)
+    provider_response_sha256 = sha256_json(response)
+    canonical_input = (
+        normalize_native_response(response, validation_schema)
+        if provider_nullable_optionals else copy.deepcopy(response)
+    )
+    errors = validate_instance(canonical_input, validation_schema)
     if errors:
         raise ValueError("source reference response rejected: " + "; ".join(errors[:8]))
     checks = {check["check_id"]: check for check in packet["checks"]}
     seen: set[str] = set()
-    compiled = copy.deepcopy(response)
+    compiled = copy.deepcopy(canonical_input)
     selections = []
     for result in compiled["results"]:
         check_id = result["check_id"]
@@ -165,10 +180,17 @@ def compile_source_reference_response(
         ], "obligations": obligation_selections})
     if seen != set(checks):
         raise ValueError("source reference response omitted checks: " + ", ".join(sorted(set(checks) - seen)))
-    return compiled, {
+    compilation = {
         "protocol": REFERENCE_PROTOCOL, "run_id": request.get("run_id"),
         "request_sha256": sha256_json(request), "packet_sha256": sha256_json(packet),
-        "raw_response_sha256": sha256_json(response),
+        "raw_response_sha256": provider_response_sha256,
         "compiled_response_sha256": sha256_json(compiled), "selections": selections,
         "semantic_verdicts_unchanged": True,
     }
+    if provider_nullable_optionals:
+        compilation["provider_nullable_normalization"] = {
+            "policy": "strict_native_optional_nulls_to_omitted_v1",
+            "provider_response_sha256": provider_response_sha256,
+            "canonical_input_response_sha256": sha256_json(canonical_input),
+        }
+    return compiled, compilation

@@ -93,8 +93,6 @@ class HostReviewCommitMarkerTests(unittest.TestCase):
                 "disposition": "represented",
                 "requirement_refs": [],
                 "obligation_summary": None,
-                "scope_dependency_codes": None,
-                "scope_dependency_dimensions": None,
             }],
         }]}
         reviewer_response, source_compilation = compile_source_reference_response(
@@ -284,8 +282,8 @@ class HostReviewCommitMarkerTests(unittest.TestCase):
             raw = json.loads(raw_path.read_text(encoding="utf-8"))
             raw_obligation = raw["results"][0]["identified_obligations"][0]
             self.assertIsNone(raw_obligation["obligation_summary"])
-            self.assertIsNone(raw_obligation["scope_dependency_codes"])
-            self.assertIsNone(raw_obligation["scope_dependency_dimensions"])
+            self.assertNotIn("scope_dependency_codes", raw_obligation)
+            self.assertNotIn("scope_dependency_dimensions", raw_obligation)
 
             result = pipeline.validate_host_review_receipts(
                 response_path=response, audit_path=audit_path, receipt_path=receipt,

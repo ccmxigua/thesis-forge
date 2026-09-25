@@ -138,9 +138,57 @@ RESPONSE_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
-OBLIGATION_COVERAGE_PROTOCOL = "native_source_obligation_coverage_review_v4"
+OBLIGATION_COVERAGE_PROTOCOL = "native_source_obligation_coverage_review_v5"
 SCOPE_DEPENDENCY_DIMENSIONS = {
     "abstract_target_metric_ambiguity": frozenset({"target", "metric"}),
+}
+_SCOPE_DEPENDENCY_CODES = tuple(sorted(SCOPE_DEPENDENCY_DIMENSIONS))
+_SCOPE_DEPENDENCY_DIMENSION_VALUES = tuple(sorted(set().union(*SCOPE_DEPENDENCY_DIMENSIONS.values())))
+_OBLIGATION_BASE_PROPERTIES: dict[str, Any] = {
+    "source_quote": {"type": "string", "minLength": 1},
+    "obligation_summary": {"type": "string", "minLength": 1},
+    "requirement_refs": {
+        "type": "array", "items": {"type": "string", "minLength": 1},
+        "uniqueItems": True,
+    },
+}
+_SCOPE_UNRESOLVED_OBLIGATION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "required": [
+        "source_quote", "disposition", "obligation_summary",
+        "scope_dependency_codes", "scope_dependency_dimensions", "requirement_refs",
+    ],
+    "properties": {
+        **copy.deepcopy(_OBLIGATION_BASE_PROPERTIES),
+        "disposition": {"enum": ["scope_unresolved"]},
+        "scope_dependency_codes": {
+            "type": "array", "items": {"enum": list(_SCOPE_DEPENDENCY_CODES)},
+            "minItems": 1, "uniqueItems": True,
+        },
+        "scope_dependency_dimensions": {
+            "type": "array", "items": {"enum": list(_SCOPE_DEPENDENCY_DIMENSION_VALUES)},
+            "minItems": 1, "uniqueItems": True,
+        },
+        # A scope-unresolved obligation is an analysis-only deferral, never a
+        # link to a requirement that could be mistaken for executable coverage.
+        "requirement_refs": {
+            "type": "array", "items": {"type": "string", "minLength": 1},
+            "maxItems": 0, "uniqueItems": True,
+        },
+    },
+    "additionalProperties": False,
+}
+_NON_SCOPE_OBLIGATION_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "required": ["source_quote", "disposition", "requirement_refs"],
+    "properties": {
+        **copy.deepcopy(_OBLIGATION_BASE_PROPERTIES),
+        "disposition": {"enum": [
+            "represented", "unrepresented", "ambiguous",
+            "external_action_pending", "authoring_content_pending", "backend_unsupported",
+        ]},
+    },
+    "additionalProperties": False,
 }
 OBLIGATION_COVERAGE_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -171,33 +219,10 @@ OBLIGATION_COVERAGE_SCHEMA: dict[str, Any] = {
                     },
                     "identified_obligations": {
                         "type": "array",
-                        "items": {
-                            "type": "object",
-                            "required": ["source_quote", "disposition", "requirement_refs"],
-                            "properties": {
-                                "source_quote": {"type": "string", "minLength": 1},
-                                "disposition": {"enum": [
-                                    "represented", "unrepresented", "ambiguous",
-                                    "external_action_pending", "authoring_content_pending",
-                                    "backend_unsupported", "scope_unresolved",
-                                ]},
-                                "obligation_summary": {"type": "string", "minLength": 1},
-                                "scope_dependency_codes": {
-                                    "type": "array", "items": {"type": "string", "minLength": 1},
-                                    "uniqueItems": True,
-                                },
-                                "scope_dependency_dimensions": {
-                                    "type": "array", "items": {"enum": [
-                                        "target", "metric", "condition", "strength",
-                                    ]}, "uniqueItems": True,
-                                },
-                                "requirement_refs": {
-                                    "type": "array", "items": {"type": "string", "minLength": 1},
-                                    "uniqueItems": True,
-                                },
-                            },
-                            "additionalProperties": False,
-                        },
+                        "items": {"anyOf": [
+                            copy.deepcopy(_NON_SCOPE_OBLIGATION_SCHEMA),
+                            copy.deepcopy(_SCOPE_UNRESOLVED_OBLIGATION_SCHEMA),
+                        ]},
                     },
                 },
                 "additionalProperties": False,
@@ -830,7 +855,9 @@ def _prompt(request: dict[str, Any]) -> str:
             "target, metric, condition, or strength depends on that registered ambiguity may be "
             "scope_unresolved only with a concise obligation_summary, dependency codes selected from the "
             "check's code-owned manual_review_codes, affected dependency dimensions, and empty "
-            "requirement_refs. This is analysis-only and never represented or executable. Any readable "
+            "requirement_refs. Emit scope dependency fields only for scope_unresolved; omit them for every "
+            "other disposition, including represented conditional requirements. This is analysis-only and "
+            "never represented or executable. Any readable "
             "obligation independent of that ambiguity remains unrepresented; never hide it under a manual "
             "deferral. Use ambiguous only when the source text itself cannot be interpreted reliably. "
             "For external_compliance clauses, use external_compliance_pending only when each primary obligation "

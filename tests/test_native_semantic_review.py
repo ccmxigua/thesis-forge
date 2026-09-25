@@ -99,7 +99,7 @@ class NativeSemanticReviewTests(unittest.TestCase):
         }
         packet = build_obligation_coverage_request(candidate, chunk, run_id="run-1", chunk_index=4)
         check = packet["checks"][0]
-        self.assertEqual(packet["protocol"], "native_source_obligation_coverage_review_v4")
+        self.assertEqual(packet["protocol"], "native_source_obligation_coverage_review_v5")
         self.assertEqual(packet["provenance"], chunk["provenance"])
         self.assertEqual(check["document_text"], source)
         requirement_ref = check["review_context"]["linked_requirements"][0]["requirement_ref"]
@@ -143,6 +143,40 @@ class NativeSemanticReviewTests(unittest.TestCase):
         for response in bad_cases:
             with self.subTest(response=response), self.assertRaises(NativeSemanticReviewError):
                 validate_obligation_coverage_response(response, [check])
+
+    def test_scope_dependency_metadata_is_schema_bound_to_scope_unresolved(self) -> None:
+        source = "密级"
+        check = {
+            "check_id": "C00004", "document_text": source,
+            "review_context": {
+                "classification": "covered", "requires_requirement": True,
+                "linked_requirements": [{"requirement_ref": "RR-security"}],
+                "machine_obligation_ids": [],
+            },
+        }
+        valid = {"results": [{
+            "check_id": "C00004", "verdict": "consistent",
+            "rationale": "The conditional field is represented by the linked requirement.",
+            "evidence_quotes": [source], "machine_obligation_ids": [],
+            "identified_obligations": [{
+                "source_quote": source, "disposition": "represented",
+                "requirement_refs": ["RR-security"],
+            }],
+        }]}
+        self.assertEqual(
+            validate_obligation_coverage_response(valid, [check])[0]["verdict"],
+            "consistent",
+        )
+
+        # Regression for the fresh BSU failure: a condition attached to a
+        # represented requirement is not scope_unresolved metadata. Reject it
+        # at the contract boundary; do not silently strip or reinterpret it.
+        invalid = json.loads(json.dumps(valid))
+        invalid["results"][0]["identified_obligations"][0][
+            "scope_dependency_dimensions"
+        ] = ["condition"]
+        with self.assertRaisesRegex(NativeSemanticReviewError, "violates its JSON schema"):
+            validate_obligation_coverage_response(invalid, [check])
 
         unresolved_check = {
             "check_id": "C2", "document_text": "该处约3cm",
@@ -947,8 +981,6 @@ class NativeSemanticReviewTests(unittest.TestCase):
             "identified_obligations": [{
                 "source_ref": full_source_ref, "disposition": "ambiguous", "requirement_refs": [],
                 "obligation_summary": None,
-                "scope_dependency_codes": None,
-                "scope_dependency_dimensions": None,
             }],
         }]}
         observed = {}
@@ -1006,8 +1038,8 @@ class NativeSemanticReviewTests(unittest.TestCase):
             )
             self.assertEqual(raw["results"][0]["evidence_refs"], [full_source_ref])
             self.assertNotIn("machine_obligation_ids", raw["results"][0])
-            self.assertIsNone(
-                raw["results"][0]["identified_obligations"][0]["scope_dependency_codes"]
+            self.assertNotIn(
+                "scope_dependency_codes", raw["results"][0]["identified_obligations"][0],
             )
             self.assertEqual(canonical["results"][0]["evidence_quotes"], ["该处约3cm"])
             self.assertEqual(compiled_candidate, canonical)

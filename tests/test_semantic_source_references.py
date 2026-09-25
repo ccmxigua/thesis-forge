@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import json
 import sys
 from pathlib import Path
 import unittest
@@ -9,6 +10,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from native_semantic_review import OBLIGATION_COVERAGE_SCHEMA, RESPONSE_SCHEMA
+from host_review_schema import native_output_schema, native_schema_support_errors
 from semantic_contract import sha256_json
 from semantic_source_references import (
     build_source_reference_packet,
@@ -133,13 +135,122 @@ class SemanticSourceReferenceTests(unittest.TestCase):
         )
         self.assertNotIn("machine_obligation_ids", wire_schema["properties"]["results"]["items"]["anyOf"][0]["properties"])
 
+    def test_scope_dependency_fields_are_discriminated_by_disposition(self) -> None:
+        request = {"protocol": "coverage", "run_id": "run-scope-schema", "checks": [{
+            "check_id": "C00004", "document_text": "密级",
+            "review_context": {
+                "classification": "covered", "requires_requirement": True,
+                "linked_requirements": [{"requirement_ref": "RR-security"}],
+                "machine_obligation_ids": [],
+            },
+        }]}
+        packet = build_source_reference_packet(request)
+        ref = packet["checks"][0]["source_spans"][0]["ref_id"]
+        wire_schema = source_reference_schema(
+            OBLIGATION_COVERAGE_SCHEMA, packet, coverage=True,
+        )
+        result_schema = wire_schema["properties"]["results"]["items"]["anyOf"][0]
+        obligation_schema = result_schema["properties"]["identified_obligations"]["items"]
+        obligation_branches = obligation_schema.get("anyOf", [obligation_schema])
+        self.assertEqual(len(obligation_branches), 1)
+        normal_branch = obligation_branches[0]
+        normal_properties = normal_branch["properties"]
+        self.assertNotIn("scope_dependency_codes", normal_properties)
+        self.assertNotIn("scope_dependency_dimensions", normal_properties)
+        self.assertEqual(normal_properties["disposition"]["enum"], [
+            "represented", "unrepresented", "ambiguous", "external_action_pending",
+            "authoring_content_pending", "backend_unsupported",
+        ])
+        self.assertIn("source_ref", normal_properties)
+        self.assertNotIn("source_quote", normal_properties)
+        self.assertEqual(native_schema_support_errors(native_output_schema(wire_schema)), [])
+
+        represented = {"results": [{
+            "check_id": "C00004", "verdict": "consistent",
+            "rationale": "The conditional field is represented.", "evidence_refs": [ref],
+            "identified_obligations": [{
+                "source_ref": ref, "disposition": "represented",
+                "requirement_refs": ["RR-security"], "obligation_summary": None,
+            }],
+        }]}
+        compiled, _ = compile_source_reference_response(
+            represented, request, OBLIGATION_COVERAGE_SCHEMA, coverage=True,
+            provider_nullable_optionals=True,
+        )
+        obligation = compiled["results"][0]["identified_obligations"][0]
+        self.assertEqual(obligation["source_quote"], "密级")
+        self.assertNotIn("obligation_summary", obligation)
+
+        # A provider or caller that ignores the discriminated output schema
+        # must still fail local validation; the compiler must not erase the
+        # contradictory non-null metadata to make the response pass.
+        invalid = json.loads(json.dumps(represented))
+        invalid["results"][0]["identified_obligations"][0][
+            "scope_dependency_dimensions"
+        ] = ["condition"]
+        with self.assertRaisesRegex(ValueError, "source reference response rejected"):
+            compile_source_reference_response(
+                invalid, request, OBLIGATION_COVERAGE_SCHEMA, coverage=True,
+                provider_nullable_optionals=True,
+            )
+
+        scope_request = {"protocol": "coverage", "run_id": "run-scope-authorized", "checks": [{
+            "check_id": "C00076",
+            "document_text": "The Chinese abstract is 300 to 1,000 words; its target remains unclear.",
+            "review_context": {
+                "classification": "unresolved", "requires_requirement": False,
+                "linked_requirements": [], "machine_obligation_ids": [],
+                "manual_review_codes": ["abstract_target_metric_ambiguity"],
+            },
+        }]}
+        scope_packet = build_source_reference_packet(scope_request)
+        scope_ref = scope_packet["checks"][0]["source_spans"][0]["ref_id"]
+        scope_wire_schema = source_reference_schema(
+            OBLIGATION_COVERAGE_SCHEMA, scope_packet, coverage=True,
+        )
+        scope_result_schema = scope_wire_schema["properties"]["results"]["items"]["anyOf"][0]
+        scope_item_schema = scope_result_schema["properties"]["identified_obligations"]["items"]
+        scope_branches = scope_item_schema.get("anyOf", [scope_item_schema])
+        self.assertEqual(len(scope_branches), 2)
+        scope_branch = next(
+            item for item in scope_branches
+            if item["properties"]["disposition"]["enum"] == ["scope_unresolved"]
+        )
+        self.assertEqual(
+            scope_branch["properties"]["scope_dependency_codes"]["items"]["enum"],
+            ["abstract_target_metric_ambiguity"],
+        )
+        self.assertEqual(native_schema_support_errors(native_output_schema(scope_wire_schema)), [])
+        scope_unresolved = {"results": [{
+            "check_id": "C00076", "verdict": "manual_review_required",
+            "rationale": "The target remains unresolved.", "evidence_refs": [scope_ref],
+            "identified_obligations": [{
+                "source_ref": scope_ref, "disposition": "scope_unresolved",
+                "obligation_summary": "The scope depends on unresolved target ambiguity.",
+                "scope_dependency_codes": ["abstract_target_metric_ambiguity"],
+                "scope_dependency_dimensions": ["target"], "requirement_refs": [],
+            }],
+        }]}
+        compiled_scope, _ = compile_source_reference_response(
+            scope_unresolved, scope_request, OBLIGATION_COVERAGE_SCHEMA, coverage=True,
+        )
+        self.assertEqual(
+            compiled_scope["results"][0]["identified_obligations"][0]["disposition"],
+            "scope_unresolved",
+        )
+
     def test_codex_nullable_optional_obligations_normalize_with_raw_hash_preserved(self) -> None:
         request = {"protocol": "coverage", "run_id": "run-null", "checks": [{
-            "check_id": "C1", "document_text": "摘要字数应符合规定。",
-            "review_context": {"machine_obligation_ids": ["abstract.word_count"]},
+            "check_id": "C1", "document_text": "该表述的目标仍需核实。",
+            "review_context": {"machine_obligation_ids": []},
         }, {
-            "check_id": "C2", "document_text": "关键词最多七个汉字。",
-            "review_context": {"machine_obligation_ids": ["keywords.maximum"]},
+            "check_id": "C2",
+            "document_text": "The Chinese abstract is 300 to 1,000 words; its target remains unclear.",
+            "review_context": {
+                "machine_obligation_ids": [], "classification": "unresolved",
+                "requires_requirement": False, "linked_requirements": [],
+                "manual_review_codes": ["abstract_target_metric_ambiguity"],
+            },
         }]}
         packet = build_source_reference_packet(request)
         first_ref = packet["checks"][0]["source_spans"][0]["ref_id"]
@@ -147,17 +258,16 @@ class SemanticSourceReferenceTests(unittest.TestCase):
         raw = {"results": [{
             "check_id": "C1", "verdict": "uncertain", "rationale": "范围需要核实。",
             "evidence_refs": [first_ref], "identified_obligations": [{
-                "source_ref": first_ref, "disposition": "scope_unresolved", "requirement_refs": [],
-                "scope_dependency_codes": None, "scope_dependency_dimensions": None,
+                "source_ref": first_ref, "disposition": "ambiguous", "requirement_refs": [],
                 "obligation_summary": None,
             }],
         }, {
             "check_id": "C2", "verdict": "uncertain", "rationale": "适用口径需要核实。",
             "evidence_refs": [second_ref], "identified_obligations": [{
                 "source_ref": second_ref, "disposition": "scope_unresolved", "requirement_refs": [],
-                "scope_dependency_codes": ["keywords.maximum"],
+                "scope_dependency_codes": ["abstract_target_metric_ambiguity"],
                 "scope_dependency_dimensions": ["target"],
-                "obligation_summary": "关键词数量限制的具体适用对象。",
+                "obligation_summary": "The count target remains unresolved.",
             }],
         }]}
         raw_before = copy.deepcopy(raw)
@@ -171,19 +281,17 @@ class SemanticSourceReferenceTests(unittest.TestCase):
         )
 
         obligation = compiled["results"][0]["identified_obligations"][0]
-        self.assertNotIn("scope_dependency_codes", obligation)
-        self.assertNotIn("scope_dependency_dimensions", obligation)
         self.assertNotIn("obligation_summary", obligation)
         preserved = compiled["results"][1]["identified_obligations"][0]
-        self.assertEqual(preserved["scope_dependency_codes"], ["keywords.maximum"])
+        self.assertEqual(
+            preserved["scope_dependency_codes"], ["abstract_target_metric_ambiguity"],
+        )
         self.assertEqual(preserved["scope_dependency_dimensions"], ["target"])
-        self.assertEqual(preserved["obligation_summary"], "关键词数量限制的具体适用对象。")
+        self.assertEqual(preserved["obligation_summary"], "The count target remains unresolved.")
         self.assertEqual(raw, raw_before)
         self.assertEqual(audit["raw_response_sha256"], sha256_json(raw_before))
         normalized_input = copy.deepcopy(raw_before)
         normalized_obligation = normalized_input["results"][0]["identified_obligations"][0]
-        normalized_obligation.pop("scope_dependency_codes")
-        normalized_obligation.pop("scope_dependency_dimensions")
         normalized_obligation.pop("obligation_summary")
         self.assertEqual(
             audit["provider_nullable_normalization"],

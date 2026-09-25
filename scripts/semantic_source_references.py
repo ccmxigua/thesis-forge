@@ -113,11 +113,57 @@ def source_reference_schema(
         if coverage:
             props.pop("machine_obligation_ids")
             branch["required"].remove("machine_obligation_ids")
-            obligation = props["identified_obligations"]["items"]
-            obligation["properties"].pop("source_quote")
-            obligation["properties"]["source_ref"] = copy.deepcopy(refs)
-            obligation["required"] = ["source_ref" if key == "source_quote" else key
-                                      for key in obligation["required"]]
+            obligation_schema = props["identified_obligations"]["items"]
+            obligation_branches = obligation_schema.get("anyOf")
+            if not isinstance(obligation_branches, list) or not obligation_branches:
+                obligation_branches = [obligation_schema]
+            review_context = check.get("review_context")
+            review_context = review_context if isinstance(review_context, dict) else {}
+            manual_codes = review_context.get("manual_review_codes")
+            manual_codes = {
+                code for code in manual_codes
+                if isinstance(code, str) and code
+            } if isinstance(manual_codes, list) else set()
+            scope_authorized = (
+                review_context.get("classification") == "unresolved"
+                and not review_context.get("linked_requirements")
+                and bool(manual_codes)
+            )
+            compiled_obligation_branches = []
+            for obligation in obligation_branches:
+                obligation_props = obligation.get("properties")
+                if not isinstance(obligation_props, dict):
+                    raise ValueError("coverage obligation schema branch has no properties")
+                disposition_schema = obligation_props.get("disposition")
+                is_scope_branch = (
+                    isinstance(disposition_schema, dict)
+                    and disposition_schema.get("enum") == ["scope_unresolved"]
+                )
+                if is_scope_branch:
+                    if not scope_authorized:
+                        continue
+                    code_schema = obligation_props.get("scope_dependency_codes", {}).get("items", {})
+                    registered_codes = code_schema.get("enum", [])
+                    permitted_codes = sorted(manual_codes & set(registered_codes))
+                    if not permitted_codes:
+                        continue
+                    code_schema["enum"] = permitted_codes
+                obligation_props.pop("source_quote")
+                obligation_props["source_ref"] = copy.deepcopy(refs)
+                obligation["required"] = [
+                    "source_ref" if key == "source_quote" else key
+                    for key in obligation["required"]
+                ]
+                compiled_obligation_branches.append(obligation)
+            if not compiled_obligation_branches:
+                raise ValueError(
+                    f"coverage check {check.get('check_id')!r} has no permitted obligation schema branch"
+                )
+            props["identified_obligations"]["items"] = (
+                compiled_obligation_branches[0]
+                if len(compiled_obligation_branches) == 1
+                else {"anyOf": compiled_obligation_branches}
+            )
         branches.append(branch)
     schema["properties"]["results"]["items"] = {"anyOf": branches}
     return schema

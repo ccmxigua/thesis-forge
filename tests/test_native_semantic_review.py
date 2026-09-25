@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from native_semantic_review import (  # noqa: E402
+    ExternalComplianceCorrectionRequiredError,
     MissingExecutableObligationInventoryError,
     NativeSemanticReviewError,
     OBLIGATION_COVERAGE_SCHEMA,
@@ -440,6 +441,84 @@ class NativeSemanticReviewTests(unittest.TestCase):
         with self.assertRaisesRegex(NativeSemanticReviewError, "only valid for external_compliance"):
             validate_obligation_coverage_response(forged, [executable])
 
+    def test_external_unrepresented_source_action_requests_only_a_bounded_re_review(self) -> None:
+        source = "学位论文作者签名： 年 月 日"
+        check = {
+            "check_id": "C00037", "document_text": source,
+            "review_context": {
+                "classification": "external_compliance", "requires_requirement": False,
+                "primary_obligations": [], "linked_requirements": [],
+                "machine_obligation_ids": [],
+            },
+        }
+        incomplete = {"results": [{
+            "check_id": "C00037", "verdict": "incomplete",
+            "rationale": "The source action is not represented in the candidate inventory.",
+            "evidence_quotes": [source], "machine_obligation_ids": [],
+            "identified_obligations": [{
+                "source_quote": source, "disposition": "unrepresented", "requirement_refs": [],
+            }],
+        }]}
+
+        with self.assertRaises(ExternalComplianceCorrectionRequiredError) as caught:
+            validate_obligation_coverage_response(incomplete, [check])
+        self.assertEqual(caught.exception.check_ids, ("C00037",))
+        self.assertEqual(caught.exception.corrections, ({
+            "check_id": "C00037", "source_quotes": [source],
+        },))
+
+        linked_check = {
+            **check,
+            "review_context": {
+                **check["review_context"],
+                "linked_requirements": [{"requirement_ref": "RR-cover"}],
+            },
+        }
+        with self.assertRaises(NativeSemanticReviewError) as unsafe:
+            validate_obligation_coverage_response(incomplete, [linked_check])
+        self.assertNotIsInstance(unsafe.exception, ExternalComplianceCorrectionRequiredError)
+
+    def test_external_pending_correction_must_preserve_the_triggering_source_quote(self) -> None:
+        original_quote = "学位论文作者签名： 年 月 日"
+        alternate_quote = "原创性声明由作者负责"
+        source = original_quote + "；" + alternate_quote
+        check = {
+            "check_id": "C00037", "document_text": source,
+            "review_context": {
+                "classification": "external_compliance", "requires_requirement": False,
+                "primary_obligations": [], "linked_requirements": [],
+                "machine_obligation_ids": [],
+            },
+        }
+        request = {
+            "protocol": native_review.OBLIGATION_COVERAGE_PROTOCOL,
+            "checks": [check],
+            "retry_feedback": {
+                "code": ExternalComplianceCorrectionRequiredError.code,
+                "checks": [{"check_id": "C00037", "source_quotes": [original_quote]}],
+            },
+        }
+        alternate_pending = {"results": [{
+            "check_id": "C00037", "verdict": "external_compliance_pending",
+            "rationale": "An external action remains pending.",
+            "evidence_quotes": [alternate_quote], "machine_obligation_ids": [],
+            "identified_obligations": [{
+                "source_quote": alternate_quote, "disposition": "external_action_pending",
+                "requirement_refs": [],
+            }],
+        }]}
+        validated = validate_obligation_coverage_response(alternate_pending, [check])
+        self.assertEqual(validated[0]["verdict"], "external_compliance_pending")
+        with self.assertRaisesRegex(
+            NativeSemanticReviewError, "exact source-obligation inventory",
+        ):
+            native_review._validate_external_compliance_retry_result(alternate_pending, request)
+
+        exact_pending = json.loads(json.dumps(alternate_pending, ensure_ascii=False))
+        exact_pending["results"][0]["evidence_quotes"] = [original_quote]
+        exact_pending["results"][0]["identified_obligations"][0]["source_quote"] = original_quote
+        native_review._validate_external_compliance_retry_result(exact_pending, request)
+
     def test_external_pending_protocol_is_explicitly_non_docx_completion(self) -> None:
         prompt = native_review._prompt({
             "protocol": native_review.OBLIGATION_COVERAGE_PROTOCOL,
@@ -448,6 +527,70 @@ class NativeSemanticReviewTests(unittest.TestCase):
         self.assertIn("external_compliance_pending", prompt)
         self.assertIn("external_action_pending", prompt)
         self.assertIn("never DOCX satisfaction", prompt)
+
+    def test_external_compliance_retry_prompt_is_source_bound_and_not_a_pass_override(self) -> None:
+        prompt = native_review._prompt({
+            "protocol": native_review.OBLIGATION_COVERAGE_PROTOCOL,
+            "checks": [],
+            "retry_feedback": {
+                "code": ExternalComplianceCorrectionRequiredError.code,
+                "checks": [{
+                    "check_id": "C00037", "source_quotes": ["学位论文作者签名： 年 月 日"],
+                }],
+            },
+        })
+        self.assertIn("same unchanged candidate", prompt)
+        self.assertIn("C00037", prompt)
+        self.assertIn("only if the source itself clearly requires a real-world action", prompt)
+        self.assertIn("Any result that still fails the original local contract will be rejected", prompt)
+
+    def test_native_runner_preserves_external_correction_signal_for_bridge(self) -> None:
+        source = "学位论文作者签名： 年 月 日"
+        check = {
+            "check_id": "C00037", "document_text": source,
+            "review_context": {
+                "classification": "external_compliance", "requires_requirement": False,
+                "primary_obligations": [], "linked_requirements": [],
+                "machine_obligation_ids": [],
+            },
+        }
+        request = {
+            "protocol": native_review.OBLIGATION_COVERAGE_PROTOCOL,
+            "case_id": "case", "run_id": "run", "checks": [check],
+        }
+        source_packet = native_review.build_source_reference_packet(request)
+        source_ref = source_packet["checks"][0]["source_spans"][0]["ref_id"]
+        response = {"results": [{
+            "check_id": "C00037", "verdict": "incomplete",
+            "rationale": "The external action is not represented in the primary inventory.",
+            "evidence_refs": [source_ref],
+            "identified_obligations": [{
+                "source_ref": source_ref, "disposition": "unrepresented", "requirement_refs": [],
+            }],
+        }]}
+
+        def write_last_message(**kwargs):
+            kwargs["last_message_path"].write_text("{}", encoding="utf-8")
+            return ["codex"]
+
+        patches = self._stub_codex_host(CompletedProcess(["codex"], 0, "{}", ""))
+        patches[4] = patch.object(
+            native_review.codex_adapter, "build_command", side_effect=write_last_message,
+        )
+        patches.append(patch.object(
+            native_review.codex_adapter, "parse_result",
+            return_value=(response, {"event_types": ["task_complete"]}),
+        ))
+        with tempfile.TemporaryDirectory() as td:
+            output_dir = Path(td) / "native"
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+                with self.assertRaises(ExternalComplianceCorrectionRequiredError):
+                    native_review.run_native_semantic_review(
+                        request, output_dir=output_dir, host_runtime="codex",
+                        model="gpt-5.6-luna", timeout=5,
+                    )
+            self.assertTrue((output_dir / "compiled-response.json").is_file())
+            self.assertFalse((output_dir / "response.json").exists())
 
     def test_source_clause_support_is_explicit_for_shared_requirement_edges(self) -> None:
         chunk = {

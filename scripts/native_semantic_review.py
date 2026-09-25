@@ -56,6 +56,24 @@ class MissingExecutableObligationInventoryError(NativeSemanticReviewError):
         )
 
 
+class ExternalComplianceCorrectionRequiredError(NativeSemanticReviewError):
+    """An external clause needs one same-candidate source-action re-review."""
+
+    code = "external_compliance_unrepresented_obligation"
+
+    def __init__(self, corrections: list[dict[str, Any]]) -> None:
+        self.corrections = tuple(copy.deepcopy(corrections))
+        check_ids = sorted(
+            item["check_id"] for item in self.corrections
+            if isinstance(item, dict) and isinstance(item.get("check_id"), str)
+        )
+        self.check_ids = tuple(check_ids)
+        super().__init__(
+            "external-compliance review found source-bound unrepresented action(s) for "
+            + ", ".join(check_ids)
+        )
+
+
 def is_explicit_authoring_content_quote(quote: Any) -> bool:
     """Recognize only explicit source instructions for author-supplied content.
 
@@ -301,6 +319,7 @@ def validate_obligation_coverage_response(
         raise NativeSemanticReviewError("independent obligation review has no results array")
     by_id: dict[str, dict[str, Any]] = {}
     missing_executable_inventory: list[str] = []
+    external_compliance_corrections: list[dict[str, Any]] = []
     for result in results:
         check_id = result.get("check_id") if isinstance(result, dict) else None
         if not isinstance(check_id, str) or check_id not in expected:
@@ -372,6 +391,29 @@ def validate_obligation_coverage_response(
             if isinstance(context.get("primary_obligations"), list) else []
         )
         if is_external_compliance:
+            identified_obligations = result.get("identified_obligations", [])
+            if (
+                context.get("requires_requirement") is False
+                and not linked
+                and not primary_obligations
+                and verdict == "incomplete"
+                and unrepresented == len(identified_obligations)
+                and unrepresented > 0
+                and not (represented or ambiguous or external_pending or authoring_pending)
+            ):
+                # This is not an accepted pending disposition. It is a
+                # one-shot signal to re-read the exact source as an external
+                # action; the bridge retries the independent reviewer against
+                # the unchanged candidate and still requires the strict
+                # external_compliance_pending contract below.
+                external_compliance_corrections.append({
+                    "check_id": check_id,
+                    "source_quotes": [
+                        item["source_quote"] for item in identified_obligations
+                    ],
+                })
+                by_id[check_id] = result
+                continue
             if (
                 context.get("requires_requirement") is not False
                 or linked
@@ -462,7 +504,75 @@ def validate_obligation_coverage_response(
         )
     if missing_executable_inventory:
         raise MissingExecutableObligationInventoryError(missing_executable_inventory)
+    if external_compliance_corrections:
+        raise ExternalComplianceCorrectionRequiredError(external_compliance_corrections)
     return [by_id[key] for key in sorted(by_id)]
+
+
+def _validate_external_compliance_retry_result(
+    response: dict[str, Any], request: dict[str, Any],
+) -> None:
+    """Bind a corrective pending result to exactly the source spans that triggered it."""
+    feedback = request.get("retry_feedback")
+    if (
+        not isinstance(feedback, dict)
+        or feedback.get("code") != ExternalComplianceCorrectionRequiredError.code
+    ):
+        return
+    corrections = feedback.get("checks")
+    checks = request.get("checks")
+    results = response.get("results")
+    if not isinstance(corrections, list) or not corrections or not isinstance(checks, list) or not isinstance(results, list):
+        raise NativeSemanticReviewError(
+            "external-compliance correction feedback is malformed"
+        )
+    checks_by_id = {
+        str(item.get("check_id")): item for item in checks if isinstance(item, dict)
+    }
+    results_by_id = {
+        str(item.get("check_id")): item for item in results if isinstance(item, dict)
+    }
+    seen_check_ids: set[str] = set()
+    for correction in corrections:
+        if not isinstance(correction, dict):
+            raise NativeSemanticReviewError(
+                "external-compliance correction entry is malformed"
+            )
+        check_id = correction.get("check_id")
+        source_quotes = correction.get("source_quotes")
+        check = checks_by_id.get(str(check_id)) if isinstance(check_id, str) else None
+        result = results_by_id.get(str(check_id)) if isinstance(check_id, str) else None
+        if (
+            not isinstance(check_id, str)
+            or not check_id
+            or check_id in seen_check_ids
+            or not isinstance(check, dict)
+            or not isinstance(result, dict)
+            or not isinstance(source_quotes, list)
+            or not source_quotes
+            or any(
+                not isinstance(quote, str)
+                or not quote
+                or quote not in str(check.get("document_text") or "")
+                for quote in source_quotes
+            )
+        ):
+            raise NativeSemanticReviewError(
+                "external-compliance correction feedback is not bound to current source checks"
+            )
+        seen_check_ids.add(check_id)
+        obligations = result.get("identified_obligations")
+        pending_quotes = [
+            item.get("source_quote") for item in obligations
+            if isinstance(item, dict) and item.get("disposition") == "external_action_pending"
+        ] if isinstance(obligations, list) else []
+        if (
+            result.get("verdict") != "external_compliance_pending"
+            or sorted(pending_quotes) != sorted(source_quotes)
+        ):
+            raise NativeSemanticReviewError(
+                "external-compliance correction did not preserve the exact source-obligation inventory"
+            )
 
 
 def sha256_file(path: Path) -> str:
@@ -524,6 +634,20 @@ def _prompt(request: dict[str, Any]) -> str:
     )
     if request.get("protocol") == OBLIGATION_COVERAGE_PROTOCOL:
         retry_feedback = request.get("retry_feedback")
+        external_retry_checks = (
+            [
+                item for item in retry_feedback.get("checks", [])
+                if isinstance(item, dict)
+                and isinstance(item.get("check_id"), str)
+                and isinstance(item.get("source_quotes"), list)
+                and item["source_quotes"]
+                and all(isinstance(quote, str) and quote for quote in item["source_quotes"])
+            ]
+            if isinstance(retry_feedback, dict)
+            and retry_feedback.get("code") == ExternalComplianceCorrectionRequiredError.code
+            and isinstance(retry_feedback.get("checks"), list)
+            else []
+        )
         retry_clause_ids = (
             sorted({value for value in retry_feedback.get("clause_ids", []) if isinstance(value, str)})
             if isinstance(retry_feedback, dict)
@@ -532,7 +656,23 @@ def _prompt(request: dict[str, Any]) -> str:
             else []
         )
         retry_instruction = ""
-        if retry_clause_ids:
+        if external_retry_checks:
+            retry_instruction = (
+                "\nA prior independent-review response for this same unchanged candidate was rejected by a "
+                "deterministic local check. For these external_compliance checks, it identified the following "
+                "exact source-bound passages as unrepresented: "
+                + strict_json_dumps(external_retry_checks, ensure_ascii=False, sort_keys=True)
+                + ". Re-read each passage in the current run-bound source spans and compare it with the unchanged "
+                "candidate. This is one corrective review only. Use external_compliance_pending and list an "
+                "external_action_pending disposition with no requirement_refs only if the source itself clearly "
+                "requires a real-world action that cannot be satisfied by the DOCX pipeline. Do not infer an "
+                "external action from the classification alone. If a passage is a DOCX-representable obligation, "
+                "keep it incomplete; if its meaning is genuinely unclear, use the permitted uncertainty path. "
+                "Never alter the candidate, source, classification, provenance, or requirement links, and never "
+                "invent, merge, or omit an obligation. Any result that still fails the original local contract "
+                "will be rejected.\n"
+            )
+        elif retry_clause_ids:
             retry_instruction = (
                 "\nA prior independent-review response for this same candidate was rejected by a "
                 "deterministic local check: it returned verdict=consistent with an empty "
@@ -808,6 +948,8 @@ def run_native_semantic_review(
             strict_json_dumps(response, ensure_ascii=False, indent=2) + "\n",
         )
         results = response_validator(response, checks)
+        if obligation_coverage_mode:
+            _validate_external_compliance_retry_result(response, request)
     except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
         raise NativeSemanticReviewError(f"native semantic response rejected: {exc}") from exc
     _write_fresh(response_path, strict_json_dumps(response, ensure_ascii=False, indent=2) + "\n")

@@ -167,6 +167,7 @@ from host_runtime import (  # noqa: E402
     require_parent_session,
 )
 from native_semantic_review import (  # noqa: E402
+    ExternalComplianceCorrectionRequiredError,
     MissingExecutableObligationInventoryError,
     OBLIGATION_COVERAGE_PROTOCOL,
     RetryableNativeSemanticReviewError,
@@ -6560,6 +6561,93 @@ def _run_independent_obligation_coverage_review(
             error.retryable = True  # type: ignore[attr-defined]
             raise error
         return pointer
+    except ExternalComplianceCorrectionRequiredError as review_error:
+        retryable = _provider_attempt < INDEPENDENT_REVIEW_PROVIDER_MAX_ATTEMPTS
+        corrections = [copy.deepcopy(item) for item in review_error.corrections]
+        retry_feedback = {
+            "code": ExternalComplianceCorrectionRequiredError.code,
+            "checks": corrections,
+        }
+        failure_envelope = {
+            "schema_version": "1.0",
+            "protocol": OBLIGATION_COVERAGE_PROTOCOL,
+            "status": "rejected",
+            "retryable": retryable,
+            "retry_code": ExternalComplianceCorrectionRequiredError.code,
+            "next_request_retry_feedback": retry_feedback if retryable else None,
+            "provider_attempt": _provider_attempt,
+            "next_provider_attempt": _provider_attempt + 1 if retryable else None,
+            "run_id": run_id,
+            "chunk_index": chunk_index,
+            "attempt": attempt,
+            "provider_attempt_history": retry_history,
+            "candidate_response_sha256": response_sha,
+            "provenance": copy.deepcopy(coverage_request.get("provenance")),
+            "corrections": corrections,
+            "error_type": type(review_error).__name__,
+            "error": str(review_error),
+            "review_output_dir": str(output_dir.resolve()),
+        }
+        if not audit_path.exists():
+            _write_json(audit_path, failure_envelope)
+        check_ids = [item["check_id"] for item in corrections]
+        attempt_record = {
+            "provider_attempt": _provider_attempt,
+            "status": "semantic_contract_rejected",
+            "retry_code": ExternalComplianceCorrectionRequiredError.code,
+            "check_ids": check_ids,
+            "error": str(review_error),
+            "audit_path": audit_path.relative_to(review_dir).as_posix(),
+            "audit_sha256": sha256_file(audit_path),
+        }
+        attempt_history = retry_history + [attempt_record]
+        if retryable:
+            controller.check()
+            time.sleep(INDEPENDENT_REVIEW_RETRY_BACKOFF_SECONDS)
+            controller.check()
+            return _run_independent_obligation_coverage_review(
+                response,
+                chunk,
+                review_dir=review_dir,
+                run_id=run_id,
+                chunk_index=chunk_index,
+                attempt=attempt,
+                host_runtime=host_runtime,
+                model=model,
+                timeout=timeout,
+                agent_id=agent_id,
+                runner=runner,
+                binary=binary,
+                config_path=config_path,
+                controller=controller,
+                _provider_attempt=_provider_attempt + 1,
+                _provider_attempt_history=attempt_history,
+                _retry_feedback=retry_feedback,
+            )
+        error = IndependentObligationReviewError(
+            f"independent external-compliance review correction exhausted after "
+            f"{_provider_attempt} attempt(s) for chunk {chunk_index}"
+        )
+        error.error_records = [{
+            "code": "independent_obligation_review_correction_exhausted",
+            "retry_code": ExternalComplianceCorrectionRequiredError.code,
+            "provider_attempts": _provider_attempt,
+            "provider_attempt_history": attempt_history,
+            "check_ids": check_ids,
+            "candidate_response_sha256": response_sha,
+            "message": str(review_error),
+            "audit_path": audit_path.relative_to(review_dir).as_posix(),
+        }]  # type: ignore[attr-defined]
+        error.independent_review_audit = {
+            "status": "failed",
+            "audit_path": audit_path.relative_to(review_dir).as_posix(),
+            "audit_sha256": sha256_file(audit_path),
+            "candidate_response_sha256": response_sha,
+            "run_id": run_id,
+            "chunk_index": chunk_index,
+            "provider_attempt_history": attempt_history,
+        }  # type: ignore[attr-defined]
+        raise error from review_error
     except MissingExecutableObligationInventoryError as review_error:
         retryable = _provider_attempt < INDEPENDENT_REVIEW_PROVIDER_MAX_ATTEMPTS
         retry_feedback = {

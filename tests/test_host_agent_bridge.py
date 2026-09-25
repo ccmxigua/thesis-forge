@@ -458,6 +458,150 @@ class HostAgentBridgeTests(unittest.TestCase):
             self.assertEqual(pointer["status"], "rejected")
             self.assertEqual(envelope["status"], "rejected")
 
+    @staticmethod
+    def _external_compliance_review_case() -> tuple[dict, dict, dict, str]:
+        source = "学位论文作者签名： 年 月 日"
+        provenance = {
+            "run_id": "run-external-correction",
+            "source_sha256": "a" * 64,
+            "clause_sha256": "b" * 64,
+            "evidence_sha256": "c" * 64,
+            "request_sha256": "d" * 64,
+        }
+        chunk = {
+            "provenance": provenance,
+            "clauses": [{"id": "C00037", "text": source, "evidence_ids": ["E1"]}],
+            "evidence_context": {"E1": {"id": "E1", "text": source}},
+        }
+        response = {
+            "provenance": provenance,
+            "clause_reviews": [{
+                "clause_id": "C00037", "classification": "external_compliance",
+                "reason": "The author must sign and date the declaration.",
+                "obligations": [],
+            }],
+            "requirements": [],
+        }
+        request = bridge.build_obligation_coverage_request(
+            response, chunk, run_id="run-external-correction", chunk_index=2,
+        )
+        machine_ids = request["checks"][0]["review_context"]["machine_obligation_ids"]
+        accepted_review = {
+            "protocol": bridge.OBLIGATION_COVERAGE_PROTOCOL,
+            "status": "completed", "request_sha256": "e" * 64,
+            "response_sha256": "f" * 64,
+            "results": [{
+                "check_id": "C00037", "verdict": "external_compliance_pending",
+                "rationale": "The author signature and date are external actions, not DOCX work.",
+                "evidence_quotes": [source], "machine_obligation_ids": machine_ids,
+                "identified_obligations": [{
+                    "source_quote": source, "disposition": "external_action_pending",
+                    "requirement_refs": [],
+                }],
+            }],
+            "summary": {"consistent": 0, "incomplete": 0, "uncertain": 0},
+        }
+        return chunk, response, accepted_review, source
+
+    def test_external_compliance_incomplete_review_gets_one_same_candidate_correction(self) -> None:
+        self._independent_review_patch.stop()
+        chunk, response, accepted_review, source = self._external_compliance_review_case()
+        initial_response_sha = bridge._response_sha256(response)
+        correction = bridge.ExternalComplianceCorrectionRequiredError([{
+            "check_id": "C00037", "source_quotes": [source],
+        }])
+        calls: list[tuple[dict, dict]] = []
+
+        def correct_external_review(request: dict, **kwargs: dict) -> dict:
+            calls.append((copy.deepcopy(request), kwargs))
+            if len(calls) == 1:
+                raise correction
+            return accepted_review
+
+        with tempfile.TemporaryDirectory() as td:
+            review_dir = Path(td)
+            with patch.object(bridge, "run_native_semantic_review", side_effect=correct_external_review), \
+                    patch.object(bridge.time, "sleep") as sleep:
+                pointer = bridge._run_independent_obligation_coverage_review(
+                    response, chunk, review_dir=review_dir, run_id="run-external-correction",
+                    chunk_index=2, attempt=1, host_runtime="codex", model="gpt-5.6-luna",
+                    timeout=10, agent_id="main", runner="exec", binary="codex",
+                    config_path=None, controller=bridge.RunController(),
+                )
+
+            self.assertEqual(len(calls), 2)
+            self.assertEqual([call[0]["provider_attempt"] for call in calls], [1, 2])
+            self.assertEqual([call[1]["model"] for call in calls], ["gpt-5.6-luna"] * 2)
+            self.assertNotEqual(calls[0][1]["output_dir"], calls[1][1]["output_dir"])
+            self.assertEqual(calls[0][0]["provenance"], calls[1][0]["provenance"])
+            self.assertEqual(calls[0][0]["checks"], calls[1][0]["checks"])
+            self.assertNotIn("retry_feedback", calls[0][0])
+            self.assertEqual(calls[1][0]["retry_feedback"], {
+                "code": bridge.ExternalComplianceCorrectionRequiredError.code,
+                "checks": [{"check_id": "C00037", "source_quotes": [source]}],
+            })
+            sleep.assert_called_once_with(bridge.INDEPENDENT_REVIEW_RETRY_BACKOFF_SECONDS)
+            self.assertEqual(bridge._response_sha256(response), initial_response_sha)
+            self.assertEqual(response["requirements"], [])
+            self.assertEqual(response["clause_reviews"][0]["obligations"], [])
+            self.assertEqual(pointer["status"], "completed")
+            self.assertEqual(pointer["provider_attempt"], 2)
+            self.assertEqual(pointer["candidate_response_sha256"], initial_response_sha)
+
+            first_audit_path = review_dir / (
+                "independent-review-chunk-0002-attempt-01/coverage-audit.json"
+            )
+            first_audit = json.loads(first_audit_path.read_text(encoding="utf-8"))
+            self.assertEqual(first_audit["status"], "rejected")
+            self.assertTrue(first_audit["retryable"])
+            accepted_audit = json.loads(
+                (review_dir / pointer["audit_path"]).read_text(encoding="utf-8")
+            )
+            self.assertEqual(accepted_audit["status"], "completed")
+            self.assertEqual(
+                accepted_audit["provider_attempt_history"][0]["retry_code"],
+                bridge.ExternalComplianceCorrectionRequiredError.code,
+            )
+            self.assertEqual(accepted_audit["candidate_response_sha256"], initial_response_sha)
+
+    def test_external_compliance_correction_exhaustion_fails_closed(self) -> None:
+        self._independent_review_patch.stop()
+        chunk, response, _, source = self._external_compliance_review_case()
+        correction = bridge.ExternalComplianceCorrectionRequiredError([{
+            "check_id": "C00037", "source_quotes": [source],
+        }])
+        with tempfile.TemporaryDirectory() as td:
+            review_dir = Path(td)
+            with patch.object(
+                bridge, "run_native_semantic_review", side_effect=[correction, correction],
+            ) as review_call, patch.object(bridge.time, "sleep") as sleep:
+                with self.assertRaises(bridge.IndependentObligationReviewError) as caught:
+                    bridge._run_independent_obligation_coverage_review(
+                        response, chunk, review_dir=review_dir,
+                        run_id="run-external-correction", chunk_index=2, attempt=1,
+                        host_runtime="codex", model="gpt-5.6-luna", timeout=10,
+                        agent_id="main", runner="exec", binary="codex", config_path=None,
+                        controller=bridge.RunController(),
+                    )
+
+            self.assertEqual(review_call.call_count, bridge.INDEPENDENT_REVIEW_PROVIDER_MAX_ATTEMPTS)
+            sleep.assert_called_once_with(bridge.INDEPENDENT_REVIEW_RETRY_BACKOFF_SECONDS)
+            record = caught.exception.error_records[0]
+            self.assertEqual(record["code"], "independent_obligation_review_correction_exhausted")
+            self.assertEqual(record["retry_code"], bridge.ExternalComplianceCorrectionRequiredError.code)
+            self.assertEqual(record["check_ids"], ["C00037"])
+            self.assertFalse(getattr(caught.exception, "retryable", False))
+            for suffix in ("", "-provider-attempt-02"):
+                audit_path = review_dir / (
+                    "independent-review-chunk-0002-attempt-01" + suffix + "/coverage-audit.json"
+                )
+                audit = json.loads(audit_path.read_text(encoding="utf-8"))
+                self.assertEqual(audit["status"], "rejected")
+                if suffix:
+                    self.assertFalse(audit["retryable"])
+                else:
+                    self.assertTrue(audit["retryable"])
+
     def _packet(self, directory: Path) -> tuple[Path, dict]:
         directory.mkdir(parents=True, exist_ok=True)
         clauses = [{

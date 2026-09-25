@@ -373,14 +373,28 @@ may make one fresh independent-review call for the unchanged candidate and
 provenance. Its run-bound feedback identifies only the affected clause IDs and
 requires the reviewer to re-read source spans and linked requirements; it
 never inserts or rewrites an obligation. For each fixed candidate response,
-the capacity retry and this correction share a two-call maximum, so they cannot
-compound into extra attempts. A separately corrected primary response gets a
-new review budget only after the existing bounded primary-response correction
-path produces and revalidates a new candidate. Every retry must pass the
-original validator; a repeated omission and any other semantic/schema,
-provenance, route, timeout, or unclassified provider failure remain fail-closed.
-An explicit `incomplete` verdict continues to
-use the existing bounded primary-response correction path, with the resulting
+the capacity retry and these corrections share a two-call maximum, so they
+cannot compound into extra attempts. A second narrowly defined correction
+applies only when an `external_compliance` candidate has no linked DOCX
+requirement or declared primary obligations and the independent reviewer
+returns `incomplete` with only exact-source-bound `unrepresented` actions. One
+fresh independent-review call may reconsider those same source spans against
+the unchanged candidate. It may return `external_compliance_pending` only if
+the source itself clearly requires a real-world action outside the DOCX
+pipeline; it must enumerate that action as `external_action_pending` with no
+requirement reference and preserve the exact source-quote inventory that
+triggered the correction. The bridge never creates an obligation or changes
+the candidate, and the ordinary external-pending validator remains
+authoritative.
+If the second review still reports an unrepresented obligation, cannot prove
+an external action, or violates any other contract, the chunk fails closed.
+A separately corrected primary response gets a new review budget only after
+the existing bounded primary-response correction path produces and revalidates
+a new candidate. Every retry must pass the original validator; a repeated
+omission and any other semantic/schema, provenance, route, timeout, or
+unclassified provider failure remain fail-closed. An explicit `incomplete`
+verdict outside these narrowly defined correction signals continues to use the
+existing bounded primary-response correction path, with the resulting
 candidate revalidated and checked for semantic drift.
 
 Both the source-first obligation review and post-format semantic review use

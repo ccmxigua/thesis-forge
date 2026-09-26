@@ -5686,9 +5686,8 @@ def _apply_safe_mechanical_repairs_one_rule(
         and record.get("code") == "informational_requirement_forbidden"
     ]
     if informational_records:
-        # This is the only relation projection that is currently safe to do
-        # mechanically.  Recompute the complete relation from the current
-        # response and chunk; never trust an index embedded in an error string.
+        # Recompute the complete relation from the current response and chunk;
+        # never trust an index embedded in an error string.
         analysis_clauses = (
             chunk.get("clauses") if isinstance(chunk, dict) else None
         )
@@ -5790,6 +5789,139 @@ def _apply_safe_mechanical_repairs_one_rule(
             "projection": "ordered_mask",
             "original_index_to_repaired_index": retained_index_map,
             "removed_requirement_fingerprints": removed_requirement_fingerprints,
+            "source_response_sha256": _response_sha256(response),
+            "repaired_response_sha256": _response_sha256(repaired),
+        })
+        return repaired, repairs
+
+    # A response may contain a semantically populated requirement object that
+    # has no authoritative relation at all (no clause_ids or evidence_ids).
+    # Such an orphan cannot be safely assigned to a source clause. Remove it
+    # only when the validator names exactly those missing edges and the
+    # relation record binds the repair to this response. The caller must
+    # re-run the complete validator; any executable clause left without a
+    # requirement therefore remains blocked.
+    orphan_relation_records = [
+        record for record in error_records
+        if isinstance(record, dict)
+        and record.get("code") == "requirement_relation_mismatch"
+        and record.get("relation_category") == "missing_clause_relation"
+    ]
+    if orphan_relation_records and not any(
+        isinstance(record, dict) and record.get("code") == "empty_requirement_properties"
+        for record in error_records
+    ):
+        requirements = repaired.get("requirements")
+        if not isinstance(requirements, list):
+            return None, []
+        orphan_indexes: set[int] = set()
+        for record in orphan_relation_records:
+            index = record.get("requirement_index")
+            if (
+                type(index) is not int
+                or index < 0
+                or index >= len(requirements)
+                or record.get("json_pointer") != f"$.requirements[{index}]"
+                or record.get("mechanically_removable") is not True
+                or record.get("mechanical_removal_basis") != "no_clause_or_evidence_binding"
+                or record.get("clause_ids") != []
+                or record.get("response_sha256") != baseline_sha256
+                or index in orphan_indexes
+            ):
+                return None, []
+            requirement = requirements[index]
+            if (
+                not isinstance(requirement, dict)
+                or requirement.get("clause_ids") != []
+                or requirement.get("evidence_ids") != []
+                or requirement.get("existing_requirement_id") not in (None, "")
+                or requirement.get("field_key") not in (None, "")
+            ):
+                return None, []
+            orphan_indexes.add(index)
+        if not orphan_indexes:
+            return None, []
+
+        observed: dict[int, set[str]] = {index: set() for index in orphan_indexes}
+        for record in error_records:
+            if not isinstance(record, dict):
+                return None, []
+            pointer = str(record.get("json_pointer") or "")
+            match = re.match(r"^\$\.requirements\[(\d+)\]", pointer)
+            if match is None:
+                return None, []
+            index = int(match.group(1))
+            if index not in orphan_indexes or record.get("response_sha256") != baseline_sha256:
+                return None, []
+            code = record.get("code")
+            raw_error = str(record.get("raw_error") or "")
+            if (
+                code == "schema_contract_violation"
+                and pointer == f"$.requirements[{index}].clause_ids"
+                and "must_be_non_empty" in raw_error
+            ):
+                observed[index].add("clause_ids")
+            elif (
+                code == "schema_contract_violation"
+                and pointer == f"$.requirements[{index}].evidence_ids"
+                and "must_be_non_empty" in raw_error
+            ):
+                observed[index].add("evidence_ids")
+            elif (
+                code == "schema_contract_violation"
+                and pointer == f"$.requirements[{index}].properties.text"
+                and "must_be_exact_substring_of_cited_source_span" in raw_error
+            ):
+                observed[index].add("unbound_text")
+            elif (
+                code == "requirement_relation_mismatch"
+                and pointer == f"$.requirements[{index}]"
+                and record.get("relation_category") == "missing_clause_relation"
+                and record.get("mechanically_removable") is True
+            ):
+                observed[index].add("missing_relation")
+            else:
+                return None, []
+        if any(
+            not {"clause_ids", "evidence_ids", "missing_relation"}.issubset(values)
+            for values in observed.values()
+        ):
+            return None, []
+
+        before_count = len(requirements)
+        removed_fingerprints: list[str] = []
+        for index in sorted(orphan_indexes, reverse=True):
+            removed = requirements.pop(index)
+            fingerprint = _response_sha256(removed)
+            removed_fingerprints.append(fingerprint)
+            repairs.append({
+                "code": "requirement_relation_mismatch",
+                "rule_id": "remove_unbound_non_placeholder_requirement_v1",
+                "removed_requirement_index": index,
+                "removed_requirement": copy.deepcopy(removed),
+                "removed_requirement_sha256": fingerprint,
+                "reason": (
+                    "the requirement has no clause/evidence binding and cannot be "
+                    "accepted; clause reviews are unchanged and full validation follows"
+                ),
+            })
+        retained_index_map: dict[str, int] = {}
+        next_index = 0
+        for index in range(before_count):
+            if index in orphan_indexes:
+                continue
+            retained_index_map[str(index)] = next_index
+            next_index += 1
+        repairs.append({
+            "code": "requirement_relation_mismatch",
+            "rule_id": "remove_unbound_non_placeholder_requirement_v1",
+            "removed_requirement_indexes": sorted(orphan_indexes),
+            "removed_requirement_count": len(orphan_indexes),
+            "before_requirement_count": before_count,
+            "after_requirement_count": len(requirements),
+            "projection": "ordered_mask",
+            "original_index_to_repaired_index": retained_index_map,
+            "removed_requirement_fingerprints": list(reversed(removed_fingerprints)),
             "source_response_sha256": _response_sha256(response),
             "repaired_response_sha256": _response_sha256(repaired),
         })

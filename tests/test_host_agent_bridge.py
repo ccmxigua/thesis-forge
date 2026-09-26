@@ -835,13 +835,14 @@ class HostAgentBridgeTests(unittest.TestCase):
 
     def _packet(
         self, directory: Path, *, contract_version: str | None = None,
+        source: str = "正文使用宋体",
     ) -> tuple[Path, dict]:
         directory.mkdir(parents=True, exist_ok=True)
         clauses = [{
-            "id": "C1", "text": "正文使用宋体", "evidence_ids": ["E1"],
+            "id": "C1", "text": source, "evidence_ids": ["E1"],
             "source_kind": "paragraph", "location": {}, "part_index": 0,
         }]
-        evidence = {"evidence": [{"id": "E1", "text": "正文使用宋体", "kind": "paragraph"}]}
+        evidence = {"evidence": [{"id": "E1", "text": source, "kind": "paragraph"}]}
         if contract_version == "3.0":
             clauses = self._bind_test_source_spans(clauses, evidence)
         if contract_version is None:
@@ -3810,9 +3811,23 @@ class HostAgentBridgeTests(unittest.TestCase):
             for item in orphan_records
             if item["code"] == "requirement_relation_mismatch"
         ))
-        self.assertIsNone(bridge._apply_safe_mechanical_repairs(
+        self.assertIsNone(bridge._project_external_action_requirements(
             orphan, orphan_records, chunk=chunk,
-        )[0], "an unbound orphan must not be guessed into C1 or silently removed")
+        )[0], "external-action projection must not guess a relation for an orphan")
+        orphan_repaired, orphan_audit = bridge._apply_safe_mechanical_repairs(
+            orphan, orphan_records, chunk=chunk,
+        )
+        self.assertIsNotNone(orphan_repaired)
+        self.assertEqual(orphan_repaired["requirements"], [])
+        self.assertEqual(
+            orphan_repaired["clause_reviews"], orphan["clause_reviews"],
+            "unbound-orphan cleanup must preserve every semantic clause review",
+        )
+        self.assertTrue(any(
+            item.get("rule_id") == "remove_unbound_non_placeholder_requirement_v1"
+            and item.get("reason")
+            for item in orphan_audit
+        ), "orphan cleanup must be explicit in the repair audit")
 
         stale = copy.deepcopy(records)
         stale[0]["response_sha256"] = "0" * 64
@@ -4150,6 +4165,96 @@ class HostAgentBridgeTests(unittest.TestCase):
             )
             self.assertIsNone(rejected)
             response["requirements"][1][field] = [] if field != "reason" else ""
+
+    def test_unbound_semantic_orphan_is_audited_then_full_contract_is_revalidated(self) -> None:
+        source = "北京体育大学学位评定委员会办公室盖章(有效)"
+        with tempfile.TemporaryDirectory() as td:
+            _review_dir, chunk = self._packet(
+                Path(td) / "review", contract_version="3.0", source=source,
+            )
+            raw = {
+                "contract_version": "3.0",
+                "requirements": [{
+                    "existing_requirement_id": None,
+                    "field_key": None,
+                    "clause_ids": [],
+                    "evidence_ids": [],
+                    "confidence": 0.0,
+                    "reason": "No additional executable requirement is needed for the external stamping duty.",
+                    "applicability": None,
+                    "input_prerequisites": None,
+                    "verification": None,
+                    "role": "body_text",
+                    "properties": {
+                        "font": None,
+                        "paragraph": None,
+                        "numbering": None,
+                        "position": None,
+                        "prefix": None,
+                        "separator": None,
+                        "style_hint": "external compliance only",
+                        "text": source,
+                        "header_content": None,
+                        "bottom_border": None,
+                    },
+                }],
+                "clause_reviews": [{
+                    "clause_id": "C1",
+                    "classification": "external_compliance",
+                    "reason": "An actual office stamp is an external duty.",
+                    "obligations": None,
+                    "normative_basis": "external_duty",
+                }],
+                "unsupported_items": [],
+                "reported_conflicts": [],
+            }
+            accepted, audit = bridge.prepare_native_response_candidate(raw, chunk)
+            self.assertEqual(accepted["requirements"], [])
+            self.assertEqual(accepted["clause_reviews"][0]["classification"], "external_compliance")
+            self.assertEqual(bridge.validate_host_agent_response(accepted, chunk), [])
+            repair = next(
+                item for item in audit["mechanical_repairs"]
+                if item.get("rule_id") == "remove_unbound_non_placeholder_requirement_v1"
+                and "removed_requirement" in item
+            )
+            self.assertEqual(repair["removed_requirement"]["properties"]["text"], source)
+            normalized_parent = bridge.normalize_native_response(raw, chunk["response_schema"])
+            self.assertEqual(
+                repair["removed_requirement_sha256"],
+                bridge._response_sha256(normalized_parent["requirements"][0]),
+            )
+
+            bound_orphan = copy.deepcopy(raw)
+            bound_orphan["requirements"][0]["evidence_ids"] = ["E1"]
+            normalized = bridge.normalize_native_response(
+                bound_orphan, chunk["response_schema"],
+            )
+            bound_errors = bridge.validate_host_agent_response(normalized, chunk)
+            bound_records = bridge.contract_error_records(
+                bound_errors, response=normalized, chunk=chunk,
+            )
+            bound_relation = next(
+                item for item in bound_records
+                if item.get("code") == "requirement_relation_mismatch"
+            )
+            self.assertFalse(bound_relation["mechanically_removable"])
+            self.assertIsNone(bridge._apply_safe_mechanical_repairs(
+                normalized, bound_records, chunk=chunk,
+            )[0])
+
+            executable = copy.deepcopy(raw)
+            executable["clause_reviews"][0]["classification"] = "executable"
+            executable["clause_reviews"][0]["normative_basis"] = "explicit_normative_text"
+            executable["clause_reviews"][0]["obligations"] = [{
+                "id": "office_stamp", "status": "covered",
+                "reason": "The response claims to cover this source duty.",
+            }]
+            with self.assertRaises(ValueError) as blocked:
+                bridge.prepare_native_response_candidate(executable, chunk)
+            self.assertIn(
+                "executable_review_requires_derived_requirement",
+                str(getattr(blocked.exception, "error_records", [])),
+            )
 
     def test_mechanical_repair_never_removes_mixed_or_noninformational_relations(self) -> None:
         cases = [

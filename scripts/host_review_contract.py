@@ -219,6 +219,34 @@ def _relation_record(
     clause_id: str | None = None,
     matching_requirement_indexes: list[int] | None = None,
 ) -> dict[str, Any]:
+    mechanically_removable = code == "informational_requirement_forbidden"
+    removal_basis = None
+    if (
+        not mechanically_removable
+        and code == "requirement_relation_mismatch"
+        and fact is not None
+        and fact.get("category") == "missing_clause_relation"
+        and isinstance(requirements, list)
+    ):
+        requirement_index = fact.get("requirement_index")
+        if (
+            type(requirement_index) is int
+            and 0 <= requirement_index < len(requirements)
+            and isinstance(requirements[requirement_index], dict)
+        ):
+            requirement = requirements[requirement_index]
+            # An item with neither an authoritative clause edge nor an
+            # evidence edge cannot enter the execution contract. A bounded
+            # bridge projection may discard it, but only after it records the
+            # removed payload and the complete response validator passes again.
+            mechanically_removable = (
+                requirement.get("clause_ids") == []
+                and requirement.get("evidence_ids") == []
+                and requirement.get("existing_requirement_id") in (None, "")
+                and requirement.get("field_key") in (None, "")
+            )
+            if mechanically_removable:
+                removal_basis = "no_clause_or_evidence_binding"
     record: dict[str, Any] = {
         "code": code,
         "json_pointer": json_pointer,
@@ -240,8 +268,10 @@ def _relation_record(
             "unknown_clause_ids": list(fact.get("unknown_clause_ids", [])),
             "missing_review_ids": list(fact.get("missing_review_ids", [])),
             "duplicate_review_ids": list(fact.get("duplicate_review_ids", [])),
-            "mechanically_removable": code == "informational_requirement_forbidden",
+            "mechanically_removable": mechanically_removable,
         })
+        if removal_basis:
+            record["mechanical_removal_basis"] = removal_basis
     return record
 
 

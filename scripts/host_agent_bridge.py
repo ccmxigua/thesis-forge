@@ -1601,6 +1601,205 @@ def _retry_record_binds_exact_path(
     )
 
 
+def _v3_source_inventory_completion_allowed(
+    previous_response: Any,
+    current_response: Any,
+    records: list[dict[str, Any]],
+    changed_paths: list[str],
+    *,
+    chunk: dict[str, Any] | None,
+) -> bool:
+    """Allow only validator-directed completion of a missing obligation inventory.
+
+    The retry may add a source-reviewable inventory, but cannot use that
+    contract error as authority to alter any other semantic field.  The
+    candidate still has to pass the ordinary response validator and the fresh
+    source-first obligation review before it can be accepted.
+    """
+    if (
+        not isinstance(previous_response, dict)
+        or not isinstance(current_response, dict)
+        or not isinstance(chunk, dict)
+        or not changed_paths
+        or not records
+        or any(
+            not isinstance(record, dict)
+            or record.get("code") != "executable_review_obligations_missing"
+            or not isinstance(record.get("response_sha256"), str)
+            or record.get("response_sha256") != _response_sha256(previous_response)
+            for record in records
+        )
+    ):
+        return False
+
+    fingerprints = _retry_input_fingerprints(chunk)
+    if not _retry_fingerprints_complete(fingerprints):
+        return False
+    clauses = chunk.get("clauses")
+    evidence_context = chunk.get("evidence_context")
+    if not isinstance(clauses, list) or not isinstance(evidence_context, dict):
+        return False
+    clause_map: dict[str, dict[str, Any]] = {}
+    for clause in clauses:
+        if (
+            not isinstance(clause, dict)
+            or not isinstance(clause.get("id"), str)
+            or not clause["id"]
+        ):
+            return False
+        clause_id = clause["id"]
+        if clause_id in clause_map:
+            return False
+        clause_map[clause_id] = clause
+
+    before_reviews = previous_response.get("clause_reviews")
+    after_reviews = current_response.get("clause_reviews")
+    if not isinstance(before_reviews, list) or not isinstance(after_reviews, list):
+        return False
+    before_ids = [item.get("clause_id") if isinstance(item, dict) else None for item in before_reviews]
+    after_ids = [item.get("clause_id") if isinstance(item, dict) else None for item in after_reviews]
+    # A validator pointer is positional.  Do not transfer it across a retry
+    # that also reorders reviews, even though ordinary diffing is keyed by ID.
+    if before_ids != after_ids or any(not isinstance(value, str) or not value for value in before_ids):
+        return False
+    if len(set(before_ids)) != len(before_ids):
+        return False
+
+    inventory_paths: dict[str, int] = {}
+    for path in changed_paths:
+        match = re.fullmatch(r"\$\.clause_reviews\[(\d+)\]\.obligations", path)
+        if match is None:
+            return False
+        index = int(match.group(1))
+        if index >= len(before_reviews) or index >= len(after_reviews):
+            return False
+        clause_id = before_ids[index]
+        if clause_id in inventory_paths:
+            return False
+        inventory_paths[clause_id] = index
+        before_review, after_review = before_reviews[index], after_reviews[index]
+        if not isinstance(before_review, dict) or not isinstance(after_review, dict):
+            return False
+        classification = before_review.get("classification")
+        if (
+            not isinstance(classification, str)
+            or classification in {"informational", "not_applicable"}
+        ):
+            return False
+        old_present, old_inventory = _retry_pointer_lookup(previous_response, path)
+        new_present, new_inventory = _retry_pointer_lookup(current_response, path)
+        if (old_present and old_inventory is not None) or not new_present:
+            return False
+        if not isinstance(new_inventory, list) or not new_inventory:
+            return False
+
+        if classification_requires_requirement(str(classification)):
+            allowed_statuses = {"covered"}
+        else:
+            allowed_statuses = {
+                "external_compliance": {"unverifiable"},
+                "requires_metadata": {"requires_metadata"},
+                "requires_source_content": {"requires_source_content"},
+                "unsupported_backend": {"unsupported_backend"},
+                "unverifiable": {"unverifiable"},
+                "unresolved": {"unresolved"},
+            }.get(classification, set())
+        if not allowed_statuses:
+            return False
+        obligation_ids: set[str] = set()
+        for obligation in new_inventory:
+            if (
+                not isinstance(obligation, dict)
+                or set(obligation) != {"id", "status", "reason"}
+                or not isinstance(obligation.get("id"), str)
+                or not obligation["id"].strip()
+                or obligation["id"] in obligation_ids
+                or obligation.get("status") not in allowed_statuses
+                or not isinstance(obligation.get("reason"), str)
+                or not obligation["reason"].strip()
+            ):
+                return False
+            obligation_ids.add(obligation["id"])
+
+        clause = clause_map.get(clause_id)
+        evidence_ids = clause.get("evidence_ids") if isinstance(clause, dict) else None
+        if (
+            not isinstance(clause, dict)
+            or not isinstance(clause.get("text"), str)
+            or not clause["text"].strip()
+            or not isinstance(evidence_ids, list)
+            or not evidence_ids
+            or len({value for value in evidence_ids if isinstance(value, str)}) != len(evidence_ids)
+            or any(
+                not isinstance(evidence_id, str)
+                or not evidence_id
+                or not isinstance(evidence_context.get(evidence_id), dict)
+                or evidence_context[evidence_id].get("id") != evidence_id
+                or not isinstance(evidence_context[evidence_id].get("text"), str)
+                for evidence_id in evidence_ids
+            )
+        ):
+            return False
+        source_span = clause.get("source_span")
+        if not isinstance(source_span, dict):
+            return False
+        span_evidence_id = source_span.get("evidence_id")
+        span_evidence = (
+            evidence_context.get(span_evidence_id)
+            if isinstance(span_evidence_id, str) else None
+        )
+        span_source_text = span_evidence.get("text") if isinstance(span_evidence, dict) else None
+        span_start, span_end = source_span.get("start_offset"), source_span.get("end_offset")
+        span_text, span_digest = source_span.get("text"), source_span.get("source_sha256")
+        if (
+            span_evidence_id not in evidence_ids
+            or not isinstance(span_evidence, dict)
+            or span_evidence.get("id") != span_evidence_id
+            or not isinstance(span_source_text, str)
+            or isinstance(span_start, bool) or not isinstance(span_start, int) or span_start < 0
+            or isinstance(span_end, bool) or not isinstance(span_end, int)
+            or span_end <= span_start or span_end > len(span_source_text)
+            or not isinstance(span_text, str) or not span_text
+            or span_source_text[span_start:span_end] != span_text
+            or not isinstance(span_digest, str)
+            or hashlib.sha256(span_source_text.encode("utf-8")).hexdigest() != span_digest
+        ):
+            return False
+
+        matching_records = [
+            record for record in records
+            if record.get("json_pointer") == path
+            and record.get("clause_id") == clause_id
+            and _retry_record_binds_exact_path(
+                record, path, previous_response, current_response,
+            )
+        ]
+        if not matching_records:
+            return False
+        source_binding, _evidence_bindings, source_binding_complete = _retry_path_source_binding(
+            path, previous_response, current_response, matching_records, chunk,
+        )
+        if not source_binding_complete or not _retry_fingerprints_complete(source_binding):
+            return False
+
+    # Restore only the validator-identified old inventory values in a copy of
+    # the retry.  Nothing else may differ, including requirements, clause
+    # classification, reason, evidence, conflicts, or unrelated reviews.
+    restored = copy.deepcopy(current_response)
+    restored_reviews = restored.get("clause_reviews")
+    if not isinstance(restored_reviews, list):
+        return False
+    for clause_id, index in inventory_paths.items():
+        old_present, old_inventory = _retry_pointer_lookup(
+            previous_response, f"$.clause_reviews[{index}].obligations",
+        )
+        if old_present:
+            restored_reviews[index]["obligations"] = copy.deepcopy(old_inventory)
+        else:
+            restored_reviews[index].pop("obligations", None)
+    return not _retry_change_paths(previous_response, restored)
+
+
 def _retry_changes_allowed(
     records: list[dict[str, Any]], changed_paths: list[str], *, contract_version: str,
     previous_response: Any = None, current_response: Any = None,
@@ -1610,6 +1809,13 @@ def _retry_changes_allowed(
     if not changed_paths:
         return True
     codes = {str(item.get("code")) for item in records if isinstance(item, dict)}
+    if (
+        contract_version == HOST_REVIEW_CONTRACT_V3
+        and _v3_source_inventory_completion_allowed(
+            previous_response, current_response, records, changed_paths, chunk=chunk,
+        )
+    ):
+        return True
     empty_payload_repair = "empty_requirement_properties" in codes
     unknown_payload_repair = "unknown_property" in codes
     cover_placeholder_repair = "cover_institution_placeholder" in codes
@@ -4374,6 +4580,10 @@ def _retry_authorization_ledger(
     codes = {str(record.get("code") or "") for record in records if isinstance(record, dict)}
     special_rule: str | None = None
     if contract_version == HOST_REVIEW_CONTRACT_V3:
+        if _v3_source_inventory_completion_allowed(
+            previous_response, current_response, records, changed_paths, chunk=chunk,
+        ):
+            special_rule = "v3_source_inventory_completion"
         special_checks = (
             ("v3_schema_directed_cover_completion", _v3_cover_contract_completion_allowed),
             ("v3_bounded_incomplete_response_completion", _v3_incomplete_completion_allowed),
@@ -4388,6 +4598,8 @@ def _retry_authorization_ledger(
             ("v3_fixed_declaration_completion", _v3_fixed_declaration_completion_allowed),
         )
         for rule_id, predicate in special_checks:
+            if special_rule is not None:
+                break
             kwargs = {"chunk": chunk} if rule_id not in {
                 "v3_duplicate_evidence_projection",
             } else {}

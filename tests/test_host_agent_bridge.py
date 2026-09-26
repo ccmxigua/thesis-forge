@@ -1323,6 +1323,220 @@ class HostAgentBridgeTests(unittest.TestCase):
         self.assertIsNotNone(change_error)
         self.assertIn("semantic re-review", str(change_error))
 
+    def test_v3_missing_obligation_inventory_retry_is_narrow_and_source_bound(self) -> None:
+        source = "学位论文作者签名： 年 月 日"
+        provenance = {
+            "run_id": "run-inventory-retry", "source_sha256": "a" * 64,
+            "clause_sha256": "b" * 64, "evidence_sha256": "c" * 64,
+            "request_sha256": "d" * 64,
+        }
+        chunk = {
+            "provenance": provenance,
+            "batch": {"index": 2},
+            "case_id": "case-inventory-retry",
+            "response_schema": {"type": "object", "title": "retry test"},
+            "runtime_context": {"code_fingerprint_sha256": "9" * 64},
+            "clauses": [exact_source_clause("C00037", source)],
+            "evidence_context": {"E1": {"id": "E1", "text": source}},
+        }
+        previous = {
+            "contract_version": "3.0", "provenance": provenance,
+            "requirements": [], "unsupported_items": [], "reported_conflicts": [],
+            "clause_reviews": [{
+                "clause_id": "C00037", "classification": "external_compliance",
+                "normative_basis": "external_duty",
+                "reason": "The author must sign and date the declaration.",
+                "obligations": None,
+            }],
+        }
+        current = copy.deepcopy(previous)
+        current["clause_reviews"][0]["obligations"] = [{
+            "id": "actual_signature_and_date", "status": "unverifiable",
+            "reason": "The source requires an actual author signature and date.",
+        }]
+        records = [{
+            "code": "executable_review_obligations_missing",
+            "json_pointer": "$.clause_reviews[0].obligations",
+            "clause_id": "C00037",
+            "response_sha256": bridge._response_sha256(previous),
+            "raw_error": "review_requires_non_empty_source_inventory",
+        }]
+
+        authorization: list[dict] = []
+        error, changed = bridge._retry_semantic_change_error(
+            previous, current, records, contract_version="3.0", chunk=chunk,
+            authorization_out=authorization,
+        )
+        self.assertIsNone(error)
+        self.assertEqual(changed, ["$.clause_reviews[0].obligations"])
+        self.assertEqual(len(authorization), 1)
+        self.assertEqual(authorization[0]["rule_id"], "v3_source_inventory_completion")
+        self.assertTrue(authorization[0]["source_binding_complete"])
+        self.assertEqual(authorization[0]["source_binding"]["run_id"], "run-inventory-retry")
+        self.assertEqual(
+            authorization[0]["source_evidence_bindings"][0]["clause_id"], "C00037",
+        )
+
+        # The allowance is not a blanket semantic retry grant.
+        unsafe_candidates = []
+        changed_classification = copy.deepcopy(current)
+        changed_classification["clause_reviews"][0]["classification"] = "informational"
+        unsafe_candidates.append(changed_classification)
+        changed_reason = copy.deepcopy(current)
+        changed_reason["clause_reviews"][0]["reason"] = "Unrelated rewrite"
+        unsafe_candidates.append(changed_reason)
+        covered_external_action = copy.deepcopy(current)
+        covered_external_action["clause_reviews"][0]["obligations"][0]["status"] = "covered"
+        unsafe_candidates.append(covered_external_action)
+        unresolved_external_action = copy.deepcopy(current)
+        unresolved_external_action["clause_reviews"][0]["obligations"][0]["status"] = "unresolved"
+        unsafe_candidates.append(unresolved_external_action)
+        empty_inventory = copy.deepcopy(current)
+        empty_inventory["clause_reviews"][0]["obligations"] = []
+        unsafe_candidates.append(empty_inventory)
+        duplicate_ids = copy.deepcopy(current)
+        duplicate_ids["clause_reviews"][0]["obligations"].append(
+            copy.deepcopy(duplicate_ids["clause_reviews"][0]["obligations"][0])
+        )
+        unsafe_candidates.append(duplicate_ids)
+        changed_requirement_graph = copy.deepcopy(current)
+        changed_requirement_graph["requirements"].append({
+            "role": "paragraph", "properties": {"text": source},
+            "clause_ids": ["C00037"], "evidence_ids": ["E1"],
+            "reason": "Unauthorized new requirement edge",
+        })
+        unsafe_candidates.append(changed_requirement_graph)
+
+        for candidate in unsafe_candidates:
+            with self.subTest(candidate=candidate):
+                candidate_error, _ = bridge._retry_semantic_change_error(
+                    previous, candidate, records, contract_version="3.0", chunk=chunk,
+                )
+                self.assertIsNotNone(candidate_error)
+
+        stale_record = copy.deepcopy(records)
+        stale_record[0]["response_sha256"] = "0" * 64
+        stale_error, _ = bridge._retry_semantic_change_error(
+            previous, current, stale_record, contract_version="3.0", chunk=chunk,
+        )
+        self.assertIsNotNone(stale_error)
+
+        incomplete_fingerprints = copy.deepcopy(chunk)
+        incomplete_fingerprints["runtime_context"].pop("code_fingerprint_sha256")
+        fingerprint_error, _ = bridge._retry_semantic_change_error(
+            previous, current, records, contract_version="3.0", chunk=incomplete_fingerprints,
+        )
+        self.assertIsNotNone(fingerprint_error)
+
+        mismatched_evidence = copy.deepcopy(chunk)
+        mismatched_evidence["evidence_context"]["E1"]["id"] = "E2"
+        evidence_error, _ = bridge._retry_semantic_change_error(
+            previous, current, records, contract_version="3.0", chunk=mismatched_evidence,
+        )
+        self.assertIsNotNone(evidence_error)
+
+        duplicate_evidence_ids = copy.deepcopy(chunk)
+        duplicate_evidence_ids["clauses"][0]["evidence_ids"] = ["E1", "E1"]
+        duplicate_evidence_error, _ = bridge._retry_semantic_change_error(
+            previous, current, records, contract_version="3.0", chunk=duplicate_evidence_ids,
+        )
+        self.assertIsNotNone(duplicate_evidence_error)
+
+        mismatched_span = copy.deepcopy(chunk)
+        mismatched_span["clauses"][0]["source_span"]["text"] = "不匹配的来源切片"
+        invalid_spans = [mismatched_span]
+        bool_offset = copy.deepcopy(chunk)
+        bool_offset["clauses"][0]["source_span"]["start_offset"] = True
+        invalid_spans.append(bool_offset)
+        out_of_bounds = copy.deepcopy(chunk)
+        out_of_bounds["clauses"][0]["source_span"]["end_offset"] = len(source) + 1
+        invalid_spans.append(out_of_bounds)
+        wrong_source_hash = copy.deepcopy(chunk)
+        wrong_source_hash["clauses"][0]["source_span"]["source_sha256"] = "0" * 64
+        invalid_spans.append(wrong_source_hash)
+        unlinked_span_evidence = copy.deepcopy(chunk)
+        unlinked_span_evidence["clauses"][0]["source_span"]["evidence_id"] = "E2"
+        invalid_spans.append(unlinked_span_evidence)
+        for invalid_chunk in invalid_spans:
+            with self.subTest(source_span=invalid_chunk["clauses"][0]["source_span"]):
+                span_error, _ = bridge._retry_semantic_change_error(
+                    previous, current, records, contract_version="3.0", chunk=invalid_chunk,
+                )
+                self.assertIsNotNone(span_error)
+
+    def test_v3_inventory_completion_is_revalidated_and_independently_reviewed(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            review_dir = Path(td) / "requirements"
+            review_dir.mkdir(parents=True)
+            source = "论文作者须在声明页亲笔签名并填写日期。"
+            clauses = [{
+                "id": "C1", "text": source, "evidence_ids": ["E1"],
+                "source_kind": "paragraph", "location": {}, "part_index": 0,
+            }]
+            evidence = {"evidence": [{"id": "E1", "text": source, "kind": "paragraph"}]}
+            clauses = self._bind_test_source_spans(clauses, evidence)
+            request = engine.build_llm_request(
+                [], clauses, evidence, {}, "full", contract_version="3.0",
+                runtime_context={"code_fingerprint_sha256": "f" * 64},
+            )
+            request = attach_request_provenance(
+                request, source_sha256="a" * 64, evidence_doc=evidence,
+                clauses=clauses, run_id="run-inventory-bridge-test",
+            )
+            engine.prepare_host_agent_review_packets(
+                request, clauses, evidence, "a" * 64, review_dir, chunk_size=1,
+            )
+            first = {
+                "contract_version": "3.0", "requirements": [],
+                "clause_reviews": [{
+                    "clause_id": "C1", "classification": "external_compliance",
+                    "normative_basis": "external_duty",
+                    "reason": "The author must sign and date the declaration.",
+                    "obligations": None,
+                }],
+                "unsupported_items": [], "reported_conflicts": [],
+            }
+            second = copy.deepcopy(first)
+            second["clause_reviews"][0]["obligations"] = [{
+                "id": "actual_signature_and_date", "status": "unverifiable",
+                "reason": "An actual signature and date cannot be generated by the formatter.",
+            }]
+            envelopes = [
+                {"runId": "inventory-retry-1", "status": "ok", "provider": "openai",
+                 "model": "gpt-5.6-luna", "result": {"payloads": [{"text": json.dumps(first)}]}},
+                {"runId": "inventory-retry-2", "status": "ok", "provider": "openai",
+                 "model": "gpt-5.6-luna", "result": {"payloads": [{"text": json.dumps(second)}]}},
+            ]
+            host_results = [
+                subprocess.CompletedProcess(["openclaw"], 0, json.dumps(item), "")
+                for item in envelopes
+            ]
+            independent_candidates: list[dict] = []
+
+            def review_candidate(candidate: dict, chunk: dict, **kwargs: dict) -> dict:
+                independent_candidates.append(copy.deepcopy(candidate))
+                return self._fake_independent_review(candidate, chunk, **kwargs)
+
+            with patch.object(bridge, "_run_independent_obligation_coverage_review",
+                              side_effect=review_candidate), \
+                    patch.object(bridge, "_run_command", side_effect=host_results) as host_call:
+                audit = bridge.run_bridge(
+                    review_dir, response_out=Path(td) / "host-agent-response.json",
+                    agent_id="main", timeout=1, max_attempts=2,
+                    openclaw_bin="openclaw", model="openai/gpt-5.6-luna",
+                )
+
+            self.assertEqual(host_call.call_count, 2)
+            self.assertEqual(audit["status"], "merged")
+            self.assertEqual(len(independent_candidates), 1)
+            accepted_review = independent_candidates[0]["clause_reviews"][0]
+            self.assertEqual(accepted_review["classification"], "external_compliance")
+            self.assertEqual(accepted_review["obligations"], second["clause_reviews"][0]["obligations"])
+            self.assertEqual(
+                audit["chunk_runs"][0]["semantic_retry_authorizations"]["paths"][0]["rule_id"],
+                "v3_source_inventory_completion",
+            )
+
     def test_retry_stage_pair_compares_raw_to_raw_and_cannot_hide_raw_drift(self) -> None:
         raw = {
             "contract_version": bridge.HOST_REVIEW_CONTRACT_V3,

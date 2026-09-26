@@ -21,6 +21,9 @@ from source_obligation_compiler import (
     source_fact_value_matches,
     compile_soft_keyword_count_guidance,
     compile_explicit_keyword_count_range,
+    has_explicit_keyword_count_signal,
+    source_text_candidates,
+    exact_clause_source_text,
     materialize_complete_abstract_source_constraints,
     materialize_soft_keyword_count_guidance,
     materialize_known_source_verification,
@@ -429,7 +432,10 @@ def contract_error_records(
             code = "requirement_relation_mismatch"
         elif "executable_review_requires_derived_requirement" in lowered:
             code = "missing_derived_requirement"
-        elif "executable_review_requires_non_empty_inventory" in lowered:
+        elif (
+            "executable_review_requires_non_empty_inventory" in lowered
+            or "review_requires_non_empty_source_inventory" in lowered
+        ):
             code = "executable_review_obligations_missing"
         elif "executable_review_requires_all_obligations_covered" in lowered:
             code = "executable_review_obligations_uncovered"
@@ -596,7 +602,7 @@ def _abstract_obligation_gaps(
     prevents a short property projection from claiming to cover an entire
     clause that explicitly contains additional independent constraints.
     """
-    text = re.sub(r"\s+", "", str(clause.get("text") or clause.get("source_text_full") or ""))
+    text = re.sub(r"\s+", "", exact_clause_source_text(clause))
     if not re.search(r"中文摘要|摘要|chineseabstract|englishabstract|abstract", text, re.I):
         return []
     properties: dict[str, Any] = {}
@@ -660,11 +666,13 @@ def _abstract_obligation_gaps(
     if re.search(r"不加评论和解释|不得?加评论|不应?加评论|不含评论", text) and abstract_rule.get("prohibit_commentary") is not True:
         gaps.append("abstract_zh.prohibit_commentary")
     quality_checks = {
+        "brief_statement_of_thesis_content": "论文内容的简要陈述",
         "independent_and_complete": "独立性和完整性",
         "reflects_central_idea": "准确反映论文的中心思想",
         "academic_language": "规范的学术用语",
         "logical_structure": "逻辑性强",
         "highlight_innovation": "创造性成果",
+        "new_theory_method_technology": "新理论、新方法、新技术",
         "main_information_equivalent_to_thesis": "与论文等同的主要信息",
     }
     quality_guidance = set(abstract_rule.get("quality_guidance") or [])
@@ -685,36 +693,256 @@ def _abstract_obligation_gaps(
 def _keyword_obligation_gaps(
     clause: dict[str, Any], requirements: list[dict[str, Any]], indexes: list[int],
 ) -> list[str]:
-    text = re.sub(r"\s+", "", str(clause.get("text") or clause.get("source_text_full") or ""))
-    if not re.search(r"关键词|keywords?", text, re.I):
+    candidates = source_text_candidates(clause)
+    exact_text = candidates[0] if candidates else ""
+    keyword_subject = re.compile(r"关键词|关键字|\bkey\s*words?\b", re.I)
+    obligation_text = exact_text
+    if not keyword_subject.search(exact_text) and "source_span" in clause:
+        # A split clause may inherit its target noun from the same, already
+        # hash-validated evidence paragraph. Use that context only to identify
+        # one unambiguous language target; never parse numeric bounds from the
+        # wider paragraph, where unrelated limits may coexist.
+        contexts = [value for value in candidates[1:] if keyword_subject.search(value)]
+        languages = {
+            "keywords_en" if re.search(r"\bkey\s*words?\b", value, re.I) else "keywords_zh"
+            for value in contexts
+        }
+        if len(languages) == 1:
+            subject = "Key Words" if languages == {"keywords_en"} else "关键词"
+            obligation_text = f"{subject} {exact_text}"
+    text = re.sub(r"\s+", "", obligation_text)
+    if not keyword_subject.search(obligation_text):
         return []
-    if not re.search(r"Chinesecharacters|汉字|中文字符", text, re.I):
-        return []
+    has_chinese_character_limit = bool(
+        re.search(r"Chinesecharacters|汉字|中文字符", text, re.I)
+    )
     properties: dict[str, Any] = {}
     for index in indexes:
         if 0 <= index < len(requirements) and requirements[index].get("role") == "content_constraints":
             properties.update(_flatten_property_paths(requirements[index].get("properties") or {}))
-    key = "keywords_en" if re.search(r"英文关键词|englishkeywords|english.*keywords", text, re.I) else "keywords_zh"
+    key = "keywords_en" if re.search(
+        r"英文关键词|\benglish\s+keywords?\b|\bkey\s*words?\b",
+        obligation_text, re.I,
+    ) else "keywords_zh"
     gaps: list[str] = []
-    if f"{key}.max_item_chars" not in properties:
-        gaps.append(f"{key}.max_item_chars")
-    elif properties.get(f"{key}.item_length_metric") != "cjk_characters":
-        gaps.append(f"{key}.item_length_metric:cjk_characters")
-    guidance = compile_soft_keyword_count_guidance(clause.get("text") or clause.get("source_text_full"))
-    if guidance:
-        count_guidance = properties.get(f"{key}.count_guidance")
-        if not isinstance(count_guidance, dict) or any(
-            count_guidance.get(field) != guidance[field]
+    if has_chinese_character_limit:
+        if f"{key}.max_item_chars" not in properties:
+            gaps.append(f"{key}.max_item_chars")
+        elif properties.get(f"{key}.item_length_metric") != "cjk_characters":
+            gaps.append(f"{key}.item_length_metric:cjk_characters")
+    guidance = compile_soft_keyword_count_guidance(obligation_text)
+    guidance_candidates = [guidance] if guidance is not None else []
+    unique_guidance = {
+        (item["language_key"], item["min_count"], item["max_count"], item["strength"])
+        for item in guidance_candidates
+    }
+    if len(unique_guidance) == 1:
+        guidance = guidance_candidates[0]
+        expected_guidance = {
+            f"{key}.count_guidance.{field}": guidance[field]
             for field in ("min_count", "max_count", "strength")
-        ):
+        }
+        if any(properties.get(path) != value for path, value in expected_guidance.items()):
             gaps.append(f"{key}.count_guidance")
-    else:
-        hard_range = compile_explicit_keyword_count_range(clause.get("text") or clause.get("source_text_full"))
-        if hard_range:
-            for field in ("min_count", "max_count"):
-                if properties.get(f"{key}.{field}") != hard_range[field]:
-                    gaps.append(f"{key}.{field}")
+    elif len(unique_guidance) > 1:
+        gaps.append(f"{key}.count_guidance:ambiguous_source")
+
+    hard_range = compile_explicit_keyword_count_range(obligation_text)
+    hard_ranges = [hard_range] if hard_range is not None else []
+    unique_hard_ranges = {
+        (item["min_count"], item["max_count"]) for item in hard_ranges
+    }
+    if len(unique_hard_ranges) == 1:
+        hard_range = hard_ranges[0]
+        for field in ("min_count", "max_count"):
+            if properties.get(f"{key}.{field}") != hard_range[field]:
+                gaps.append(f"{key}.{field}")
+    elif len(unique_hard_ranges) > 1:
+        gaps.append(f"{key}.hard_count_range:conflicting_source")
+    elif has_explicit_keyword_count_signal(obligation_text):
+        gaps.append(f"{key}.hard_count_range:unresolved_source")
     return gaps
+
+
+def validate_clause_source_spans(
+    clauses: Any,
+    evidence_context: Any,
+    *,
+    required: bool,
+) -> list[str]:
+    """Validate code-owned clause spans against the exact evidence packet.
+
+    Contract 3.0 relies on exact source text for deterministic obligation
+    checks. A span is therefore not trusted merely because it contains text
+    and a plausible hash: its evidence id, offsets, source digest, slice, and
+    normalized clause text must all agree with the current evidence packet.
+    """
+    if not isinstance(clauses, list):
+        return ["clauses_must_be_array_for_source_binding"] if required else []
+    evidence_map = evidence_context if isinstance(evidence_context, dict) else {}
+    errors: list[str] = []
+    for index, clause in enumerate(clauses):
+        prefix = f"$.clauses[{index}].source_span"
+        if not isinstance(clause, dict):
+            if required:
+                errors.append(f"{prefix}: clause_must_be_object")
+            continue
+        span = clause.get("source_span")
+        if span is None:
+            if required:
+                errors.append(f"{prefix}: required_for_contract_3.0")
+            continue
+        if not isinstance(span, dict):
+            errors.append(f"{prefix}: must_be_object")
+            continue
+        evidence_id = span.get("evidence_id")
+        clause_evidence_ids = clause.get("evidence_ids")
+        source_record = evidence_map.get(str(evidence_id)) if isinstance(evidence_id, str) else None
+        source_text = source_record.get("text") if isinstance(source_record, dict) else None
+        start = span.get("start_offset")
+        end = span.get("end_offset")
+        span_text = span.get("text")
+        digest = span.get("source_sha256")
+        if not isinstance(evidence_id, str) or not evidence_id:
+            errors.append(f"{prefix}.evidence_id: must_be_nonempty_string")
+            continue
+        if (
+            not isinstance(clause_evidence_ids, list)
+            or evidence_id not in {str(value) for value in clause_evidence_ids}
+        ):
+            errors.append(f"{prefix}.evidence_id: not_referenced_by_clause")
+        if not isinstance(source_text, str):
+            errors.append(f"{prefix}.evidence_id: missing_current_source_text")
+            continue
+        if (
+            isinstance(start, bool) or not isinstance(start, int) or start < 0
+            or isinstance(end, bool) or not isinstance(end, int)
+            or end <= start or end > len(source_text)
+        ):
+            errors.append(f"{prefix}: invalid_source_offsets")
+            continue
+        if not isinstance(span_text, str) or not span_text:
+            errors.append(f"{prefix}.text: must_be_nonempty_string")
+            continue
+        if source_text[start:end] != span_text:
+            errors.append(f"{prefix}.text: does_not_match_current_evidence_slice")
+        if (
+            not isinstance(digest, str)
+            or not re.fullmatch(r"[0-9a-f]{64}", digest)
+            or hashlib.sha256(source_text.encode("utf-8")).hexdigest() != digest
+        ):
+            errors.append(f"{prefix}.source_sha256: does_not_match_current_evidence")
+        clause_text = clause.get("text")
+        normalized_span = re.sub(r"\s+", " ", span_text).strip(" ，,、：:;；。和及")
+        normalized_clause = (
+            re.sub(r"\s+", " ", clause_text).strip(" ，,、：:;；。和及")
+            if isinstance(clause_text, str) else None
+        )
+        if normalized_clause != normalized_span:
+            errors.append(f"{prefix}.text: does_not_match_clause_text")
+        full_context = clause.get("source_text_full")
+        if isinstance(full_context, str) and re.sub(r"\s+", " ", source_text).strip() != full_context:
+            errors.append(f"$.clauses[{index}].source_text_full: does_not_match_current_evidence")
+        exact_context = clause.get("source_evidence_text")
+        if isinstance(exact_context, str) and exact_context != source_text:
+            errors.append(f"$.clauses[{index}].source_evidence_text: does_not_match_current_evidence")
+    return errors
+
+
+_TOP_LEVEL_NON_TEXT_ROLES = {
+    "page", "table", "objects", "content_constraints", "conditional_constraints",
+    "document_structure", "appendices", "equations", "cover", "declarations",
+}
+
+
+def _resolve_contract_schema(schema: Any, contract_root: dict[str, Any]) -> dict[str, Any] | None:
+    """Resolve the local role-schema reference used by the request contract."""
+    seen: set[str] = set()
+    while isinstance(schema, dict) and isinstance(schema.get("$ref"), str):
+        reference = schema["$ref"]
+        if not reference.startswith("#/$defs/") or reference in seen:
+            return None
+        seen.add(reference)
+        schema = contract_root.get("$defs", {}).get(reference.removeprefix("#/$defs/"))
+    return schema if isinstance(schema, dict) else None
+
+
+def _literal_text_source_binding_error(
+    item: dict[str, Any], index: int, clause_map: dict[str, dict[str, Any]],
+    evidence_context: dict[str, Any],
+) -> str | None:
+    """Require literal text properties to be exact text at a cited source span.
+
+    Segmentation may trim boundary punctuation from source_span. Permit only
+    such punctuation immediately adjacent to the bound span; never normalize
+    internal whitespace or replace punctuation inside the literal.
+    """
+    properties = item.get("properties")
+    text = properties.get("text") if isinstance(properties, dict) else None
+    if not isinstance(text, str) or not text.strip():
+        return None  # The role schema reports malformed or missing values.
+    clause_ids = item.get("clause_ids")
+    evidence_ids = item.get("evidence_ids")
+    if not isinstance(clause_ids, list) or not isinstance(evidence_ids, list):
+        return f"$.requirements[{index}].properties.text: must_be_exact_substring_of_cited_source_span"
+    cited_evidence = {str(value) for value in evidence_ids}
+    punctuation = re.compile(r"^[\s，,、：:;；。！？!?…“”‘’（）()【】\[\]{}]*$")
+    source_spans: list[tuple[str, str, int, int]] = []
+    # Validate every linked clause before looking for a matching literal.  An
+    # early match must not let a later clause's primary evidence disappear
+    # merely because the model changed the order of clause_ids.
+    for clause_id in clause_ids:
+        clause = clause_map.get(str(clause_id))
+        span = clause.get("source_span") if isinstance(clause, dict) else None
+        if not isinstance(span, dict):
+            continue
+        evidence_id = span.get("evidence_id")
+        if not isinstance(evidence_id, str) or not evidence_id:
+            return (
+                f"$.requirements[{index}].properties.text: "
+                f"missing_primary_source_span_evidence_id:{clause_id}"
+            )
+        if evidence_id not in cited_evidence:
+            return (
+                f"$.requirements[{index}].evidence_ids: "
+                f"must_cite_primary_source_span_evidence:{clause_id}"
+            )
+        source_spans.append((str(clause_id), evidence_id, span.get("start_offset"), span.get("end_offset")))
+
+    for clause_id, evidence_id, start, end in source_spans:
+        evidence = evidence_context.get(evidence_id)
+        source_text = evidence.get("text") if isinstance(evidence, dict) else None
+        if (
+            not isinstance(source_text, str)
+            or isinstance(start, bool) or not isinstance(start, int)
+            or isinstance(end, bool) or not isinstance(end, int)
+        ):
+            continue
+        search_from = 0
+        matched = False
+        while True:
+            occurrence = source_text.find(text, search_from)
+            if occurrence < 0:
+                break
+            occurrence_end = occurrence + len(text)
+            overlaps_span = occurrence < end and occurrence_end > start
+            left_fringe = source_text[occurrence:start] if occurrence < start else ""
+            right_fringe = source_text[end:occurrence_end] if occurrence_end > end else ""
+            bounded_fringe = len(left_fringe) <= 8 and len(right_fringe) <= 8
+            if (
+                overlaps_span and bounded_fringe
+                and punctuation.fullmatch(left_fringe)
+                and punctuation.fullmatch(right_fringe)
+            ):
+                matched = True
+                break
+            search_from = occurrence + 1
+        if matched:
+            # A literal may be supported by one of several linked clauses, but
+            # the primary evidence for every linked clause has already been
+            # checked above.
+            return None
+    return f"$.requirements[{index}].properties.text: must_be_exact_substring_of_cited_source_span"
 
 
 def _table_obligation_gaps(
@@ -727,7 +955,7 @@ def _table_obligation_gaps(
     properties so a prose ID mismatch cannot hide a missing property, and a
     model is not required to echo code-owned IDs.
     """
-    source_text = clause.get("text") or clause.get("source_text_full")
+    source_text = exact_clause_source_text(clause)
     selected = [
         requirements[index] for index in indexes
         if isinstance(index, int) and 0 <= index < len(requirements)
@@ -823,7 +1051,7 @@ def _security_marking_qualifier_binding_errors(
         source_facts = [
             fact for clause in linked_clauses
             for fact in compile_known_source_obligations(
-                clause.get("text") or clause.get("source_text_full")
+                exact_clause_source_text(clause)
             )
             if fact.get("id") == SECURITY_MARKING_SHORTER_ALLOWANCE_OBLIGATION_ID
         ]
@@ -851,19 +1079,21 @@ def _validate_obligations(
     review: dict[str, Any], review_index: int, *,
     require_semantic_decomposition: bool = False,
 ) -> list[str]:
+    classification = str(review.get("classification"))
+    requires_inventory = classification not in {"informational", "not_applicable"}
     obligations = review.get("obligations")
     if obligations is None:
-        if require_semantic_decomposition and classification_requires_requirement(str(review.get("classification"))):
+        if require_semantic_decomposition and requires_inventory:
             return [
-                f"$.clause_reviews[{review_index}].obligations: executable_review_requires_non_empty_inventory"
+                f"$.clause_reviews[{review_index}].obligations: review_requires_non_empty_source_inventory"
             ]
         return []
     if not isinstance(obligations, list):
         return [f"$.clause_reviews[{review_index}].obligations: must_be_array"]
     errors: list[str] = []
-    if require_semantic_decomposition and classification_requires_requirement(str(review.get("classification"))) and not obligations:
+    if require_semantic_decomposition and requires_inventory and not obligations:
         errors.append(
-            f"$.clause_reviews[{review_index}].obligations: executable_review_requires_non_empty_inventory"
+            f"$.clause_reviews[{review_index}].obligations: review_requires_non_empty_source_inventory"
         )
     seen: set[str] = set()
     for index, obligation in enumerate(obligations):
@@ -1106,8 +1336,20 @@ def validate_response(response: Any, chunk: dict[str, Any]) -> list[str]:
     if not isinstance(response, dict):
         return ["response_must_be_object"]
 
+    contract_version = response.get("contract_version")
+    clauses_value = chunk.get("clauses")
+    evidence_context = chunk.get("evidence_context")
+    span_errors = validate_clause_source_spans(
+        clauses_value,
+        evidence_context,
+        required=contract_version == HOST_REVIEW_CONTRACT_V3,
+    )
+    if span_errors:
+        return span_errors
+    clauses = clauses_value if isinstance(clauses_value, list) else []
+
     clause_map_for_binding = {
-        item["id"]: item for item in chunk.get("clauses", [])
+        item["id"]: item for item in clauses
         if isinstance(item, dict) and isinstance(item.get("id"), str)
     }
     existing_map = {
@@ -1133,7 +1375,6 @@ def validate_response(response: Any, chunk: dict[str, Any]) -> list[str]:
     errors.extend(_security_marking_qualifier_binding_errors(
         response, chunk.get("clauses"),
     ))
-    contract_version = response.get("contract_version")
     if contract_version not in SUPPORTED_HOST_REVIEW_CONTRACTS:
         errors.append(f"contract_version_unsupported:{contract_version!r}")
     response_schema = chunk.get("response_schema")
@@ -1174,7 +1415,6 @@ def validate_response(response: Any, chunk: dict[str, Any]) -> list[str]:
     role_schemas = contract.get("role_properties_schema", {})
     allowed_roles = set(contract.get("allowed_roles", []))
 
-    clauses = chunk.get("clauses")
     if not isinstance(clauses, list):
         clauses = []
     clause_map = {
@@ -1182,7 +1422,6 @@ def validate_response(response: Any, chunk: dict[str, Any]) -> list[str]:
         for item in clauses
         if isinstance(item, dict) and item.get("id")
     }
-    evidence_context = chunk.get("evidence_context")
     if not isinstance(evidence_context, dict):
         evidence_context = {}
     evidence_ids = {str(key) for key in evidence_context}
@@ -1249,31 +1488,32 @@ def validate_response(response: Any, chunk: dict[str, Any]) -> list[str]:
                 )
             if isinstance(properties, dict) and isinstance(properties.get("items"), list):
                 source_texts = {
-                    _normalized_fixed_text(evidence_context.get(str(evidence_id), {}).get("text"))
+                    evidence_context.get(str(evidence_id), {}).get("text")
                     for evidence_id in item.get("evidence_ids", [])
                     if isinstance(evidence_context.get(str(evidence_id)), dict)
+                    and isinstance(evidence_context.get(str(evidence_id), {}).get("text"), str)
                 }
                 for item_index, declaration in enumerate(properties["items"]):
                     if not isinstance(declaration, dict):
                         continue
-                    heading = declaration.get("heading")
-                    if isinstance(heading, str) and heading.strip() and _normalized_fixed_text(heading) not in source_texts:
-                        errors.append(
-                            f"$.requirements[{index}].properties.items[{item_index}].heading: "
-                            "must equal a complete cited source-evidence text; do not shorten a source paragraph into a guessed heading"
-                        )
+                    fixed_text_atoms: list[tuple[str, str]] = []
+                    for field in ("heading", "body"):
+                        value = declaration.get(field)
+                        if isinstance(value, str) and value.strip():
+                            fixed_text_atoms.append((field, value))
                     body_parts = declaration.get("body_parts")
                     if isinstance(body_parts, list):
-                        for body_index, body in enumerate(body_parts):
-                            if (
-                                isinstance(body, str)
-                                and body.strip()
-                                and _normalized_fixed_text(body) not in source_texts
-                            ):
-                                errors.append(
-                                    f"$.requirements[{index}].properties.items[{item_index}].body_parts[{body_index}]: "
-                                    "must equal a complete cited source-evidence text; do not paraphrase or shorten fixed declaration prose"
-                                )
+                        fixed_text_atoms.extend(
+                            (f"body_parts[{body_index}]", body)
+                            for body_index, body in enumerate(body_parts)
+                            if isinstance(body, str) and body.strip()
+                        )
+                    for field_path, value in fixed_text_atoms:
+                        if value not in source_texts:
+                            errors.append(
+                                f"$.requirements[{index}].properties.items[{item_index}].{field_path}: "
+                                "must exactly equal a complete cited source-evidence text; do not normalize, paraphrase, or shorten fixed declaration prose"
+                            )
             if _declarations_are_signature_only(properties):
                 errors.append(
                     f"$.requirements[{index}].properties.items: generic author/date/signature lines "
@@ -1319,6 +1559,26 @@ def validate_response(response: Any, chunk: dict[str, Any]) -> list[str]:
             errors.append(
                 f"$.requirements[{index}].evidence_ids: not_backed_by_clause:{','.join(unrelated_evidence)}"
             )
+        if contract_version == HOST_REVIEW_CONTRACT_V3 and isinstance(role, str):
+            raw_role_schema = role_schemas.get(role) if isinstance(role_schemas, dict) else None
+            resolved_role_schema = _resolve_contract_schema(raw_role_schema, contract_root)
+            role_properties = (
+                resolved_role_schema.get("properties")
+                if isinstance(resolved_role_schema, dict) else None
+            )
+            text_schema = role_properties.get("text") if isinstance(role_properties, dict) else None
+            if (
+                role not in _TOP_LEVEL_NON_TEXT_ROLES
+                and isinstance(text_schema, dict)
+                and text_schema.get("type") == "string"
+                and isinstance(item.get("properties"), dict)
+                and "text" in item["properties"]
+            ):
+                source_binding_error = _literal_text_source_binding_error(
+                    item, index, clause_map, evidence_context,
+                )
+                if source_binding_error:
+                    errors.append(source_binding_error)
 
     matching_requirement_indexes: dict[str, list[int]] = {
         clause_id: [

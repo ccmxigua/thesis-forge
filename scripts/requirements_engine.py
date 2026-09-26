@@ -36,6 +36,7 @@ from host_review_contract import (
     derived_requirement_indexes,
     project_compatibility_indexes,
     requirement_payload_errors,
+    validate_clause_source_spans,
     validate_response as validate_host_review_response,
 )
 from compliance import (
@@ -247,7 +248,10 @@ def _requirement_properties_for_role(role: str, props: dict[str, Any]) -> dict[s
     normalized = _style_properties_for_role(role, props)
     text = props.get("text") if isinstance(props, dict) else None
     if role in CONTENT_INSTANCE_ROLES and isinstance(text, str) and text.strip():
-        normalized["text"] = text.strip()
+        # ``text`` is source content, not formatting whitespace. Preserve the
+        # exact source-backed value; callers may use strip() only to reject an
+        # empty value, never to rewrite the literal.
+        normalized["text"] = text
     return normalized
 
 
@@ -276,6 +280,42 @@ def _cover_field_instance_id(role: str, field_key: str) -> str:
     return f"CFI-{digest}"
 
 
+_SOURCE_TEXT_BOUNDARY_PUNCTUATION = re.compile(
+    r"^[\s，,、：:;；。！？!?…“”‘’（）()【】\[\]{}]*$"
+)
+
+
+def _literal_text_matches_bound_clause(text: str, clause: dict[str, Any]) -> bool:
+    span = clause.get("source_span")
+    source = clause.get("source_evidence_text")
+    if not isinstance(span, dict) or not isinstance(source, str):
+        return False
+    start = span.get("start_offset")
+    end = span.get("end_offset")
+    if (
+        isinstance(start, bool) or not isinstance(start, int)
+        or isinstance(end, bool) or not isinstance(end, int)
+        or start < 0 or end <= start or end > len(source)
+    ):
+        return False
+    search_from = 0
+    while True:
+        occurrence = source.find(text, search_from)
+        if occurrence < 0:
+            return False
+        occurrence_end = occurrence + len(text)
+        left_fringe = source[occurrence:start] if occurrence < start else ""
+        right_fringe = source[end:occurrence_end] if occurrence_end > end else ""
+        if (
+            occurrence < end and occurrence_end > start
+            and len(left_fringe) <= 8 and len(right_fringe) <= 8
+            and _SOURCE_TEXT_BOUNDARY_PUNCTUATION.fullmatch(left_fringe)
+            and _SOURCE_TEXT_BOUNDARY_PUNCTUATION.fullmatch(right_fringe)
+        ):
+            return True
+        search_from = occurrence + 1
+
+
 def _register_content_instance(
     instances: list[dict[str, Any]], item: dict[str, Any], role: str,
     props: dict[str, Any], clause_ids: set[str], cited_evidence: set[str],
@@ -284,8 +324,8 @@ def _register_content_instance(
     """Register one literal content value without merging it into a role.
 
     The optional ``field_key`` lets a host agent identify a field semantically
-    (for example ``school_code``).  Existing responses do not need to provide
-    it: a deterministic role-plus-normalized-text identity preserves backward
+    (for example ``school_code``). Existing responses do not need to provide
+    it: a deterministic role-plus-exact-text identity preserves backward
     compatibility and still keeps different labels/values independent.
     """
     if role not in CONTENT_INSTANCE_ROLES or "text" not in props:
@@ -293,15 +333,67 @@ def _register_content_instance(
     text = props.get("text")
     if not isinstance(text, str) or not text.strip():
         return None, {"reason": "content_instance_text_must_be_nonempty"}
+    has_bound_source = False
+    matching_source_occurrences: set[tuple[str, int, int, str]] = set()
+    for clause_id in sorted(clause_ids):
+        clause = clause_map.get(clause_id)
+        if not isinstance(clause, dict):
+            continue
+        span = clause.get("source_span")
+        if not isinstance(span, dict):
+            continue
+        has_bound_source = True
+        span_evidence_id = span.get("evidence_id")
+        clause_evidence_ids = {str(value) for value in clause.get("evidence_ids", [])}
+        if (
+            not isinstance(span_evidence_id, str)
+            or span_evidence_id not in cited_evidence
+            or span_evidence_id not in clause_evidence_ids
+        ):
+            continue
+        # The span may intentionally omit boundary punctuation during clause
+        # segmentation. The full source paragraph is retained separately and
+        # is the only authority for exact literal matching.
+        exact_evidence_text = clause.get("source_evidence_text")
+        literal_matches = (
+            isinstance(exact_evidence_text, str)
+            and _literal_text_matches_bound_clause(text, clause)
+        ) or (isinstance(span.get("text"), str) and text in span["text"])
+        if literal_matches:
+            start = span.get("start_offset")
+            end = span.get("end_offset")
+            source_sha256 = span.get("source_sha256")
+            if (
+                isinstance(start, int) and not isinstance(start, bool)
+                and isinstance(end, int) and not isinstance(end, bool)
+                and isinstance(source_sha256, str)
+            ):
+                matching_source_occurrences.add(
+                    (span_evidence_id, start, end, source_sha256)
+                )
+            else:
+                # Missing offsets cannot establish occurrence identity. Keep
+                # this candidate isolated by clause rather than merging it.
+                matching_source_occurrences.add(
+                    (span_evidence_id, -1, -1, str(clause_id))
+                )
+    if has_bound_source and not matching_source_occurrences:
+        return None, {"reason": "content_instance_text_not_exactly_backed_by_source"}
     explicit_key = item.get("field_key")
     if explicit_key is not None and (not isinstance(explicit_key, str) or not explicit_key.strip()):
         return None, {"reason": "field_key_must_be_nonempty_string"}
     field_key = (explicit_key.strip() if isinstance(explicit_key, str) and explicit_key.strip()
-                 else f"{role}:{_normalized_exact_text(text)}")
+                 else f"{role}:{text}")
     base_field_key = field_key
-    normalized_text = _normalized_exact_text(text)
+    if matching_source_occurrences:
+        occurrence_payload = json.dumps(
+            sorted(matching_source_occurrences), ensure_ascii=False, separators=(",", ":"),
+        )
+        occurrence_digest = hashlib.sha256(occurrence_payload.encode("utf-8")).hexdigest()[:16]
+        field_key = f"{field_key}::source-{occurrence_digest}"
+        base_field_key = field_key
     style_properties = _style_properties_for_role(role, props)
-    variant_digest = hashlib.sha256(normalized_text.encode("utf-8")).hexdigest()[:16]
+    variant_digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:16]
     while True:
         matched = False
         for instance in instances:
@@ -309,7 +401,7 @@ def _register_content_instance(
                 continue
             matched = True
             existing_text = str(instance.get("text") or "")
-            if _normalized_exact_text(existing_text) == normalized_text:
+            if existing_text == text:
                 if style_properties:
                     style_conflicts = _deep_merge(
                         instance.setdefault("style_properties", {}), style_properties
@@ -337,11 +429,9 @@ def _register_content_instance(
                     "new_text": text,
                 }
 
-            # Two exact labels can legitimately name the same semantic field
-            # when they come from disjoint source occurrences (BSU has both
-            # ``分类号：`` and ``中图分类号：``). Keep both literals and make
-            # the distinction deterministic from the exact new text. A
-            # same-clause or same-evidence disagreement remains blocking.
+            # Two different literal values can identify the same semantic
+            # field at one source occurrence. Keep the variant deterministic;
+            # a same-clause or same-evidence disagreement remains blocking.
             field_key = f"{base_field_key}::variant-{variant_digest}"
             break
         if not matched:
@@ -349,7 +439,9 @@ def _register_content_instance(
 
     instance_id = _cover_field_instance_id(role, field_key)
     source_text = " | ".join(
-        clause_map[cid].get("text", "")
+        clause_map[cid].get("source_evidence_text")
+        or (clause_map[cid].get("source_span") or {}).get("text")
+        or clause_map[cid].get("text", "")
         for cid in sorted(clause_ids)
         if cid in clause_map
     )
@@ -357,7 +449,7 @@ def _register_content_instance(
         "id": instance_id,
         "field_key": field_key,
         "role": role,
-        "text": text.strip(),
+        "text": text,
         "order": len(instances) + 1,
         "clause_ids": sorted(clause_ids),
         "evidence_ids": sorted(cited_evidence),
@@ -647,18 +739,70 @@ def _split_role_segments(text: str) -> list[str]:
     return segments or [text]
 
 
+def _normalized_source_with_offsets(source_text: str) -> tuple[str, list[tuple[int, int]]]:
+    """Collapse whitespace while retaining an exact map to original characters."""
+    normalized: list[str] = []
+    offsets: list[tuple[int, int]] = []
+    index = 0
+    while index < len(source_text):
+        if source_text[index].isspace():
+            start = index
+            while index < len(source_text) and source_text[index].isspace():
+                index += 1
+            if normalized and normalized[-1] != " ":
+                normalized.append(" ")
+                offsets.append((start, index))
+            continue
+        normalized.append(source_text[index])
+        offsets.append((index, index + 1))
+        index += 1
+    if normalized and normalized[-1] == " ":
+        normalized.pop()
+        offsets.pop()
+    return "".join(normalized), offsets
+
+
 def split_clauses(evidence_doc: dict[str, Any]) -> list[dict[str, Any]]:
     clauses = []
     for ev in evidence_doc["evidence"]:
-        text = re.sub(r"\s+", " ", ev["text"]).strip()
+        original_text = ev["text"]
+        if not isinstance(original_text, str):
+            raise ValueError(f"source evidence {ev.get('id')!r} has no text string")
+        text, source_offsets = _normalized_source_with_offsets(original_text)
         strong_parts = [p.strip(" ：:;；。") for p in re.split(r"[。；;\n]+", text) if p.strip(" ：:;；。")]
         parts = [segment for part in strong_parts for segment in _split_role_segments(part)]
+        source_cursor = 0
         for part_i, part in enumerate(parts):
             if len(part) < 3:
                 continue
+            normalized_start = text.find(part, source_cursor)
+            if normalized_start < 0:
+                raise ValueError(
+                    f"cannot bind normalized clause to exact source span: evidence={ev.get('id')!r}, part={part!r}"
+                )
+            normalized_end = normalized_start + len(part)
+            if normalized_end > len(source_offsets):
+                raise ValueError(f"source span mapping is incomplete for evidence {ev.get('id')!r}")
+            source_start = source_offsets[normalized_start][0]
+            source_end = source_offsets[normalized_end - 1][1]
+            exact_source_text = original_text[source_start:source_end]
+            if re.sub(r"\s+", " ", exact_source_text).strip() != part:
+                raise ValueError(
+                    f"exact source span does not match normalized clause: evidence={ev.get('id')!r}, part={part!r}"
+                )
+            source_cursor = normalized_end
             clauses.append({
                 "id": f"C{len(clauses)+1:05d}", "text": part,
                 "source_text_full": text,
+                "source_evidence_text": original_text,
+                "source_span": {
+                    "evidence_id": str(ev["id"]),
+                    "start_offset": source_start,
+                    "end_offset": source_end,
+                    "text": exact_source_text,
+                    "source_sha256": hashlib.sha256(original_text.encode("utf-8")).hexdigest(),
+                    "location": copy.deepcopy(ev.get("location", {})),
+                },
                 "evidence_ids": [ev["id"]], "source_kind": ev["kind"],
                 "context_before": ev["context_before"], "context_after": ev["context_after"],
                 "location": ev["location"], "part_index": part_i,
@@ -768,6 +912,16 @@ def _set_nested(out: dict[str, Any], path: tuple[str, ...], value: Any) -> None:
 
 
 def parse_properties(text: str) -> dict[str, Any]:
+    # Conditional clauses do not authorize a document-wide property. The
+    # model/review path may preserve their scope; the deterministic parser
+    # must not silently erase the condition and emit an unconditional rule.
+    if re.search(
+        r"(?:如果|若|假如|倘若|除非|只有在|仅当|如有|当.{0,24}时)|"
+        r"\b(?:if|unless|only\s+if|when|provided\s+that)\b",
+        text,
+        re.I,
+    ):
+        return {}
     # Purely optional alternatives do not define a single required output
     # state. Keep them as source evidence instead of turning one allowed choice
     # into a mandatory document-wide style.
@@ -777,7 +931,13 @@ def parse_properties(text: str) -> dict[str, Any]:
     out: dict[str, Any] = {}
     # Fonts: explicit script qualifiers win; otherwise Chinese named fonts are CJK.
     for zh, canonical in FONT_NAMES.items():
-        if zh in text:
+        negated_font = re.search(
+            rf"(?:不得|不准|不能|不可|不应|不宜|不要|禁止|避免|不使用|不采用|不选用)"
+            rf".{{0,12}}{re.escape(zh)}|{re.escape(zh)}"
+            rf".{{0,12}}(?:不得|不准|不能|不可|不应|不宜|禁止|不适用)",
+            text,
+        )
+        if zh in text and not negated_font:
             _set_nested(out, ("font", "cjk"), canonical)
     latin = re.search(r"(Times\s+New\s+Roman|Arial|Calibri|Cambria|Courier\s+New)", text, re.I)
     if latin:
@@ -1197,11 +1357,11 @@ def _declaration_body_parts(item: dict[str, Any]) -> list[str]:
     parts: list[str] = []
     body = item.get("body")
     if isinstance(body, str) and body.strip():
-        parts.append(body.strip())
+        parts.append(body)
     body_parts = item.get("body_parts")
     if isinstance(body_parts, list):
         parts.extend(
-            value.strip() for value in body_parts
+            value for value in body_parts
             if isinstance(value, str) and value.strip()
         )
     return parts
@@ -1236,14 +1396,25 @@ def _declaration_items_share_entity(existing: dict[str, Any], incoming: dict[str
     return not incoming.get("heading") and not incoming_body
 
 
-def _append_unique_source_text(target: list[str], values: list[str]) -> None:
-    """Append exact source paragraphs while avoiding duplicate fragments."""
-    existing = {_normalized_exact_text(value) for value in target}
+def _append_unique_source_text(
+    target: list[str], values: list[str],
+) -> list[tuple[str, str]]:
+    """Append byte-identical paragraphs; report normalization-only collisions."""
+    conflicts: list[tuple[str, str]] = []
     for value in values:
         normalized = _normalized_exact_text(value)
-        if normalized and normalized not in existing:
-            target.append(value.strip())
-            existing.add(normalized)
+        if not normalized:
+            continue
+        same_normalized = next(
+            (prior for prior in target if _normalized_exact_text(prior) == normalized),
+            None,
+        )
+        if same_normalized is not None:
+            if same_normalized != value:
+                conflicts.append((same_normalized, value))
+            continue
+        target.append(value)
+    return conflicts
 
 
 def _merge_declaration_item(
@@ -1262,7 +1433,7 @@ def _merge_declaration_item(
         new = incoming.get(field)
         if new is None:
             continue
-        if old and new and str(old).strip() != str(new).strip():
+        if old and new and old != new:
             conflicts.append((f"items[{item_id}].{field}", old, new))
         elif not old:
             merged[field] = copy.deepcopy(new)
@@ -1270,11 +1441,14 @@ def _merge_declaration_item(
     old_body = existing.get("body")
     new_body = incoming.get("body")
     if isinstance(old_body, str) and old_body.strip() and isinstance(new_body, str) and new_body.strip():
-        if _normalized_exact_text(old_body) != _normalized_exact_text(new_body):
+        if old_body != new_body:
             conflicts.append((f"items[{item_id}].body", old_body, new_body))
 
     body_parts = _declaration_body_parts(existing)
-    _append_unique_source_text(body_parts, _declaration_body_parts(incoming))
+    for old_text, new_text in _append_unique_source_text(
+        body_parts, _declaration_body_parts(incoming),
+    ):
+        conflicts.append((f"items[{item_id}].body_parts", old_text, new_text))
     if body_parts:
         merged.pop("body", None)
         merged["body_parts"] = body_parts
@@ -1374,8 +1548,14 @@ def _merge_declaration_properties(
                     None,
                 )
                 if related is not None:
-                    conflicts.extend(_merge_declaration_item(
-                        related, item, str(related.get("id")),
+                    # Similar text from the same evidence under two different
+                    # semantic IDs is a duplicate-ownership ambiguity. Do not
+                    # silently alias the model's IDs or merge the source into
+                    # whichever declaration happened to arrive first.
+                    conflicts.append((
+                        f"items[{item_id}].source_ownership",
+                        related.get("id"),
+                        item_id,
                     ))
                 else:
                     copied = copy.deepcopy(item)
@@ -1600,6 +1780,21 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
     if mode == "full":
         if contract_version not in SUPPORTED_HOST_REVIEW_CONTRACTS:
             raise ValueError(f"unsupported host review contract version: {contract_version}")
+        evidence_context = {
+            str(item.get("id")): item
+            for item in (evidence_doc or {}).get("evidence", [])
+            if isinstance(item, dict) and item.get("id")
+        }
+        source_binding_errors = validate_clause_source_spans(
+            clauses,
+            evidence_context,
+            required=contract_version == HOST_REVIEW_CONTRACT_V3,
+        )
+        if source_binding_errors:
+            raise ValueError(
+                "host-review clauses are not bound to current source evidence: "
+                + "; ".join(source_binding_errors)
+            )
         # Clause records retain rich context for deterministic auditing, but
         # embedding that context into every clause duplicates the same DOCX
         # runs/location payload many times.  The LLM receives a compact clause
@@ -1607,7 +1802,10 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
         clause_packets = [
             {
                 key: copy.deepcopy(clause[key])
-                for key in ("id", "text", "evidence_ids", "source_kind", "location", "part_index")
+                for key in (
+                    "id", "text", "evidence_ids", "source_kind", "location",
+                    "part_index", "source_span", "source_text_full",
+                )
                 if key in clause
             }
             for clause in clauses
@@ -1616,11 +1814,6 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
             packet["deterministic_obligation_keys"] = compile_known_source_obligation_ids(
                 packet.get("text")
             )
-        evidence_context = {
-            str(item.get("id")): item
-            for item in (evidence_doc or {}).get("evidence", [])
-            if isinstance(item, dict) and item.get("id")
-        }
         format_schema = strict_json_loads(
             (Path(__file__).resolve().parents[1] / "schema" / "format-spec.schema.json").read_text(encoding="utf-8")
         )
@@ -1651,6 +1844,7 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
             "task": "extract_and_review_complete_thesis_format_spec",
             "instructions": [
                 "Treat every supplied clause as in scope for completeness review.",
+                "source_span is deterministic code-owned citation metadata bound to the exact evidence text; do not edit, regenerate, or emit it in your response. Use it only to locate source wording, and cite clause_id/evidence_id instead.",
                 "Return formatting requirements supported by cited clause_ids and evidence_ids.",
                 "existing_requirement_id selects an exact supplied current-input candidate; it is not a new output ID. Omit it for a new requirement (null in native structured output). Code assigns new IDs. Never increment IDs or borrow one from a neighboring chunk.",
                 "Every requirement object MUST include a non-empty reason explaining why its role and properties are supported by the cited clause/evidence.",
@@ -2821,7 +3015,10 @@ def _continuity_clause_projection(clause: dict[str, Any]) -> dict[str, Any]:
     """Expose only bounded source order/text needed across a chunk boundary."""
     return {
         key: copy.deepcopy(clause[key])
-        for key in ("id", "text", "evidence_ids", "source_kind", "location", "part_index")
+        for key in (
+            "id", "text", "evidence_ids", "source_kind", "location",
+            "part_index", "source_span",
+        )
         if key in clause
     }
 
@@ -2850,6 +3047,52 @@ def _source_continuity_context(
     }
 
 
+def _source_atomic_chunks(
+    clauses: list[dict[str, Any]], chunk_size: int,
+) -> tuple[list[list[dict[str, Any]]], list[tuple[int, int]]]:
+    """Chunk clauses without splitting one physical evidence occurrence."""
+    groups: list[list[dict[str, Any]]] = []
+    group_keys: list[tuple[Any, ...]] = []
+    for clause in clauses:
+        evidence_ids = tuple(sorted(
+            str(value) for value in (clause.get("evidence_ids") or []) if value
+        ))
+        if not evidence_ids:
+            key = ("clause", str(clause.get("id") or len(groups)))
+        else:
+            location = clause.get("location") if isinstance(clause.get("location"), dict) else {}
+            key = (
+                "evidence_occurrence", evidence_ids,
+                json.dumps(location, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+            )
+        if groups and key == group_keys[-1]:
+            groups[-1].append(clause)
+        else:
+            groups.append([clause])
+            group_keys.append(key)
+
+    chunks: list[list[dict[str, Any]]] = []
+    bounds: list[tuple[int, int]] = []
+    current: list[dict[str, Any]] = []
+    current_start = 0
+    consumed = 0
+    for group in groups:
+        if current and len(current) + len(group) > chunk_size:
+            chunks.append(current)
+            bounds.append((current_start, consumed))
+            current = []
+            current_start = consumed
+        current.extend(group)
+        consumed += len(group)
+    if current:
+        chunks.append(current)
+        bounds.append((current_start, consumed))
+    if not chunks:
+        chunks = [[]]
+        bounds = [(0, 0)]
+    return chunks, bounds
+
+
 def _build_host_review_chunks(
     full_request: dict[str, Any],
     clauses: list[dict[str, Any]],
@@ -2864,7 +3107,7 @@ def _build_host_review_chunks(
     response with its current runtime model.
     """
     chunk_size = _validate_host_review_chunk_size(chunk_size)
-    chunks = [clauses[i:i + chunk_size] for i in range(0, len(clauses), chunk_size)] or [[]]
+    chunks, chunk_bounds = _source_atomic_chunks(clauses, chunk_size)
     request_chunks: list[dict[str, Any]] = []
     all_evidence = {
         str(item.get("id")): item
@@ -2872,8 +3115,7 @@ def _build_host_review_chunks(
         if isinstance(item, dict) and item.get("id")
     }
     for index, chunk in enumerate(chunks):
-        start = index * chunk_size
-        end = start + len(chunk)
+        start, end = chunk_bounds[index]
         chunk_ids = {cid for clause in chunk for cid in clause.get("evidence_ids", [])}
         chunk_evidence = copy.deepcopy(evidence_doc)
         chunk_evidence["evidence"] = [item for eid, item in all_evidence.items() if eid in chunk_ids]
@@ -3059,19 +3301,19 @@ def _write_json_artifacts_atomic(
         )
         marker_temporary.replace(marker_path)
         marker_published = True
-    except Exception:
+    except BaseException:
         # No target existed before this transaction. Remove only this
         # invocation's files; a crash leaves no marker and is rejected by the
-        # consumer, while an ordinary exception rolls back published files.
+        # consumer, while an exception or interruption rolls back published files.
         if marker_published:
             try:
                 marker_path.unlink()
-            except FileNotFoundError:
+            except OSError:
                 pass
         for path in published_paths:
             try:
                 path.unlink()
-            except FileNotFoundError:
+            except OSError:
                 pass
         raise
     finally:
@@ -3522,7 +3764,14 @@ def prepare_fresh_extraction(source: Path, out: Path, run_id: str | None = None)
             + ", ".join(sorted(set(protected)))
         )
     removed: list[str] = []
-    for name in sorted(GENERATED_REQUIREMENT_ARTIFACTS):
+    # Invalidate the old completion marker before touching any prior output.
+    # If cleanup or a subsequent write is interrupted, no stale manifest may
+    # certify a partially rebuilt extraction.
+    old_manifest = out / "extraction-manifest.json"
+    if old_manifest.exists():
+        old_manifest.unlink()
+        removed.append(old_manifest.name)
+    for name in sorted(GENERATED_REQUIREMENT_ARTIFACTS - {"extraction-manifest.json"}):
         path = out / name
         if path.exists():
             path.unlink()
@@ -3564,9 +3813,11 @@ def normalize_role_line_spacing_units(spec: dict[str, Any]) -> None:
             paragraph["spacing_line_height_pt"] = float(size)
 
 
-def analyse(args: argparse.Namespace) -> int:
+def _analyse(args: argparse.Namespace) -> int:
     source = args.input.resolve(); out = args.out.resolve()
     extraction_manifest = prepare_fresh_extraction(source, out, args.run_id)
+    extraction_manifest["status"] = "running"
+    write_json(out / "extraction-manifest.json", extraction_manifest)
     normalization_manifest_path = out / "requirements-input-manifest.json"
     try:
         normalized = normalize_requirements_input(
@@ -3916,6 +4167,7 @@ def analyse(args: argparse.Namespace) -> int:
         "clause_count": len(clauses),
         "format_spec_sha256": _sha256(out / "format-spec.json"),
         "requirement_clauses_sha256": _sha256(out / "requirement-clauses.json"),
+        "document_evidence_sha256": _sha256(out / "document-evidence.json"),
         "evidence_sha256": _sha256(out / "evidence-context.json"),
         # The old field is retained as a compatibility alias for the semantic
         # request body hash.  The explicit domains prevent a full-envelope
@@ -3958,6 +4210,56 @@ def analyse(args: argparse.Namespace) -> int:
                       "questions": len(questions), "conflicts": len(conflicts), "valid": not errors,
                       "output_dir": str(out)}, ensure_ascii=False))
     return 0 if args.prepare_host_review or not errors else 1
+
+
+def analyse(args: argparse.Namespace) -> int:
+    """Run extraction and leave a truthful terminal manifest on interruption."""
+    out = args.out.resolve()
+    if not getattr(args, "run_id", None):
+        args.run_id = str(uuid4())
+    try:
+        return _analyse(args)
+    except BaseException as exc:
+        # prepare_fresh_extraction removes the old success marker first. If any
+        # later stage fails or is interrupted, publish an explicit failed state
+        # so partial JSON files cannot be mistaken for a completed run.
+        try:
+            manifest_path = out / "extraction-manifest.json"
+            manifest: dict[str, Any] = {}
+            if manifest_path.is_file():
+                try:
+                    loaded = strict_json_loads(manifest_path.read_text(encoding="utf-8"))
+                    if isinstance(loaded, dict):
+                        manifest = loaded
+                except (OSError, ValueError, json.JSONDecodeError):
+                    manifest = {}
+            # A protected-artifact refusal happens before the current run is
+            # initialized. Never rewrite a prior run's immutable receipt.
+            if manifest.get("run_id") != args.run_id or manifest.get("status") != "running":
+                raise
+            source = args.input.resolve()
+            now = datetime.now(timezone.utc).isoformat()
+            manifest.update({
+                "schema_version": "1.0",
+                "run_id": manifest.get("run_id") or args.run_id or str(uuid4()),
+                "status": "interrupted" if isinstance(exc, KeyboardInterrupt) else "failed",
+                "cache_reused": False,
+                "completed_at": now,
+                "failure_stage": manifest.get("failure_stage") or "requirements_extraction",
+                "error_type": type(exc).__name__,
+                "error": "operator interrupted extraction" if isinstance(exc, KeyboardInterrupt) else str(exc),
+            })
+            if "source_document" not in manifest:
+                manifest["source_document"] = str(source)
+                if source.is_file():
+                    manifest["source_bytes"] = source.stat().st_size
+                    manifest["source_sha256"] = _sha256(source)
+            write_json(manifest_path, manifest)
+        except BaseException:
+            # Preserve the original exception. The pipeline-level manifest is
+            # an additional terminal record if the filesystem itself failed.
+            pass
+        raise
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:

@@ -42,18 +42,23 @@ class RetryableNativeSemanticReviewError(NativeSemanticReviewError):
         self.retry_code = retry_code
 
 
-class MissingExecutableObligationInventoryError(NativeSemanticReviewError):
-    """A consistent verdict omitted the inventory for executable clauses."""
+class MissingSourceObligationInventoryError(NativeSemanticReviewError):
+    """A non-informational clause omitted its source-obligation inventory."""
 
-    code = "missing_executable_obligation_inventory"
+    code = "missing_source_obligation_inventory"
 
     def __init__(self, clause_ids: list[str]) -> None:
         self.clause_ids = tuple(sorted(set(clause_ids)))
         joined = ", ".join(self.clause_ids)
         super().__init__(
-            "independent obligation review found no obligations for executable clause(s) "
+            "independent obligation review found no source-obligation inventory for clause(s) "
             + joined
         )
+
+
+# Preserve the public import name used by earlier callers while broadening the
+# invariant from executable requirements to all non-informational clauses.
+MissingExecutableObligationInventoryError = MissingSourceObligationInventoryError
 
 
 class ExternalComplianceCorrectionRequiredError(NativeSemanticReviewError):
@@ -85,6 +90,22 @@ def is_explicit_authoring_content_quote(quote: Any) -> bool:
     if not isinstance(quote, str) or not quote.strip():
         return False
     compact = re.sub(r"\s+", "", quote).casefold()
+    # This gate authorizes an outstanding positive author action. A matching
+    # keyword set is insufficient when its scope is negated or conditional;
+    # keep such wording for semantic review instead of manufacturing a draft
+    # placeholder from a lexical coincidence.
+    chinese_scope_markers = (
+        "不得", "不要", "不能", "不应", "不宜", "不可", "无需", "无须", "禁止", "避免", "切勿",
+        "如果", "若", "假如", "倘若", "除非", "只有在", "仅当", "如有", "当……时",
+    )
+    if any(token in compact for token in chinese_scope_markers):
+        return False
+    english = quote.casefold()
+    if re.search(
+        r"\b(?:not|never|don't|doesn't|didn't|cannot|can't|shouldn't|mustn't|without|unless|if|when|only\s+if|provided\s+that)\b",
+        english,
+    ):
+        return False
     chinese_sample = any(token in compact for token in (
         "示例", "样例", "范例", "虚构", "杜撰", "编的", "编写的",
     ))
@@ -98,7 +119,6 @@ def is_explicit_authoring_content_quote(quote: Any) -> bool:
     if chinese_author and chinese_action and (chinese_sample or chinese_genuine_content):
         return True
 
-    english = quote.casefold()
     english_sample = any(token in english for token in (
         "example", "sample", "fictitious", "fabricated", "placeholder",
     ))
@@ -110,6 +130,40 @@ def is_explicit_authoring_content_quote(quote: Any) -> bool:
         "genuine content", "actual research", "original content",
     ))
     return english_author and english_action and (english_sample or english_genuine_content)
+
+
+def _exact_clause_source_text(
+    clause: dict[str, Any], evidence_context: dict[str, Any],
+) -> str:
+    """Resolve an exact, evidence-bound source span; never trust free clause text."""
+    span = clause.get("source_span")
+    if span is None:
+        raise NativeSemanticReviewError(
+            "clause source_span is required for independent obligation review"
+        )
+    if not isinstance(span, dict):
+        raise NativeSemanticReviewError("clause source_span must be an object")
+    evidence_id = span.get("evidence_id")
+    evidence_ids = clause.get("evidence_ids")
+    evidence = evidence_context.get(str(evidence_id)) if isinstance(evidence_context, dict) else None
+    source = evidence.get("text") if isinstance(evidence, dict) else None
+    start = span.get("start_offset")
+    end = span.get("end_offset")
+    source_hash = span.get("source_sha256")
+    span_text = span.get("text")
+    if (
+        not isinstance(evidence_id, str) or not evidence_id
+        or not isinstance(evidence_ids, list)
+        or evidence_id not in {str(value) for value in evidence_ids}
+        or not isinstance(source, str)
+        or isinstance(start, bool) or not isinstance(start, int) or start < 0
+        or isinstance(end, bool) or not isinstance(end, int) or end <= start or end > len(source)
+        or not isinstance(source_hash, str)
+        or hashlib.sha256(source.encode("utf-8")).hexdigest() != source_hash
+        or not isinstance(span_text, str) or source[start:end] != span_text
+    ):
+        raise NativeSemanticReviewError("clause source_span is not bound to its exact source evidence")
+    return span_text
 
 
 RESPONSE_SCHEMA: dict[str, Any] = {
@@ -141,6 +195,7 @@ RESPONSE_SCHEMA: dict[str, Any] = {
 OBLIGATION_COVERAGE_PROTOCOL = "native_source_obligation_coverage_review_v5"
 SCOPE_DEPENDENCY_DIMENSIONS = {
     "abstract_target_metric_ambiguity": frozenset({"target", "metric"}),
+    "quantitative_scope_unit_ambiguity": frozenset({"target", "metric"}),
 }
 _SCOPE_DEPENDENCY_CODES = tuple(sorted(SCOPE_DEPENDENCY_DIMENSIONS))
 _SCOPE_DEPENDENCY_DIMENSION_VALUES = tuple(sorted(set().union(*SCOPE_DEPENDENCY_DIMENSIONS.values())))
@@ -256,11 +311,7 @@ def build_obligation_coverage_request(
     evidence_context = chunk.get("evidence_context") if isinstance(chunk.get("evidence_context"), dict) else {}
     checks: list[dict[str, Any]] = []
     for clause_id, clause in sorted(clause_by_id.items()):
-        source_text = clause.get("text")
-        if not isinstance(source_text, str):
-            source_text = clause.get("source_text_full")
-        if not isinstance(source_text, str):
-            source_text = ""
+        source_text = _exact_clause_source_text(clause, evidence_context)
         review = review_by_id.get(clause_id, {})
         linked_requirements = []
         linked_requirement_sources: list[tuple[str, dict[str, Any]]] = []
@@ -297,13 +348,15 @@ def build_obligation_coverage_request(
                 if support_key in seen_support:
                     continue
                 seen_support.add(support_key)
-                supported_text = supported_clause.get("text")
-                if not isinstance(supported_text, str):
-                    supported_text = supported_clause.get("source_text_full")
+                supported_text = _exact_clause_source_text(supported_clause, evidence_context)
                 source_clause_support.append({
                     "requirement_ref": requirement_ref,
                     "clause_id": str(supported_clause_id),
                     "document_text": supported_text if isinstance(supported_text, str) else "",
+                    "semantic_clause_text": (
+                        supported_clause.get("text")
+                        if isinstance(supported_clause.get("text"), str) else ""
+                    ),
                     "evidence_ids": copy.deepcopy(supported_clause.get("evidence_ids") or []),
                 })
         cited_evidence_ids = set(clause.get("evidence_ids") or [])
@@ -311,6 +364,9 @@ def build_obligation_coverage_request(
             "check_id": clause_id,
             "document_text": source_text,
             "review_context": {
+                "semantic_clause_text": (
+                    clause.get("text") if isinstance(clause.get("text"), str) else ""
+                ),
                 "classification": review.get("classification"),
                 "requires_requirement": classification_requires_requirement(
                     str(review.get("classification"))
@@ -358,7 +414,7 @@ def validate_obligation_coverage_response(
     if not isinstance(results, list):
         raise NativeSemanticReviewError("independent obligation review has no results array")
     by_id: dict[str, dict[str, Any]] = {}
-    missing_executable_inventory: list[str] = []
+    missing_source_inventory: list[str] = []
     external_compliance_corrections: list[dict[str, Any]] = []
     for result in results:
         check_id = result.get("check_id") if isinstance(result, dict) else None
@@ -378,6 +434,12 @@ def validate_obligation_coverage_response(
                 f"independent obligation review evidence is not an exact source quote for {check_id}"
             )
         context = check.get("review_context") if isinstance(check.get("review_context"), dict) else {}
+        classification = context.get("classification")
+        if (
+            classification not in {"informational", "not_applicable"}
+            and not result.get("identified_obligations")
+        ):
+            missing_source_inventory.append(check_id)
         rationale = result.get("rationale")
         if not isinstance(rationale, str) or not rationale.strip():
             raise NativeSemanticReviewError(
@@ -417,7 +479,7 @@ def validate_obligation_coverage_response(
             disposition = obligation.get("disposition")
             if disposition == "represented":
                 represented += 1
-                if not requirement_refs and context.get("requires_requirement") is True:
+                if not requirement_refs:
                     raise NativeSemanticReviewError(
                         f"independent obligation review claims unlinked coverage for {check_id}"
                     )
@@ -596,16 +658,13 @@ def validate_obligation_coverage_response(
             raise NativeSemanticReviewError(
                 f"independent obligation review manual deferral is not authorized by a current source ambiguity for {check_id}"
             )
-        if verdict == "consistent" and not result.get("identified_obligations"):
-            if context.get("requires_requirement") is True and not safely_unresolved:
-                missing_executable_inventory.append(check_id)
     missing = sorted(set(expected) - set(by_id))
     if missing:
         raise NativeSemanticReviewError(
             "independent obligation review omitted clauses: " + ", ".join(missing)
         )
-    if missing_executable_inventory:
-        raise MissingExecutableObligationInventoryError(missing_executable_inventory)
+    if missing_source_inventory:
+        raise MissingSourceObligationInventoryError(missing_source_inventory)
     if external_compliance_corrections:
         raise ExternalComplianceCorrectionRequiredError(external_compliance_corrections)
     return [by_id[key] for key in sorted(by_id)]
@@ -753,7 +812,7 @@ def _prompt(request: dict[str, Any]) -> str:
         retry_clause_ids = (
             sorted({value for value in retry_feedback.get("clause_ids", []) if isinstance(value, str)})
             if isinstance(retry_feedback, dict)
-            and retry_feedback.get("code") == MissingExecutableObligationInventoryError.code
+            and retry_feedback.get("code") == MissingSourceObligationInventoryError.code
             and isinstance(retry_feedback.get("clause_ids"), list)
             else []
         )
@@ -807,7 +866,7 @@ def _prompt(request: dict[str, Any]) -> str:
             retry_instruction = (
                 "\nA prior independent-review response for this same candidate was rejected by a "
                 "deterministic local check: it returned verdict=consistent with an empty "
-                "identified_obligations list for executable clause(s) "
+                "identified_obligations list for non-informational clause(s) "
                 + ", ".join(retry_clause_ids)
                 + ". This is one constrained corrective review of the unchanged candidate, not "
                 "permission to alter the source, candidate, classification, provenance, or links. "

@@ -225,6 +225,10 @@ def load_and_validate(
     field_instances = []
     field_instances_key = "content_instances"
     if isinstance(instance, dict):
+        if "content_instances" in instance and "cover_field_instances" in instance:
+            errors.append(
+                "$.content_instances and $.cover_field_instances are mutually exclusive"
+            )
         if "content_instances" in instance:
             field_instances = instance.get("content_instances", [])
         else:

@@ -9,7 +9,6 @@ import json
 import re
 import sys
 import tempfile
-import unicodedata
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -40,10 +39,11 @@ from docx_semantics import (
     iter_document_nodes,
 )
 from format_spec_validation import load_and_validate
-from semantic_contract import strict_json_read
+from semantic_contract import evidence_payload, sha256_json, strict_json_loads, strict_json_read
 from manual_review import (
     add_manual_review_items,
     filter_manual_marker_ledger,
+    validate_manual_review_ledger_ingress,
     write_manual_review_ledger,
 )
 from manual_review_display import (
@@ -121,6 +121,140 @@ def load_json(path: Path) -> dict[str, Any]:
     data = strict_json_read(path)
     if not isinstance(data, dict): raise ValueError(f"{path} must contain an object")
     return data
+
+
+def _file_sha256(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _checked_pipeline_file_record(record: Any, label: str) -> tuple[str | None, str | None]:
+    if not isinstance(record, dict) or not isinstance(record.get("path"), str):
+        return None, f"pipeline_{label}_record_missing"
+    path = Path(record["path"]).expanduser()
+    try:
+        resolved = path.resolve(strict=True)
+        digest = _file_sha256(resolved)
+        byte_count = resolved.stat().st_size
+    except OSError:
+        return None, f"pipeline_{label}_record_file_unavailable"
+    if record.get("sha256") != digest or record.get("bytes") != byte_count:
+        return None, f"pipeline_{label}_record_hash_mismatch"
+    return digest, None
+
+
+def _current_manual_review_binding(
+    args: argparse.Namespace, spec: dict[str, Any], pipeline_manifest: dict[str, Any],
+) -> tuple[dict[str, Any] | None, list[str]]:
+    """Recompute the ledger binding from the live pipeline and source artifacts."""
+    errors: list[str] = []
+    inputs = pipeline_manifest.get("inputs")
+    if not isinstance(inputs, dict):
+        return None, ["pipeline_input_records_missing"]
+    requirements_sha, requirements_error = _checked_pipeline_file_record(
+        inputs.get("requirements"), "requirements",
+    )
+    source_input_sha, source_error = _checked_pipeline_file_record(
+        inputs.get("source"), "source_input",
+    )
+    errors.extend(error for error in (requirements_error, source_error) if error)
+    if any(path is None for path in (
+        args.source_clauses, args.source_evidence,
+        args.source_evidence_context, args.source_extraction_manifest,
+    )):
+        errors.append("manual_review_requires_current_extraction_artifacts")
+        return None, errors
+    try:
+        clauses_data = strict_json_read(args.source_clauses)
+        clauses = (
+            clauses_data if isinstance(clauses_data, list)
+            else clauses_data.get("clauses", []) if isinstance(clauses_data, dict)
+            else None
+        )
+        evidence_doc = load_json(args.source_evidence)
+        evidence_context = load_json(args.source_evidence_context)
+        extraction_manifest = load_json(args.source_extraction_manifest)
+        if not isinstance(clauses, list):
+            errors.append("source_clauses_must_be_array")
+            return None, errors
+        source_clause_sha = _file_sha256(args.source_clauses)
+        source_evidence_sha = _file_sha256(args.source_evidence)
+        source_context_sha = _file_sha256(args.source_evidence_context)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return None, errors + [f"manual_review_source_artifact_unreadable:{exc}"]
+
+    if extraction_manifest.get("status") != "completed":
+        errors.append("manual_review_extraction_manifest_not_completed")
+    if extraction_manifest.get("cache_reused") is not False:
+        errors.append("manual_review_extraction_manifest_not_fresh")
+    run_id = extraction_manifest.get("run_id")
+    if not isinstance(run_id, str) or not run_id or spec.get("run_id") != run_id:
+        errors.append("manual_review_run_id_mismatch")
+    if extraction_manifest.get("source_sha256") != requirements_sha:
+        errors.append("manual_review_requirements_source_hash_mismatch")
+    for key, digest in (
+        ("requirement_clauses_sha256", source_clause_sha),
+        ("document_evidence_sha256", source_evidence_sha),
+        ("evidence_sha256", source_context_sha),
+    ):
+        if extraction_manifest.get(key) != digest:
+            errors.append(f"manual_review_extraction_{key}_mismatch")
+
+    provenance = spec.get("semantic_review_provenance")
+    manifest_provenance = extraction_manifest.get("semantic_review_provenance")
+    if provenance is not None or manifest_provenance is not None:
+        if not isinstance(provenance, dict) or provenance != manifest_provenance:
+            errors.append("manual_review_semantic_provenance_mismatch")
+        else:
+            if provenance.get("run_id") != run_id:
+                errors.append("manual_review_semantic_provenance_run_mismatch")
+            if provenance.get("source_sha256") != extraction_manifest.get("source_sha256"):
+                errors.append("manual_review_semantic_provenance_source_mismatch")
+            if provenance.get("clause_sha256") != sha256_json(clauses):
+                errors.append("manual_review_semantic_provenance_clause_mismatch")
+            if provenance.get("evidence_sha256") != sha256_json(evidence_payload(evidence_doc)):
+                errors.append("manual_review_semantic_provenance_evidence_mismatch")
+    elif spec.get("analysis_mode") == "llm_primary":
+        errors.append("manual_review_llm_primary_provenance_missing")
+
+    official_record = inputs.get("official_template_evidence")
+    official_template_sha: str | None = None
+    if official_record is not None:
+        official_template_sha, template_error = _checked_pipeline_file_record(
+            official_record, "official_template",
+        )
+        if template_error:
+            errors.append(template_error)
+        if args.official_template is None:
+            errors.append("manual_review_official_template_argument_missing")
+        else:
+            try:
+                if _file_sha256(args.official_template) != official_template_sha:
+                    errors.append("manual_review_official_template_argument_mismatch")
+            except OSError:
+                errors.append("manual_review_official_template_argument_unavailable")
+    elif args.official_template is not None:
+        errors.append("manual_review_unregistered_official_template_argument")
+
+    semantic_provenance = provenance if isinstance(provenance, dict) else {}
+    case_id = pipeline_manifest.get("case_id") or "standalone"
+    if (args.case_id or "standalone") != case_id:
+        errors.append("manual_review_case_id_mismatch")
+    binding = {
+        "case_id": case_id,
+        "run_id": run_id,
+        "source_sha256": semantic_provenance.get(
+            "source_sha256", extraction_manifest.get("source_sha256")
+        ),
+        "clause_sha256": semantic_provenance.get("clause_sha256", source_clause_sha),
+        "evidence_sha256": semantic_provenance.get("evidence_sha256", source_context_sha),
+        "request_sha256": semantic_provenance.get("request_sha256"),
+        "requirements_sha256": requirements_sha,
+        "input_source_sha256": source_input_sha,
+        "format_spec_sha256": _file_sha256(args.format_spec),
+        "official_template_sha256": official_template_sha,
+        "official_template_source": inputs.get("official_template_source"),
+    }
+    return (binding if not errors else None), errors
 
 
 def format_spec_blockers(
@@ -1458,10 +1592,270 @@ def paragraph_has_role_content(paragraph) -> bool:
     return has_visible_or_object_content(paragraph)
 
 
-def _normalize_content_instance_text(value: Any) -> str:
-    """Normalize only presentation whitespace for literal-content matching."""
-    text = unicodedata.normalize("NFKC", str(value or ""))
-    return re.sub(r"\s+", "", text).strip()
+_CONTENT_SOURCE_BOUNDARY_PUNCTUATION = re.compile(
+    r"^[\s，,、：:;；。！？!?…“”‘’（）()【】\[\]{}]*$"
+)
+
+
+def _literal_text_matches_source_span(
+    text: str, source_text: str, span_start: int, span_end: int,
+) -> bool:
+    """Match a literal only within its exact source span (allowing edge punctuation)."""
+    search_from = 0
+    while True:
+        occurrence = source_text.find(text, search_from)
+        if occurrence < 0:
+            return False
+        occurrence_end = occurrence + len(text)
+        left_fringe = source_text[occurrence:span_start] if occurrence < span_start else ""
+        right_fringe = source_text[span_end:occurrence_end] if occurrence_end > span_end else ""
+        if (
+            occurrence < span_end and occurrence_end > span_start
+            and len(left_fringe) <= 8 and len(right_fringe) <= 8
+            and _CONTENT_SOURCE_BOUNDARY_PUNCTUATION.fullmatch(left_fringe)
+            and _CONTENT_SOURCE_BOUNDARY_PUNCTUATION.fullmatch(right_fringe)
+        ):
+            return True
+        search_from = occurrence + 1
+
+
+def validate_content_instance_source_bindings(
+    spec: dict[str, Any], clauses: list[dict[str, Any]], evidence_doc: dict[str, Any],
+    extraction_manifest: dict[str, Any], evidence_context: dict[str, Any], *,
+    clause_artifact_sha256: str, document_evidence_artifact_sha256: str,
+    evidence_context_artifact_sha256: str,
+) -> tuple[list[str], dict[str, list[dict[str, Any]]]]:
+    """Rebind executable literal selectors to one complete extraction run."""
+    if "content_instances" in spec and "cover_field_instances" in spec:
+        return ["content_instances_and_legacy_cover_field_instances_are_mutually_exclusive"], {}
+    instances = spec.get("content_instances", spec.get("cover_field_instances", []))
+    if not isinstance(instances, list):
+        return ["content_instances_must_be_array"], {}
+    if not instances:
+        return [], {}
+    if (
+        not isinstance(clauses, list) or not isinstance(evidence_doc, dict)
+        or not isinstance(extraction_manifest, dict) or not isinstance(evidence_context, dict)
+    ):
+        return ["current_extraction_source_artifacts_required"], {}
+
+    errors: list[str] = []
+    manifest_run_id = extraction_manifest.get("run_id")
+    if extraction_manifest.get("status") != "completed":
+        errors.append("extraction_manifest_not_completed")
+    if extraction_manifest.get("cache_reused") is not False:
+        errors.append("extraction_manifest_must_be_fresh")
+    if not isinstance(manifest_run_id, str) or not manifest_run_id:
+        errors.append("extraction_manifest_run_id_missing")
+    manifest_source_sha256 = extraction_manifest.get("source_sha256")
+    if (
+        not isinstance(manifest_source_sha256, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", manifest_source_sha256)
+    ):
+        errors.append("extraction_manifest_source_sha256_invalid")
+    if not isinstance(spec.get("run_id"), str) or spec.get("run_id") != manifest_run_id:
+        errors.append("format_spec_run_id_mismatch")
+    source_document = spec.get("source_document")
+    manifest_source_document = extraction_manifest.get("source_document")
+    try:
+        same_source_document = (
+            isinstance(source_document, str) and source_document
+            and isinstance(manifest_source_document, str) and manifest_source_document
+            and Path(source_document).expanduser().resolve()
+            == Path(manifest_source_document).expanduser().resolve()
+        )
+    except (OSError, RuntimeError, ValueError):
+        same_source_document = False
+    if not same_source_document:
+        errors.append("format_spec_source_document_mismatch")
+    elif same_source_document:
+        try:
+            current_source_sha256 = hashlib.sha256(
+                Path(manifest_source_document).expanduser().resolve().read_bytes()
+            ).hexdigest()
+        except OSError:
+            current_source_sha256 = None
+        if current_source_sha256 != manifest_source_sha256:
+            errors.append("extraction_source_document_hash_mismatch")
+
+    manifest_clause_sha = extraction_manifest.get("requirement_clauses_sha256")
+    if not isinstance(manifest_clause_sha, str) or manifest_clause_sha != clause_artifact_sha256:
+        errors.append("extraction_manifest_clause_artifact_mismatch")
+    manifest_document_evidence_sha = extraction_manifest.get("document_evidence_sha256")
+    if (
+        not isinstance(manifest_document_evidence_sha, str)
+        or manifest_document_evidence_sha != document_evidence_artifact_sha256
+    ):
+        errors.append("extraction_manifest_document_evidence_artifact_mismatch")
+    manifest_evidence_context_sha = extraction_manifest.get("evidence_sha256")
+    if (
+        not isinstance(manifest_evidence_context_sha, str)
+        or manifest_evidence_context_sha != evidence_context_artifact_sha256
+    ):
+        errors.append("extraction_manifest_evidence_context_artifact_mismatch")
+
+    expected_evidence_context = evidence_payload(evidence_doc)
+    if evidence_context != expected_evidence_context:
+        errors.append("evidence_context_does_not_match_source_evidence")
+
+    provenance = spec.get("semantic_review_provenance")
+    manifest_provenance = extraction_manifest.get("semantic_review_provenance")
+    if provenance is None and manifest_provenance is None:
+        # Rule-only/known-template extraction has no model-review provenance.
+        # LLM-primary specs must never silently lose both copies.
+        if spec.get("analysis_mode") == "llm_primary":
+            errors.append("llm_primary_semantic_review_provenance_missing")
+    elif not isinstance(provenance, dict) or not isinstance(manifest_provenance, dict):
+        errors.append("semantic_review_provenance_missing_from_spec_or_manifest")
+    else:
+        if provenance != manifest_provenance:
+            errors.append("semantic_review_provenance_manifest_mismatch")
+        if provenance.get("run_id") != manifest_run_id:
+            errors.append("semantic_review_provenance_run_id_mismatch")
+        if provenance.get("source_sha256") != manifest_source_sha256:
+            errors.append("semantic_review_provenance_source_sha256_mismatch")
+        if provenance.get("clause_sha256") != sha256_json(clauses):
+            errors.append("semantic_review_provenance_clause_sha256_mismatch")
+        current_evidence_sha256 = sha256_json(expected_evidence_context)
+        if (
+            provenance.get("evidence_sha256") != current_evidence_sha256
+            or provenance.get("evidence_sha256") != sha256_json(evidence_context)
+        ):
+            errors.append("semantic_review_provenance_evidence_sha256_mismatch")
+        if spec.get("semantic_review_provenance_valid") is not True:
+            errors.append("semantic_review_provenance_not_valid")
+
+    raw_evidence = evidence_doc.get("evidence", [])
+    if not isinstance(raw_evidence, list):
+        return errors + ["source_evidence_must_be_array"], {}
+    clauses_by_id = {
+        str(item.get("id")): item for item in clauses
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    evidence_by_id = {
+        str(item.get("id")): item for item in raw_evidence
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    requirements = spec.get("requirements", [])
+    if not isinstance(requirements, list):
+        requirements = []
+    if len(clauses_by_id) != len(clauses):
+        errors.append("source_clause_ids_must_be_unique_objects")
+    if len(evidence_by_id) != len(raw_evidence):
+        errors.append("source_evidence_ids_must_be_unique_objects")
+    instance_ids = [
+        item.get("id") for item in instances if isinstance(item, dict) and item.get("id")
+    ]
+    if len(instance_ids) != len(instances) or len(set(instance_ids)) != len(instance_ids):
+        errors.append("content_instance_ids_must_be_unique")
+    bindings: dict[str, list[dict[str, Any]]] = {}
+    for index, instance in enumerate(instances):
+        label = f"content_instances[{index}]"
+        if not isinstance(instance, dict):
+            errors.append(f"{label}:must_be_object")
+            continue
+        instance_id = instance.get("id")
+        text = instance.get("text")
+        clause_ids = instance.get("clause_ids")
+        evidence_ids = instance.get("evidence_ids")
+        if (
+            not isinstance(instance_id, str) or not instance_id
+            or not isinstance(text, str) or not text
+            or not isinstance(clause_ids, list) or not clause_ids
+            or any(not isinstance(value, str) or not value for value in clause_ids)
+            or len(set(clause_ids)) != len(clause_ids)
+            or not isinstance(evidence_ids, list) or not evidence_ids
+            or any(not isinstance(value, str) or not value for value in evidence_ids)
+            or len(set(evidence_ids)) != len(evidence_ids)
+        ):
+            errors.append(f"{label}:malformed_literal_or_source_references")
+            continue
+        instance_bindings: list[dict[str, Any]] = []
+        expected_evidence_ids: set[str] = set()
+        text_is_source_backed = False
+        expected_source_texts: list[str] = []
+        for clause_id in clause_ids:
+            clause = clauses_by_id.get(clause_id)
+            span = clause.get("source_span") if isinstance(clause, dict) else None
+            span_evidence_id = span.get("evidence_id") if isinstance(span, dict) else None
+            evidence = evidence_by_id.get(span_evidence_id) if isinstance(span_evidence_id, str) else None
+            raw_source = evidence.get("text") if isinstance(evidence, dict) else None
+            start = span.get("start_offset") if isinstance(span, dict) else None
+            end = span.get("end_offset") if isinstance(span, dict) else None
+            span_text = span.get("text") if isinstance(span, dict) else None
+            clause_evidence_ids = clause.get("evidence_ids") if isinstance(clause, dict) else None
+            clause_text = clause.get("text") if isinstance(clause, dict) else None
+            if (
+                not isinstance(clause, dict)
+                or not isinstance(span, dict)
+                or not isinstance(span_evidence_id, str)
+                or not isinstance(raw_source, str)
+                or isinstance(start, bool) or not isinstance(start, int)
+                or isinstance(end, bool) or not isinstance(end, int)
+                or not 0 <= start < end <= len(raw_source)
+                or not isinstance(span_text, str)
+                or raw_source[start:end] != span_text
+                or hashlib.sha256(raw_source.encode("utf-8")).hexdigest() != span.get("source_sha256")
+                or not isinstance(clause_evidence_ids, list)
+                or not clause_evidence_ids
+                or any(not isinstance(value, str) or not value for value in clause_evidence_ids)
+                or len(set(clause_evidence_ids)) != len(clause_evidence_ids)
+                or span_evidence_id not in clause_evidence_ids
+                or not isinstance(clause_text, str)
+                or re.sub(r"\s+", " ", span_text).strip() != clause_text
+            ):
+                errors.append(f"{label}:clause_source_binding_invalid:{clause_id}")
+                continue
+            expected_evidence_ids.update(str(value) for value in clause_evidence_ids)
+            if not set(clause_evidence_ids) <= set(evidence_by_id):
+                errors.append(f"{label}:clause_references_unknown_evidence:{clause_id}")
+                continue
+            if not (set(evidence_ids) & set(clause_evidence_ids)):
+                errors.append(f"{label}:instance_evidence_not_bound_to_clause:{clause_id}")
+            if span_evidence_id not in evidence_ids:
+                errors.append(f"{label}:clause_primary_span_evidence_not_cited:{clause_id}")
+            full_source = clause.get("source_evidence_text")
+            if full_source is not None and full_source != raw_source:
+                errors.append(f"{label}:clause_evidence_text_mismatch:{clause_id}")
+                continue
+            expected_source_texts.append(
+                full_source if isinstance(full_source, str) else span_text
+            )
+            literal_matches_span = _literal_text_matches_source_span(
+                text, raw_source, start, end,
+            )
+            if literal_matches_span and span_evidence_id in evidence_ids:
+                text_is_source_backed = True
+                instance_bindings.append({
+                    "clause_id": clause_id,
+                    "evidence_id": span_evidence_id,
+                    "start_offset": start,
+                    "end_offset": end,
+                    "source_sha256": span["source_sha256"],
+                })
+        if not set(evidence_ids) <= expected_evidence_ids:
+            errors.append(f"{label}:evidence_ids_not_supported_by_clause_sources")
+        if not text_is_source_backed:
+            errors.append(f"{label}:literal_not_backed_by_current_source")
+        supplied_source_text = instance.get("source_text")
+        expected_source_text = " | ".join(expected_source_texts)
+        if supplied_source_text is not None and supplied_source_text != expected_source_text:
+            errors.append(f"{label}:source_text_projection_mismatch")
+        compatible_requirement = any(
+            isinstance(requirement, dict)
+            and instance_id in (requirement.get("field_instance_ids") or [])
+            and requirement.get("role") == instance.get("role")
+            and isinstance(requirement.get("properties"), dict)
+            and requirement["properties"].get("text") == text
+            and set(clause_ids) == set(requirement.get("clause_ids") or [])
+            and set(evidence_ids) == set(requirement.get("evidence_ids") or [])
+            for requirement in requirements
+        )
+        if not compatible_requirement:
+            errors.append(f"{label}:no_matching_source_bound_requirement")
+        if instance_bindings:
+            bindings[instance_id] = instance_bindings
+    return errors, bindings
 
 
 def _content_instance_paragraphs(doc: Document) -> list[Paragraph]:
@@ -1489,7 +1883,8 @@ def _content_instance_paragraphs(doc: Document) -> list[Paragraph]:
 
 
 def apply_content_instance_overrides(
-    doc: Document, spec: dict[str, Any], mappings: dict[str, Any]
+    doc: Document, spec: dict[str, Any], mappings: dict[str, Any],
+    source_bindings: dict[str, list[dict[str, Any]]],
 ) -> list[dict[str, Any]]:
     """Apply per-instance style overrides without merging literal text into roles.
 
@@ -1499,6 +1894,10 @@ def apply_content_instance_overrides(
     not synthesized: arbitrary labels and values must remain school-specific
     cover data rather than guessed DOCX content.
     """
+    if "content_instances" in spec and "cover_field_instances" in spec:
+        raise ValueError(
+            "content_instances and cover_field_instances are mutually exclusive"
+        )
     raw_instances = spec.get("content_instances", spec.get("cover_field_instances", []))
     if not isinstance(raw_instances, list) or not raw_instances:
         return []
@@ -1510,13 +1909,12 @@ def apply_content_instance_overrides(
         instance_id = str(instance.get("id") or "")
         role = str(instance.get("role") or "")
         text = str(instance.get("text") or "")
-        target = _normalize_content_instance_text(text)
         mapping = mappings.get(role) if isinstance(mappings, dict) else None
         style_properties = instance.get("style_properties")
         if not isinstance(style_properties, dict):
             style_properties = {}
         matches = [paragraph for paragraph in paragraphs
-                   if target and _normalize_content_instance_text(paragraph.text) == target]
+                   if text and paragraph.text == text]
         applied = 0
         for paragraph in matches:
             if mapping and mapping.get("style_name") and paragraph.style.name != mapping["style_name"]:
@@ -1536,6 +1934,7 @@ def apply_content_instance_overrides(
             "role": role,
             "text": text,
             "style_properties": copy.deepcopy(style_properties),
+            "source_bindings": copy.deepcopy(source_bindings.get(instance_id, [])),
             "match_count": len(matches),
             "applied_count": applied,
             "status": status,
@@ -2281,7 +2680,17 @@ def semantic_content_review_items(
             str(value) for item in requirements if isinstance(item, dict)
             for value in item.get("evidence_ids", []) if value
         })
+        source_texts = sorted({
+            str(item.get("source_text")).strip()
+            for item in requirements
+            if isinstance(item, dict) and isinstance(item.get("source_text"), str)
+            and item.get("source_text").strip()
+        })
         check_id = str(result["check_id"])
+        if not clause_ids or not evidence_ids or not source_texts:
+            raise ValueError(
+                f"semantic review check lacks run-bound clause/evidence/source context: {check_id}"
+            )
         source_code = f"semantic_review:{check_id}"
         verdict = str(result.get("verdict"))
         quotes = result.get("evidence_quotes") or []
@@ -2294,7 +2703,7 @@ def semantic_content_review_items(
             "requirement_ids": requirement_ids,
             "question_ids": [],
             "evidence_ids": evidence_ids,
-            "source_text": check_id,
+            "source_text": "\n".join(source_texts),
             "reason": (
                 f"原生宿主 Agent 判定 {verdict}：{result.get('rationale')}；"
                 f"原文证据：{' / '.join(str(value) for value in quotes)}"
@@ -2346,7 +2755,7 @@ def semantic_content_review_findings(
 
 
 def manual_review_validation_items(
-    findings: list[dict[str, Any]],
+    findings: list[dict[str, Any]], spec: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Convert post-application findings into explicit draft-only review items.
 
@@ -2366,20 +2775,52 @@ def manual_review_validation_items(
         reason = str(finding.get("reason") or "该项未通过当前运行的确定性后验检查。")
         actual = finding.get("template_value")
         expected = finding.get("required_value")
-        source_text = f"{role}.{property_name}"
+        declared_properties = finding.get("declared_by")
+        property_roots = (
+            [str(value) for value in declared_properties if value]
+            if isinstance(declared_properties, list) and declared_properties
+            else [property_name.split(".", 1)[0].split("[", 1)[0]]
+        )
+        requirements = [
+            item for item in (spec or {}).get("requirements", [])
+            if isinstance(item, dict)
+            and item.get("role") == "content_constraints"
+            and isinstance(item.get("properties"), dict)
+            and any(root in item["properties"] for root in property_roots)
+        ]
+        clause_ids = sorted({
+            str(value) for item in requirements
+            for value in item.get("clause_ids", []) if value
+        })
+        requirement_ids = sorted({
+            str(item.get("id")) for item in requirements if item.get("id")
+        })
+        evidence_ids = sorted({
+            str(value) for item in requirements
+            for value in item.get("evidence_ids", []) if value
+        })
+        source_texts = sorted({
+            str(item.get("source_text")).strip()
+            for item in requirements
+            if isinstance(item.get("source_text"), str) and item["source_text"].strip()
+        })
+        if not clause_ids or not evidence_ids or not source_texts:
+            raise ValueError(
+                "human-decision marker lacks run-bound source context: "
+                f"{role}.{property_name}"
+            )
+        source_text = "\n".join(source_texts)
         if actual is not None or expected is not None:
-            source_text += f"（实际={actual!r}；要求={expected!r}）"
+            reason += f"（实际={actual!r}；要求={expected!r}）"
         items.append({
             "source_type": "human_semantic_verification",
             "source_code": f"validation_finding:{fingerprint}",
             "source_codes": [f"validation_finding:{fingerprint}"],
             "category": "semantic_content_review",
-            "clause_ids": [str(value) for value in finding.get("clause_ids", [])]
-            if isinstance(finding.get("clause_ids"), list) else [],
-            "requirement_ids": [str(value) for value in finding.get("requirement_ids", [])]
-            if isinstance(finding.get("requirement_ids"), list) else [],
+            "clause_ids": clause_ids,
+            "requirement_ids": requirement_ids,
             "question_ids": [],
-            "evidence_ids": [],
+            "evidence_ids": evidence_ids,
             "source_text": source_text,
             "reason": reason,
             "action": "请人工核对该项；修正源文档或格式规则后，以 submission 模式重新开始一轮新运行。",
@@ -3054,6 +3495,16 @@ def main(argv: list[str]) -> int:
                    help="opt-in supported-subset preview: continue past unresolved requirement semantics while keeping submission_ready false")
     p.add_argument("--manual-review-items", type=Path,
                    help="run-bound manual-review ledger used to append red draft markers")
+    p.add_argument("--pipeline-manifest", type=Path,
+                   help="current pipeline invocation manifest binding the manual-review input ledger")
+    p.add_argument("--source-clauses", type=Path,
+                   help="current run's extracted requirement clauses for literal-instance provenance")
+    p.add_argument("--source-evidence", type=Path,
+                   help="current run's extracted source evidence for literal-instance provenance")
+    p.add_argument("--source-evidence-context", type=Path,
+                   help="current run's canonical evidence-context artifact")
+    p.add_argument("--source-extraction-manifest", type=Path,
+                   help="completed extraction manifest binding the spec and source artifacts")
     p.add_argument("--semantic-issue-ledger", type=Path,
                    help="run-bound user acknowledgement ledger for unresolved semantic clauses")
     p.add_argument("--semantic-review-runtime", choices=["codex", "openclaw"],
@@ -3067,6 +3518,8 @@ def main(argv: list[str]) -> int:
     p.add_argument("--semantic-review-config", type=Path)
     p.add_argument("--case-id", help="stable case identity bound into semantic-content review")
     args = p.parse_args(argv)
+    if bool(args.manual_review_items) != bool(args.pipeline_manifest):
+        p.error("--manual-review-items and --pipeline-manifest must be supplied together")
     if bool(args.semantic_review_runtime) != bool(args.semantic_review_model):
         p.error("--semantic-review-runtime and --semantic-review-model must be supplied together")
     if args.semantic_review_timeout <= 0:
@@ -3078,6 +3531,65 @@ def main(argv: list[str]) -> int:
         allow_missing_required_metadata=args.output_policy == "review_draft",
     )
     if validation_errors: raise SystemExit("invalid format spec:\n" + "\n".join(validation_errors))
+    raw_content_instances = spec.get("content_instances", spec.get("cover_field_instances", []))
+    content_instance_source_bindings: dict[str, list[dict[str, Any]]] = {}
+    content_instance_source_binding_record: dict[str, Any] = {"status": "not_required", "count": 0}
+    if isinstance(raw_content_instances, list) and raw_content_instances:
+        required_source_artifacts = (
+            args.source_clauses, args.source_evidence,
+            args.source_evidence_context, args.source_extraction_manifest,
+        )
+        if any(path is None for path in required_source_artifacts):
+            raise SystemExit(
+                "content-instance application requires current clauses, evidence, "
+                "evidence-context, and extraction-manifest artifacts"
+            )
+        try:
+            clause_data = strict_json_read(args.source_clauses)
+            source_clauses = (
+                clause_data if isinstance(clause_data, list)
+                else clause_data.get("clauses", []) if isinstance(clause_data, dict)
+                else None
+            )
+            source_evidence_doc = load_json(args.source_evidence)
+            source_evidence_context = load_json(args.source_evidence_context)
+            source_extraction_manifest = load_json(args.source_extraction_manifest)
+            binding_errors, content_instance_source_bindings = validate_content_instance_source_bindings(
+                spec, source_clauses, source_evidence_doc,
+                source_extraction_manifest, source_evidence_context,
+                clause_artifact_sha256=hashlib.sha256(args.source_clauses.read_bytes()).hexdigest(),
+                document_evidence_artifact_sha256=hashlib.sha256(
+                    args.source_evidence.read_bytes()
+                ).hexdigest(),
+                evidence_context_artifact_sha256=hashlib.sha256(
+                    args.source_evidence_context.read_bytes()
+                ).hexdigest(),
+            )
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            raise SystemExit(f"cannot validate content-instance source artifacts: {exc}") from exc
+        if binding_errors:
+            raise SystemExit(
+                "invalid content-instance source binding:\n" + "\n".join(binding_errors)
+            )
+        content_instance_source_binding_record = {
+            "status": "validated",
+            "count": len(content_instance_source_bindings),
+            "source_clauses": str(args.source_clauses.resolve()),
+            "source_clauses_sha256": hashlib.sha256(args.source_clauses.read_bytes()).hexdigest(),
+            "source_evidence": str(args.source_evidence.resolve()),
+            "source_evidence_sha256": hashlib.sha256(args.source_evidence.read_bytes()).hexdigest(),
+            "source_evidence_context": str(args.source_evidence_context.resolve()),
+            "source_evidence_context_sha256": hashlib.sha256(
+                args.source_evidence_context.read_bytes()
+            ).hexdigest(),
+            "source_extraction_manifest": str(args.source_extraction_manifest.resolve()),
+            "source_extraction_run_id": source_extraction_manifest.get("run_id"),
+            "source_extraction_manifest_sha256": hashlib.sha256(
+                args.source_extraction_manifest.read_bytes()
+            ).hexdigest(),
+        }
+    elif raw_content_instances not in ([], None):
+        raise SystemExit("invalid content_instances container")
     explicit_raw = load_json(args.style_map) if args.style_map else {}
     source_mappings = explicit_raw.get("mappings", explicit_raw)
     explicit = {role: value.get("style_name") if isinstance(value, dict) else value
@@ -3124,17 +3636,43 @@ def main(argv: list[str]) -> int:
         raise SystemExit(f"refusing to apply a blocked format spec: {', '.join(blockers)}")
     doc = Document(args.input); args.out_dir.mkdir(parents=True, exist_ok=True)
     manual_review_ledger = None
+    manual_review_ingress_record: dict[str, Any] | None = None
     if args.manual_review_items:
         try:
-            manual_review_ledger = load_json(args.manual_review_items)
+            ledger_bytes = args.manual_review_items.read_bytes()
+            manual_review_ledger = strict_json_loads(ledger_bytes.decode("utf-8"))
+            pipeline_manifest = load_json(args.pipeline_manifest)
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             raise SystemExit(f"invalid manual-review ledger: {exc}") from exc
+        if not isinstance(manual_review_ledger, dict):
+            raise SystemExit("invalid manual-review ledger: expected a JSON object")
         ledger_errors = load_and_validate(
             manual_review_ledger,
             Path(__file__).resolve().parents[1] / "schema" / "manual-review-ledger.schema.json",
         )
         if ledger_errors:
             raise SystemExit("invalid manual-review ledger schema:\n" + "\n".join(ledger_errors))
+        expected_binding, current_binding_errors = _current_manual_review_binding(
+            args, spec, pipeline_manifest,
+        )
+        input_sha256 = hashlib.sha256(ledger_bytes).hexdigest()
+        ingress_errors = current_binding_errors + validate_manual_review_ledger_ingress(
+            manual_review_ledger,
+            expected_binding=expected_binding,
+            expected_ledger_sha256=pipeline_manifest.get("manual_review_ledger_input_sha256"),
+            actual_ledger_sha256=input_sha256,
+        )
+        if ingress_errors:
+            raise SystemExit(
+                "invalid manual-review current-run binding:\n" + "\n".join(ingress_errors)
+            )
+        manual_review_ingress_record = {
+            "status": "validated",
+            "case_id": expected_binding["case_id"],
+            "run_id": expected_binding["run_id"],
+            "ledger_input_sha256": input_sha256,
+            "binding": copy.deepcopy(expected_binding),
+        }
         manual_review_ledger = filter_manual_marker_ledger(manual_review_ledger)
         write_manual_review_ledger(args.manual_review_items, manual_review_ledger)
     if args.output_policy == "review_draft":
@@ -3340,7 +3878,9 @@ def main(argv: list[str]) -> int:
     declaration_changes = apply_declarations(
         doc, spec.get("declarations", {}), resource_items(spec)
     )
-    content_instance_audit = apply_content_instance_overrides(doc, spec, mappings)
+    content_instance_audit = apply_content_instance_overrides(
+        doc, spec, mappings, content_instance_source_bindings,
+    )
     pending_content = insert_missing_content_placeholders(
         doc, spec, mappings, review_draft=args.output_policy == "review_draft",
     )
@@ -3572,6 +4112,7 @@ def main(argv: list[str]) -> int:
         "schema_version": "1.0",
         "policy": args.output_policy,
         "ledger": str(args.manual_review_items.resolve()) if args.manual_review_items else None,
+        "ingress_binding": manual_review_ingress_record,
         "visual_policy": (
             manual_review_document_ledger.get("visual_policy")
             if isinstance(manual_review_document_ledger, dict) else None
@@ -3781,7 +4322,7 @@ def main(argv: list[str]) -> int:
         ),
     )
     if args.output_policy == "review_draft":
-        late_review_items = manual_review_validation_items(raw_validation_findings)
+        late_review_items = manual_review_validation_items(raw_validation_findings, spec)
         late_review_items.extend(semantic_uncertainty_items)
         manual_review_receipts = manual_review_receipt_items(property_receipts)
         late_review_items.extend(manual_review_receipts)
@@ -3833,6 +4374,7 @@ def main(argv: list[str]) -> int:
             "schema_version": "1.0",
             "policy": args.output_policy,
             "ledger": str(args.manual_review_items.resolve()) if args.manual_review_items else None,
+            "ingress_binding": manual_review_ingress_record,
             "visual_policy": manual_review_document_ledger.get("visual_policy"),
             "markers": manual_review_markers,
             "inline_marker_count": len(inline_manual_review_locations),
@@ -3873,7 +4415,7 @@ def main(argv: list[str]) -> int:
         ]
         # Findings retain their original status and keep valid/format_ready
         # false. Only verification=human_decision checks appear in the red ledger.
-        manual_review_findings = manual_review_validation_items(raw_validation_findings)
+        manual_review_findings = manual_review_validation_items(raw_validation_findings, spec)
     write("property-receipts.json", {
         "schema_version": "1.0", "receipts": property_receipts,
     })
@@ -4001,6 +4543,7 @@ def main(argv: list[str]) -> int:
               "equation_layout_changes": equation_changes,
               "cover_changes": cover_changes,
               "content_instance_audit": content_instance_audit,
+              "content_instance_source_binding": content_instance_source_binding_record,
               "deterministic_content_repairs": {
                   "keyword_separator_repairs": keyword_separator_repairs,
               },

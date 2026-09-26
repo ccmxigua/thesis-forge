@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import sys
 import tempfile
@@ -34,13 +35,25 @@ from semantic_source_references import (  # noqa: E402
 
 
 class HostReviewCommitMarkerTests(unittest.TestCase):
-    def _make_committed_merge(self, work: Path) -> tuple[Path, Path, Path, dict]:
+    def _make_committed_merge(
+        self, work: Path, *, scope_unresolved: bool = False,
+        nullable_optionals: bool = False,
+    ) -> tuple[Path, Path, Path, dict]:
+        source_text = (
+            "Key Words: at least 3 groups, with a maximum of 8 sets."
+            if scope_unresolved else "3cm左右" if nullable_optionals else "本节为说明性标题。"
+        )
         clauses = [{
-            "id": "C1", "text": "本节为说明性标题。", "evidence_ids": ["E1"],
+            "id": "C1", "text": source_text, "evidence_ids": ["E1"],
+            "source_span": {
+                "evidence_id": "E1", "start_offset": 0, "end_offset": len(source_text),
+                "text": source_text,
+                "source_sha256": hashlib.sha256(source_text.encode("utf-8")).hexdigest(),
+            },
             "source_kind": "paragraph", "location": {"part": "document", "order": 1},
         }]
         evidence = {"evidence": [{
-            "id": "E1", "text": clauses[0]["text"], "kind": "paragraph",
+            "id": "E1", "text": source_text, "kind": "paragraph",
         }]}
         request = engine.build_llm_request([], clauses, evidence, {}, "full")
         request = attach_request_provenance(
@@ -59,8 +72,14 @@ class HostReviewCommitMarkerTests(unittest.TestCase):
             "provenance": chunk["provenance"],
             "requirements": [],
             "clause_reviews": [{
-                "clause_id": "C1", "classification": "informational",
-                "requirement_indexes": [], "reason": "该段为说明性内容。",
+                "clause_id": "C1",
+                "classification": "unresolved" if scope_unresolved or nullable_optionals else "informational",
+                "requirement_indexes": [],
+                "reason": (
+                    "计数上下限的单位不一致，适用范围保持未决。"
+                    if scope_unresolved else "物理对象或适用位置尚未明确。"
+                    if nullable_optionals else "该段为说明性内容。"
+                ),
             }],
             "unsupported_items": [],
             "reported_conflicts": [],
@@ -82,19 +101,59 @@ class HostReviewCommitMarkerTests(unittest.TestCase):
         independent_request["attempt"] = 1
         independent_request["provider_attempt"] = 1
         source_packet = build_source_reference_packet(independent_request)
-        source_span = source_packet["checks"][0]["source_spans"][0]
-        raw_reviewer_response = {"results": [{
-            "check_id": "C1",
-            "verdict": "consistent",
-            "rationale": "来源是说明性标题，没有遗漏可执行义务。",
-            "evidence_refs": [source_span["ref_id"]],
-            "identified_obligations": [{
-                "source_ref": source_span["ref_id"],
-                "disposition": "represented",
-                "requirement_refs": [],
-                "obligation_summary": None,
-            }],
-        }]}
+        source_span = next(
+            span for span in source_packet["checks"][0]["source_spans"]
+            if span["start"] == 0 and span["end"] == len(source_text)
+        )
+        if scope_unresolved:
+            raw_reviewer_response = {"results": [{
+                "check_id": "C1",
+                "verdict": "manual_review_required",
+                "rationale": "The lower and upper bounds use different measurement units.",
+                "evidence_refs": [source_span["ref_id"]],
+                "identified_obligations": [
+                    {
+                        "source_ref": source_span["ref_id"],
+                        "disposition": "scope_unresolved",
+                        "requirement_refs": [],
+                        "obligation_summary": "The lower count is stated in groups.",
+                        "scope_dependency_codes": ["quantitative_scope_unit_ambiguity"],
+                        "scope_dependency_dimensions": ["metric"],
+                    },
+                    {
+                        "source_ref": source_span["ref_id"],
+                        "disposition": "scope_unresolved",
+                        "requirement_refs": [],
+                        "obligation_summary": "The upper count is stated in sets.",
+                        "scope_dependency_codes": ["quantitative_scope_unit_ambiguity"],
+                        "scope_dependency_dimensions": ["metric"],
+                    },
+                ],
+            }]}
+        elif nullable_optionals:
+            raw_reviewer_response = {"results": [{
+                "check_id": "C1",
+                "verdict": "uncertain",
+                "rationale": "The physical object and applicable location are not identified.",
+                "evidence_refs": [source_span["ref_id"]],
+                "identified_obligations": [{
+                    "source_ref": source_span["ref_id"],
+                    "disposition": "ambiguous",
+                    "requirement_refs": [],
+                    "obligation_summary": None,
+                }],
+            }]}
+        else:
+            raw_reviewer_response = {"results": [{
+                "check_id": "C1",
+                "verdict": "consistent",
+                "rationale": "来源是说明性标题，没有遗漏可执行义务。",
+                "evidence_refs": [source_span["ref_id"]],
+                # This informational clause has no represented requirement;
+                # do not fabricate an obligation merely to exercise the
+                # receipt/commit-marker pipeline.
+                "identified_obligations": [],
+            }]}
         reviewer_response, source_compilation = compile_source_reference_response(
             raw_reviewer_response,
             independent_request,
@@ -270,10 +329,54 @@ class HostReviewCommitMarkerTests(unittest.TestCase):
             self.assertEqual(result["run_id"], "commit-marker-test-run")
             self.assertEqual(result["merge_commit_marker"]["path"], str((receipt.parent / "merge-commit.json").resolve()))
 
+    def test_pipeline_projects_each_verified_scope_obligation_to_its_own_draft_gate(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            work = Path(td).resolve()
+            response, audit, receipt, extraction = self._make_committed_merge(
+                work, scope_unresolved=True,
+            )
+            result = pipeline.validate_host_review_receipts(
+                response_path=response, audit_path=audit, receipt_path=receipt,
+                extraction_manifest=extraction, work=work, output_policy="review_draft",
+            )
+            independent_reviews = result["independent_obligation_reviews"]
+            self.assertEqual(len(independent_reviews), 1)
+            scope_items = independent_reviews[0]["scope_unresolved_items"]
+            self.assertEqual(len(scope_items), 2)
+            self.assertEqual(
+                {item["source_quote"] for item in scope_items},
+                {"Key Words: at least 3 groups, with a maximum of 8 sets."},
+            )
+            self.assertTrue(all(not item["execution_authorized"] for item in scope_items))
+
+            source = "Key Words: at least 3 groups, with a maximum of 8 sets."
+            clauses = [{
+                "id": "C1", "text": source, "evidence_ids": ["E1"],
+                "source_span": {
+                    "evidence_id": "E1", "start_offset": 0, "end_offset": len(source),
+                    "text": source,
+                    "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
+                },
+            }]
+            evidence_doc = {"evidence": [{"id": "E1", "text": source}]}
+            gates = pipeline._scope_unresolved_release_gates(
+                independent_reviews, clauses=clauses, evidence_doc=evidence_doc,
+            )
+            self.assertEqual(len(gates), 2)
+            self.assertEqual(len({item["analysis_obligation_id"] for item in gates}), 2)
+            self.assertTrue(all(
+                item["source_location"]["evidence_id"] == "E1"
+                and item["source_location"]["start_offset"] == 0
+                and item["source_location"]["end_offset"] == len(scope_items[0]["source_quote"])
+                for item in gates
+            ))
+
     def test_pipeline_replays_codex_nullable_raw_response_and_rejects_raw_byte_changes(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             work = Path(td).resolve()
-            response, audit_path, receipt, extraction = self._make_committed_merge(work)
+            response, audit_path, receipt, extraction = self._make_committed_merge(
+                work, nullable_optionals=True,
+            )
             audit = json.loads(audit_path.read_text(encoding="utf-8"))
             pointer = audit["chunk_runs"][0]["independent_obligation_review"]
             envelope = json.loads((audit_path.parent / pointer["audit_path"]).read_text(encoding="utf-8"))
@@ -301,7 +404,9 @@ class HostReviewCommitMarkerTests(unittest.TestCase):
     def test_pipeline_replay_keeps_nullable_optionals_strict_for_non_codex_adapter(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             work = Path(td).resolve()
-            _response, audit_path, _receipt, _extraction = self._make_committed_merge(work)
+            _response, audit_path, _receipt, _extraction = self._make_committed_merge(
+                work, nullable_optionals=True,
+            )
             audit = json.loads(audit_path.read_text(encoding="utf-8"))
             pointer = audit["chunk_runs"][0]["independent_obligation_review"]
             envelope_path = audit_path.parent / pointer["audit_path"]

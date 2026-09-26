@@ -23,14 +23,30 @@ from apply_format_spec import (  # noqa: E402
 )
 from format_spec_validation import load_and_validate  # noqa: E402
 from manual_review import (  # noqa: E402
+    add_manual_review_items,
     build_manual_review_ledger,
     filter_manual_marker_ledger,
+    validate_manual_review_ledger_ingress,
 )
 import requirements_engine as engine  # noqa: E402
 from submission_audit import PLACEHOLDER_PATTERNS  # noqa: E402
 
 
 class ManualReviewTests(unittest.TestCase):
+    @staticmethod
+    def _binding(**overrides):
+        binding = {
+            "case_id": "test-case", "run_id": "test-run",
+            "source_sha256": "0" * 64, "clause_sha256": "1" * 64,
+            "evidence_sha256": "2" * 64, "request_sha256": None,
+            "requirements_sha256": "3" * 64, "input_source_sha256": "4" * 64,
+            "format_spec_sha256": "5" * 64,
+            "official_template_sha256": None,
+            "official_template_source": "not_supplied",
+        }
+        binding.update(overrides)
+        return binding
+
     def test_technical_findings_do_not_become_human_red_markers(self) -> None:
         ledger = build_manual_review_ledger({
             "findings": [
@@ -56,12 +72,15 @@ class ManualReviewTests(unittest.TestCase):
         ledger = {
             "items": [
                 {"marker_id": "MR-0001", "category": "property_receipt", "source_code": "receipt"},
-                {"marker_id": "MR-0002", "category": "input_prerequisite", "source_code": "template"},
-                {"marker_id": "MR-0003", "category": "semantic_content_review", "source_code": "abstract"},
+                {"marker_id": "MR-0002", "category": "input_prerequisite", "source_code": "template",
+                 "source_text": "官方模板待提供"},
+                {"marker_id": "MR-0003", "category": "semantic_content_review", "source_code": "abstract",
+                 "source_text": "摘要需符合来源要求。", "clause_ids": ["C1"],
+                 "evidence_ids": ["E1"]},
             ],
         }
         filtered = filter_manual_marker_ledger(ledger)
-        self.assertEqual([item["source_code"] for item in filtered["items"]], ["abstract", "template"])
+        self.assertEqual([item["source_code"] for item in filtered["items"]], ["template", "abstract"])
         self.assertEqual([item["marker_id"] for item in filtered["items"]], ["MR-0001", "MR-0002"])
         self.assertEqual(filtered["summary"]["by_category"], {
             "semantic_content_review": 1, "input_prerequisite": 1,
@@ -90,13 +109,7 @@ class ManualReviewTests(unittest.TestCase):
         ledger = build_manual_review_ledger(
             report,
             questions,
-            binding={
-                "case_id": "bsu",
-                "run_id": "run-1",
-                "source_sha256": "0" * 64,
-                "clause_sha256": "1" * 64,
-                "evidence_sha256": "2" * 64,
-            },
+            binding=self._binding(case_id="bsu", run_id="run-1"),
         )
         self.assertEqual(ledger["binding"]["run_id"], "run-1")
         self.assertFalse(ledger["submission_ready"])
@@ -112,6 +125,38 @@ class ManualReviewTests(unittest.TestCase):
             [],
         )
 
+    def test_ingress_rejects_changed_stale_binding_and_duplicate_marker_ids(self) -> None:
+        binding = self._binding(case_id="bsu", run_id="run-1")
+        ledger = {
+            "binding": binding,
+            "items": [
+                {"marker_id": "MR-0001"}, {"marker_id": "MR-0002"},
+            ],
+        }
+        payload = json.dumps(ledger, sort_keys=True).encode("utf-8")
+        digest = hashlib.sha256(payload).hexdigest()
+        self.assertEqual(validate_manual_review_ledger_ingress(
+            ledger, expected_binding=binding, expected_ledger_sha256=digest,
+            actual_ledger_sha256=digest,
+        ), [])
+        stale = validate_manual_review_ledger_ingress(
+            ledger, expected_binding=self._binding(case_id="other"),
+            expected_ledger_sha256=digest, actual_ledger_sha256=digest,
+        )
+        self.assertIn("manual_review_ledger_current_run_binding_mismatch", stale)
+        changed = validate_manual_review_ledger_ingress(
+            ledger, expected_binding=binding, expected_ledger_sha256="f" * 64,
+            actual_ledger_sha256=digest,
+        )
+        self.assertIn("manual_review_ledger_input_sha256_mismatch", changed)
+        duplicate = copy.deepcopy(ledger)
+        duplicate["items"][1]["marker_id"] = "MR-0001"
+        duplicate_errors = validate_manual_review_ledger_ingress(
+            duplicate, expected_binding=binding,
+            expected_ledger_sha256=digest, actual_ledger_sha256=digest,
+        )
+        self.assertIn("manual_review_ledger_marker_ids_not_unique", duplicate_errors)
+
     def test_producer_question_shape_preserves_id_and_all_evidence_ids(self) -> None:
         ledger = build_manual_review_ledger({}, [{
             "id": "Q-PRODUCER-1",
@@ -123,6 +168,84 @@ class ManualReviewTests(unittest.TestCase):
         item = next(item for item in ledger["items"] if item["source_type"] == "open_question")
         self.assertEqual(item["question_ids"], ["Q-PRODUCER-1"])
         self.assertEqual(item["evidence_ids"], ["E-PRODUCER-1", "E-PRODUCER-2"])
+
+    def test_same_question_text_at_distinct_evidence_occurrences_is_not_collapsed(self) -> None:
+        ledger = build_manual_review_ledger({}, [
+            {
+                "question_id": "Q1", "clause_id": "C1", "evidence_id": "E1",
+                "question": "请人工核对该项", "source_text": "关键词最多七个汉字",
+            },
+            {
+                "question_id": "Q2", "clause_id": "C2", "evidence_id": "E2",
+                "question": "请人工核对该项", "source_text": "关键词最多七个汉字",
+            },
+        ])
+        self.assertEqual(len(ledger["items"]), 2)
+        self.assertEqual(
+            {tuple(item["evidence_ids"]) for item in ledger["items"]},
+            {("E1",), ("E2",)},
+        )
+
+    def test_late_manual_review_dedupe_includes_source_evidence_identity(self) -> None:
+        ledger = {"items": [], "submission_ready": False}
+        common = {
+            "category": "semantic_content_review", "source_code": "keyword_separator",
+            "source_text": "关键词以分号分隔", "clause_ids": ["C1"],
+        }
+        add_manual_review_items(ledger, [
+            {**common, "evidence_ids": ["E1"]},
+            {**common, "evidence_ids": ["E2"]},
+            {**common, "evidence_ids": ["E1"]},
+        ])
+        self.assertEqual(len(ledger["items"]), 2)
+        self.assertEqual(
+            {tuple(item["evidence_ids"]) for item in ledger["items"]},
+            {("E1",), ("E2",)},
+        )
+
+    def test_filter_deduplicates_singular_source_locations_but_keeps_distinct_occurrences(self) -> None:
+        common = {
+            "category": "runtime_manual_unverifiable", "source_text": "原文位置待核对",
+            "reason": "需要人工核对", "action": "请检查对应原文。",
+            "placeholder_text": "【待人工处理：source】", "clause_ids": ["C1"],
+            "evidence_ids": ["E1"],
+        }
+        location = {"evidence_id": "E1", "start_offset": 3, "end_offset": 10,
+                    "source_sha256": "a" * 64}
+        other_location = {**location, "start_offset": 20, "end_offset": 27}
+        ledger = {"items": [
+            {**common, "source_location": location, "source_code": "first"},
+            {**common, "source_location": location, "source_code": "duplicate"},
+            {**common, "source_location": other_location, "source_code": "second occurrence"},
+        ]}
+
+        filtered = filter_manual_marker_ledger(ledger)
+        self.assertEqual(len(filtered["items"]), 2)
+        self.assertEqual([item["marker_id"] for item in filtered["items"]], ["MR-0001", "MR-0002"])
+
+    def test_semantic_content_marker_without_bound_source_fails_closed(self) -> None:
+        with self.assertRaisesRegex(ValueError, "requires a bound clause_id"):
+            filter_manual_marker_ledger({"items": [{
+                "category": "semantic_content_review", "source_text": "摘要目标待确认",
+                "reason": "无法判断", "action": "人工确认", "placeholder_text": "【待人工处理：摘要】",
+            }]})
+
+    def test_schema_rejects_unbound_semantic_content_marker(self) -> None:
+        ledger = {
+            "schema_version": "1.0", "policy": "review_draft_only",
+            "binding": self._binding(case_id="c", run_id="r"),
+            "submission_ready": False,
+            "items": [{
+                "marker_id": "MR-0001", "status": "pending_manual_review",
+                "marker_required": True, "category": "semantic_content_review",
+                "source_text": "摘要目标待确认", "reason": "无法判断", "action": "人工确认",
+                "placeholder_text": "【待人工处理：摘要】",
+            }],
+            "summary": {},
+        }
+        errors = load_and_validate(ledger, ROOT / "schema" / "manual-review-ledger.schema.json")
+        self.assertTrue(any("clause_ids" in error for error in errors), errors)
+        self.assertTrue(any("evidence_ids" in error for error in errors), errors)
 
     def test_requirements_producer_to_ledger_to_serialized_marker_keeps_source_binding(self) -> None:
         clauses = [{
@@ -148,11 +271,11 @@ class ManualReviewTests(unittest.TestCase):
 
         ledger = build_manual_review_ledger(
             {}, questions, clauses=clauses, evidence_doc=evidence_doc,
-            binding={
-                "case_id": "producer-fixture", "run_id": "question-marker-e2e",
-                "source_sha256": "a" * 64, "clause_sha256": "b" * 64,
-                "evidence_sha256": "c" * 64,
-            },
+            binding=self._binding(
+                case_id="producer-fixture", run_id="question-marker-e2e",
+                source_sha256="a" * 64, clause_sha256="b" * 64,
+                evidence_sha256="c" * 64,
+            ),
         )
         self.assertEqual(len(ledger["items"]), 1)
         item = ledger["items"][0]
@@ -269,13 +392,7 @@ class ManualReviewTests(unittest.TestCase):
                 "action": "提供官方模板后重新运行。",
                 "placeholder_text": "【待提供：官方版式模板】",
             }],
-            binding={
-                "case_id": "bsu",
-                "run_id": "run-1",
-                "source_sha256": "0" * 64,
-                "clause_sha256": "1" * 64,
-                "evidence_sha256": "2" * 64,
-            },
+            binding=self._binding(case_id="bsu", run_id="run-1"),
         )
         self.assertEqual(ledger["visual_policy"]["text_color"], "C00000")
         self.assertFalse(ledger["submission_ready"])
@@ -456,6 +573,19 @@ class ManualReviewTests(unittest.TestCase):
                 document.save(path)
                 self.assertFalse(audit_manual_review_markers(path, ledger)["valid"])
 
+    def test_serialized_audit_rejects_marker_payload_drift(self) -> None:
+        document = Document()
+        ledger = {"items": [self._item()]}
+        append_manual_review_markers(document, ledger)
+        marker = next(p for p in document.paragraphs if p.text.startswith("【MR-"))
+        marker.add_run("伪造的额外标记内容")
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "payload-drift.docx"
+            document.save(path)
+            audit = audit_manual_review_markers(path, ledger)
+        self.assertFalse(audit["valid"])
+        self.assertEqual(audit["payload_errors"], ["MR-0001"])
+
     def test_duplicate_ledger_ids_are_rejected_before_insertion(self) -> None:
         document = Document()
         with self.assertRaises(ValueError):
@@ -492,13 +622,7 @@ class ManualReviewTests(unittest.TestCase):
                 }],
             },
             [],
-            binding={
-                "case_id": "bsu",
-                "run_id": "run-1",
-                "source_sha256": "0" * 64,
-                "clause_sha256": "1" * 64,
-                "evidence_sha256": "2" * 64,
-            },
+            binding=self._binding(case_id="bsu", run_id="run-1"),
         )
         self.assertEqual(ledger["summary"]["total"], 1)
         self.assertEqual(ledger["items"][0]["category"], "confirmed_semantic_issue")

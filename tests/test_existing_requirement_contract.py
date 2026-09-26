@@ -8,6 +8,7 @@ Production code must never special-case these IDs, this school or this run.
 from __future__ import annotations
 
 import copy
+import hashlib
 import sys
 import unittest
 from pathlib import Path
@@ -43,6 +44,24 @@ class ExistingRequirementContractTests(unittest.TestCase):
             "unsupported_items": [], "reported_conflicts": []}
 
     def request(self, baseline=None):
+        evidence_by_id = {
+            str(item.get("id")): item for item in self.evidence.get("evidence", [])
+            if isinstance(item, dict) and item.get("id")
+        }
+        cursors = {}
+        for clause in self.clauses:
+            evidence_id = str(clause["evidence_ids"][0])
+            source = evidence_by_id[evidence_id]["text"]
+            start = source.find(clause["text"], cursors.get(evidence_id, 0))
+            if start < 0:
+                raise AssertionError(f"test source span not found for {clause['id']}")
+            end = start + len(clause["text"])
+            clause["source_span"] = {
+                "evidence_id": evidence_id, "start_offset": start, "end_offset": end,
+                "text": source[start:end],
+                "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
+            }
+            cursors[evidence_id] = end
         return build_llm_request([], self.clauses, self.evidence,
                                  self.baseline if baseline is None else baseline,
                                  "full", contract_version="3.0")
@@ -84,6 +103,8 @@ class ExistingRequirementContractTests(unittest.TestCase):
                 self.assertEqual(projected, before)
 
     def test_same_text_wrong_occurrence_and_changed_source_are_rejected(self):
+        duplicate_source = "正文使用宋体；正文使用宋体"
+        self.evidence["evidence"][0]["text"] = duplicate_source
         self.clauses.append({"id": "C2", "text": "正文使用宋体", "evidence_ids": ["E1"]})
         item = copy.deepcopy(self.response["requirements"][0])
         item["clause_ids"] = ["C2"]
@@ -91,6 +112,7 @@ class ExistingRequirementContractTests(unittest.TestCase):
         self.assertIn("existing_requirement_clause_mismatch", existing_reference_errors(
             item, {"R00012": self.baseline["requirements"][0]}, mapping))
         self.clauses[0]["text"] = "正文使用黑体"
+        self.evidence["evidence"][0]["text"] = "正文使用黑体；正文使用宋体"
         self.assertIn("existing_requirement_source_text_mismatch", str(validate_response(self.response, self.request())))
         self.assertIn("existing_requirement_source_text_mismatch", str(self.merge(self.response)[1]))
 

@@ -46,6 +46,18 @@ _COMPETING_CAPTION_POLICY = re.compile(
     re.IGNORECASE,
 )
 _QUOTE_PAIRS = (("“", "”"), ("‘", "’"), ('"', '"'), ("'", "'"))
+_KEYWORD_COUNT_MANDATORY_SIGNAL = re.compile(
+    r"(?:关键词|关键字|\bkey\s*words?\b).{0,48}"
+    r"(?:至少|最少|不少于|不得少于|最多|至多|不超过|不得超过|上限|下限|"
+    r"at\s+least|no\s+fewer\s+than|not\s+less\s+than|at\s+most|"
+    r"no\s+more\s+than|maximum|minimum|required|must)"
+    r".{0,32}\d+|"
+    r"(?:至少|最少|不少于|不得少于|最多|至多|不超过|不得超过|上限|下限|"
+    r"at\s+least|no\s+fewer\s+than|not\s+less\s+than|at\s+most|"
+    r"no\s+more\s+than|maximum|minimum|required|must)"
+    r".{0,32}\d+.{0,48}(?:关键词|关键字|\bkey\s*words?\b)",
+    re.IGNORECASE | re.DOTALL,
+)
 SECURITY_MARKING_OPTIONS_OBLIGATION_ID = "cover.security_marking_options"
 SECURITY_MARKING_SHORTER_ALLOWANCE_OBLIGATION_ID = (
     "cover.security_marking_options.shorter_duration_allowed"
@@ -151,18 +163,25 @@ _KEYWORD_RANGE_EN = re.compile(
     r"(?:~|～|to|[-–—])\s*(?P<maximum>\d+)\b",
     re.IGNORECASE,
 )
+_COUNT_UNIT_ZH = r"(?:条目|个词|个字|个|组|项|条|字|字符|词|篇|份|张|幅|套)"
+_COUNT_UNIT_EN = r"(?:groups?|sets?|keywords?|items?|entries?|words?|characters?|chars?|pieces?|pages?)"
 _EXPLICIT_KEYWORD_RANGE_ZH = re.compile(
-    r"(?:最少|至少|不少于)\s*(?P<minimum>\d+)\s*(?:个|组)?.{0,16}?"
-    r"(?:最多|至多|不超过)\s*(?P<maximum>\d+)\s*(?:个|组)?"
+    rf"(?:最少|至少|不少于)\s*(?P<minimum>\d+)\s*(?P<minimum_unit>{_COUNT_UNIT_ZH})?"
+    rf"(?:[\s，,、；;]|并且|而且|同时|且|关键词|关键字){{0,24}}?"
+    rf"(?:最多|至多|不超过)\s*(?P<maximum>\d+)\s*"
+    rf"(?P<maximum_unit>{_COUNT_UNIT_ZH})?"
 )
 _EXPLICIT_KEYWORD_RANGE_EN = re.compile(
-    r"(?:at\s+least|minimum\s+of)\s*(?P<minimum>\d+).{0,32}?"
-    r"(?:at\s+most|no\s+more\s+than|maximum\s+of)\s*"
-    r"(?P<maximum>\d+)",
+    rf"(?:at\s+least|no\s+fewer\s+than|not\s+less\s+than|minimum\s+of)\s*"
+    rf"(?P<minimum>\d+)\s*(?P<minimum_unit>{_COUNT_UNIT_EN})?"
+    rf"(?:[\s,;:]|and\b|with\b|a\b|the\b|key\s*words?\b){{0,48}}?"
+    rf"(?:with\s+a\s+maximum\s+of|at\s+most|no\s+more\s+than|maximum\s+of)\s*"
+    rf"(?P<maximum>\d+)\s*(?P<maximum_unit>{_COUNT_UNIT_EN})?",
     re.IGNORECASE,
 )
 
 _ABSTRACT_QUALITY_MAP = {
+    "brief_statement_of_thesis_content": ("论文内容的简要陈述",),
     "independent_and_complete": ("独立性和完整性",),
     "reflects_central_idea": ("准确反映论文的中心思想",),
     "academic_language": ("规范的学术用语",),
@@ -172,6 +191,7 @@ _ABSTRACT_QUALITY_MAP = {
         "突出本论文的创造性成果",
         "突出论文的创造性成果",
     ),
+    "new_theory_method_technology": ("新理论、新方法、新技术",),
     "main_information_equivalent_to_thesis": (
         "与论文等同的主要信息",
         "与论文相同的主要信息",
@@ -239,21 +259,7 @@ def compile_continuation_caption_requirement(source_text: Any) -> dict[str, Any]
     }
 
 
-def compile_known_source_obligation_ids(source_text: Any) -> list[str]:
-    """Return stable IDs for narrowly recognized, machine-checkable source facts.
-
-    This inventory is deliberately incomplete: it supplements rather than
-    replaces semantic decomposition by the host agent. Unknown prose is never
-    treated as proof that no other obligation exists.
-    """
-    if not isinstance(source_text, str) or not source_text.strip():
-        return []
-    # Do not promote propositions embedded in examples, quotations, or
-    # conditional prose into code-owned facts.  This compiler is only a
-    # conservative supplement; skipping a candidate is safer than treating
-    # illustrative/conditional wording as a binding source requirement.
-    if _CONTEXT_UNSAFE.search(source_text):
-        return []
+def _compile_known_source_obligation_ids_in_segment(source_text: str) -> list[str]:
     text = re.sub(r"\s+", "", source_text)
     result: list[str] = []
     is_continuation_table = "续" in text and "表" in text
@@ -275,18 +281,88 @@ def compile_known_source_obligation_ids(source_text: Any) -> list[str]:
     return sorted(set(result))
 
 
+def _known_source_targets_mentioned(source_text: str) -> set[str]:
+    """Identify only known obligation families named by an unsafe segment."""
+    compact = re.sub(r"\s+", "", source_text)
+    targets: set[str] = set()
+    if "续" in compact and "表" in compact:
+        targets.update({
+            "table.continuation.caption_suffix",
+            "table.continuation.repeat_header_row",
+            "table.continuation.caption_optional",
+            "table.continuation.caption_required",
+        })
+    if "表" in compact and re.search(r"表上方|置于表上|表上.*居中|居中.*表上", compact):
+        targets.update({"table_caption.position_above", "table_caption.alignment_center"})
+    if re.search(r"[□☐]", source_text) and re.search(r"限制|秘密|机密|密级", source_text):
+        targets.add(SECURITY_MARKING_OPTIONS_OBLIGATION_ID)
+    if "可少于" in compact and re.search(r"限制|秘密|机密|密级", compact):
+        targets.add(SECURITY_MARKING_SHORTER_ALLOWANCE_OBLIGATION_ID)
+    return targets
+
+
+def _safe_known_source_segments(source_text: str) -> list[str]:
+    """Split sentence-level context so unrelated examples do not erase facts.
+
+    Unsafe segments that mention a recognized target suppress promotion of
+    that same target, including when a safe sentence elsewhere states it.
+    """
+    segments = [
+        segment.strip()
+        for segment in re.split(r"(?<=[。！？.!?\n])", source_text)
+        if segment.strip()
+    ]
+    safe_segments: list[str] = []
+    for segment in segments:
+        if not _CONTEXT_UNSAFE.search(segment):
+            safe_segments.append(segment)
+    return safe_segments
+
+
+def _unsafe_known_source_targets(source_text: str) -> set[str]:
+    targets: set[str] = set()
+    segments = re.split(r"(?<=[。！？.!?\n])", source_text)
+    for segment in segments:
+        if _CONTEXT_UNSAFE.search(segment):
+            targets.update(_known_source_targets_mentioned(segment))
+    return targets
+
+
+def compile_known_source_obligation_ids(source_text: Any) -> list[str]:
+    """Return stable IDs for narrowly recognized, machine-checkable source facts.
+
+    Sentence-level unsafe context does not erase unrelated facts, but an
+    unsafe sentence naming the same target suppresses that target globally.
+    """
+    if not isinstance(source_text, str) or not source_text.strip():
+        return []
+    result: set[str] = set()
+    for segment in _safe_known_source_segments(source_text):
+        result.update(_compile_known_source_obligation_ids_in_segment(segment))
+    result.difference_update(_unsafe_known_source_targets(source_text))
+    if {
+        "table.continuation.caption_optional", "table.continuation.caption_required",
+    }.issubset(result):
+        result.difference_update({
+            "table.continuation.caption_optional", "table.continuation.caption_required",
+        })
+    return sorted(result)
+
+
 def compile_known_source_obligations(source_text: Any) -> list[dict[str, Any]]:
     """Return source-derived facts with their deterministic payload bindings."""
     facts: list[dict[str, Any]] = []
+    safe_source = "\n".join(_safe_known_source_segments(source_text)) \
+        if isinstance(source_text, str) else ""
     for obligation_id in compile_known_source_obligation_ids(source_text):
         binding = KNOWN_SOURCE_OBLIGATION_BINDINGS.get(obligation_id)
         if binding is None:
             continue
         fact = {"id": obligation_id, **copy.deepcopy(binding)}
         if obligation_id == SECURITY_MARKING_OPTIONS_OBLIGATION_ID:
-            fact["expected_value"] = compile_security_marking_options(source_text)
+            fact["expected_value"] = compile_security_marking_options(safe_source)
         elif obligation_id == SECURITY_MARKING_SHORTER_ALLOWANCE_OBLIGATION_ID:
-            fact["expected_value"] = compile_security_marking_shorter_allowances(source_text)
+            fact["expected_value"] = compile_security_marking_shorter_allowances(safe_source)
         else:
             fact["expected_value"] = copy.deepcopy(binding.get("expected_value"))
         facts.append(fact)
@@ -410,7 +486,7 @@ def compile_soft_keyword_count_guidance(source_text: Any) -> dict[str, Any] | No
         return None
     language_key = (
         "keywords_en"
-        if re.search(r"\benglish\s+keywords?\b|\bkeywords?\b", source_text, re.I)
+        if re.search(r"\benglish\s+keywords?\b|\bkey\s*words?\b", source_text, re.I)
         else "keywords_zh" if "关键词" in source_text else None
     )
     if language_key is None:
@@ -435,6 +511,42 @@ def compile_soft_keyword_count_guidance(source_text: Any) -> dict[str, Any] | No
     }
 
 
+def source_text_candidates(clause: Any) -> list[str]:
+    """Return deduplicated source-bound clause/evidence text from most exact to widest."""
+    if not isinstance(clause, dict):
+        return [clause] if isinstance(clause, str) and clause.strip() else []
+    span = clause.get("source_span")
+    if "source_span" in clause:
+        if not isinstance(span, dict):
+            raise ValueError("clause source_span must be an object")
+        exact = span.get("text")
+        if not isinstance(exact, str) or not exact.strip():
+            raise ValueError("clause source_span.text must be non-empty source text")
+        # source_text_full is deterministic extraction context and may carry
+        # a subject split into an adjacent clause. Never mix the normalized
+        # clause.text back into source-bound semantic checks: it can differ in
+        # whitespace or punctuation and is not the citation source.
+        values = (exact, clause.get("source_text_full"))
+    else:
+        values = (clause.get("text"), clause.get("source_text_full"))
+    return list(dict.fromkeys(
+        value for value in values
+        if isinstance(value, str) and value.strip()
+    ))
+
+
+def exact_clause_source_text(clause: Any) -> str:
+    """Return the authoritative exact clause text when a bound span exists."""
+    candidates = source_text_candidates(clause)
+    if not candidates:
+        return ""
+    if isinstance(clause, dict) and "source_span" in clause:
+        return candidates[0]
+    # Legacy extraction records have no span. They remain readable for
+    # offline compatibility, but current host-review packets require spans.
+    return candidates[0]
+
+
 def compile_explicit_keyword_count_range(source_text: Any) -> dict[str, int] | None:
     """Compile only explicitly mandatory keyword counts, excluding examples."""
     if not isinstance(source_text, str) or not source_text.strip() or _CONTEXT_UNSAFE.search(source_text):
@@ -450,10 +562,54 @@ def compile_explicit_keyword_count_range(source_text: Any) -> dict[str, int] | N
     ]
     if len(matches) != 1:
         return None
-    minimum, maximum = int(matches[0].group("minimum")), int(matches[0].group("maximum"))
+    match = matches[0]
+    minimum, maximum = int(match.group("minimum")), int(match.group("maximum"))
+    minimum_unit = _normalize_count_unit(match.groupdict().get("minimum_unit"))
+    maximum_unit = _normalize_count_unit(match.groupdict().get("maximum_unit"))
+    # A lower bound and an upper bound are comparable only when both state
+    # the same measure. Missing one side is also ambiguous; never collapse
+    # "groups" and "sets" into a single keyword count.
+    if not minimum_unit or not maximum_unit or minimum_unit != maximum_unit:
+        return None
     if minimum < 1 or maximum < minimum:
         return None
     return {"min_count": minimum, "max_count": maximum}
+
+
+def _normalize_count_unit(value: Any) -> str:
+    if not isinstance(value, str):
+        return ""
+    unit = value.casefold()
+    return unit[:-1] if unit.endswith("s") else unit
+
+
+def _has_ambiguous_explicit_count_units(source_text: str) -> bool:
+    matches = [
+        match
+        for pattern in (_EXPLICIT_KEYWORD_RANGE_ZH, _EXPLICIT_KEYWORD_RANGE_EN)
+        for match in pattern.finditer(source_text)
+    ]
+    return any(
+        not _normalize_count_unit(match.groupdict().get("minimum_unit"))
+        or not _normalize_count_unit(match.groupdict().get("maximum_unit"))
+        or _normalize_count_unit(match.groupdict().get("minimum_unit"))
+        != _normalize_count_unit(match.groupdict().get("maximum_unit"))
+        for match in matches
+    )
+
+
+def has_explicit_keyword_count_signal(source_text: Any) -> bool:
+    """Detect a likely hard keyword-count rule even when its range is ambiguous.
+
+    This is deliberately only a fail-closed signal.  It does not compile a
+    numeric bound; callers must keep the item unresolved unless the narrow
+    range compiler above succeeds.
+    """
+    if not isinstance(source_text, str) or not source_text.strip():
+        return False
+    if _CONTEXT_UNSAFE.search(source_text):
+        return False
+    return _KEYWORD_COUNT_MANDATORY_SIGNAL.search(source_text) is not None
 
 
 def compile_abstract_source_constraints(
@@ -589,13 +745,16 @@ def compile_unresolved_manual_review_codes(source_text: Any) -> list[str]:
         source_text[max(0, match.start() - 80):min(len(source_text), match.end() + 80)]
         if match is not None else ""
     )
+    codes: list[str] = []
     if (
         match is not None
         and not _ABSTRACT_MANUAL_REVIEW_CONTEXT_UNSAFE.search(context)
         and not _inside_quote(source_text, match.start())
     ):
-        return ["abstract_target_metric_ambiguity"]
-    return []
+        codes.append("abstract_target_metric_ambiguity")
+    if not _CONTEXT_UNSAFE.search(source_text) and _has_ambiguous_explicit_count_units(source_text):
+        codes.append("quantitative_scope_unit_ambiguity")
+    return sorted(set(codes))
 
 
 def _explicit_abstract_hard_support(source_text: Any, property_name: str) -> bool:
@@ -628,8 +787,18 @@ def materialize_soft_keyword_count_guidance(
     }
     audit: list[dict[str, Any]] = []
     for clause_id, clause in sorted(clauses_by_id.items()):
-        source_text = clause.get("text") or clause.get("source_text_full")
-        guidance = compile_soft_keyword_count_guidance(source_text)
+        source_candidates = source_text_candidates(clause)
+        guidance_candidates = [
+            result for candidate in source_candidates
+            if (result := compile_soft_keyword_count_guidance(candidate)) is not None
+        ]
+        unique_guidance = {
+            (item["language_key"], item["min_count"], item["max_count"], item["strength"])
+            for item in guidance_candidates
+        }
+        if len(unique_guidance) > 1:
+            continue
+        guidance = guidance_candidates[0] if guidance_candidates else None
         if guidance is None:
             continue
         for index, requirement in enumerate(requirements):
@@ -658,17 +827,26 @@ def materialize_soft_keyword_count_guidance(
                 str(value) for value in requirement.get("clause_ids", [])
                 if isinstance(value, str)
             ]
-            explicit_ranges = [
-                compile_explicit_keyword_count_range(
-                    clauses_by_id.get(other_id, {}).get("text")
-                    or clauses_by_id.get(other_id, {}).get("source_text_full")
-                )
+            linked_source_candidates = [
+                source_text
                 for other_id in linked_clause_ids
-                if other_id != clause_id
+                for source_text in source_text_candidates(clauses_by_id.get(other_id, {}))
+            ]
+            explicit_ranges = [
+                compile_explicit_keyword_count_range(source_text)
+                for source_text in linked_source_candidates
+            ]
+            hard_signals = [
+                has_explicit_keyword_count_signal(source_text)
+                for source_text in linked_source_candidates
             ]
             independently_mandatory = any(value is not None for value in explicit_ranges)
+            mandatory_signal_present = any(hard_signals)
             removed_hard_bounds: list[str] = []
-            if not independently_mandatory:
+            # An unparsed hard-looking source statement is not permission to
+            # erase model-provided bounds.  Keep them for review, while the
+            # contract reports the unresolved source rule and blocks release.
+            if not independently_mandatory and not mandatory_signal_present:
                 for bound in ("min_count", "max_count"):
                     if bound in keyword_rule:
                         keyword_rule.pop(bound)
@@ -707,6 +885,8 @@ def materialize_soft_keyword_count_guidance(
                     }),
                     "source_quote": guidance["source_quote"],
                     "independently_mandatory_range_present": independently_mandatory,
+                    "mandatory_count_signal_present": mandatory_signal_present,
+                    "mandatory_count_signal_fully_compiled": independently_mandatory,
                     "removed_hard_bounds": removed_hard_bounds,
                     "before_sha256": hashlib.sha256(before_bytes).hexdigest(),
                     "after_sha256": hashlib.sha256(after_bytes).hexdigest(),
@@ -744,7 +924,7 @@ def materialize_complete_abstract_source_constraints(
         # change the review disposition or create executable requirements.
         if not isinstance(review, dict) or review.get("classification") == "unresolved":
             continue
-        source_text = clause.get("text") or clause.get("source_text_full")
+        source_text = exact_clause_source_text(clause)
         source_context_items = []
         clause_evidence_ids = set(clause.get("evidence_ids") or [])
         location = clause.get("location") if isinstance(clause.get("location"), dict) else {}
@@ -771,7 +951,7 @@ def materialize_complete_abstract_source_constraints(
                 and other_location.get("child_index") == location_child_index
                 and other_location.get("order") == location_order
             ):
-                other_text = other_clause.get("text") or other_clause.get("source_text_full")
+                other_text = exact_clause_source_text(other_clause)
                 if isinstance(other_text, str):
                     source_context_items.append(other_text)
         compiled = compile_abstract_source_constraints(
@@ -842,8 +1022,7 @@ def materialize_complete_abstract_source_constraints(
         has_hard_source = {
             name: any(
                 _explicit_abstract_hard_support(
-                    clauses_by_id.get(other_id, {}).get("text")
-                    or clauses_by_id.get(other_id, {}).get("source_text_full"),
+                    exact_clause_source_text(clauses_by_id.get(other_id, {})),
                     name,
                 )
                 for other_id in linked_clause_ids
@@ -886,17 +1065,12 @@ def materialize_complete_abstract_source_constraints(
         for evidence_id in evidence_ids:
             if evidence_id not in current_evidence:
                 current_evidence.append(evidence_id)
+        # This compiler may project exact-source properties into the
+        # requirement graph, but it is not a semantic reviewer.  Preserve the
+        # Host Agent's classification, reason, normative basis, and complete
+        # obligation inventory exactly; the independent source audit remains
+        # responsible for identifying omissions and coverage.
         review_before = copy.deepcopy(review)
-        review["classification"] = "executable"
-        review["reason"] = (
-            "Every obligation in this recognized source bundle is represented by a deterministic, "
-            "source-bound content constraint; soft qualifiers remain guidance, not hard limits."
-        )
-        review["normative_basis"] = "explicit_normative_text"
-        review["obligations"] = [
-            {"id": identifier, "status": "covered", "reason": "Represented by the registered source-bound content property."}
-            for identifier in compiled["obligation_ids"]
-        ]
         if projected.get("contract_version") == "2.1":
             review["requirement_indexes"] = [
                 index for index, item in enumerate(requirements)
@@ -918,13 +1092,14 @@ def materialize_complete_abstract_source_constraints(
             "clause_id": clause_id,
             "source_evidence_ids": evidence_ids,
             "source_quote_sha256": hashlib.sha256(
-                str(clause.get("text") or clause.get("source_text_full") or "").encode("utf-8")
+                exact_clause_source_text(clause).encode("utf-8")
             ).hexdigest(),
             "requirement_index": requirement_index,
             "bundle": compiled["bundle"],
             "obligation_ids": compiled["obligation_ids"],
             "before_sha256": before_sha256,
             "after_sha256": after_sha256,
+            "semantic_review_preserved": review == review_before,
             "authorization": "complete_registered_source_bundle_projection_v1",
             "rule_id": compiled["rule_id"],
         })
@@ -970,7 +1145,7 @@ def materialize_known_source_verification(
         if not isinstance(clause, dict) or not isinstance(clause.get("id"), str):
             continue
         clause_id = clause["id"]
-        source_text = clause.get("text") or clause.get("source_text_full")
+        source_text = exact_clause_source_text(clause)
         choices = compile_security_marking_options(source_text)
         review = review_by_id.get(clause_id, {})
         if (
@@ -1029,7 +1204,7 @@ def materialize_known_source_verification(
         if not isinstance(clause, dict) or not isinstance(clause.get("id"), str):
             continue
         clause_id = clause["id"]
-        source_text = clause.get("text") or clause.get("source_text_full")
+        source_text = exact_clause_source_text(clause)
         allowances = compile_security_marking_shorter_allowances(source_text)
         review = review_by_id.get(clause_id, {})
         if (
@@ -1108,7 +1283,7 @@ def materialize_known_source_verification(
         if not isinstance(clause, dict) or not isinstance(clause.get("id"), str):
             continue
         clause_id = clause["id"]
-        source_text = clause.get("text") or clause.get("source_text_full")
+        source_text = exact_clause_source_text(clause)
         for fact in compile_known_source_obligations(source_text):
             for index, requirement in enumerate(requirements):
                 if not isinstance(requirement, dict):

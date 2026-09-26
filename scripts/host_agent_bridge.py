@@ -70,6 +70,23 @@ class IndependentObligationReviewError(RuntimeError):
     """Raised when independent source-coverage review rejects a candidate."""
 
 
+def _finalize_interrupted_attempts(record: dict[str, Any], reason: str) -> None:
+    """Close local attempts after worker shutdown without claiming remote success."""
+    attempts = record.get("attempts")
+    if not isinstance(attempts, list):
+        return
+    finished_at = datetime.now(timezone.utc).isoformat()
+    for attempt in attempts:
+        if not isinstance(attempt, dict) or attempt.get("status") not in {"running", "retrying"}:
+            continue
+        attempt.update(
+            status="terminated",
+            finished_at=finished_at,
+            remote_operation_state="unknown",
+            termination_reason=reason,
+        )
+
+
 class RunController:
     """Coordinate bounded cancellation without touching unrelated processes."""
 
@@ -182,8 +199,11 @@ from host_runtime import (  # noqa: E402
 from native_semantic_review import (  # noqa: E402
     ExternalComplianceCorrectionRequiredError,
     MissingExecutableObligationInventoryError,
+    MissingSourceObligationInventoryError,
+    NativeSemanticReviewError,
     OBLIGATION_COVERAGE_PROTOCOL,
     RetryableNativeSemanticReviewError,
+    _exact_clause_source_text,
     build_obligation_coverage_request,
     is_explicit_authoring_content_quote,
     run_native_semantic_review,
@@ -596,7 +616,10 @@ def _contract_repair_guidance(
         targeted.append(
             "The executable review has at least one obligation that is not fully represented. Never change that obligation status to covered merely to satisfy the gate. Preserve its id and status; reclassify only the affected clause as the most accurate non-executable status, use requirement_indexes: [] for contract 2.1 or omit the reverse index for contract 3.0, and remove that clause from every requirement edge. Keep every other review, requirement, evidence ID, property, and obligation unchanged."
         )
-    if "executable_review_requires_non_empty_inventory" in text:
+    if (
+        "executable_review_requires_non_empty_inventory" in text
+        or "review_requires_non_empty_source_inventory" in text
+    ):
         targeted.append(
             "For each covered, executable, or verify_existing clause_review, obligations must be a non-empty array of distinct semantic duties derived from that clause's current source. Do not omit it, return null/[], add a generic placeholder, or copy code-owned machine IDs as semantic duties. Preserve each duty's meaning and only classify the clause as executable when the source and linked requirements support that classification."
         )
@@ -1150,6 +1173,27 @@ def _validate_retry_attempt_artifact(
             }
         ), None) if isinstance(records, list) else None
         if isinstance(no_response_record, dict):
+            if not _retry_fingerprints_complete(retry_inputs):
+                fail(
+                    "retry_stage_invocation_binding_missing", "raw_envelope",
+                    str(no_response_record.get("raw_envelope_path") or ""),
+                    "attempt has no complete invocation fingerprint receipt",
+                )
+            envelope_binding = attempt_record.get("no_semantic_response_invocation_fingerprints")
+            binding_fields = (
+                "run_id", "case_id", "source_sha256", "clause_sha256", "evidence_sha256",
+                "request_sha256", "chunk_index", "chunk_sha256", "schema_sha256",
+                "code_fingerprint_sha256",
+            )
+            if (
+                not _retry_fingerprints_complete(envelope_binding)
+                or any(envelope_binding.get(key) != retry_inputs.get(key) for key in binding_fields)
+            ):
+                fail(
+                    "retry_stage_invocation_binding_mismatch", "raw_envelope",
+                    str(no_response_record.get("raw_envelope_path") or ""),
+                    "raw envelope receipt does not match the attempt invocation fingerprints",
+                )
             envelope_path = response_path.with_name(
                 f"{response_path.stem}.attempt-{attempt_number:02d}.raw-envelope.txt"
             )
@@ -3324,12 +3368,13 @@ def _v3_uncovered_obligation_reclassification_response(
     The model is allowed to make the semantic decision that a clause is not
     executable when the validator has proved that one of its obligations is
     not covered.  It is not allowed to satisfy the retry mechanically by
-    changing that obligation to ``covered``.  This helper accepts only a
-    complete, locally valid retry that preserves the affected obligation
-    ``id``/``status`` pair and changes only the affected review's
-    classification.  The accepted response is rebuilt from the previous
-    response, and requirement edges for the affected clause are removed by
-    deterministic projection rather than trusted from model bookkeeping.  A
+    changing that obligation to ``covered``. This helper accepts only a
+    complete retry that preserves the affected obligation ``id``/``status``
+    pair and changes only the affected review's classification and
+    requirement relation edges. The accepted response is rebuilt from the
+    previous response; affected clause edges and evidence used only by those
+    edges are removed by deterministic projection rather than trusted from
+    model bookkeeping. A
     provider may leave behind the exact old requirement object with only
     ``clause_ids: []`` after removing its last affected edge; that invalid
     empty shell is accepted only as an intermediate form and is dropped by
@@ -3462,21 +3507,36 @@ def _v3_uncovered_obligation_reclassification_response(
             stale_empty["clause_ids"] = []
             intermediate_requirements.append(stale_empty)
             continue
+        evidence_ids = requirement.get("evidence_ids")
+        if not isinstance(evidence_ids, list):
+            return None, None
+        all_backed_evidence_ids = {
+            str(evidence_id)
+            for clause_id in clause_ids
+            for evidence_id in (clause_map[clause_id].get("evidence_ids") or [])
+        }
+        if not set(map(str, evidence_ids)) <= all_backed_evidence_ids:
+            return None, None
+        remaining_backed_evidence_ids = {
+            str(evidence_id)
+            for clause_id in remaining_clause_ids
+            for evidence_id in (clause_map[clause_id].get("evidence_ids") or [])
+        }
         projected = copy.deepcopy(requirement)
         if remaining_clause_ids != clause_ids:
-            evidence_ids = requirement.get("evidence_ids")
-            if not isinstance(evidence_ids, list):
-                return None, None
-            backed_evidence_ids = {
-                str(evidence_id)
-                for clause_id in remaining_clause_ids
-                for evidence_id in (clause_map[clause_id].get("evidence_ids") or [])
-            }
-            if not set(map(str, evidence_ids)) <= backed_evidence_ids:
-                return None, None
             projected["clause_ids"] = remaining_clause_ids
+            projected["evidence_ids"] = [
+                evidence_id for evidence_id in evidence_ids
+                if str(evidence_id) in remaining_backed_evidence_ids
+            ]
         projected_requirements.append(projected)
-        intermediate_requirements.append(copy.deepcopy(projected))
+        # A provider may remove the semantic edge but leave the old evidence
+        # list behind. Accept only this exact intermediate shape; the trusted
+        # projection below removes evidence that belongs solely to the dropped
+        # clause before the response can be used.
+        intermediate = copy.deepcopy(requirement)
+        intermediate["clause_ids"] = remaining_clause_ids
+        intermediate_requirements.append(intermediate)
 
     if current_requirements not in (projected_requirements, intermediate_requirements):
         return None, None
@@ -3497,6 +3557,69 @@ def _v3_uncovered_obligation_reclassification_response(
             len(intermediate_requirements) - len(projected_requirements)
         ),
     }
+
+
+def _v3_authoring_content_retry_is_source_bound(
+    review_context: Any,
+    clause: Any,
+    evidence_context: Any,
+    missing_obligations: Any,
+) -> bool:
+    """Allow a primary retry only for exact, cited author-input instructions."""
+    if (
+        not isinstance(review_context, dict)
+        or review_context.get("classification") != "informational"
+        or review_context.get("requires_requirement") is not False
+        or review_context.get("linked_requirements") != []
+        or not isinstance(clause, dict)
+        or not isinstance(evidence_context, dict)
+        or not isinstance(missing_obligations, list)
+        or not missing_obligations
+    ):
+        return False
+    cited_evidence = review_context.get("cited_evidence")
+    clause_evidence_ids = {
+        str(value) for value in (clause.get("evidence_ids") or [])
+        if isinstance(value, str) and value
+    }
+    if not isinstance(cited_evidence, dict) or not cited_evidence:
+        return False
+    cited_ids = {str(value) for value in cited_evidence}
+    if not cited_ids or not cited_ids <= clause_evidence_ids:
+        return False
+    try:
+        exact_source = _exact_clause_source_text(clause, evidence_context)
+    except NativeSemanticReviewError:
+        return False
+    if not exact_source:
+        return False
+    source_span = clause.get("source_span")
+    source_evidence_id = (
+        str(source_span.get("evidence_id"))
+        if isinstance(source_span, dict) and source_span.get("evidence_id") else None
+    )
+    if source_evidence_id is None or source_evidence_id not in cited_ids:
+        return False
+    cited_texts = [
+        evidence_context[evidence_id].get("text")
+        for evidence_id in sorted(cited_ids)
+        if isinstance(evidence_context.get(evidence_id), dict)
+    ]
+    if not cited_texts or any(not isinstance(value, str) for value in cited_texts):
+        return False
+    for obligation in missing_obligations:
+        quote = obligation.get("source_quote") if isinstance(obligation, dict) else None
+        if (
+            not isinstance(obligation, dict)
+            or obligation.get("disposition") != "unrepresented"
+            or not isinstance(quote, str)
+            or not quote
+            or quote not in exact_source
+            or not is_explicit_authoring_content_quote(quote)
+            or not any(quote in evidence_text for evidence_text in cited_texts)
+        ):
+            return False
+    return True
 
 
 def _v3_authoring_content_reclassification_response(
@@ -3595,24 +3718,39 @@ def _v3_authoring_content_reclassification_response(
             or not isinstance(clause, dict)
         ):
             return None, None
-        source_text = clause.get("text") or clause.get("source_text_full")
+        try:
+            source_text = _exact_clause_source_text(clause, evidence_context)
+        except NativeSemanticReviewError:
+            return None, None
         clause_evidence_ids = {
             str(value) for value in (clause.get("evidence_ids") or []) if value
         }
         record_evidence_ids = {
             str(value) for value in (record.get("evidence_ids") or []) if value
         }
+        source_span = clause.get("source_span")
+        source_evidence_id = (
+            str(source_span.get("evidence_id"))
+            if isinstance(source_span, dict) and source_span.get("evidence_id") else None
+        )
+        record_evidence_texts = [
+            evidence_context[evidence_id].get("text")
+            for evidence_id in sorted(record_evidence_ids)
+            if isinstance(evidence_context.get(evidence_id), dict)
+        ]
         if (
             not isinstance(source_text, str)
             or not source_text.strip()
             or not record_evidence_ids
             or not record_evidence_ids <= clause_evidence_ids
+            or source_evidence_id not in record_evidence_ids
             or any(quote not in source_text for quote in quotes)
             or any(not is_explicit_authoring_content_quote(quote) for quote in quotes)
+            or len(record_evidence_texts) != len(record_evidence_ids)
+            or any(not isinstance(value, str) for value in record_evidence_texts)
             or any(
-                evidence_id not in evidence_context
-                or not isinstance(evidence_context[evidence_id], dict)
-                for evidence_id in record_evidence_ids
+                not any(quote in evidence_text for evidence_text in record_evidence_texts)
+                for quote in quotes
             )
         ):
             return None, None
@@ -7515,7 +7653,16 @@ def _run_independent_obligation_coverage_review(
                     for obligation in missing_obligations
                     if isinstance(obligation.get("source_quote"), str)
                 ))
-                repairable = review_context.get("requires_requirement") is True
+                authoring_retryable = _v3_authoring_content_retry_is_source_bound(
+                    review_context,
+                    clause,
+                    chunk.get("evidence_context"),
+                    missing_obligations,
+                )
+                repairable = (
+                    review_context.get("requires_requirement") is True
+                    or authoring_retryable
+                )
                 primary_repairable = primary_repairable or repairable
                 correction_checks.append({
                     "check_id": clause_id,
@@ -7547,6 +7694,13 @@ def _run_independent_obligation_coverage_review(
                     "missing_obligations": missing_obligations,
                     "missing_source_quotes": missing_quotes,
                     "primary_repairable": repairable,
+                    "primary_retry_authorization": (
+                        "source_bound_authoring_content_reclassification_v1"
+                        if authoring_retryable
+                        else "executable_requirement_completion"
+                        if review_context.get("requires_requirement") is True
+                        else None
+                    ),
                     "candidate_response_sha256": response_sha,
                     "candidate_semantic_sha256": candidate_semantic_sha,
                     "review_request_sha256": review_result.get("request_sha256"),
@@ -7689,10 +7843,10 @@ def _run_independent_obligation_coverage_review(
             "provider_attempt_history": attempt_history,
         }  # type: ignore[attr-defined]
         raise error from review_error
-    except MissingExecutableObligationInventoryError as review_error:
+    except MissingSourceObligationInventoryError as review_error:
         retryable = _provider_attempt < INDEPENDENT_REVIEW_PROVIDER_MAX_ATTEMPTS
         retry_feedback = {
-            "code": MissingExecutableObligationInventoryError.code,
+            "code": MissingSourceObligationInventoryError.code,
             "clause_ids": list(review_error.clause_ids),
         }
         failure_envelope = {
@@ -7700,7 +7854,7 @@ def _run_independent_obligation_coverage_review(
             "protocol": OBLIGATION_COVERAGE_PROTOCOL,
             "status": "rejected",
             "retryable": retryable,
-            "retry_code": MissingExecutableObligationInventoryError.code,
+            "retry_code": MissingSourceObligationInventoryError.code,
             "next_request_retry_feedback": retry_feedback if retryable else None,
             "provider_attempt": _provider_attempt,
             "next_provider_attempt": _provider_attempt + 1 if retryable else None,
@@ -7720,7 +7874,7 @@ def _run_independent_obligation_coverage_review(
         attempt_record = {
             "provider_attempt": _provider_attempt,
             "status": "semantic_contract_rejected",
-            "retry_code": MissingExecutableObligationInventoryError.code,
+            "retry_code": MissingSourceObligationInventoryError.code,
             "missing_clause_ids": list(review_error.clause_ids),
             "error": str(review_error),
             "audit_path": audit_path.relative_to(review_dir).as_posix(),
@@ -7756,7 +7910,7 @@ def _run_independent_obligation_coverage_review(
         )
         error.error_records = [{
             "code": "independent_obligation_review_correction_exhausted",
-            "retry_code": MissingExecutableObligationInventoryError.code,
+            "retry_code": MissingSourceObligationInventoryError.code,
             "provider_attempts": _provider_attempt,
             "provider_attempt_history": attempt_history,
             "missing_clause_ids": list(review_error.clause_ids),
@@ -8951,6 +9105,20 @@ def run_bridge(
                     raise
                 failures.append(str(exc))
                 error_records = getattr(exc, "error_records", None)
+                if isinstance(error_records, list):
+                    error_records = copy.deepcopy(error_records)
+                    invocation_binding = _retry_input_fingerprints(chunk)
+                    if any(
+                        isinstance(record, dict) and record.get("code") in {
+                            "host_response_parse_error", "host_response_unavailable",
+                        }
+                        for record in error_records
+                    ):
+                        with lifecycle_lock:
+                            if chunk_lifecycle[index].get("attempts"):
+                                chunk_lifecycle[index]["attempts"][-1][
+                                    "no_semantic_response_invocation_fingerprints"
+                                ] = copy.deepcopy(invocation_binding)
                 retry_stage_snapshots = getattr(exc, "retry_stage_snapshots", None)
                 if (
                     not isinstance(retry_stage_snapshots, list)
@@ -9238,6 +9406,7 @@ def run_bridge(
                             remote_operation_state="unknown",
                             termination_reason=stop_reason,
                         )
+                    _finalize_interrupted_attempts(record, stop_reason)
             persist_failure_audit(
                 exc,
                 [chunk_audits_by_index[index]
@@ -9260,7 +9429,7 @@ def run_bridge(
         merged, merge_metadata = merge_host_agent_review_packets(
             review_dir, response_out=response_out,
         )
-    except Exception as exc:
+    except BaseException as exc:
         persist_failure_audit(exc, chunk_audits, chunk_lifecycle=chunk_lifecycle)
         raise
     payload = {

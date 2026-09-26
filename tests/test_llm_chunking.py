@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sys
 import tempfile
 import unittest
@@ -160,7 +161,13 @@ class HostAgentReviewTests(unittest.TestCase):
                 "provenance": chunk["provenance"],
                 "requirements": [{
                     "role": "content_constraints",
-                    "properties": {"keywords_zh": {"min_count": 3, "max_count": 8}},
+                    "properties": {"keywords_zh": {
+                        "min_count": 3, "max_count": 8,
+                        "count_guidance": {
+                            "min_count": 3, "max_count": 8,
+                            "strength": "general_guidance",
+                        },
+                    }},
                     "clause_ids": ["C69"], "evidence_ids": ["E69"],
                     "confidence": 1, "reason": "The source clause gives the keyword range.",
                 }],
@@ -202,6 +209,16 @@ class HostAgentReviewTests(unittest.TestCase):
             {"id": "E1", "text": clauses[0]["text"], "kind": "paragraph"},
             {"id": "E2", "text": clauses[1]["text"], "kind": "paragraph"},
         ]}
+        evidence_by_id = {item["id"]: item["text"] for item in evidence["evidence"]}
+        for clause in clauses:
+            source_text = evidence_by_id[clause["evidence_ids"][0]]
+            clause["source_span"] = {
+                "evidence_id": clause["evidence_ids"][0],
+                "start_offset": 0,
+                "end_offset": len(clause["text"]),
+                "text": clause["text"],
+                "source_sha256": hashlib.sha256(source_text.encode("utf-8")).hexdigest(),
+            }
         request = engine.build_llm_request(
             [], clauses, evidence, {}, "full", contract_version=HOST_REVIEW_CONTRACT_V3,
         )

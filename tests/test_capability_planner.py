@@ -576,6 +576,7 @@ class CapabilityPlannerTest(unittest.TestCase):
     def test_semantic_contract_gate_blocks_invalid_response_before_capability(self) -> None:
         clauses = [{"id": "C1", "text": "正文使用宋体", "evidence_ids": ["E1"]}]
         evidence = {"evidence": [{"id": "E1", "text": "正文使用宋体", "kind": "paragraph"}]}
+        self._bind_test_source_spans(clauses, evidence)
         request = build_llm_request(
             [], clauses, evidence, {}, "full", contract_version="3.0",
         )
@@ -608,6 +609,7 @@ class CapabilityPlannerTest(unittest.TestCase):
     def test_semantic_contract_gate_requires_current_provenance_for_release(self) -> None:
         clauses = [{"id": "C1", "text": "正文使用宋体", "evidence_ids": ["E1"]}]
         evidence = {"evidence": [{"id": "E1", "text": "正文使用宋体", "kind": "paragraph"}]}
+        self._bind_test_source_spans(clauses, evidence)
         request = build_llm_request(
             [], clauses, evidence, {}, "full", contract_version="3.0",
         )
@@ -636,6 +638,27 @@ class CapabilityPlannerTest(unittest.TestCase):
                     request_path=request_path,
                     require_provenance=True,
                 )
+
+    @staticmethod
+    def _bind_test_source_spans(clauses: list[dict], evidence_doc: dict) -> None:
+        evidence_by_id = {
+            str(item.get("id")): item for item in evidence_doc.get("evidence", [])
+            if isinstance(item, dict) and item.get("id")
+        }
+        cursors: dict[str, int] = {}
+        for clause in clauses:
+            evidence_id = str(clause["evidence_ids"][0])
+            source = evidence_by_id[evidence_id]["text"]
+            start = source.find(clause["text"], cursors.get(evidence_id, 0))
+            if start < 0:
+                raise AssertionError(f"test source span not found for {clause['id']}")
+            end = start + len(clause["text"])
+            clause["source_span"] = {
+                "evidence_id": evidence_id, "start_offset": start, "end_offset": end,
+                "text": source[start:end],
+                "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
+            }
+            cursors[evidence_id] = end
 
     def test_pipeline_runs_preflight_before_style_and_records_subset_gaps(self) -> None:
         with tempfile.TemporaryDirectory() as td:

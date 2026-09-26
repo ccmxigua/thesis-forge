@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import sys
 import unittest
 from pathlib import Path
@@ -14,6 +15,7 @@ from source_obligation_compiler import (  # noqa: E402
     compile_explicit_keyword_count_range,
     compile_known_source_obligations,
     compile_known_source_obligation_ids,
+    has_explicit_keyword_count_signal,
     compile_security_marking_options,
     compile_security_marking_shorter_allowances,
     compile_soft_keyword_count_guidance,
@@ -443,6 +445,127 @@ class SourceObligationCompilerTests(unittest.TestCase):
         self.assertFalse(audit[0]["independently_mandatory_range_present"])
         self.assertEqual(projected["requirements"][0]["verification"]["checks"], [])
 
+    def test_soft_projection_preserves_hard_bounds_when_subject_is_in_full_evidence(self) -> None:
+        clauses = [
+            {
+                "id": "C69", "text": "关键词一般3～8个", "source_text_full": "关键词一般3～8个",
+                "evidence_ids": ["E1"],
+            },
+            {
+                "id": "C72", "text": "at least 3 groups, with a maximum of 8 sets",
+                "source_text_full": "Key Words: Terminology; at least 3 groups, with a maximum of 8 sets",
+                "source_span": {"text": "at least 3 groups, with a maximum of 8 sets"},
+                "evidence_ids": ["E1"],
+            },
+        ]
+        response = {"requirements": [{
+            "role": "content_constraints", "clause_ids": ["C69", "C72"],
+            "evidence_ids": ["E1"],
+            "properties": {"keywords_zh": {"min_count": 3, "max_count": 8}},
+            "verification": {"checks": ["Verify the Chinese keyword count is 3 to 8."]},
+        }]}
+
+        self.assertTrue(has_explicit_keyword_count_signal(clauses[1]["source_text_full"]))
+        self.assertIsNone(compile_explicit_keyword_count_range(clauses[1]["source_text_full"]))
+        projected, audit = materialize_soft_keyword_count_guidance(response, clauses)
+
+        rule = projected["requirements"][0]["properties"]["keywords_zh"]
+        self.assertEqual((rule["min_count"], rule["max_count"]), (3, 8))
+        self.assertEqual(
+            rule["count_guidance"],
+            {"min_count": 3, "max_count": 8, "strength": "general_guidance"},
+        )
+        self.assertTrue(audit[0]["mandatory_count_signal_present"])
+        self.assertFalse(audit[0]["mandatory_count_signal_fully_compiled"])
+
+    def test_mixed_explicit_count_units_remain_unresolved_and_block_scope(self) -> None:
+        source = "Key Words: at least 3 groups, with a maximum of 8 sets."
+        self.assertTrue(has_explicit_keyword_count_signal(source))
+        self.assertIsNone(compile_explicit_keyword_count_range(source))
+        self.assertEqual(
+            compile_unresolved_manual_review_codes(source),
+            ["quantitative_scope_unit_ambiguity"],
+        )
+        self.assertIsNotNone(compile_explicit_keyword_count_range(
+            "Key Words: at least 3 groups, with a maximum of 8 groups."
+        ))
+
+    def test_explicit_keyword_range_rejects_one_sided_or_different_units(self) -> None:
+        self.assertIsNone(compile_explicit_keyword_count_range(
+            "关键词最少3组，最多8个。"
+        ))
+        self.assertIsNone(compile_explicit_keyword_count_range(
+            "关键词最少3组，最多8项。"
+        ))
+        self.assertEqual(
+            compile_explicit_keyword_count_range("关键词最少3组，最多8组。"),
+            {"min_count": 3, "max_count": 8},
+        )
+        self.assertIsNone(compile_explicit_keyword_count_range(
+            "关键词最少3组，正文最多8组。"
+        ))
+        self.assertIsNone(compile_explicit_keyword_count_range(
+            "Key Words: at least 3 groups, while the body maximum is 8 groups."
+        ))
+        self.assertEqual(compile_explicit_keyword_count_range(
+            "Key Words: at least 3 groups, with a maximum of 8 groups."
+        ), {"min_count": 3, "max_count": 8})
+
+    def test_key_words_spacing_is_recognized_without_inventing_a_hard_bound(self) -> None:
+        guidance = compile_soft_keyword_count_guidance("Key Words are generally 3 to 8.")
+        self.assertIsNotNone(guidance)
+        self.assertEqual(guidance["language_key"], "keywords_en")
+        self.assertEqual(guidance["strength"], "general_guidance")
+
+    def test_unsafe_unrelated_sentence_does_not_erase_safe_source_obligation(self) -> None:
+        source = "续表应标注（续）。错误示例：公式中的变量不得省略。"
+        self.assertIn(
+            "table.continuation.caption_suffix",
+            compile_known_source_obligation_ids(source),
+        )
+
+    def test_unsafe_same_target_sentence_suppresses_source_obligation_promotion(self) -> None:
+        source = "续表题可以省略。错误示例：续表题不得省略。"
+        ids = compile_known_source_obligation_ids(source)
+        self.assertNotIn("table.continuation.caption_optional", ids)
+        self.assertNotIn("table.continuation.caption_required", ids)
+
+    def test_unitless_explicit_keyword_range_stays_unresolved(self) -> None:
+        source = "关键词最少3，最多8"
+        self.assertTrue(has_explicit_keyword_count_signal(source))
+        self.assertIsNone(compile_explicit_keyword_count_range(source))
+        self.assertEqual(
+            compile_unresolved_manual_review_codes(source),
+            ["quantitative_scope_unit_ambiguity"],
+        )
+
+    def test_abstract_materializer_uses_exact_bound_source_span(self) -> None:
+        source = (
+            "中文摘要是论文内容的简要陈述，一般以第三人称语气撰写，"
+            "300～1000字（如遇特殊需要字数可以略多），不加评论和解释，"
+            "是一篇具有独立性和完整性的短文，能准确反映论文的中心思想，"
+            "规范的学术用语，逻辑性强、结构严谨，体现出论文的新理论、新方法、新技术等。"
+        )
+        clause = {
+            "id": "C_RAW", "text": "不含摘要规则的规范化字段", "evidence_ids": ["E_RAW"],
+            "source_span": {"text": source},
+        }
+        response = {
+            "contract_version": "3.0",
+            "clause_reviews": [{"clause_id": "C_RAW", "classification": "executable"}],
+            "requirements": [],
+        }
+        projected, audit = materialize_complete_abstract_source_constraints(
+            response, [clause],
+        )
+        self.assertEqual(len(projected["requirements"]), 1)
+        self.assertEqual(projected["requirements"][0]["clause_ids"], ["C_RAW"])
+        self.assertEqual(len(audit), 1)
+        self.assertEqual(
+            audit[0]["source_quote_sha256"],
+            hashlib.sha256(source.encode("utf-8")).hexdigest(),
+        )
+
     def test_complete_abstract_bundles_materialize_but_ambiguous_english_stays_manual(self) -> None:
         c66 = (
             "中文摘要是论文内容的简要陈述，一般以第三人称语气撰写，"
@@ -476,11 +599,13 @@ class SourceObligationCompilerTests(unittest.TestCase):
                 for cid in ("C66", "C67")
             ],
         }
+        reviews_before = copy.deepcopy(response["clause_reviews"])
         projected, audit = materialize_complete_abstract_source_constraints(response, clauses)
         self.assertEqual(len(projected["requirements"]), 2)
         reviews = {item["clause_id"]: item for item in projected["clause_reviews"]}
         self.assertEqual(reviews["C66"]["classification"], "executable")
         self.assertEqual(reviews["C67"]["classification"], "executable")
+        self.assertEqual(projected["clause_reviews"], reviews_before)
         zh_properties = projected["requirements"][0]["properties"]["abstract_zh"]
         self.assertEqual(zh_properties["third_person_guidance"], "general_guidance")
         self.assertNotIn("require_third_person", zh_properties)
@@ -488,8 +613,8 @@ class SourceObligationCompilerTests(unittest.TestCase):
         self.assertNotIn("min_chars", zh_properties)
         self.assertTrue(zh_properties["prohibit_commentary"])
         self.assertIn("main_information_equivalent_to_thesis", projected["requirements"][1]["properties"]["abstract_zh"]["quality_guidance"])
-        self.assertTrue(all(item["status"] == "covered" for review in reviews.values() for item in review["obligations"]))
         self.assertEqual(len(audit), 2)
+        self.assertTrue(all(item["semantic_review_preserved"] for item in audit))
         again, second_audit = materialize_complete_abstract_source_constraints(projected, clauses)
         self.assertEqual(again, projected)
         self.assertEqual(second_audit, [])

@@ -322,6 +322,7 @@ def audit_manual_review_markers(path: Path, ledger: dict[str, Any]) -> dict[str,
     counts: Counter[str] = Counter()
     style_errors = []
     source_binding_errors = []
+    payload_errors = []
     marker_text: dict[str, str] = {}
     doc = Document(path)
     for paragraph in all_body_paragraphs(doc):
@@ -350,6 +351,8 @@ def audit_manual_review_markers(path: Path, ledger: dict[str, Any]) -> dict[str,
     for marker_id in sorted(expected):
         item = expected_items[marker_id]
         paragraph_text = marker_text.get(marker_id, "")
+        if paragraph_text != _text(item):
+            payload_errors.append(marker_id)
         question_ids = sorted(str(value) for value in item.get("question_ids", []) if value)
         evidence_ids = sorted(str(value) for value in item.get("evidence_ids", []) if value)
         expected_refs = (
@@ -368,11 +371,15 @@ def audit_manual_review_markers(path: Path, ledger: dict[str, Any]) -> dict[str,
             "ledger_item_sha256": _canonical_sha256(item),
         })
     return {
-        "valid": not (missing or extra or duplicate or style_errors or source_binding_errors),
+        "valid": not (
+            missing or extra or duplicate or style_errors or source_binding_errors
+            or payload_errors
+        ),
         "expected_count": len(expected), "visible_marker_count": sum(counts.values()),
         "missing_ids": missing, "unexpected_ids": extra, "duplicate_ids": duplicate,
         "style_errors": sorted(set(style_errors)),
         "source_binding_errors": sorted(set(source_binding_errors)),
+        "payload_errors": sorted(set(payload_errors)),
         "marker_bindings": marker_bindings,
         "docx_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
         "visual_verification": "required", "submission_ready": False,

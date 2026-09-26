@@ -6,6 +6,7 @@ import argparse
 import copy
 import hashlib
 import json
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -429,7 +430,7 @@ def _validate_independent_obligation_receipts(
         retry_feedback = review_request.get("retry_feedback") if isinstance(review_request, dict) else None
         allowed_retry_feedback_codes = {
             "external_compliance_unrepresented_obligation",
-            "missing_executable_obligation_inventory",
+            "missing_source_obligation_inventory",
             "independent_obligation_review_incomplete",
         }
         if (
@@ -662,7 +663,13 @@ def _validate_independent_obligation_receipts(
             if isinstance(item, dict) and isinstance(item.get("check_id"), str)
         }
         source_content_pending_items: list[dict[str, Any]] = []
+        scope_unresolved_items: list[dict[str, Any]] = []
         backend_unsupported_items: list[dict[str, Any]] = []
+        packet_clauses = {
+            str(item.get("id")): item
+            for item in packets_by_index[index].get("clauses", [])
+            if isinstance(item, dict) and isinstance(item.get("id"), str)
+        }
         for result in normalized_results:
             if result.get("verdict") == "backend_unsupported":
                 backend_unsupported_items.append({
@@ -714,6 +721,67 @@ def _validate_independent_obligation_receipts(
                 "evidence_ids": sorted(str(key) for key in cited_evidence),
                 "reason": str(result.get("rationale") or ""),
             })
+        for obligation in ledger_items:
+            if not isinstance(obligation, dict) or obligation.get("disposition") != "scope_unresolved":
+                continue
+            check_id = obligation.get("check_id")
+            check = checks_by_id.get(str(check_id)) if isinstance(check_id, str) else None
+            context = check.get("review_context") if isinstance(check, dict) else None
+            cited_evidence = (
+                context.get("cited_evidence")
+                if isinstance(context, dict) and isinstance(context.get("cited_evidence"), dict)
+                else {}
+            )
+            source_clause = packet_clauses.get(str(check_id))
+            source_span = source_clause.get("source_span") if isinstance(source_clause, dict) else None
+            source_location = None
+            document_text = check.get("document_text") if isinstance(check, dict) else None
+            if (
+                isinstance(source_span, dict)
+                and isinstance(document_text, str)
+                and source_span.get("text") == document_text
+                and isinstance(source_span.get("evidence_id"), str)
+                and source_span.get("evidence_id") in cited_evidence
+                and isinstance(source_span.get("start_offset"), int)
+                and not isinstance(source_span.get("start_offset"), bool)
+                and isinstance(source_span.get("source_sha256"), str)
+            ):
+                source_location = {
+                    "evidence_id": source_span["evidence_id"],
+                    "start_offset": source_span["start_offset"] + obligation["source_start"],
+                    "end_offset": source_span["start_offset"] + obligation["source_end"],
+                    "source_sha256": source_span["source_sha256"],
+                }
+            if (
+                not isinstance(check_id, str) or not check_id
+                or not isinstance(cited_evidence, dict) or not cited_evidence
+                or any(
+                    not isinstance(evidence_id, str) or not evidence_id
+                    or not isinstance(evidence_item, dict)
+                    or not isinstance(evidence_item.get("text"), str)
+                    for evidence_id, evidence_item in cited_evidence.items()
+                )
+            ):
+                raise ValueError("scope-unresolved receipt has no exact clause and cited evidence")
+            scope_unresolved_items.append({
+                "analysis_obligation_id": obligation.get("analysis_obligation_id"),
+                "clause_id": check_id,
+                "source_ref": obligation.get("source_ref"),
+                "source_quote": obligation.get("source_quote"),
+                "source_start": obligation.get("source_start"),
+                "source_end": obligation.get("source_end"),
+                "source_text_sha256": obligation.get("source_text_sha256"),
+                "obligation_summary": obligation.get("obligation_summary"),
+                "scope_dependency_codes": copy.deepcopy(
+                    obligation.get("scope_dependency_codes") or []
+                ),
+                "scope_dependency_dimensions": copy.deepcopy(
+                    obligation.get("scope_dependency_dimensions") or []
+                ),
+                "evidence_ids": sorted(str(key) for key in cited_evidence),
+                "source_location": source_location,
+                "execution_authorized": False,
+            })
         validated.append({
             "chunk_index": index,
             "candidate_response_sha256": candidate_sha,
@@ -732,6 +800,8 @@ def _validate_independent_obligation_receipts(
             }),
             "source_content_pending_items": source_content_pending_items,
             "submission_blocked_by_source_content_pending": bool(source_content_pending_items),
+            "scope_unresolved_items": scope_unresolved_items,
+            "submission_blocked_by_scope_unresolved": bool(scope_unresolved_items),
         })
     if seen_indexes != expected_indexes:
         raise ValueError("host-agent audit omitted an independently reviewed chunk")
@@ -773,11 +843,23 @@ def enforce_obligation_review_output_policy(
 
 def _source_content_pending_release_gates(
     independent_reviews: list[dict[str, Any]],
+    *, clauses: list[dict[str, Any]], evidence_doc: dict[str, Any],
 ) -> list[dict[str, Any]]:
-    """Project validated author-input findings into draft-only visible gates."""
+    """Project source-bound author-input findings into draft-only visible gates."""
     if not isinstance(independent_reviews, list):
         raise ValueError("independent obligation reviews must be an array")
+    if not isinstance(clauses, list) or not isinstance(evidence_doc, dict):
+        raise ValueError("current clause and evidence artifacts are required for source-content gates")
+    clauses_by_id = {
+        str(item.get("id")): item for item in clauses
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    evidence_by_id = {
+        str(item.get("id")): item for item in evidence_doc.get("evidence", [])
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
     gates: list[dict[str, Any]] = []
+    seen_clause_ids: set[str] = set()
     for independent_review in independent_reviews:
         if not isinstance(independent_review, dict):
             raise ValueError("independent obligation review must be an object")
@@ -800,7 +882,55 @@ def _source_content_pending_release_gates(
                 not isinstance(value, str) or not value for value in evidence_ids
             ):
                 raise ValueError("source-content pending requires non-empty evidence IDs")
-            gates.append({
+            if clause_id in seen_clause_ids:
+                raise ValueError("duplicate source-content pending clause")
+            clause = clauses_by_id.get(clause_id)
+            span = clause.get("source_span") if isinstance(clause, dict) else None
+            span_evidence_id = span.get("evidence_id") if isinstance(span, dict) else None
+            source_evidence = evidence_by_id.get(span_evidence_id) if isinstance(span_evidence_id, str) else None
+            raw_source = source_evidence.get("text") if isinstance(source_evidence, dict) else None
+            start = span.get("start_offset") if isinstance(span, dict) else None
+            end = span.get("end_offset") if isinstance(span, dict) else None
+            span_text = span.get("text") if isinstance(span, dict) else None
+            clause_evidence_ids = clause.get("evidence_ids") if isinstance(clause, dict) else None
+            clause_text = clause.get("text") if isinstance(clause, dict) else None
+            source_location = None
+            if (
+                isinstance(clause, dict)
+                and isinstance(span, dict)
+                and isinstance(span_evidence_id, str)
+                and isinstance(raw_source, str)
+                and isinstance(start, int) and not isinstance(start, bool)
+                and isinstance(end, int) and not isinstance(end, bool)
+                and 0 <= start < end <= len(raw_source)
+                and isinstance(span_text, str)
+                and raw_source[start:end] == span_text
+                and hashlib.sha256(raw_source.encode("utf-8")).hexdigest()
+                == span.get("source_sha256")
+                and isinstance(clause_text, str)
+                and re.sub(r"\s+", " ", span_text).strip() == clause_text
+                and isinstance(clause_evidence_ids, list)
+                and set(clause_evidence_ids) == {span_evidence_id}
+                and set(evidence_ids) == {span_evidence_id}
+                and all(
+                    isinstance(quote, str)
+                    and quote in clause_text
+                    and re.sub(r"\s+", " ", quote).strip()
+                    in re.sub(r"\s+", " ", span_text).strip()
+                    for quote in quotes
+                )
+            ):
+                source_location = {
+                    "evidence_id": span_evidence_id,
+                    "start_offset": start,
+                    "end_offset": end,
+                    "source_sha256": span["source_sha256"],
+                }
+            if source_location is None:
+                raise ValueError(
+                    "source-content pending quote, evidence, range, or hash is not bound to current source"
+                )
+            gate = {
                 "source_code": "independent_authoring_content_pending",
                 "category": "input_prerequisite",
                 "source_text": "\n".join(quotes),
@@ -808,8 +938,133 @@ def _source_content_pending_release_gates(
                 "action": "请用本人真实研究内容替换示例或虚构内容；系统不会代写论文实质内容。完成后以 submission 模式重新开始一轮新运行。",
                 "placeholder_text": f"【待补写真实论文内容：{clause_id}】",
                 "clause_ids": [clause_id],
+                "evidence_ids": [span_evidence_id],
+                "source_location": source_location,
+            }
+            gates.append(gate)
+            seen_clause_ids.add(clause_id)
+    return gates
+
+
+def _scope_unresolved_release_gates(
+    independent_reviews: list[dict[str, Any]],
+    *, clauses: list[dict[str, Any]], evidence_doc: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Project each validated, analysis-only scope obligation into its own draft marker."""
+    if not isinstance(independent_reviews, list):
+        raise ValueError("independent obligation reviews must be an array")
+    gates: list[dict[str, Any]] = []
+    seen_obligation_ids: set[str] = set()
+    clauses_by_id = {
+        str(item.get("id")): item for item in clauses
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    evidence_by_id = {
+        str(item.get("id")): item for item in evidence_doc.get("evidence", [])
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    for independent_review in independent_reviews:
+        if not isinstance(independent_review, dict):
+            raise ValueError("independent obligation review must be an object")
+        items = independent_review.get("scope_unresolved_items", [])
+        if not isinstance(items, list):
+            raise ValueError("independent review scope-unresolved items must be an array")
+        for item in items:
+            if not isinstance(item, dict):
+                raise ValueError("scope-unresolved item must be an object")
+            clause_id = item.get("clause_id")
+            obligation_id = item.get("analysis_obligation_id")
+            quote = item.get("source_quote")
+            summary = item.get("obligation_summary")
+            evidence_ids = item.get("evidence_ids")
+            codes = item.get("scope_dependency_codes")
+            dimensions = item.get("scope_dependency_dimensions")
+            start, end = item.get("source_start"), item.get("source_end")
+            source_sha = item.get("source_text_sha256")
+            source_ref = item.get("source_ref")
+            source_location = item.get("source_location")
+            source_clause = clauses_by_id.get(clause_id) if isinstance(clause_id, str) else None
+            source_span = source_clause.get("source_span") if isinstance(source_clause, dict) else None
+            span_evidence_id = source_span.get("evidence_id") if isinstance(source_span, dict) else None
+            span_evidence = evidence_by_id.get(span_evidence_id) if isinstance(span_evidence_id, str) else None
+            span_source_text = span_evidence.get("text") if isinstance(span_evidence, dict) else None
+            span_start = source_span.get("start_offset") if isinstance(source_span, dict) else None
+            span_end = source_span.get("end_offset") if isinstance(source_span, dict) else None
+            span_text = source_span.get("text") if isinstance(source_span, dict) else None
+            expected_location = None
+            if (
+                isinstance(span_evidence_id, str)
+                and isinstance(span_source_text, str)
+                and isinstance(span_start, int) and not isinstance(span_start, bool)
+                and isinstance(span_end, int) and not isinstance(span_end, bool)
+                and isinstance(span_text, str)
+                and 0 <= span_start < span_end <= len(span_source_text)
+                and span_source_text[span_start:span_end] == span_text
+                and hashlib.sha256(span_source_text.encode("utf-8")).hexdigest()
+                == source_span.get("source_sha256")
+                and isinstance(start, int) and not isinstance(start, bool)
+                and isinstance(end, int) and not isinstance(end, bool)
+                and 0 <= start < end <= len(span_text)
+                and quote == span_text[start:end]
+                and source_sha == sha256_json(span_text)
+            ):
+                expected_location = {
+                    "evidence_id": span_evidence_id,
+                    "start_offset": span_start + start,
+                    "end_offset": span_start + end,
+                    "source_sha256": source_span["source_sha256"],
+                }
+            if (
+                not isinstance(clause_id, str) or not clause_id
+                or not isinstance(obligation_id, str) or not obligation_id.startswith("AO-")
+                or obligation_id in seen_obligation_ids
+                or not isinstance(quote, str) or not quote
+                or not isinstance(summary, str) or not summary.strip()
+                or not isinstance(evidence_ids, list) or not evidence_ids
+                or any(not isinstance(value, str) or not value for value in evidence_ids)
+                or not isinstance(codes, list) or not codes
+                or any(not isinstance(value, str) or not value for value in codes)
+                or not isinstance(dimensions, list) or not dimensions
+                or any(not isinstance(value, str) or not value for value in dimensions)
+                or isinstance(start, bool) or not isinstance(start, int) or start < 0
+                or isinstance(end, bool) or not isinstance(end, int) or end <= start
+                or not isinstance(source_sha, str)
+                or len(source_sha) != 64
+                or any(char not in "0123456789abcdef" for char in source_sha)
+                or not isinstance(source_ref, str) or not source_ref
+                or span_evidence_id not in evidence_ids
+                or expected_location is None
+                or source_location != expected_location
+                or item.get("execution_authorized") is not False
+            ):
+                raise ValueError(
+                    "validated scope-unresolved item is malformed, unbound to exact source, or executable"
+                )
+            seen_obligation_ids.add(obligation_id)
+            gate = {
+                "source_code": "independent_scope_unresolved",
+                "category": "runtime_manual_unverifiable",
+                "source_text": quote,
+                "reason": summary,
+                "action": (
+                    "请人工确认这条来源义务的适用对象、计量单位或条件；不要将其视为已满足。"
+                    "确认后应以权威输入重新运行。"
+                ),
+                "placeholder_text": f"【待人工处理：待确认适用范围：{clause_id}｜{obligation_id}】",
+                "clause_ids": [clause_id],
                 "evidence_ids": sorted(set(evidence_ids)),
-            })
+                "analysis_obligation_id": obligation_id,
+                "obligation_summary": summary,
+                "scope_dependency_codes": sorted(set(codes)),
+                "scope_dependency_dimensions": sorted(set(dimensions)),
+                "source_ref": source_ref,
+                "source_start": start,
+                "source_end": end,
+                "source_text_sha256": source_sha,
+                "execution_authorized": False,
+            }
+            gate["source_location"] = copy.deepcopy(expected_location)
+            gates.append(gate)
     return gates
 
 
@@ -2006,7 +2261,14 @@ def _main(argv: list[str]) -> int:
             if isinstance(host_review_receipts, dict) else []
         )
         manual_review_release_gates.extend(
-            _source_content_pending_release_gates(independent_reviews)
+            _source_content_pending_release_gates(
+                independent_reviews, clauses=clauses, evidence_doc=evidence_doc,
+            )
+        )
+        manual_review_release_gates.extend(
+            _scope_unresolved_release_gates(
+                independent_reviews, clauses=clauses, evidence_doc=evidence_doc,
+            )
         )
         manifest["manual_review_release_gates"] = [
             gate["source_code"] for gate in manual_review_release_gates
@@ -2215,11 +2477,24 @@ def _main(argv: list[str]) -> int:
         manifest.update(status="blocked", reason="style mapping needs clarification", questions_file=str(style_map))
         write_json(manifest_path, manifest); print(json.dumps(manifest, ensure_ascii=False)); return 4
 
+    if args.output_policy == "review_draft":
+        current_ledger = read_json(manual_review_items_path)
+        manifest["manual_review_binding"] = copy.deepcopy(current_ledger.get("binding"))
+        manifest["manual_review_ledger_input_sha256"] = file_record(
+            manual_review_items_path
+        ).get("sha256")
+        write_json(manifest_path, manifest)
+
     apply_cmd = [sys.executable, str(ROOT / "scripts" / "apply_format_spec.py"), str(application_input),
                  str(requirements_dir / "format-spec.json"), str(args.output), "--out-dir", str(apply_dir),
                  "--style-map", str(style_map), "--compliance-mode", execution_compliance_mode,
+                 "--source-clauses", str(requirements_dir / "requirement-clauses.json"),
+                 "--source-evidence", str(requirements_dir / "document-evidence.json"),
+                 "--source-evidence-context", str(requirements_dir / "evidence-context.json"),
+                 "--source-extraction-manifest", str(requirements_dir / "extraction-manifest.json"),
                  "--output-policy", args.output_policy,
                  "--capability-report", str(capability_report_path)]
+    apply_cmd += ["--case-id", args.case_id or "standalone"]
     if not args.neutral_reference_docx:
         apply_cmd.append("--require-coverage")
     if args.neutral_reference_docx:
@@ -2231,12 +2506,14 @@ def _main(argv: list[str]) -> int:
     if args.preview_placeholders or args.output_policy == "review_draft":
         apply_cmd.append("--preview-placeholders")
     if args.output_policy == "review_draft":
-        apply_cmd += ["--manual-review-items", str(manual_review_items_path)]
+        apply_cmd += [
+            "--manual-review-items", str(manual_review_items_path),
+            "--pipeline-manifest", str(manifest_path),
+        ]
     if args.semantic_review_runtime:
         apply_cmd += [
             "--semantic-review-runtime", args.semantic_review_runtime,
             "--semantic-review-model", args.semantic_review_model,
-            "--case-id", args.case_id or "standalone",
         ]
     if args.template_profile and not args.neutral_reference_docx:
         # apply_format_spec retains its legacy interface; the profile gate is

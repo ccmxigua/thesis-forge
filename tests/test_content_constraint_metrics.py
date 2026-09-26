@@ -187,7 +187,12 @@ class ContentConstraintMetricTests(unittest.TestCase):
                      if item.get("property") == "keywords.match_other_language_count")
         self.assertEqual(match["declared_by"], ["keywords_zh"])
         self.assertEqual(match["template_value"], {"keywords_zh": 2, "keywords_en": 1})
-        markers = manual_review_validation_items(findings)
+        markers = manual_review_validation_items(findings, {"requirements": [{
+            "id": "R00001", "role": "content_constraints",
+            "clause_ids": ["C00001"], "evidence_ids": ["E00001"],
+            "source_text": "中英文关键词数量应一致。",
+            "properties": {"keywords_zh": {"match_other_language_count": True}},
+        }]})
         self.assertEqual(len(markers), 1)
         self.assertEqual(markers[0]["category"], "semantic_content_review")
         self.assertIn("不能确定应补充、删除", markers[0]["reason"])
@@ -201,7 +206,12 @@ class ContentConstraintMetricTests(unittest.TestCase):
         )
         violation = next(item for item in findings if ".max_item_chars[" in item["property"])
         self.assertEqual(violation["template_value"], 7)
-        markers = manual_review_validation_items(findings)
+        markers = manual_review_validation_items(findings, {"requirements": [{
+            "id": "R00002", "role": "content_constraints",
+            "clause_ids": ["C00002"], "evidence_ids": ["E00002"],
+            "source_text": "中文关键词每项最多7个汉字。",
+            "properties": {"keywords_zh": {"max_item_chars": 7}},
+        }]})
         self.assertEqual(len(markers), 1)
         self.assertIn("不能擅自删改", markers[0]["reason"])
 
@@ -219,13 +229,13 @@ class ContentConstraintMetricTests(unittest.TestCase):
             "check_id": "abstract_zh.require_third_person",
             "source_requirements": [{
                 "requirement_id": "R00001", "clause_ids": ["C00001"],
-                "evidence_ids": ["E00001"],
+                "evidence_ids": ["E00001"], "source_text": "摘要应使用第三人称。",
             }],
         }, {
             "check_id": "abstract_en.required_sections",
             "source_requirements": [{
                 "requirement_id": "R00002", "clause_ids": ["C00002"],
-                "evidence_ids": ["E00002"],
+                "evidence_ids": ["E00002"], "source_text": "英文摘要应包含结论。",
             }],
         }]
         review = {"results": [
@@ -246,13 +256,19 @@ class ContentConstraintMetricTests(unittest.TestCase):
         findings = manual_review_validation_items([
             {"role": "keywords_zh", "property": "separator", "template_value": "，",
              "required_value": "semicolon"},
-            {"role": "keywords_en", "property": "metric", "verification": "human_decision",
+            {"role": "content_constraints", "property": "keywords_en.item_length_metric", "verification": "human_decision",
              "template_value": "cjk_characters", "required_value": "human scope decision"},
-            {"role": "keywords_en", "property": "metric", "verification": "manual",
+            {"role": "content_constraints", "property": "keywords_en.item_length_metric", "verification": "manual",
              "template_value": "cjk_characters", "required_value": "legacy generic manual"},
-        ])
+        ], {"requirements": [{
+            "id": "R00003", "role": "content_constraints",
+            "clause_ids": ["C00003"], "evidence_ids": ["E00003"],
+            "source_text": "英文关键词的计量方式需人工确认。",
+            "properties": {"keywords_en": {"item_length_metric": "cjk_characters"}},
+        }]})
         self.assertEqual(len(findings), 1)
-        self.assertIn("keywords_en.metric", findings[0]["source_text"])
+        self.assertEqual(findings[0]["source_text"], "英文关键词的计量方式需人工确认。")
+        self.assertIn("human scope decision", findings[0]["reason"])
 
     def test_unverified_property_receipts_stay_out_of_red_ledger(self) -> None:
         self.assertEqual(manual_review_receipt_items([{

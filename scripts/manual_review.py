@@ -8,6 +8,8 @@ is the authoritative machine-readable record.
 """
 from __future__ import annotations
 
+import copy
+import hashlib
 import json
 import re
 from pathlib import Path
@@ -72,6 +74,94 @@ def _string_list(value: Any) -> list[str]:
     if not isinstance(value, list):
         return []
     return [str(item) for item in value if item not in (None, "")]
+
+
+def _source_location_identity(item: dict[str, Any]) -> str:
+    locations: list[Any] = []
+    singular = item.get("source_location")
+    if isinstance(singular, dict):
+        locations.append(singular)
+    plural = item.get("source_locations")
+    if isinstance(plural, list):
+        locations.extend(value for value in plural if isinstance(value, dict))
+    unique = {
+        json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        for value in locations
+    }
+    return json.dumps(sorted(unique), ensure_ascii=False, separators=(",", ":"))
+
+
+def _manual_item_identity(item: dict[str, Any]) -> tuple[Any, ...]:
+    clause_ids = tuple(sorted(_string_list(item.get("clause_ids"))))
+    requirement_ids = tuple(sorted(_string_list(item.get("requirement_ids"))))
+    location = _source_location_identity(item)
+    evidence_ids = tuple(sorted(_string_list(item.get("evidence_ids"))))
+    question_ids = tuple(sorted(_string_list(item.get("question_ids"))))
+    source_code = str(item.get("source_code") or "")
+    anchored = bool(clause_ids or requirement_ids or location.strip("[]"))
+    return (
+        str(item.get("category") or ""),
+        str(item.get("source_text") or ""),
+        clause_ids,
+        requirement_ids,
+        location,
+        str(item.get("analysis_obligation_id") or ""),
+        evidence_ids,
+        () if anchored else question_ids,
+        "" if anchored else source_code,
+    )
+
+
+def _require_semantic_marker_source(item: dict[str, Any]) -> None:
+    if str(item.get("category") or "") != "semantic_content_review":
+        return
+    if not _string_list(item.get("clause_ids")):
+        raise ValueError("semantic-content review marker requires a bound clause_id")
+    if not _string_list(item.get("evidence_ids")):
+        raise ValueError("semantic-content review marker requires a bound evidence_id")
+    if not isinstance(item.get("source_text"), str) or not item["source_text"].strip():
+        raise ValueError("semantic-content review marker requires source text")
+
+
+def _normalize_manual_marker_text(item: dict[str, Any]) -> None:
+    source_text = item.get("source_text")
+    if not isinstance(source_text, str) or not source_text.strip():
+        raise ValueError("manual-review marker requires non-empty source text")
+    if not isinstance(item.get("reason"), str) or not item["reason"].strip():
+        item["reason"] = source_text
+    category = str(item.get("category") or "")
+    if not isinstance(item.get("action"), str) or not item["action"].strip():
+        item["action"] = CATEGORY_ACTIONS.get(category, "请人工核对该项并记录结果。")
+    if not isinstance(item.get("placeholder_text"), str) or not item["placeholder_text"].strip():
+        item["placeholder_text"] = f"【待人工处理：{item.get('source_code') or category or '未命名项目'}】"
+
+
+def _merge_manual_item(target: dict[str, Any], candidate: dict[str, Any]) -> None:
+    for field in ("question_ids", "evidence_ids", "clause_ids", "requirement_ids", "source_codes"):
+        target[field] = sorted(set(_string_list(target.get(field))) | set(_string_list(candidate.get(field))))
+    for field in ("reason", "action"):
+        values = [str(value).strip() for value in (target.get(field), candidate.get(field)) if value]
+        target[field] = "；".join(dict.fromkeys(values))
+    if target.get("source_type") != candidate.get("source_type"):
+        target["source_type"] = "multiple_bound_sources"
+    target["original_blocking"] = bool(target.get("original_blocking")) or bool(
+        candidate.get("original_blocking")
+    )
+    target["release_gate"] = bool(target.get("release_gate")) or bool(candidate.get("release_gate"))
+
+
+def _deduplicate_manual_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: dict[tuple[Any, ...], dict[str, Any]] = {}
+    for original in items:
+        item = dict(original)
+        _normalize_manual_marker_text(item)
+        _require_semantic_marker_source(item)
+        key = _manual_item_identity(item)
+        if key in merged:
+            _merge_manual_item(merged[key], item)
+        else:
+            merged[key] = dict(item)
+    return list(merged.values())
 
 
 def _question_item(question: dict[str, Any]) -> dict[str, Any]:
@@ -204,21 +294,27 @@ def build_manual_review_ledger(
             ),
             "original_blocking": bool(gate.get("original_blocking", True)),
             "release_gate": True,
+            **{
+                key: copy.deepcopy(gate[key])
+                for key in (
+                    "analysis_obligation_id", "obligation_summary",
+                    "scope_dependency_codes", "scope_dependency_dimensions",
+                    "source_ref", "source_start", "source_end",
+                    "source_text_sha256", "source_location", "execution_authorized",
+                )
+                if key in gate
+            },
         })
 
     merged: dict[tuple[Any, ...], dict[str, Any]] = {}
     for candidate in candidates:
-        key = (
-            candidate["category"],
-            tuple(candidate["clause_ids"]),
-            tuple(candidate["requirement_ids"]),
-            candidate["source_text"],
-        )
-        current = merged.setdefault(key, dict(candidate))
-        for field in ("question_ids", "evidence_ids", "clause_ids", "requirement_ids", "source_codes"):
-            current[field] = sorted(set(current.get(field, [])) | set(candidate.get(field, [])))
-        if current.get("source_type") != candidate.get("source_type"):
-            current["source_type"] = "capability_finding_and_open_question"
+        _normalize_manual_marker_text(candidate)
+        _require_semantic_marker_source(candidate)
+        key = _manual_item_identity(candidate)
+        if key not in merged:
+            merged[key] = dict(candidate)
+        else:
+            _merge_manual_item(merged[key], candidate)
 
     items: list[dict[str, Any]] = []
     for index, item in enumerate(sorted(
@@ -268,29 +364,21 @@ def add_manual_review_items(
     """
     if not isinstance(ledger, dict):
         raise ValueError("manual review ledger must be an object")
-    existing = [item for item in ledger.get("items", []) if isinstance(item, dict)]
-    identities = {
-        (
-            str(item.get("category") or ""),
-            str(item.get("source_code") or ""),
-            str(item.get("source_text") or ""),
-        )
-        for item in existing
-    }
+    existing = _deduplicate_manual_items([
+        item for item in ledger.get("items", []) if isinstance(item, dict)
+    ])
+    items_by_identity = {_manual_item_identity(item): item for item in existing}
     for candidate in candidates or []:
         if not isinstance(candidate, dict):
             continue
         item = dict(candidate)
         if str(item.get("category") or "") not in HUMAN_MARKER_CATEGORIES:
             continue
-        identity = (
-            str(item.get("category") or ""),
-            str(item.get("source_code") or ""),
-            str(item.get("source_text") or ""),
-        )
-        if identity in identities:
+        _require_semantic_marker_source(item)
+        identity = _manual_item_identity(item)
+        if identity in items_by_identity:
+            _merge_manual_item(items_by_identity[identity], item)
             continue
-        identities.add(identity)
         item.setdefault("source_type", "release_gate")
         item.setdefault("source_codes", [str(item.get("source_code") or "release_gate")])
         item.setdefault("clause_ids", [])
@@ -304,7 +392,10 @@ def add_manual_review_items(
             f"【待人工处理：{item.get('source_code') or item.get('category') or '未命名项目'}】",
         )
         item.setdefault("original_blocking", True)
+        _normalize_manual_marker_text(item)
+        _require_semantic_marker_source(item)
         existing.append(item)
+        items_by_identity[identity] = item
     for index, item in enumerate(existing, start=1):
         item["marker_id"] = f"MR-{index:04d}"
         item["status"] = "pending_manual_review"
@@ -333,11 +424,11 @@ def filter_manual_marker_ledger(ledger: dict[str, Any]) -> dict[str, Any]:
     """
     if not isinstance(ledger, dict):
         raise ValueError("manual review ledger must be an object")
-    items = [
+    items = _deduplicate_manual_items([
         dict(item) for item in ledger.get("items", [])
         if isinstance(item, dict)
         and str(item.get("category") or "") in HUMAN_MARKER_CATEGORIES
-    ]
+    ])
     items.sort(key=lambda item: (
         tuple(item.get("clause_ids") or []),
         tuple(item.get("requirement_ids") or []),
@@ -360,6 +451,45 @@ def filter_manual_marker_ledger(ledger: dict[str, Any]) -> dict[str, Any]:
     }
     ledger["submission_ready"] = False
     return ledger
+
+
+def validate_manual_review_ledger_ingress(
+    ledger: Any, *, expected_binding: Any, expected_ledger_sha256: Any,
+    actual_ledger_sha256: str,
+) -> list[str]:
+    """Reject stale, changed, or ambiguously identified review sidecars.
+
+    The expected binding and input digest must come from the current pipeline
+    invocation's manifest; this check runs before any filtering or marker-ID
+    normalization can hide a malformed/stale input ledger.
+    """
+    errors: list[str] = []
+    if not isinstance(ledger, dict):
+        return ["manual_review_ledger_must_be_object"]
+    if not isinstance(expected_binding, dict) or not expected_binding:
+        errors.append("current_pipeline_manual_review_binding_missing")
+    elif ledger.get("binding") != expected_binding:
+        errors.append("manual_review_ledger_current_run_binding_mismatch")
+    if (
+        not isinstance(expected_ledger_sha256, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", expected_ledger_sha256)
+        or actual_ledger_sha256 != expected_ledger_sha256
+    ):
+        errors.append("manual_review_ledger_input_sha256_mismatch")
+    items = ledger.get("items")
+    if not isinstance(items, list):
+        errors.append("manual_review_ledger_items_must_be_array")
+    else:
+        marker_ids = [
+            item.get("marker_id") for item in items if isinstance(item, dict)
+        ]
+        if len(marker_ids) != len(items) or any(
+            not isinstance(marker_id, str) or not marker_id for marker_id in marker_ids
+        ):
+            errors.append("manual_review_ledger_marker_ids_missing")
+        elif len(set(marker_ids)) != len(marker_ids):
+            errors.append("manual_review_ledger_marker_ids_not_unique")
+    return errors
 
 
 def write_manual_review_ledger(path: Path, ledger: dict[str, Any]) -> None:

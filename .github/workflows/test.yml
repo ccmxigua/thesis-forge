@@ -26,7 +26,13 @@ jobs:
         run: |
           pandoc --version
           test "$(pandoc --version | sed -n '1s/^pandoc //p')" = "3.7.0.2"
+      - name: Install and verify PDF rasterizer
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes poppler-utils
+          command -v pdftoppm
+          pdftoppm -v
       - name: Install deterministic test dependencies
         run: python -m pip install --requirement requirements-test.txt
       - name: Compile and run unit tests
-        run: make test
+        run: make check

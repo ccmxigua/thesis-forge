@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import hashlib
 import importlib.util
 import json
 import os
@@ -14,6 +15,7 @@ import unittest
 import zipfile
 import xml.etree.ElementTree as ET
 from pathlib import Path
+from unittest.mock import patch
 
 from docx import Document
 from docx.enum.section import WD_SECTION
@@ -35,6 +37,7 @@ import apply_format_spec
 import format_contract_guards
 import requirements_engine
 from resource_registry import materialize_declaration_resources
+from semantic_contract import evidence_payload, sha256_json
 
 
 def run(*args: str) -> subprocess.CompletedProcess[str]:
@@ -43,6 +46,57 @@ def run(*args: str) -> subprocess.CompletedProcess[str]:
 
 def run_raw(*args: str) -> subprocess.CompletedProcess[str]:
     return subprocess.run([PY, *args], cwd=ROOT, check=False, text=True, capture_output=True)
+
+
+def bind_test_content_instance_run(
+    directory: Path, spec_path: Path, clauses_path: Path, evidence_path: Path,
+) -> tuple[str, ...]:
+    """Build internally consistent run-bound artifacts for CLI provenance tests."""
+    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+    clauses_data = json.loads(clauses_path.read_text(encoding="utf-8"))
+    clauses = clauses_data if isinstance(clauses_data, list) else clauses_data["clauses"]
+    evidence_doc = json.loads(evidence_path.read_text(encoding="utf-8"))
+    requirement_source = directory / "requirements-source.docx"
+    source_doc = Document()
+    source_doc.add_paragraph("测试格式要求来源")
+    source_doc.save(requirement_source)
+    source_sha256 = hashlib.sha256(requirement_source.read_bytes()).hexdigest()
+    run_id = "test-content-instance-run"
+    provenance = {
+        "version": "1.0", "origin": "fresh_host_agent",
+        "source_sha256": source_sha256,
+        "evidence_sha256": sha256_json(evidence_payload(evidence_doc)),
+        "clause_sha256": sha256_json(clauses),
+        "request_sha256": "f" * 64,
+        "run_id": run_id,
+    }
+    evidence_context_path = directory / "evidence-context.json"
+    evidence_context_path.write_text(
+        json.dumps(evidence_payload(evidence_doc), ensure_ascii=False, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    manifest_path = directory / "extraction-manifest.json"
+    manifest = {
+        "status": "completed", "run_id": run_id, "cache_reused": False,
+        "source_document": str(requirement_source.resolve()),
+        "source_sha256": source_sha256,
+        "requirement_clauses_sha256": hashlib.sha256(clauses_path.read_bytes()).hexdigest(),
+        "document_evidence_sha256": hashlib.sha256(evidence_path.read_bytes()).hexdigest(),
+        "evidence_sha256": hashlib.sha256(evidence_context_path.read_bytes()).hexdigest(),
+        "semantic_review_provenance": provenance,
+    }
+    manifest_path.write_text(
+        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8",
+    )
+    spec["source_document"] = str(requirement_source.resolve())
+    spec["run_id"] = run_id
+    spec["semantic_review_provenance"] = provenance
+    spec["semantic_review_provenance_valid"] = True
+    spec_path.write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
+    return (
+        "--source-evidence-context", str(evidence_context_path),
+        "--source-extraction-manifest", str(manifest_path),
+    )
 
 
 def make_requirements(path: Path, ambiguous: bool = False) -> None:
@@ -116,6 +170,71 @@ def make_multi_section_target(path: Path) -> None:
 
 
 class RequirementsPipelineTest(unittest.TestCase):
+    def test_interrupted_atomic_merge_rolls_back_published_artifacts(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first, second, marker = root / "first.json", root / "second.json", root / "receipt.json"
+            original_replace = Path.replace
+
+            def interrupt_second_publish(path: Path, target: Path) -> Path:
+                if Path(target) == second and ".tmp-" in path.name:
+                    raise KeyboardInterrupt("test interruption during merge publication")
+                return original_replace(path, target)
+
+            with patch.object(Path, "replace", new=interrupt_second_publish):
+                with self.assertRaises(KeyboardInterrupt):
+                    requirements_engine._write_json_artifacts_atomic(
+                        [(first, {"ok": 1}), (second, {"ok": 2})],
+                        commit_marker_path=marker, commit_root=root,
+                        commit_metadata={"run_id": "run-interrupted"},
+                    )
+            self.assertFalse(first.exists())
+            self.assertFalse(second.exists())
+            self.assertFalse(marker.exists())
+            self.assertEqual(list(root.iterdir()), [])
+
+    def test_interrupted_fresh_extraction_replaces_old_success_with_terminal_state(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            source = root / "requirements.docx"
+            source_doc = Document(); source_doc.add_paragraph("requirements")
+            source_doc.save(source)
+            out = root / "requirements"
+            out.mkdir()
+            (out / "format-spec.json").write_text('{"old": true}', encoding="utf-8")
+            (out / "extraction-manifest.json").write_text(json.dumps({
+                "run_id": "old-run", "status": "completed", "cache_reused": False,
+            }), encoding="utf-8")
+            args = type("Args", (), {
+                "input": source, "out": out, "run_id": "new-run",
+            })()
+            with patch.object(
+                requirements_engine, "normalize_requirements_input",
+                side_effect=KeyboardInterrupt("test extraction interruption"),
+            ):
+                with self.assertRaises(KeyboardInterrupt):
+                    requirements_engine.analyse(args)
+            manifest = json.loads((out / "extraction-manifest.json").read_text(encoding="utf-8"))
+            self.assertEqual(manifest["run_id"], "new-run")
+            self.assertEqual(manifest["status"], "interrupted")
+            self.assertFalse((out / "format-spec.json").exists())
+
+    def test_split_clauses_preserves_exact_original_source_span(self) -> None:
+        raw = "密  级："
+        evidence = {"evidence": [{
+            "id": "E1", "text": raw, "kind": "paragraph",
+            "location": {"part": "document", "order": 1},
+            "context_before": [], "context_after": [],
+        }]}
+        clauses = requirements_engine.split_clauses(evidence)
+        self.assertEqual(len(clauses), 1)
+        clause = clauses[0]
+        span = clause["source_span"]
+        self.assertEqual(clause["text"], "密 级")
+        self.assertEqual(span["text"], "密  级")
+        self.assertEqual(raw[span["start_offset"]:span["end_offset"]], span["text"])
+        self.assertEqual(span["evidence_id"], "E1")
+
     def test_unresolved_spine_annotation_is_not_reclassified_by_nearby_context(self) -> None:
         clauses = [
             {
@@ -1274,6 +1393,30 @@ b&=2\notag
         body_errors = load_and_validate(body_spec, ROOT / "schema" / "format-spec.schema.json")
         self.assertFalse(any("inline placement" in e for e in body_errors), body_errors)
 
+    def test_content_instances_and_legacy_alias_cannot_be_combined(self) -> None:
+        from scripts.format_spec_validation import load_and_validate
+        spec = {
+            "schema_version": "1.0", "source_document": "x", "status": "rule_resolved",
+            "roles": {}, "requirements": [], "content_instances": [],
+            "cover_field_instances": [{"id": "legacy-instance"}],
+        }
+        errors = load_and_validate(spec, ROOT / "schema" / "format-spec.schema.json")
+        self.assertTrue(any(
+            "content_instances and $.cover_field_instances are mutually exclusive" in error
+            for error in errors
+        ), errors)
+        binding_errors, bindings = apply_format_spec.validate_content_instance_source_bindings(
+            spec, [], {}, {}, {}, clause_artifact_sha256="",
+            document_evidence_artifact_sha256="", evidence_context_artifact_sha256="",
+        )
+        self.assertIn(
+            "content_instances_and_legacy_cover_field_instances_are_mutually_exclusive",
+            binding_errors,
+        )
+        self.assertEqual(bindings, {})
+        with self.assertRaisesRegex(ValueError, "content_instances and cover_field_instances"):
+            apply_format_spec.apply_content_instance_overrides(Document(), spec, {}, {})
+
     def test_direct_line_spacing_is_parsed_without_fixed_value_keyword(self) -> None:
         from scripts.requirements_engine import parse_properties
         properties = parse_properties("论文题目仿宋14磅，行距16磅，段前段后0磅")
@@ -1376,6 +1519,12 @@ b&=2\notag
                 "仿宋14磅，行距16磅"), "cover_field_value")
             self.assertEqual(parse_properties("引文内容可用楷体"), {})
             self.assertNotIn("italic", parse_properties("量的符号一律采用斜体" ).get("font", {}))
+            self.assertNotEqual(
+                parse_properties("正文不得使用宋体").get("font", {}).get("cjk"),
+                "SimSun",
+            )
+            self.assertEqual(parse_properties("若正文用于标题，则采用黑体"), {})
+            self.assertEqual(parse_properties("正文使用宋体")["font"]["cjk"], "SimSun")
             self.assertEqual(identify_role("表内字体为宋体，小五号")[0], "table_text")
             self.assertEqual(identify_role("标题“附录A 附录内容名称”样式为黑体小三")[0], "heading_1")
         finally:
@@ -1481,6 +1630,10 @@ b&=2\notag
             self.assertNotEqual(first_manifest["source_sha256"], second_manifest["source_sha256"])
             self.assertGreater(second_manifest["clause_count"], first_manifest["clause_count"])
             self.assertFalse(second_manifest["cache_reused"])
+            self.assertEqual(
+                second_manifest["document_evidence_sha256"],
+                hashlib.sha256((out / "document-evidence.json").read_bytes()).hexdigest(),
+            )
             self.assertIn("llm-response.raw.json", second_manifest["invalidated_prior_artifacts"])
             self.assertIn("llm-merge-audit.json", second_manifest["invalidated_prior_artifacts"])
             self.assertFalse((out / "llm-response.raw.json").exists())
@@ -2031,6 +2184,25 @@ b&=2\notag
             self.assertEqual(records[clauses[0]["id"]]["requirement_ids"], [])
             self.assertEqual(records[clauses[0]["id"]]["status"], "unresolved")
             self.assertIn("rejected", records[clauses[0]["id"]]["reason"])
+
+    def test_declaration_text_with_same_source_atom_but_distinct_ids_is_blocked(self) -> None:
+        original = {
+            "before_role": "abstract_title_zh",
+            "items": [{
+                "id": "declaration-a", "body_parts": ["本人声明本论文为本人完成。"],
+                "source_evidence_ids": ["E1"], "signature_placeholders": [],
+            }],
+        }
+        incoming = {
+            "before_role": "abstract_title_zh",
+            "items": [{
+                "id": "declaration-b", "body_parts": ["本人声明本论文为本人完成。"],
+                "source_evidence_ids": ["E1"], "signature_placeholders": [],
+            }],
+        }
+        conflicts = requirements_engine._merge_declaration_properties(original, incoming)
+        self.assertTrue(any("source_ownership" in path for path, _, _ in conflicts), conflicts)
+        self.assertEqual([item["id"] for item in original["items"]], ["declaration-a"])
 
     def test_declaration_fragments_merge_by_item_id_and_materialize(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -2986,7 +3158,24 @@ b&=2\notag
         with tempfile.TemporaryDirectory() as td:
             td = Path(td); source = td / "source.docx"; output = td / "output.docx"
             spec_path = td / "spec.json"; audit = td / "audit"
+            clauses_path = td / "clauses.json"; evidence_path = td / "evidence.json"
             doc = Document(); doc.add_paragraph("分类号"); doc.save(source)
+            source_text = "分类号"
+            source_sha = hashlib.sha256(source_text.encode("utf-8")).hexdigest()
+            clauses_path.write_text(json.dumps([{
+                "id": "C1", "text": source_text, "evidence_ids": ["E1", "E2"],
+                "source_span": {
+                    "evidence_id": "E1", "start_offset": 0,
+                    "end_offset": len(source_text), "text": source_text,
+                    "source_sha256": source_sha,
+                },
+            }], ensure_ascii=False), encoding="utf-8")
+            evidence_path.write_text(json.dumps({
+                "evidence": [
+                    {"id": "E1", "text": source_text},
+                    {"id": "E2", "text": "补充证据"},
+                ],
+            }, ensure_ascii=False), encoding="utf-8")
             spec_path.write_text(json.dumps({
                 "schema_version": "1.0", "source_document": "test",
                 "status": "semantic_resolved", "analysis_mode": "llm_primary",
@@ -3005,8 +3194,13 @@ b&=2\notag
                     "clause_ids": ["C1"], "resolved_by": "llm", "confidence": .98,
                 }],
             }, ensure_ascii=False), encoding="utf-8")
+            source_binding_args = bind_test_content_instance_run(
+                td, spec_path, clauses_path, evidence_path,
+            )
             result = run_raw("scripts/apply_format_spec.py", str(source), str(spec_path), str(output),
-                             "--out-dir", str(audit), "--compliance-mode", "supported_subset")
+                             "--out-dir", str(audit), "--compliance-mode", "supported_subset",
+                             "--source-clauses", str(clauses_path),
+                             "--source-evidence", str(evidence_path), *source_binding_args)
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
             rendered = Document(output)
             self.assertEqual(len(rendered.paragraphs), 1)
@@ -3014,6 +3208,264 @@ b&=2\notag
             instance_audit = json.loads((audit / "content-instance-audit.json").read_text())
             self.assertEqual(instance_audit["counts"]["applied"], 1)
             self.assertEqual(instance_audit["instances"][0]["status"], "applied")
+            self.assertEqual(instance_audit["instances"][0]["source_bindings"][0]["clause_id"], "C1")
+            report = json.loads((audit / "validation-report.json").read_text())
+            self.assertEqual(report["content_instance_source_binding"]["status"], "validated")
+
+    def test_content_instance_override_rejects_unbacked_manual_spec_literal(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td); source = td / "source.docx"; output = td / "output.docx"
+            spec_path = td / "spec.json"; audit = td / "audit"
+            clauses_path = td / "clauses.json"; evidence_path = td / "evidence.json"
+            doc = Document(); doc.add_paragraph("编造标签"); doc.save(source)
+            source_text = "分类号"
+            source_sha = hashlib.sha256(source_text.encode("utf-8")).hexdigest()
+            clauses_path.write_text(json.dumps([{
+                "id": "C1", "text": source_text, "evidence_ids": ["E1"],
+                "source_span": {
+                    "evidence_id": "E1", "start_offset": 0,
+                    "end_offset": len(source_text), "text": source_text,
+                    "source_sha256": source_sha,
+                },
+            }], ensure_ascii=False), encoding="utf-8")
+            evidence_path.write_text(json.dumps({
+                "evidence": [{"id": "E1", "text": source_text}],
+            }, ensure_ascii=False), encoding="utf-8")
+            spec_path.write_text(json.dumps({
+                "schema_version": "1.0", "source_document": "test",
+                "status": "semantic_resolved", "analysis_mode": "llm_primary",
+                "roles": {"cover_field_label": {"font": {"size_pt": 10.5}}},
+                "content_instances": [{
+                    "id": "CFI-test", "field_key": "cover_field_label:伪造",
+                    "role": "cover_field_label", "text": "编造标签", "order": 1,
+                    "clause_ids": ["C1"], "evidence_ids": ["E1"],
+                    "style_properties": {"font": {"size_pt": 16}}, "reason": "forged",
+                }],
+                "requirements": [{
+                    "id": "R00001", "role": "cover_field_label",
+                    "properties": {"text": "编造标签"}, "field_instance_ids": ["CFI-test"],
+                    "evidence_ids": ["E1"], "clause_ids": ["C1"],
+                    "resolved_by": "llm", "confidence": .98,
+                }],
+            }, ensure_ascii=False), encoding="utf-8")
+            source_binding_args = bind_test_content_instance_run(
+                td, spec_path, clauses_path, evidence_path,
+            )
+            result = run_raw("scripts/apply_format_spec.py", str(source), str(spec_path), str(output),
+                             "--out-dir", str(audit), "--compliance-mode", "supported_subset",
+                             "--source-clauses", str(clauses_path),
+                             "--source-evidence", str(evidence_path), *source_binding_args)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("literal_not_backed_by_current_source", result.stderr + result.stdout)
+            self.assertFalse(output.exists())
+
+    def test_content_instance_matching_does_not_erase_internal_whitespace(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            td = Path(td); source = td / "source.docx"; output = td / "output.docx"
+            spec_path = td / "spec.json"; audit = td / "audit"
+            clauses_path = td / "clauses.json"; evidence_path = td / "evidence.json"
+            doc = Document(); paragraph = doc.add_paragraph("分 类号")
+            paragraph.runs[0].font.size = Pt(9)
+            doc.save(source)
+            source_text = "分类号"
+            source_sha = hashlib.sha256(source_text.encode("utf-8")).hexdigest()
+            clauses_path.write_text(json.dumps([{
+                "id": "C1", "text": source_text, "evidence_ids": ["E1"],
+                "source_span": {
+                    "evidence_id": "E1", "start_offset": 0,
+                    "end_offset": len(source_text), "text": source_text,
+                    "source_sha256": source_sha,
+                },
+            }], ensure_ascii=False), encoding="utf-8")
+            evidence_path.write_text(json.dumps({
+                "evidence": [{"id": "E1", "text": source_text}],
+            }, ensure_ascii=False), encoding="utf-8")
+            spec_path.write_text(json.dumps({
+                "schema_version": "1.0", "source_document": "test",
+                "status": "semantic_resolved", "analysis_mode": "llm_primary",
+                "roles": {"cover_field_label": {"font": {"size_pt": 10.5}}},
+                "content_instances": [{
+                    "id": "CFI-test", "field_key": "cover_field_label:分类号",
+                    "role": "cover_field_label", "text": "分类号", "order": 1,
+                    "clause_ids": ["C1"], "evidence_ids": ["E1"],
+                    "style_properties": {"font": {"size_pt": 16}}, "reason": "instance override",
+                }],
+                "requirements": [{
+                    "id": "R00001", "role": "cover_field_label",
+                    "properties": {"text": "分类号"}, "field_instance_ids": ["CFI-test"],
+                    "evidence_ids": ["E1"], "clause_ids": ["C1"],
+                    "resolved_by": "llm", "confidence": .98,
+                }],
+            }, ensure_ascii=False), encoding="utf-8")
+            source_binding_args = bind_test_content_instance_run(
+                td, spec_path, clauses_path, evidence_path,
+            )
+            result = run_raw("scripts/apply_format_spec.py", str(source), str(spec_path), str(output),
+                             "--out-dir", str(audit), "--compliance-mode", "supported_subset",
+                             "--source-clauses", str(clauses_path),
+                             "--source-evidence", str(evidence_path), *source_binding_args)
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            rendered = Document(output)
+            self.assertAlmostEqual(rendered.paragraphs[0].runs[0].font.size.pt, 9, places=2)
+            instance_audit = json.loads((audit / "content-instance-audit.json").read_text())
+            self.assertEqual(instance_audit["instances"][0]["status"], "not_present")
+
+    def test_content_instance_application_rejects_cross_run_source_and_requirement_bindings(self) -> None:
+        cases = {
+            "run_id": "format_spec_run_id_mismatch",
+            "source_document": "format_spec_source_document_mismatch",
+            "source_bytes": "extraction_source_document_hash_mismatch",
+            "provenance": "semantic_review_provenance_manifest_mismatch",
+            "missing_provenance": "llm_primary_semantic_review_provenance_missing",
+            "cached_run": "extraction_manifest_must_be_fresh",
+            "clause_artifact": "extraction_manifest_clause_artifact_mismatch",
+            "document_evidence": "extraction_manifest_document_evidence_artifact_mismatch",
+            "evidence_context": "extraction_manifest_evidence_context_artifact_mismatch",
+            "requirement_superset": "no_matching_source_bound_requirement",
+            "duplicate_instance_id": "duplicate 'CFI-test'",
+            "primary_span_evidence_omitted": "clause_primary_span_evidence_not_cited:C1",
+            "multi_clause_evidence_mismatch": "instance_evidence_not_bound_to_clause:C2",
+            "unrelated_clause_primary_omitted": "clause_primary_span_evidence_not_cited:C1",
+        }
+        for mutation, expected_error in cases.items():
+            with self.subTest(mutation=mutation), tempfile.TemporaryDirectory() as tmp:
+                td = Path(tmp)
+                target = td / "target.docx"
+                output = td / "output.docx"
+                spec_path = td / "spec.json"
+                audit = td / "audit"
+                clauses_path = td / "clauses.json"
+                evidence_path = td / "evidence.json"
+                evidence_context_path = td / "evidence-context.json"
+                manifest_path = td / "extraction-manifest.json"
+                doc = Document()
+                doc.add_paragraph("分类号")
+                doc.save(target)
+                source_text = "分类号"
+                source_sha = hashlib.sha256(source_text.encode("utf-8")).hexdigest()
+                clauses_path.write_text(json.dumps([{
+                    "id": "C1", "text": source_text, "evidence_ids": ["E1", "E2"],
+                    "source_span": {
+                        "evidence_id": "E1", "start_offset": 0,
+                        "end_offset": len(source_text), "text": source_text,
+                        "source_sha256": source_sha,
+                    },
+                }, {
+                    "id": "C2", "text": "其他内容", "evidence_ids": ["E3"],
+                    "source_span": {
+                        "evidence_id": "E3", "start_offset": 0,
+                        "end_offset": len("其他内容"), "text": "其他内容",
+                        "source_sha256": hashlib.sha256("其他内容".encode("utf-8")).hexdigest(),
+                    },
+                }], ensure_ascii=False), encoding="utf-8")
+                evidence_path.write_text(json.dumps({
+                    "evidence": [
+                        {"id": "E1", "text": source_text},
+                        {"id": "E2", "text": "其他内容"},
+                        {"id": "E3", "text": "其他内容"},
+                    ],
+                }, ensure_ascii=False), encoding="utf-8")
+                spec_path.write_text(json.dumps({
+                    "schema_version": "1.0", "source_document": "test",
+                    "status": "semantic_resolved", "analysis_mode": "llm_primary",
+                    "roles": {"cover_field_label": {"font": {"size_pt": 10.5}}},
+                    "content_instances": [{
+                        "id": "CFI-test", "field_key": "cover_field_label:分类号",
+                        "role": "cover_field_label", "text": "分类号", "order": 1,
+                        "clause_ids": ["C1"], "evidence_ids": ["E1"],
+                        "style_properties": {"font": {"size_pt": 16}},
+                        "reason": "instance override",
+                    }],
+                    "requirements": [{
+                        "id": "R00001", "role": "cover_field_label",
+                        "properties": {"text": "分类号"},
+                        "field_instance_ids": ["CFI-test"], "evidence_ids": ["E1"],
+                        "clause_ids": ["C1"], "resolved_by": "llm", "confidence": .98,
+                    }],
+                }, ensure_ascii=False), encoding="utf-8")
+                source_binding_args = bind_test_content_instance_run(
+                    td, spec_path, clauses_path, evidence_path,
+                )
+                if mutation == "run_id":
+                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    manifest["run_id"] = "stale-run"
+                    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+                elif mutation == "source_document":
+                    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+                    spec["source_document"] = str(td / "different-requirements.docx")
+                    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+                elif mutation == "source_bytes":
+                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    Path(manifest["source_document"]).write_bytes(b"changed source bytes")
+                elif mutation == "provenance":
+                    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+                    spec["semantic_review_provenance"]["request_sha256"] = "e" * 64
+                    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+                elif mutation == "missing_provenance":
+                    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+                    spec.pop("semantic_review_provenance")
+                    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    manifest.pop("semantic_review_provenance")
+                    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+                elif mutation == "cached_run":
+                    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                    manifest["cache_reused"] = True
+                    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+                elif mutation == "clause_artifact":
+                    clauses_path.write_text(json.dumps([{
+                        "id": "C1", "text": "其他标签", "evidence_ids": ["E1"],
+                        "source_span": {
+                            "evidence_id": "E1", "start_offset": 0,
+                            "end_offset": len(source_text), "text": source_text,
+                            "source_sha256": source_sha,
+                        },
+                    }]), encoding="utf-8")
+                elif mutation == "evidence_context":
+                    evidence_context = json.loads(evidence_context_path.read_text(encoding="utf-8"))
+                    evidence_context["evidence"][0]["text"] = "stale evidence"
+                    evidence_context_path.write_text(json.dumps(evidence_context), encoding="utf-8")
+                elif mutation == "document_evidence":
+                    evidence_doc = json.loads(evidence_path.read_text(encoding="utf-8"))
+                    evidence_doc["ignored_metadata"] = "not represented in evidence-context"
+                    evidence_path.write_text(json.dumps(evidence_doc), encoding="utf-8")
+                elif mutation == "requirement_superset":
+                    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+                    spec["requirements"][0]["clause_ids"].append("C2")
+                    spec["requirements"][0]["evidence_ids"].append("E2")
+                    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+                elif mutation == "duplicate_instance_id":
+                    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+                    spec["content_instances"].append(dict(spec["content_instances"][0]))
+                    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+                elif mutation == "primary_span_evidence_omitted":
+                    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+                    spec["content_instances"][0]["evidence_ids"] = ["E2"]
+                    spec["requirements"][0]["evidence_ids"] = ["E2"]
+                    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+                elif mutation == "multi_clause_evidence_mismatch":
+                    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+                    spec["content_instances"][0]["clause_ids"] = ["C1", "C2"]
+                    spec["requirements"][0]["clause_ids"] = ["C1", "C2"]
+                    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+                elif mutation == "unrelated_clause_primary_omitted":
+                    spec = json.loads(spec_path.read_text(encoding="utf-8"))
+                    spec["content_instances"][0]["text"] = "其他内容"
+                    spec["content_instances"][0]["clause_ids"] = ["C1", "C2"]
+                    spec["content_instances"][0]["evidence_ids"] = ["E2", "E3"]
+                    spec["requirements"][0]["properties"]["text"] = "其他内容"
+                    spec["requirements"][0]["clause_ids"] = ["C1", "C2"]
+                    spec["requirements"][0]["evidence_ids"] = ["E2", "E3"]
+                    spec_path.write_text(json.dumps(spec), encoding="utf-8")
+                result = run_raw(
+                    "scripts/apply_format_spec.py", str(target), str(spec_path), str(output),
+                    "--out-dir", str(audit), "--compliance-mode", "supported_subset",
+                    "--source-clauses", str(clauses_path),
+                    "--source-evidence", str(evidence_path), *source_binding_args,
+                )
+                self.assertNotEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(expected_error, result.stdout + result.stderr)
+                self.assertFalse(output.exists())
 
     def test_disjoint_literal_field_variants_are_kept_as_separate_instances(self) -> None:
         instances = []
@@ -3041,6 +3493,84 @@ b&=2\notag
             {"text": "另一种同源标签"}, {"C1"}, {"E1"}, clause_map, "conflicting source label",
         )
         self.assertEqual(overlap_error["reason"], "content_instance_identity_conflict")
+
+    def test_content_instance_registration_preserves_and_checks_exact_source_text(self) -> None:
+        source = " 密  级： "
+        clause_map = {
+            "C1": {
+                "text": "密 级",
+                "source_text_full": "密 级",
+                "source_evidence_text": source,
+                "source_span": {
+                    "evidence_id": "E1", "start_offset": 0,
+                    "end_offset": len(source), "text": source,
+                },
+                "evidence_ids": ["E1"],
+            },
+        }
+        instances = []
+        instance_id, error = requirements_engine._register_content_instance(
+            instances, {"field_key": "security_label"}, "cover_field_label",
+            {"text": source}, {"C1"}, {"E1"}, clause_map, "exact source label",
+        )
+        self.assertIsNotNone(instance_id)
+        self.assertIsNone(error)
+        self.assertEqual(instances[0]["text"], source)
+        self.assertEqual(instances[0]["source_text"], source)
+
+        _, mutated_error = requirements_engine._register_content_instance(
+            [], {"field_key": "security_label"}, "cover_field_label",
+            {"text": "密 级："}, {"C1"}, {"E1"}, clause_map, "mutated whitespace",
+        )
+        self.assertEqual(
+            mutated_error["reason"],
+            "content_instance_text_not_exactly_backed_by_source",
+        )
+        preserved = requirements_engine._requirement_properties_for_role(
+            "cover_field_label", {"text": source},
+        )
+        self.assertEqual(preserved["text"], source)
+
+    def test_same_literal_at_distinct_source_occurrences_stays_separately_bound(self) -> None:
+        source = "分类号；分类号"
+        source_sha = hashlib.sha256(source.encode("utf-8")).hexdigest()
+        clause_map = {}
+        for clause_id, evidence_id, start in (
+            ("C1", "E1", 0), ("C2", "E1", 4),
+        ):
+            clause_map[clause_id] = {
+                "text": "分类号", "source_evidence_text": source,
+                "evidence_ids": [evidence_id],
+                "source_span": {
+                    "evidence_id": evidence_id, "start_offset": start,
+                    "end_offset": start + len("分类号"),
+                    "text": "分类号", "source_sha256": source_sha,
+                },
+            }
+        instances = []
+        first_id, first_error = requirements_engine._register_content_instance(
+            instances, {"field_key": "classification_number"}, "cover_field_label",
+            {"text": "分类号"}, {"C1"}, {"E1"}, clause_map, "first source occurrence",
+        )
+        second_id, second_error = requirements_engine._register_content_instance(
+            instances, {"field_key": "classification_number"}, "cover_field_label",
+            {"text": "分类号"}, {"C2"}, {"E1"}, clause_map, "second source occurrence",
+        )
+        self.assertIsNone(first_error)
+        self.assertIsNone(second_error)
+        self.assertNotEqual(first_id, second_id)
+        self.assertEqual(len(instances), 2)
+        self.assertEqual(instances[0]["clause_ids"], ["C1"])
+        self.assertEqual(instances[1]["clause_ids"], ["C2"])
+        self.assertEqual(instances[0]["evidence_ids"], ["E1"])
+        self.assertEqual(instances[1]["evidence_ids"], ["E1"])
+        duplicate_id, duplicate_error = requirements_engine._register_content_instance(
+            instances, {"field_key": "classification_number"}, "cover_field_label",
+            {"text": "分类号"}, {"C1"}, {"E1"}, clause_map, "same source occurrence retry",
+        )
+        self.assertIsNone(duplicate_error)
+        self.assertEqual(duplicate_id, first_id)
+        self.assertEqual(len(instances), 2)
 
 
     def test_legacy_unsupported_status_applies_when_no_concrete_blocker_exists(self) -> None:
@@ -3220,22 +3750,82 @@ b&=2\notag
             # A semantic rule that the system can evaluate is not turned into
             # an author-facing red marker; the missing metadata remains one.
             spec["content_constraints"] = {"abstract_zh": {"require_third_person": True}}
+            spec["run_id"] = "manual-review-ingress-run"
+            spec["resource_registry"]["run_id"] = spec["run_id"]
+            spec["analysis_mode"] = "rule_only"
             spec_path = td / "review-draft.json"
             spec_path.write_text(json.dumps(spec, ensure_ascii=False), encoding="utf-8")
-            ledger_path.write_text(json.dumps({
+            requirements_source = td / "requirements.docx"
+            requirements_doc = Document(); requirements_doc.add_paragraph("test requirements")
+            requirements_doc.save(requirements_source)
+            clauses_path = td / "requirement-clauses.json"
+            clauses_path.write_text("[]", encoding="utf-8")
+            evidence_path = td / "document-evidence.json"
+            evidence_doc = {"evidence": []}
+            evidence_path.write_text(json.dumps(evidence_doc), encoding="utf-8")
+            evidence_context_path = td / "evidence-context.json"
+            evidence_context = evidence_payload(evidence_doc)
+            evidence_context_path.write_text(
+                json.dumps(evidence_context, ensure_ascii=False), encoding="utf-8",
+            )
+            extraction_manifest_path = td / "extraction-manifest.json"
+            file_hash = lambda path: hashlib.sha256(path.read_bytes()).hexdigest()
+            run_id = spec["run_id"]
+            extraction_manifest_path.write_text(json.dumps({
+                "status": "completed", "cache_reused": False, "run_id": run_id,
+                "source_sha256": file_hash(requirements_source),
+                "requirement_clauses_sha256": file_hash(clauses_path),
+                "document_evidence_sha256": file_hash(evidence_path),
+                "evidence_sha256": file_hash(evidence_context_path),
+                "semantic_review_provenance": None,
+            }), encoding="utf-8")
+            source_sha = file_hash(source)
+            requirements_sha = file_hash(requirements_source)
+            manual_binding = {
+                "case_id": "test-case", "run_id": run_id,
+                "source_sha256": requirements_sha,
+                "clause_sha256": file_hash(clauses_path),
+                "evidence_sha256": file_hash(evidence_context_path),
+                "request_sha256": None,
+                "requirements_sha256": requirements_sha,
+                "input_source_sha256": source_sha,
+                "format_spec_sha256": file_hash(spec_path),
+                "official_template_sha256": None,
+                "official_template_source": "not_supplied",
+            }
+            ledger_value = {
                 "schema_version": "1.0", "policy": "review_draft_only",
-                "binding": {
-                    "case_id": "test-case", "run_id": spec["run_id"],
-                    "source_sha256": "0" * 64, "clause_sha256": "1" * 64,
-                    "evidence_sha256": "2" * 64,
-                },
+                "binding": manual_binding,
                 "submission_ready": False, "items": [], "summary": {},
-            }, ensure_ascii=False), encoding="utf-8")
+            }
+            ledger_path.write_text(json.dumps(ledger_value, ensure_ascii=False), encoding="utf-8")
+            pipeline_manifest_path = td / "pipeline-manifest.json"
+            pipeline_manifest_path.write_text(json.dumps({
+                "case_id": "test-case",
+                "inputs": {
+                    "source": {"path": str(source), "bytes": source.stat().st_size, "sha256": source_sha},
+                    "requirements": {
+                        "path": str(requirements_source),
+                        "bytes": requirements_source.stat().st_size,
+                        "sha256": requirements_sha,
+                    },
+                    "official_template_evidence": None,
+                    "official_template_source": "not_supplied",
+                },
+                "manual_review_binding": manual_binding,
+                "manual_review_ledger_input_sha256": file_hash(ledger_path),
+            }), encoding="utf-8")
             result = run_raw(
                 "scripts/apply_format_spec.py", str(source), str(spec_path), str(output),
                 "--out-dir", str(audit), "--compliance-mode", "supported_subset",
                 "--output-policy", "review_draft", "--preview-placeholders",
                 "--manual-review-items", str(ledger_path),
+                "--pipeline-manifest", str(pipeline_manifest_path),
+                "--case-id", "test-case",
+                "--source-clauses", str(clauses_path),
+                "--source-evidence", str(evidence_path),
+                "--source-evidence-context", str(evidence_context_path),
+                "--source-extraction-manifest", str(extraction_manifest_path),
             )
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
             report = json.loads((audit / "validation-report.json").read_text())
@@ -3250,6 +3840,7 @@ b&=2\notag
             self.assertEqual(item["placeholder_text"], "【待提供：unit_code】")
             self.assertEqual(ledger["visual_policy"]["text_color"], "C00000")
             marker_report = json.loads((audit / "manual-review-markers.json").read_text())
+            self.assertEqual(marker_report["ingress_binding"]["status"], "validated")
             self.assertTrue(any(item["category"] == "input_prerequisite" for item in marker_report["markers"]))
             self.assertIn("【待提供：unit_code】", "\n".join(p.text for p in Document(output).paragraphs))
 

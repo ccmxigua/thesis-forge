@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 from concurrent.futures import ALL_COMPLETED
+import hashlib
 import json
 import os
 import subprocess
@@ -76,6 +77,22 @@ def bind_mock_review_to_source_spans(review_result: dict, request: dict, output_
         "results": results,
         "source_reference_compilation_path": str(compilation_path),
         "source_reference_compilation_sha256": bridge.sha256_file(compilation_path),
+    }
+
+
+def exact_source_clause(clause_id: str, source: str, evidence_id: str = "E1") -> dict:
+    """Build a clause fixture whose exact span is bound to its evidence text."""
+    return {
+        "id": clause_id,
+        "text": source,
+        "evidence_ids": [evidence_id],
+        "source_span": {
+            "evidence_id": evidence_id,
+            "start_offset": 0,
+            "end_offset": len(source),
+            "text": source,
+            "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
+        },
     }
 
 
@@ -160,7 +177,13 @@ class HostAgentBridgeTests(unittest.TestCase):
         }
         chunk = {
             "provenance": provenance,
-            "clauses": [{"id": "C1", "text": source, "evidence_ids": ["E1"]}],
+            "clauses": [{
+                "id": "C1", "text": source, "evidence_ids": ["E1"],
+                "source_span": {
+                    "evidence_id": "E1", "start_offset": 0, "end_offset": len(source),
+                    "text": source, "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
+                },
+            }],
             "evidence_context": {"E1": {"id": "E1", "text": source}},
         }
         response = {
@@ -257,7 +280,7 @@ class HostAgentBridgeTests(unittest.TestCase):
         }
         chunk = {
             "provenance": provenance,
-            "clauses": [{"id": "C00076", "text": source, "evidence_ids": ["E00076"]}],
+            "clauses": [exact_source_clause("C00076", source, "E00076")],
             "evidence_context": {"E00076": {"id": "E00076", "text": source}},
         }
         response = {
@@ -321,7 +344,7 @@ class HostAgentBridgeTests(unittest.TestCase):
         }
         chunk = {
             "provenance": provenance,
-            "clauses": [{"id": "C1", "text": source, "evidence_ids": ["E1"]}],
+            "clauses": [exact_source_clause("C1", source)],
             "evidence_context": {"E1": {"id": "E1", "text": source}},
         }
         response = {
@@ -401,7 +424,13 @@ class HostAgentBridgeTests(unittest.TestCase):
         }
         chunk = {
             "provenance": provenance,
-            "clauses": [{"id": "C00061", "text": source, "evidence_ids": ["E1"]}],
+            "clauses": [{
+                "id": "C00061", "text": source, "evidence_ids": ["E1"],
+                "source_span": {
+                    "evidence_id": "E1", "start_offset": 0, "end_offset": len(source),
+                    "text": source, "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
+                },
+            }],
             "evidence_context": {"E1": {"id": "E1", "text": source}},
         }
         response = {
@@ -529,7 +558,7 @@ class HostAgentBridgeTests(unittest.TestCase):
         provenance = {"run_id": "run-no-retry"}
         chunk = {
             "provenance": provenance,
-            "clauses": [{"id": "C1", "text": source, "evidence_ids": ["E1"]}],
+            "clauses": [exact_source_clause("C1", source)],
             "evidence_context": {"E1": {"id": "E1", "text": source}},
         }
         response = {
@@ -559,7 +588,7 @@ class HostAgentBridgeTests(unittest.TestCase):
         provenance = {"run_id": "run-capacity-exhausted"}
         chunk = {
             "provenance": provenance,
-            "clauses": [{"id": "C1", "text": source, "evidence_ids": ["E1"]}],
+            "clauses": [exact_source_clause("C1", source)],
             "evidence_context": {"E1": {"id": "E1", "text": source}},
         }
         response = {
@@ -605,7 +634,7 @@ class HostAgentBridgeTests(unittest.TestCase):
         provenance = {"run_id": "run-coverage-test"}
         chunk = {
             "provenance": provenance,
-            "clauses": [{"id": "C1", "text": source, "evidence_ids": ["E1"]}],
+            "clauses": [exact_source_clause("C1", source)],
             "evidence_context": {"E1": {"id": "E1", "text": source}},
         }
         response = {
@@ -664,7 +693,13 @@ class HostAgentBridgeTests(unittest.TestCase):
         }
         chunk = {
             "provenance": provenance,
-            "clauses": [{"id": "C00037", "text": source, "evidence_ids": ["E1"]}],
+            "clauses": [{
+                "id": "C00037", "text": source, "evidence_ids": ["E1"],
+                "source_span": {
+                    "evidence_id": "E1", "start_offset": 0, "end_offset": len(source),
+                    "text": source, "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
+                },
+            }],
             "evidence_context": {"E1": {"id": "E1", "text": source}},
         }
         response = {
@@ -807,6 +842,8 @@ class HostAgentBridgeTests(unittest.TestCase):
             "source_kind": "paragraph", "location": {}, "part_index": 0,
         }]
         evidence = {"evidence": [{"id": "E1", "text": "正文使用宋体", "kind": "paragraph"}]}
+        if contract_version == "3.0":
+            clauses = self._bind_test_source_spans(clauses, evidence)
         if contract_version is None:
             request = engine.build_llm_request(
                 [], clauses, evidence, {}, "full",
@@ -826,6 +863,29 @@ class HostAgentBridgeTests(unittest.TestCase):
         )
         chunk = json.loads((directory / "llm-request-chunks.json").read_text(encoding="utf-8"))[0]
         return directory, chunk
+
+    @staticmethod
+    def _bind_test_source_spans(clauses: list[dict], evidence_doc: dict) -> list[dict]:
+        evidence_by_id = {
+            str(item.get("id")): item for item in evidence_doc.get("evidence", [])
+            if isinstance(item, dict) and item.get("id")
+        }
+        for clause in clauses:
+            evidence_ids = clause.get("evidence_ids") or []
+            if len(evidence_ids) != 1:
+                raise AssertionError("test source span requires one evidence ID")
+            evidence = evidence_by_id[str(evidence_ids[0])]
+            source = evidence["text"]
+            exact = str(clause["text"])
+            start = source.find(exact)
+            if start < 0 or source.find(exact, start + 1) >= 0:
+                raise AssertionError(f"test clause is not a unique evidence substring: {exact!r}")
+            clause["source_span"] = {
+                "evidence_id": str(evidence_ids[0]), "start_offset": start,
+                "end_offset": start + len(exact), "text": exact,
+                "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
+            }
+        return clauses
 
     def _response(self, chunk: dict) -> dict:
         return {
@@ -919,6 +979,37 @@ class HostAgentBridgeTests(unittest.TestCase):
             )
             self.assertEqual(chunks[0]["batch"]["clause_ids"], ["C1", "C2"])
             self.assertEqual(chunks[1]["batch"]["clause_ids"], ["C3", "C4"])
+
+    def test_chunk_builder_keeps_one_physical_source_occurrence_atomic(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            review_dir = Path(td) / "requirements"
+            clauses = [
+                {"id": "C1", "text": "声明开头", "evidence_ids": ["E1"],
+                 "source_kind": "paragraph", "location": {"order": 1}, "part_index": 0},
+                {"id": "C2", "text": "声明续句", "evidence_ids": ["E1"],
+                 "source_kind": "paragraph", "location": {"order": 1}, "part_index": 1},
+                {"id": "C3", "text": "另一条格式", "evidence_ids": ["E2"],
+                 "source_kind": "paragraph", "location": {"order": 2}, "part_index": 0},
+            ]
+            evidence = {"evidence": [
+                {"id": "E1", "text": "声明开头声明续句", "kind": "paragraph",
+                 "location": {"order": 1}},
+                {"id": "E2", "text": "另一条格式", "kind": "paragraph",
+                 "location": {"order": 2}},
+            ]}
+            request = engine.build_llm_request([], clauses, evidence, {}, "full")
+            request = attach_request_provenance(
+                request, source_sha256="a" * 64, evidence_doc=evidence,
+                clauses=clauses, run_id="run-source-atomic-test",
+            )
+            manifest = engine.prepare_host_agent_review_packets(
+                request, clauses, evidence, "a" * 64, review_dir, chunk_size=1,
+            )
+            chunks = json.loads((review_dir / "llm-request-chunks.json").read_text())
+            self.assertEqual(manifest["chunk_count"], 2)
+            self.assertEqual(chunks[0]["batch"]["clause_ids"], ["C1", "C2"])
+            self.assertEqual(chunks[1]["batch"]["clause_ids"], ["C3"])
+            engine.validate_host_review_chunk_source_projection(request, chunks, manifest)
 
     def test_declaration_anchor_preference_is_bound_to_current_structure(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -1336,6 +1427,125 @@ class HostAgentBridgeTests(unittest.TestCase):
                     "candidate-sha", "candidate-sha", fingerprints, changed_fingerprints,
                 ))
 
+    def test_authoring_primary_retry_eligibility_requires_exact_cited_source(self) -> None:
+        source = "以下示例内容请作者根据需要自行撰写真实研究内容。"
+        evidence = {"E1": {"id": "E1", "text": source}}
+        clause = {
+            "id": "C1", "text": "规范化后的语义片段", "evidence_ids": ["E1"],
+            "source_span": {
+                "evidence_id": "E1", "start_offset": 0, "end_offset": len(source),
+                "text": source, "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
+            },
+        }
+        review_context = {
+            "classification": "informational", "requires_requirement": False,
+            "linked_requirements": [], "cited_evidence": evidence,
+        }
+        missing = [{
+            "disposition": "unrepresented", "source_quote": source,
+        }]
+        self.assertTrue(bridge._v3_authoring_content_retry_is_source_bound(
+            review_context, clause, evidence, missing,
+        ))
+
+        clause_with_context = copy.deepcopy(clause)
+        clause_with_context["evidence_ids"] = ["E1", "E2"]
+        evidence_with_context = {
+            **evidence,
+            "E2": {"id": "E2", "text": "相邻说明，不包含作者撰写指令。"},
+        }
+        context_review = {
+            **review_context,
+            "cited_evidence": evidence_with_context,
+        }
+        self.assertTrue(bridge._v3_authoring_content_retry_is_source_bound(
+            context_review, clause_with_context, evidence_with_context, missing,
+        ))
+
+        linked = {**review_context, "linked_requirements": [{"requirement_ref": "RR1"}]}
+        self.assertFalse(bridge._v3_authoring_content_retry_is_source_bound(
+            linked, clause, evidence, missing,
+        ))
+        bad_quote = [{**missing[0], "source_quote": "图题应居中"}]
+        self.assertFalse(bridge._v3_authoring_content_retry_is_source_bound(
+            review_context, clause, evidence, bad_quote,
+        ))
+        stale_span_clause = copy.deepcopy(clause)
+        stale_span_clause["source_span"]["text"] = "以下示例内容"
+        self.assertFalse(bridge._v3_authoring_content_retry_is_source_bound(
+            review_context, stale_span_clause, evidence, missing,
+        ))
+
+    def test_informational_authoring_omission_makes_bounded_primary_retryable(self) -> None:
+        self._independent_review_patch.stop()
+        source = "以下示例内容请作者根据需要自行撰写真实研究内容。"
+        provenance = {
+            "run_id": "run-authoring-primary-retry", "source_sha256": "a" * 64,
+            "evidence_sha256": "b" * 64, "clause_sha256": "c" * 64,
+            "request_sha256": "d" * 64,
+        }
+        chunk = {
+            "provenance": provenance,
+            "clauses": [{
+                "id": "C1", "text": "规范化后的语义片段", "evidence_ids": ["E1"],
+                "source_span": {
+                    "evidence_id": "E1", "start_offset": 0, "end_offset": len(source),
+                    "text": source,
+                    "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
+                },
+            }],
+            "evidence_context": {"E1": {"id": "E1", "text": source}},
+        }
+        response = {
+            "provenance": provenance,
+            "clause_reviews": [{
+                "clause_id": "C1", "classification": "informational",
+                "reason": "The sample was mistaken for descriptive text.",
+            }],
+            "requirements": [],
+        }
+        incomplete = {
+            "protocol": bridge.OBLIGATION_COVERAGE_PROTOCOL,
+            "status": "completed", "response_sha256": "f" * 64,
+            "results": [{
+                "check_id": "C1", "verdict": "incomplete",
+                "rationale": "The author-input obligation is unrepresented.",
+                "evidence_quotes": [source], "machine_obligation_ids": [],
+                "identified_obligations": [{
+                    "source_quote": source, "disposition": "unrepresented",
+                    "obligation_summary": "The author must supply genuine thesis content.",
+                    "requirement_refs": [],
+                }],
+            }],
+            "summary": {"consistent": 0, "incomplete": 1, "uncertain": 0},
+        }
+        calls = []
+
+        def reject_both_attempts(request: dict, **kwargs: dict) -> dict:
+            calls.append(copy.deepcopy(request))
+            return bind_mock_review_to_source_spans(
+                incomplete, request, kwargs["output_dir"],
+            )
+
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(bridge, "run_native_semantic_review", side_effect=reject_both_attempts), \
+                    patch.object(bridge.time, "sleep"):
+                with self.assertRaises(bridge.IndependentObligationReviewError) as caught:
+                    bridge._run_independent_obligation_coverage_review(
+                        response, chunk, review_dir=Path(td),
+                        run_id="run-authoring-primary-retry", chunk_index=1, attempt=1,
+                        host_runtime="codex", model="gpt-5.6-luna", timeout=5,
+                        agent_id="main", runner="exec", binary="codex", config_path=None,
+                        controller=bridge.RunController(),
+                    )
+        self.assertEqual([item["provider_attempt"] for item in calls], [1, 2])
+        self.assertTrue(caught.exception.retryable)
+        error_record = caught.exception.error_records[0]
+        self.assertEqual(
+            error_record["primary_retry_authorization"],
+            "source_bound_authoring_content_reclassification_v1",
+        )
+
     def test_author_content_reclassification_retry_is_exactly_source_bound(self) -> None:
         source = "以下示例内容是编写的，请作者根据需要自行撰写真实研究内容。"
         provenance = {
@@ -1358,7 +1568,7 @@ class HostAgentBridgeTests(unittest.TestCase):
             "case_id": "case-authoring-retry",
             "response_schema": {"type": "object"},
             "runtime_context": {"code_fingerprint_sha256": "9" * 64},
-            "clauses": [{"id": "C1", "text": source, "evidence_ids": ["E1"]}],
+            "clauses": [exact_source_clause("C1", source)],
             "evidence_context": {"E1": {"id": "E1", "text": source}},
         }
         record = {
@@ -1391,6 +1601,18 @@ class HostAgentBridgeTests(unittest.TestCase):
         self.assertIsNone(change_error)
         self.assertEqual(authorized_paths, changed_paths)
         self.assertTrue(authorization_ledger[0]["source_binding_complete"])
+
+        multi_evidence_chunk = copy.deepcopy(chunk)
+        multi_evidence_chunk["clauses"][0]["evidence_ids"] = ["E1", "E2"]
+        multi_evidence_chunk["evidence_context"]["E2"] = {
+            "id": "E2", "text": "相邻上下文不重复作者撰写指令。",
+        }
+        multi_evidence_record = {**record, "evidence_ids": ["E1", "E2"]}
+        with patch.object(bridge, "validate_host_agent_response", return_value=[]):
+            multi_repaired, _ = bridge._v3_authoring_content_reclassification_response(
+                parent, candidate, [multi_evidence_record], chunk=multi_evidence_chunk,
+            )
+        self.assertEqual(multi_repaired, candidate)
 
         changed_reason = copy.deepcopy(candidate)
         changed_reason["clause_reviews"][0]["reason"] = "Unrelated rewrite"
@@ -1974,6 +2196,21 @@ class HostAgentBridgeTests(unittest.TestCase):
             lifecycle = failure["chunk_lifecycle"][0]
             self.assertEqual(lifecycle["status"], "not_started")
             self.assertEqual(lifecycle["dispatch_state"], "not_dispatched")
+
+    def test_interruption_finalizer_closes_nested_running_and_retrying_attempts(self) -> None:
+        record = {"attempts": [
+            {"attempt": 1, "status": "failed"},
+            {"attempt": 2, "status": "retrying"},
+            {"attempt": 3, "status": "running"},
+        ]}
+        bridge._finalize_interrupted_attempts(record, "operator interrupted")
+        self.assertEqual(
+            [item["status"] for item in record["attempts"]],
+            ["failed", "terminated", "terminated"],
+        )
+        for attempt in record["attempts"][1:]:
+            self.assertEqual(attempt["remote_operation_state"], "unknown")
+            self.assertEqual(attempt["termination_reason"], "operator interrupted")
 
     def test_completed_sibling_is_harvested_before_concurrent_failure_audit(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -2957,6 +3194,7 @@ class HostAgentBridgeTests(unittest.TestCase):
             "source_kind": "paragraph", "location": {}, "part_index": 0,
         }]
         evidence = {"evidence": [{"id": "E1", "text": source, "kind": "paragraph"}]}
+        clauses = self._bind_test_source_spans(clauses, evidence)
         chunk = engine.build_llm_request(
             [], clauses, evidence, {}, "full", contract_version="3.0",
         )
@@ -3261,6 +3499,7 @@ class HostAgentBridgeTests(unittest.TestCase):
             {"id": "E00174", "text": "如某表需要转页接排时，在随后的各页上应重复表序。表序后跟表题(可省略)和“(续)”，居中置于表上方，续表均应重复表头。", "kind": "paragraph"},
             {"id": "E00175", "text": "说明3：表序与表题，表序即表的编号，由“表”和从“1”开始的阿拉伯数字组成；表题即表的名称，应简明，置于表序之后，表序和表题间空1个字距，居中置于表的上方。", "kind": "paragraph"},
         ]}
+        clauses = self._bind_test_source_spans(clauses, evidence)
         existing = [
             {
                 "id": "R00530", "role": "table_caption",
@@ -3877,6 +4116,11 @@ class HostAgentBridgeTests(unittest.TestCase):
             chunk["clauses"] = [{
                 "id": "C1", "text": clause_source, "evidence_ids": ["E1"],
                 "source_kind": "paragraph", "location": {}, "part_index": 0,
+                "source_span": {
+                    "evidence_id": "E1", "start_offset": 0,
+                    "end_offset": len(clause_source), "text": clause_source,
+                    "source_sha256": hashlib.sha256(evidence_source.encode("utf-8")).hexdigest(),
+                },
             }]
             chunk["evidence_context"] = {
                 "E1": {"id": "E1", "text": evidence_source},
@@ -4599,6 +4843,7 @@ class HostAgentBridgeTests(unittest.TestCase):
             evidence = {
                 "evidence": [{"id": "E1", "text": clauses[0]["text"], "kind": "paragraph"}],
             }
+            clauses = self._bind_test_source_spans(clauses, evidence)
             request = engine.build_llm_request(
                 [], clauses, evidence, {}, "full", contract_version="3.0",
                 runtime_context={"code_fingerprint_sha256": "f" * 64},
@@ -5394,6 +5639,46 @@ class HostAgentBridgeTests(unittest.TestCase):
                 record.get("code") == "retry_raw_envelope_receipt_mismatch"
                 for record in failure["chunk_lifecycle"][0]["structured_error_records"]
             ))
+
+    def test_no_semantic_response_retry_receipt_requires_invocation_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            review_dir, chunk = self._packet(Path(td) / "requirements")
+            response_path = review_dir / "llm-response-chunk-0001.json"
+            envelope_path = response_path.with_name(
+                f"{response_path.stem}.attempt-01.raw-envelope.txt"
+            )
+            envelope_path.write_text("provider response that did not decode", encoding="utf-8")
+            binding = bridge._retry_input_fingerprints(chunk)
+            error_record = {
+                "code": "host_response_parse_error",
+                "raw_envelope_path": str(envelope_path.resolve()),
+                "raw_envelope_sha256": bridge.sha256_file(envelope_path),
+            }
+            attempt_record = {
+                "retry_input_fingerprints": binding,
+                "no_semantic_response_invocation_fingerprints": copy.deepcopy(binding),
+                "error_records": [error_record],
+            }
+            receipt = bridge._validate_retry_attempt_artifact(
+                response_path, 1, attempt_record,
+            )
+            self.assertEqual(receipt["kind"], "no_semantic_response")
+
+            mismatched = copy.deepcopy(attempt_record)
+            mismatched["no_semantic_response_invocation_fingerprints"]["run_id"] = "stale-run"
+            with self.assertRaisesRegex(
+                bridge.RetryRawArtifactIntegrityError,
+                "raw envelope receipt does not match the attempt invocation fingerprints",
+            ):
+                bridge._validate_retry_attempt_artifact(response_path, 1, mismatched)
+
+            missing_binding = copy.deepcopy(attempt_record)
+            del missing_binding["no_semantic_response_invocation_fingerprints"]
+            with self.assertRaisesRegex(
+                bridge.RetryRawArtifactIntegrityError,
+                "raw envelope receipt does not match the attempt invocation fingerprints",
+            ):
+                bridge._validate_retry_attempt_artifact(response_path, 1, missing_binding)
 
     def test_run_command_kills_and_reaps_the_process_group_on_timeout(self) -> None:
         controller = bridge.RunController()

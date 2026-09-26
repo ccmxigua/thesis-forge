@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 import sys
 import tempfile
 from pathlib import Path
@@ -83,7 +84,13 @@ class NativeSemanticReviewTests(unittest.TestCase):
                 "clause_sha256": "b" * 64, "evidence_sha256": "c" * 64,
                 "request_sha256": "d" * 64,
             },
-            "clauses": [{"id": "C1", "text": source, "evidence_ids": ["E1"]}],
+            "clauses": [{
+                "id": "C1", "text": source, "evidence_ids": ["E1"],
+                "source_span": {
+                    "evidence_id": "E1", "start_offset": 0, "end_offset": len(source),
+                    "text": source, "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
+                },
+            }],
             "evidence_context": {"E1": {"id": "E1", "text": source}},
         }
         candidate = {
@@ -106,6 +113,44 @@ class NativeSemanticReviewTests(unittest.TestCase):
         self.assertTrue(requirement_ref.startswith("RR"))
         self.assertNotIn("requirement_index", check["review_context"]["linked_requirements"][0])
         self.assertIn("table_caption.alignment_center", check["review_context"]["machine_obligation_ids"])
+
+    def test_obligation_packet_uses_exact_source_span_not_normalized_clause_text(self) -> None:
+        source = "密  级："
+        clause = {
+            "id": "C1", "text": "密 级", "evidence_ids": ["E1"],
+            "source_span": {
+                "evidence_id": "E1", "start_offset": 0, "end_offset": len(source),
+                "text": source, "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
+                "location": {"part": "document", "order": 1},
+            },
+        }
+        chunk = {
+            "provenance": {"run_id": "run-raw"}, "clauses": [clause],
+            "evidence_context": {"E1": {"id": "E1", "text": source}},
+        }
+        packet = build_obligation_coverage_request(
+            {"clause_reviews": [], "requirements": []}, chunk,
+            run_id="run-raw", chunk_index=1,
+        )
+        check = packet["checks"][0]
+        self.assertEqual(check["document_text"], source)
+        self.assertEqual(check["review_context"]["semantic_clause_text"], "密 级")
+
+        missing_span = json.loads(json.dumps(chunk))
+        missing_span["clauses"][0].pop("source_span")
+        with self.assertRaisesRegex(NativeSemanticReviewError, "source_span is required"):
+            build_obligation_coverage_request(
+                {"clause_reviews": [], "requirements": []}, missing_span,
+                run_id="run-raw", chunk_index=1,
+            )
+
+        tampered = json.loads(json.dumps(chunk))
+        tampered["clauses"][0]["source_span"]["source_sha256"] = "0" * 64
+        with self.assertRaisesRegex(NativeSemanticReviewError, "not bound to its exact source evidence"):
+            build_obligation_coverage_request(
+                {"clause_reviews": [], "requirements": []}, tampered,
+                run_id="run-raw", chunk_index=1,
+            )
 
     def test_independent_obligation_review_requires_exact_full_coverage_and_safe_unresolved(self) -> None:
         check = {
@@ -143,6 +188,47 @@ class NativeSemanticReviewTests(unittest.TestCase):
         for response in bad_cases:
             with self.subTest(response=response), self.assertRaises(NativeSemanticReviewError):
                 validate_obligation_coverage_response(response, [check])
+
+    def test_obligation_review_quotes_preserve_exact_raw_whitespace(self) -> None:
+        source = "密  级："
+        check = {
+            "check_id": "C-raw-whitespace", "document_text": source,
+            "review_context": {
+                "classification": "informational", "requires_requirement": False,
+                "linked_requirements": [], "machine_obligation_ids": [],
+            },
+        }
+        response = {"results": [{
+            "check_id": check["check_id"], "verdict": "consistent",
+            "rationale": "The exact source punctuation and spacing are preserved.",
+            "evidence_quotes": [source], "machine_obligation_ids": [],
+            "identified_obligations": [],
+        }]}
+        self.assertEqual(validate_obligation_coverage_response(response, [check])[0]["verdict"], "consistent")
+        normalized = json.loads(json.dumps(response, ensure_ascii=False))
+        normalized["results"][0]["evidence_quotes"] = ["密 级："]
+        with self.assertRaisesRegex(NativeSemanticReviewError, "not an exact source quote"):
+            validate_obligation_coverage_response(normalized, [check])
+
+    def test_represented_obligation_always_requires_a_linked_requirement(self) -> None:
+        check = {
+            "check_id": "C-no-requirement", "document_text": "正文应使用宋体",
+            "review_context": {
+                "classification": "informational", "requires_requirement": False,
+                "linked_requirements": [], "machine_obligation_ids": [],
+            },
+        }
+        response = {"results": [{
+            "check_id": check["check_id"], "verdict": "consistent",
+            "rationale": "The source is represented.",
+            "evidence_quotes": [check["document_text"]], "machine_obligation_ids": [],
+            "identified_obligations": [{
+                "source_quote": check["document_text"], "disposition": "represented",
+                "requirement_refs": [],
+            }],
+        }]}
+        with self.assertRaisesRegex(NativeSemanticReviewError, "claims unlinked coverage"):
+            validate_obligation_coverage_response(response, [check])
 
     def test_scope_dependency_metadata_is_schema_bound_to_scope_unresolved(self) -> None:
         source = "密级"
@@ -323,6 +409,25 @@ class NativeSemanticReviewTests(unittest.TestCase):
             validate_obligation_coverage_response(response, [check])
         self.assertEqual(caught.exception.clause_ids, ("C00061",))
 
+    def test_unresolved_consistent_review_cannot_drop_source_obligations(self) -> None:
+        source = "The abstract is generally written in third person and is 300 to 1,000 words."
+        check = {
+            "check_id": "C00076", "document_text": source,
+            "review_context": {
+                "classification": "unresolved", "requires_requirement": False,
+                "linked_requirements": [], "machine_obligation_ids": [],
+                "manual_review_codes": [],
+            },
+        }
+        response = {"results": [{
+            "check_id": "C00076", "verdict": "consistent",
+            "rationale": "No change is needed.", "evidence_quotes": [source],
+            "machine_obligation_ids": [], "identified_obligations": [],
+        }]}
+        with self.assertRaises(MissingExecutableObligationInventoryError) as caught:
+            validate_obligation_coverage_response(response, [check])
+        self.assertEqual(caught.exception.clause_ids, ("C00076",))
+
     def test_retry_prompt_limits_missing_inventory_correction_to_same_candidate(self) -> None:
         prompt = native_review._prompt({
             "protocol": native_review.OBLIGATION_COVERAGE_PROTOCOL,
@@ -359,6 +464,33 @@ class NativeSemanticReviewTests(unittest.TestCase):
             validate_obligation_coverage_response(pending, [check])[0]["verdict"],
             "source_content_pending",
         )
+
+    def test_authoring_content_pending_rejects_negation_and_conditional_scope(self) -> None:
+        source = "以下示例内容是编写的，请作者根据需要自行撰写真实研究内容。"
+        check = {
+            "check_id": "C00102", "document_text": source,
+            "review_context": {
+                "classification": "requires_source_content", "requires_requirement": False,
+                "linked_requirements": [], "machine_obligation_ids": [],
+            },
+        }
+        pending = {"results": [{
+            "check_id": "C00102", "verdict": "source_content_pending",
+            "rationale": "The source explicitly asks the author to replace the sample with genuine content.",
+            "evidence_quotes": ["请作者根据需要自行撰写真实研究内容"],
+            "machine_obligation_ids": [],
+            "identified_obligations": [{
+                "source_quote": "请作者根据需要自行撰写真实研究内容",
+                "disposition": "authoring_content_pending", "requirement_refs": [],
+            }],
+        }]}
+        for quote in (
+            "样例中，作者不应将占位内容替换为真实研究内容。",
+            "If the sample is retained, the author should not replace it with genuine content.",
+            "如果开展了实验，作者应补充真实研究内容。",
+        ):
+            with self.subTest(quote=quote):
+                self.assertFalse(native_review.is_explicit_authoring_content_quote(quote))
 
         unsafe_checks = [
             {**check, "review_context": {**check["review_context"], "classification": "informational"}},
@@ -839,10 +971,27 @@ class NativeSemanticReviewTests(unittest.TestCase):
                            "clause_sha256": "b" * 64, "evidence_sha256": "c" * 64,
                            "request_sha256": "d" * 64},
             "clauses": [
-                {"id": "C_SOFT", "text": "关键词一般3～8个", "evidence_ids": ["E1"]},
-                {"id": "C_HARD", "text": "最少3组，最多8组", "evidence_ids": ["E2"]},
+                {
+                    "id": "C_SOFT", "text": "关键词一般3～8个", "evidence_ids": ["E1"],
+                    "source_span": {
+                        "evidence_id": "E1", "start_offset": 0,
+                        "end_offset": len("关键词一般3～8个"), "text": "关键词一般3～8个",
+                        "source_sha256": hashlib.sha256("关键词一般3～8个".encode("utf-8")).hexdigest(),
+                    },
+                },
+                {
+                    "id": "C_HARD", "text": "最少3组，最多8组", "evidence_ids": ["E2"],
+                    "source_span": {
+                        "evidence_id": "E2", "start_offset": 0,
+                        "end_offset": len("最少3组，最多8组"), "text": "最少3组，最多8组",
+                        "source_sha256": hashlib.sha256("最少3组，最多8组".encode("utf-8")).hexdigest(),
+                    },
+                },
             ],
-            "evidence_context": {},
+            "evidence_context": {
+                "E1": {"id": "E1", "text": "关键词一般3～8个"},
+                "E2": {"id": "E2", "text": "最少3组，最多8组"},
+            },
         }
         response = {
             "clause_reviews": [
@@ -865,8 +1014,54 @@ class NativeSemanticReviewTests(unittest.TestCase):
             "requirement_ref": check["review_context"]["linked_requirements"][0]["requirement_ref"],
             "clause_id": "C_HARD",
             "document_text": "最少3组，最多8组",
+            "semantic_clause_text": "最少3组，最多8组",
             "evidence_ids": ["E2"],
         }])
+
+    def test_mixed_count_units_can_be_preserved_as_separate_scope_unresolved_obligations(self) -> None:
+        source = "Key Words: at least 3 groups, with a maximum of 8 sets."
+        manual_codes = native_review.compile_unresolved_manual_review_codes(source)
+        self.assertEqual(manual_codes, ["quantitative_scope_unit_ambiguity"])
+        check = {
+            "check_id": "C1", "document_text": source,
+            "review_context": {
+                "classification": "unresolved", "requires_requirement": False,
+                "linked_requirements": [], "machine_obligation_ids": [],
+                "manual_review_codes": manual_codes,
+            },
+        }
+        response = {"results": [{
+            "check_id": "C1", "verdict": "manual_review_required",
+            "rationale": "The lower and upper bounds use different units.",
+            "evidence_quotes": ["at least 3 groups", "a maximum of 8 sets"],
+            "machine_obligation_ids": [],
+            "identified_obligations": [
+                {
+                    "source_quote": "at least 3 groups",
+                    "disposition": "scope_unresolved",
+                    "obligation_summary": "A lower bound is stated in groups.",
+                    "scope_dependency_codes": manual_codes,
+                    "scope_dependency_dimensions": ["metric"],
+                    "requirement_refs": [],
+                },
+                {
+                    "source_quote": "a maximum of 8 sets",
+                    "disposition": "scope_unresolved",
+                    "obligation_summary": "An upper bound is stated in sets.",
+                    "scope_dependency_codes": manual_codes,
+                    "scope_dependency_dimensions": ["metric"],
+                    "requirement_refs": [],
+                },
+            ],
+        }]}
+        result = validate_obligation_coverage_response(response, [check])[0]
+        self.assertEqual(result["verdict"], "manual_review_required")
+        self.assertEqual(len(result["identified_obligations"]), 2)
+        self.assertTrue(all(
+            obligation["disposition"] == "scope_unresolved"
+            and not obligation["requirement_refs"]
+            for obligation in result["identified_obligations"]
+        ))
 
     def test_obligation_review_prompt_defines_qualifier_fidelity(self) -> None:
         prompt = native_review._prompt({

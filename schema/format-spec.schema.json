@@ -3,6 +3,9 @@
   "$id": "https://example.local/thesis-latex2docx/format-spec.schema.json",
   "title": "Thesis formatting requirements",
   "type": "object",
+  "not": {
+    "required": ["content_instances", "cover_field_instances"]
+  },
   "required": [
     "schema_version",
     "source_document",
@@ -770,11 +773,13 @@
               "type": "array",
               "items": {
                 "enum": [
+                  "brief_statement_of_thesis_content",
                   "independent_and_complete",
                   "reflects_central_idea",
                   "academic_language",
                   "logical_structure",
                   "highlight_innovation",
+                  "new_theory_method_technology",
                   "main_information_equivalent_to_thesis"
                 ]
               },

@@ -11,8 +11,10 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from thesis_format_pipeline import (  # noqa: E402
     _scope_unresolved_release_gates,
     _source_content_pending_release_gates,
+    _source_content_verification_release_gates,
     enforce_obligation_review_output_policy,
 )
+from format_spec_validation import load_and_validate  # noqa: E402
 from manual_review import build_manual_review_ledger  # noqa: E402
 from semantic_contract import sha256_json  # noqa: E402
 
@@ -102,6 +104,81 @@ class ThesisFormatPipelinePolicyTests(unittest.TestCase):
         self.assertIn("本人真实研究内容", gates[0]["action"])
         self.assertIn("【待补写真实论文内容：C00102】", gates[0]["placeholder_text"])
         self.assertNotIn("generated content", gates[0]["action"])
+
+    def test_keyword_source_provenance_creates_human_verification_marker_not_authoring_todo(self) -> None:
+        quote = (
+            "关键词是为了便于做文献索引和检索工作而从论文中选取出来用以表示全文主题内容信息的单词或术语，"
+            "在论文中有明确出处。"
+        )
+        raw_source = f"前文：{quote}后文"
+        start = raw_source.index(quote)
+        source_sha = hashlib.sha256(raw_source.encode("utf-8")).hexdigest()
+        clause = {
+            "id": "C00068", "text": quote, "evidence_ids": ["E00068"],
+            "source_span": {
+                "evidence_id": "E00068", "start_offset": start,
+                "end_offset": start + len(quote), "text": quote,
+                "source_sha256": source_sha,
+            },
+        }
+        evidence_doc = {"evidence": [{"id": "E00068", "text": raw_source}]}
+        reviews = [{"source_content_verification_items": [{
+            "clause_id": "C00068", "source_quotes": [quote],
+            "evidence_ids": ["E00068"],
+        }]}]
+        gates = _source_content_verification_release_gates(
+            reviews, clauses=[clause], evidence_doc=evidence_doc,
+        )
+        self.assertEqual(len(gates), 1)
+        gate = gates[0]
+        self.assertEqual(gate["category"], "semantic_content_review")
+        self.assertEqual(gate["clause_ids"], ["C00068"])
+        self.assertEqual(gate["evidence_ids"], ["E00068"])
+        self.assertEqual(gate["placeholder_text"], "【待人工核验：关键词是否源自论文】")
+        self.assertIn("核对", gate["action"])
+        self.assertIn("仍未通过", gate["action"])
+        self.assertNotIn("补写", gate["action"])
+        self.assertNotIn("替换", gate["action"])
+
+        ledger = build_manual_review_ledger(
+            {}, [], release_gates=gates,
+            binding={
+                "case_id": "bsu", "run_id": "run-1",
+                "source_sha256": "a" * 64, "clause_sha256": "b" * 64,
+                "evidence_sha256": "c" * 64, "request_sha256": "d" * 64,
+                "requirements_sha256": "e" * 64, "input_source_sha256": "f" * 64,
+                "format_spec_sha256": "0" * 64, "official_template_sha256": None,
+                "official_template_source": "not_supplied",
+            },
+        )
+        self.assertFalse(ledger["submission_ready"])
+        self.assertEqual(ledger["items"][0]["category"], "semantic_content_review")
+        self.assertEqual(load_and_validate(ledger, ROOT / "schema" / "manual-review-ledger.schema.json"), [])
+
+        forged = [{"source_content_verification_items": [{
+            "clause_id": "C00068", "source_quotes": ["表格应居中"],
+            "evidence_ids": ["E00068"],
+        }]}]
+        with self.assertRaisesRegex(ValueError, "malformed"):
+            _source_content_verification_release_gates(
+                forged, clauses=[clause], evidence_doc=evidence_doc,
+            )
+        duplicate = [{"source_content_verification_items": [
+            *reviews[0]["source_content_verification_items"],
+            *reviews[0]["source_content_verification_items"],
+        ]}]
+        with self.assertRaisesRegex(ValueError, "duplicate source-content verification clause"):
+            _source_content_verification_release_gates(
+                duplicate, clauses=[clause], evidence_doc=evidence_doc,
+            )
+
+    def test_keyword_provenance_human_verification_is_review_draft_only(self) -> None:
+        results = [{"check_id": "C00068", "verdict": "source_content_verification_pending"}]
+        self.assertEqual(
+            enforce_obligation_review_output_policy(results, output_policy="review_draft"), [],
+        )
+        with self.assertRaisesRegex(ValueError, "human verification.*C00068.*submission output is blocked"):
+            enforce_obligation_review_output_policy(results, output_policy="submission")
 
     def test_source_content_pending_rejects_missing_evidence_ids(self) -> None:
         with self.assertRaisesRegex(ValueError, "requires non-empty evidence IDs"):

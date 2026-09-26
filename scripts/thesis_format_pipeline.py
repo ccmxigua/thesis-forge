@@ -43,6 +43,7 @@ from native_semantic_review import (
     OBLIGATION_COVERAGE_SCHEMA,
     OBLIGATION_COVERAGE_PROTOCOL,
     build_obligation_coverage_request,
+    is_explicit_keyword_source_provenance_quote,
     validate_obligation_coverage_response,
 )
 from semantic_source_references import (
@@ -663,6 +664,7 @@ def _validate_independent_obligation_receipts(
             if isinstance(item, dict) and isinstance(item.get("check_id"), str)
         }
         source_content_pending_items: list[dict[str, Any]] = []
+        source_content_verification_items: list[dict[str, Any]] = []
         scope_unresolved_items: list[dict[str, Any]] = []
         backend_unsupported_items: list[dict[str, Any]] = []
         packet_clauses = {
@@ -681,6 +683,44 @@ def _validate_independent_obligation_receipts(
                         and item.get("disposition") == "backend_unsupported"
                         and isinstance(item.get("source_quote"), str)
                     ],
+                    "reason": str(result.get("rationale") or ""),
+                })
+            if result.get("verdict") == "source_content_verification_pending":
+                check_id = str(result.get("check_id") or "")
+                check = checks_by_id.get(check_id)
+                context = check.get("review_context") if isinstance(check, dict) else None
+                cited_evidence = (
+                    context.get("cited_evidence")
+                    if isinstance(context, dict) and isinstance(context.get("cited_evidence"), dict)
+                    else {}
+                )
+                obligations = result.get("identified_obligations")
+                source_quotes = [
+                    str(item.get("source_quote"))
+                    for item in obligations or []
+                    if isinstance(item, dict)
+                    and item.get("disposition") == "source_content_verification_pending"
+                    and isinstance(item.get("source_quote"), str)
+                ]
+                if (
+                    not check_id
+                    or not source_quotes
+                    or any(not is_explicit_keyword_source_provenance_quote(quote) for quote in source_quotes)
+                    or not cited_evidence
+                    or any(
+                        not isinstance(evidence_id, str) or not evidence_id.strip()
+                        or not isinstance(evidence_item, dict)
+                        for evidence_id, evidence_item in cited_evidence.items()
+                    )
+                ):
+                    raise ValueError(
+                        "source-content verification receipt has no exact keyword-provenance quote "
+                        "or valid cited evidence"
+                    )
+                source_content_verification_items.append({
+                    "clause_id": check_id,
+                    "source_quotes": source_quotes,
+                    "evidence_ids": sorted(str(key) for key in cited_evidence),
                     "reason": str(result.get("rationale") or ""),
                 })
             if result.get("verdict") != "source_content_pending":
@@ -800,6 +840,11 @@ def _validate_independent_obligation_receipts(
             }),
             "source_content_pending_items": source_content_pending_items,
             "submission_blocked_by_source_content_pending": bool(source_content_pending_items),
+            "source_content_verification_clause_ids": sorted({
+                item["clause_id"] for item in source_content_verification_items
+            }),
+            "source_content_verification_items": source_content_verification_items,
+            "submission_blocked_by_source_content_verification": bool(source_content_verification_items),
             "scope_unresolved_items": scope_unresolved_items,
             "submission_blocked_by_scope_unresolved": bool(scope_unresolved_items),
         })
@@ -831,6 +876,18 @@ def enforce_obligation_review_output_policy(
             "independent obligation review requires genuine author content for clause(s) "
             + ", ".join(source_content_pending_clause_ids)
             + "; submission output is blocked (use an explicit review_draft for a non-release artifact)"
+        )
+    source_content_verification_clause_ids = sorted({
+        str(item.get("check_id")) for item in results
+        if isinstance(item, dict)
+        and item.get("verdict") == "source_content_verification_pending"
+        and isinstance(item.get("check_id"), str)
+    })
+    if source_content_verification_clause_ids and output_policy != "review_draft":
+        raise ValueError(
+            "independent obligation review requires human verification of keyword provenance for clause(s) "
+            + ", ".join(source_content_verification_clause_ids)
+            + "; submission output is blocked until verified"
         )
     if manual_review_clause_ids and output_policy != "review_draft":
         raise ValueError(
@@ -942,6 +999,115 @@ def _source_content_pending_release_gates(
                 "source_location": source_location,
             }
             gates.append(gate)
+            seen_clause_ids.add(clause_id)
+    return gates
+
+
+def _source_content_verification_release_gates(
+    independent_reviews: list[dict[str, Any]],
+    *, clauses: list[dict[str, Any]], evidence_doc: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Project source-bound keyword-provenance checks into draft-only human gates."""
+    if not isinstance(independent_reviews, list):
+        raise ValueError("independent obligation reviews must be an array")
+    if not isinstance(clauses, list) or not isinstance(evidence_doc, dict):
+        raise ValueError("current clause and evidence artifacts are required for source-content verification gates")
+    clauses_by_id = {
+        str(item.get("id")): item for item in clauses
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    evidence_by_id = {
+        str(item.get("id")): item for item in evidence_doc.get("evidence", [])
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    gates: list[dict[str, Any]] = []
+    seen_clause_ids: set[str] = set()
+    for independent_review in independent_reviews:
+        if not isinstance(independent_review, dict):
+            raise ValueError("independent obligation review must be an object")
+        pending_items = independent_review.get("source_content_verification_items", [])
+        if not isinstance(pending_items, list):
+            raise ValueError("independent review source-content verification items must be an array")
+        for pending in pending_items:
+            if not isinstance(pending, dict):
+                raise ValueError("source-content verification item must be an object")
+            clause_id = pending.get("clause_id")
+            quotes = pending.get("source_quotes")
+            evidence_ids = pending.get("evidence_ids")
+            if (
+                not isinstance(clause_id, str) or not clause_id
+                or not isinstance(quotes, list) or not quotes
+                or any(
+                    not isinstance(quote, str) or not quote.strip()
+                    or not is_explicit_keyword_source_provenance_quote(quote)
+                    for quote in quotes
+                )
+                or not isinstance(evidence_ids, list) or not evidence_ids
+                or any(not isinstance(value, str) or not value for value in evidence_ids)
+            ):
+                raise ValueError("validated source-content verification item is malformed")
+            if clause_id in seen_clause_ids:
+                raise ValueError("duplicate source-content verification clause")
+            clause = clauses_by_id.get(clause_id)
+            span = clause.get("source_span") if isinstance(clause, dict) else None
+            span_evidence_id = span.get("evidence_id") if isinstance(span, dict) else None
+            source_evidence = evidence_by_id.get(span_evidence_id) if isinstance(span_evidence_id, str) else None
+            raw_source = source_evidence.get("text") if isinstance(source_evidence, dict) else None
+            start = span.get("start_offset") if isinstance(span, dict) else None
+            end = span.get("end_offset") if isinstance(span, dict) else None
+            span_text = span.get("text") if isinstance(span, dict) else None
+            clause_evidence_ids = clause.get("evidence_ids") if isinstance(clause, dict) else None
+            clause_text = clause.get("text") if isinstance(clause, dict) else None
+            source_location = None
+            if (
+                isinstance(clause, dict)
+                and isinstance(span, dict)
+                and isinstance(span_evidence_id, str)
+                and isinstance(raw_source, str)
+                and isinstance(start, int) and not isinstance(start, bool)
+                and isinstance(end, int) and not isinstance(end, bool)
+                and 0 <= start < end <= len(raw_source)
+                and isinstance(span_text, str)
+                and raw_source[start:end] == span_text
+                and hashlib.sha256(raw_source.encode("utf-8")).hexdigest() == span.get("source_sha256")
+                and isinstance(clause_text, str)
+                and re.sub(r"\s+", " ", span_text).strip() == clause_text
+                and isinstance(clause_evidence_ids, list)
+                and set(clause_evidence_ids) == {span_evidence_id}
+                and set(evidence_ids) == {span_evidence_id}
+                and all(
+                    quote in clause_text
+                    or re.sub(r"\s+", " ", quote).strip()
+                    in re.sub(r"\s+", " ", span_text).strip()
+                    for quote in quotes
+                )
+            ):
+                source_location = {
+                    "evidence_id": span_evidence_id,
+                    "start_offset": start,
+                    "end_offset": end,
+                    "source_sha256": span["source_sha256"],
+                }
+            if source_location is None:
+                raise ValueError(
+                    "source-content verification quote, evidence, range, or hash is not bound to current source"
+                )
+            gates.append({
+                "source_code": "independent_keyword_source_provenance_review",
+                "category": "semantic_content_review",
+                "source_text": "\n".join(quotes),
+                "reason": (
+                    "原文要求关键词从论文中选取并在论文中有明确出处；当前审查请求未包含可核验的完整论文正文。"
+                ),
+                "action": (
+                    "请人工逐项核对论文中的关键词是否能在论文正文中找到明确出处，并将对应段落或术语记入人工核验记录；"
+                    "核验结论未记录并重新审查前，此项仍未通过。"
+                ),
+                "placeholder_text": "【待人工核验：关键词是否源自论文】",
+                "clause_ids": [clause_id],
+                "evidence_ids": [span_evidence_id],
+                "source_location": source_location,
+            })
             seen_clause_ids.add(clause_id)
     return gates
 
@@ -2259,6 +2425,11 @@ def _main(argv: list[str]) -> int:
         independent_reviews = (
             host_review_receipts.get("independent_obligation_reviews", [])
             if isinstance(host_review_receipts, dict) else []
+        )
+        manual_review_release_gates.extend(
+            _source_content_verification_release_gates(
+                independent_reviews, clauses=clauses, evidence_doc=evidence_doc,
+            )
         )
         manual_review_release_gates.extend(
             _source_content_pending_release_gates(

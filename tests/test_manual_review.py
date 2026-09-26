@@ -411,6 +411,37 @@ class ManualReviewTests(unittest.TestCase):
         self.assertIn("【待提供：官方版式模板】", marker.text)
         self.assertEqual(str(marker.runs[0].font.color.rgb), "C00000")
 
+    def test_keyword_provenance_gate_renders_as_red_human_verification(self) -> None:
+        quote = "关键词须从论文中选取，并在论文中有明确出处。"
+        ledger = build_manual_review_ledger(
+            {}, [],
+            release_gates=[{
+                "source_code": "independent_keyword_source_provenance_review",
+                "category": "semantic_content_review",
+                "clause_ids": ["C00068"], "evidence_ids": ["E00068"],
+                "source_text": quote,
+                "reason": "审查请求未包含可核验的论文正文。",
+                "action": "请人工核对关键词是否能在论文正文中找到明确出处；此标记不代表已通过。",
+                "placeholder_text": "【待人工核验：关键词是否源自论文】",
+            }],
+            binding=self._binding(case_id="bsu", run_id="run-keyword-review"),
+        )
+        self.assertFalse(ledger["submission_ready"])
+        self.assertEqual(
+            load_and_validate(ledger, ROOT / "schema" / "manual-review-ledger.schema.json"), [],
+        )
+        document = Document()
+        receipts = append_manual_review_markers(document, ledger)
+        marker = next(p for p in document.paragraphs if p.text.startswith("【MR-0001"))
+        self.assertIn("【待人工核验：关键词是否源自论文】", marker.text)
+        self.assertIn("找到明确出处", marker.text)
+        self.assertNotIn("补写", marker.text)
+        self.assertEqual(receipts[0]["placeholder_text"], "【待人工核验：关键词是否源自论文】")
+        self.assertEqual(str(marker.runs[0].font.color.rgb), "C00000")
+        shading = marker.runs[0]._r.rPr.find(qn("w:shd"))
+        self.assertIsNotNone(shading)
+        self.assertEqual(shading.get(qn("w:fill")), "FFF2CC")
+
     @staticmethod
     def _item(index=1, **values):
         return {

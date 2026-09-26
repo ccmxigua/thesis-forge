@@ -106,7 +106,7 @@ class NativeSemanticReviewTests(unittest.TestCase):
         }
         packet = build_obligation_coverage_request(candidate, chunk, run_id="run-1", chunk_index=4)
         check = packet["checks"][0]
-        self.assertEqual(packet["protocol"], "native_source_obligation_coverage_review_v5")
+        self.assertEqual(packet["protocol"], "native_source_obligation_coverage_review_v6")
         self.assertEqual(packet["provenance"], chunk["provenance"])
         self.assertEqual(check["document_text"], source)
         requirement_ref = check["review_context"]["linked_requirements"][0]["requirement_ref"]
@@ -464,6 +464,79 @@ class NativeSemanticReviewTests(unittest.TestCase):
             validate_obligation_coverage_response(pending, [check])[0]["verdict"],
             "source_content_pending",
         )
+
+    def test_keyword_provenance_without_manuscript_body_is_human_verification(self) -> None:
+        source = (
+            "关键词是为了便于做文献索引和检索工作而从论文中选取出来用以表示全文主题内容信息的单词或术语，"
+            "在论文中有明确出处。"
+        )
+        check = {
+            "check_id": "C00068", "document_text": source,
+            "review_context": {
+                "classification": "requires_source_content", "requires_requirement": False,
+                "linked_requirements": [], "machine_obligation_ids": [],
+            },
+        }
+        pending = {"results": [{
+            "check_id": "C00068", "verdict": "source_content_verification_pending",
+            "rationale": "The manuscript body is not present in this audit request, so a human must verify keyword provenance.",
+            "evidence_quotes": [source], "machine_obligation_ids": [],
+            "identified_obligations": [{
+                "source_quote": source,
+                "disposition": "source_content_verification_pending",
+                "requirement_refs": [],
+            }],
+        }]}
+        self.assertTrue(native_review.is_explicit_keyword_source_provenance_quote(source))
+        for positive_quote in (
+            "关键词要从论文中提取。",
+            "关键词来源于论文正文。",
+            "论文关键词取自论文内容。",
+            "Keywords should come from the paper.",
+            "Keywords must originate from the thesis.",
+            "Keywords must be sourced from the manuscript.",
+        ):
+            with self.subTest(quote=positive_quote):
+                self.assertTrue(
+                    native_review.is_explicit_keyword_source_provenance_quote(positive_quote),
+                )
+        for negative_quote in (
+            "关键词不得从论文中选取。",
+            "关键词不必从论文中选取。",
+            "关键词无需从论文中选取。",
+            "Keywords need not come from the paper.",
+            "Keywords are not required to originate from the thesis.",
+        ):
+            with self.subTest(quote=negative_quote):
+                self.assertFalse(
+                    native_review.is_explicit_keyword_source_provenance_quote(negative_quote),
+                )
+        self.assertEqual(
+            validate_obligation_coverage_response(pending, [check])[0]["verdict"],
+            "source_content_verification_pending",
+        )
+        prompt = native_review._prompt({
+            "protocol": native_review.OBLIGATION_COVERAGE_PROTOCOL,
+            "checks": [check],
+        })
+        self.assertIn("not a request to write, replace, or invent keywords", prompt)
+
+        unsafe_checks = [
+            {**check, "review_context": {**check["review_context"], "classification": "informational"}},
+            {**check, "review_context": {
+                **check["review_context"], "linked_requirements": [{"requirement_ref": "RR-existing"}],
+            }},
+        ]
+        for unsafe_check in unsafe_checks:
+            with self.subTest(context=unsafe_check["review_context"]), self.assertRaises(
+                NativeSemanticReviewError,
+            ):
+                validate_obligation_coverage_response(pending, [unsafe_check])
+
+        forged = json.loads(json.dumps(pending, ensure_ascii=False))
+        forged["results"][0]["identified_obligations"][0]["source_quote"] = "表格应居中"
+        with self.assertRaisesRegex(NativeSemanticReviewError, "non-source obligation quote"):
+            validate_obligation_coverage_response(forged, [check])
 
     def test_authoring_content_pending_rejects_negation_and_conditional_scope(self) -> None:
         source = "以下示例内容是编写的，请作者根据需要自行撰写真实研究内容。"

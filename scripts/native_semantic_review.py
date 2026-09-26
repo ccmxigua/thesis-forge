@@ -133,6 +133,50 @@ def is_explicit_authoring_content_quote(quote: Any) -> bool:
     return english_author and english_action and (english_sample or english_genuine_content)
 
 
+def is_explicit_keyword_source_provenance_quote(quote: Any) -> bool:
+    """Recognize source text requiring keywords to come from the thesis.
+
+    This only authorizes a human verification marker when the current review
+    packet lacks the manuscript body. It does not prove compliance.
+    """
+    if not isinstance(quote, str) or not quote.strip():
+        return False
+    compact = re.sub(r"\s+", "", quote).casefold()
+    if any(token in compact for token in (
+        "不得", "不能", "不应", "不可以", "无须", "无需", "禁止",
+        "不必", "非必须", "不需要", "不要求", "没有必要",
+    )) or re.search(
+        r"\b(?:not|never|must\s+not|cannot|should\s+not|need\s+not|"
+        r"(?:do|does)\s+not\s+need\s+to|not\s+required\s+to|"
+        r"not\s+necessary\s+to)\b",
+        quote, re.I,
+    ):
+        return False
+    if not re.search(r"关键词|关键字|\bkey\s*words?\b", quote, re.I):
+        return False
+    if any(token in compact for token in (
+        "从论文中选取", "从论文选取", "选自论文", "源自论文", "来自论文",
+        "来源于论文", "取自论文", "提取自论文", "从论文中提取", "从论文提取",
+        "论文中提取", "关键词源于论文", "关键词来自论文", "关键词来源于论文",
+        "论文中有明确出处", "论文中有明确来源", "论文正文中有明确出处",
+        "正文中有明确出处", "从正文中选取", "从正文选取",
+    )):
+        return True
+    return bool(
+        re.search(
+            r"\b(?:selected|drawn|derived|taken|extracted|originat(?:e|es|ed)|"
+            r"come|comes|sourced?)\s+from\s+"
+            r"(?:the\s+)?(?:thesis|paper|manuscript|text|body)\b",
+            quote, re.I,
+        )
+        or re.search(
+            r"\b(?:clear|explicit)\s+(?:source|provenance)\s+(?:in|within)\s+"
+            r"(?:the\s+)?(?:thesis|paper|manuscript|text|body)\b",
+            quote, re.I,
+        )
+    )
+
+
 def _exact_clause_source_text(
     clause: dict[str, Any], evidence_context: dict[str, Any],
 ) -> str:
@@ -193,7 +237,7 @@ RESPONSE_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
-OBLIGATION_COVERAGE_PROTOCOL = "native_source_obligation_coverage_review_v5"
+OBLIGATION_COVERAGE_PROTOCOL = "native_source_obligation_coverage_review_v6"
 SCOPE_DEPENDENCY_DIMENSIONS = {
     "abstract_target_metric_ambiguity": frozenset({"target", "metric"}),
     "quantitative_scope_unit_ambiguity": frozenset({"target", "metric"}),
@@ -242,6 +286,7 @@ _NON_SCOPE_OBLIGATION_SCHEMA: dict[str, Any] = {
         "disposition": {"enum": [
             "represented", "unrepresented", "ambiguous",
             "external_action_pending", "authoring_content_pending", "backend_unsupported",
+            "source_content_verification_pending",
         ]},
     },
     "additionalProperties": False,
@@ -263,7 +308,7 @@ OBLIGATION_COVERAGE_SCHEMA: dict[str, Any] = {
                     "verdict": {"enum": [
                         "consistent", "incomplete", "uncertain", "manual_review_required",
                         "external_compliance_pending", "source_content_pending",
-                        "backend_unsupported",
+                        "backend_unsupported", "source_content_verification_pending",
                     ]},
                     "rationale": {"type": "string", "minLength": 1},
                     "evidence_quotes": {
@@ -464,6 +509,7 @@ def validate_obligation_coverage_response(
             if isinstance(item, dict) and isinstance(item.get("requirement_ref"), str)
         }
         represented = unrepresented = ambiguous = external_pending = authoring_pending = 0
+        source_verification_pending = 0
         scope_unresolved = 0
         backend_unsupported = 0
         for obligation in result.get("identified_obligations", []):
@@ -494,6 +540,12 @@ def validate_obligation_coverage_response(
                         f"authoring-content pending lacks an explicit source authoring instruction for {check_id}"
                     )
                 authoring_pending += 1
+            elif disposition == "source_content_verification_pending":
+                if not is_explicit_keyword_source_provenance_quote(quote):
+                    raise NativeSemanticReviewError(
+                        f"source-content verification pending lacks an explicit keyword provenance rule for {check_id}"
+                    )
+                source_verification_pending += 1
             elif disposition == "backend_unsupported":
                 backend_unsupported += 1
             elif disposition == "ambiguous":
@@ -528,6 +580,10 @@ def validate_obligation_coverage_response(
                     f"scope dependency metadata is only valid for scope_unresolved obligations: {check_id}"
                 )
         verdict = result.get("verdict")
+        if source_verification_pending and verdict != "source_content_verification_pending":
+            raise NativeSemanticReviewError(
+                f"keyword source verification must remain a human-verification disposition for {check_id}"
+            )
         is_external_compliance = context.get("classification") == "external_compliance"
         primary_obligations = (
             context.get("primary_obligations")
@@ -552,7 +608,10 @@ def validate_obligation_coverage_response(
                 and verdict == "incomplete"
                 and unrepresented == len(identified_obligations)
                 and unrepresented > 0
-                and not (represented or ambiguous or external_pending or authoring_pending or scope_unresolved)
+                and not (
+                    represented or ambiguous or external_pending or authoring_pending
+                    or source_verification_pending or scope_unresolved
+                )
             ):
                 # This is not an accepted pending disposition. It is a
                 # one-shot signal to re-read the exact source as an external
@@ -597,11 +656,29 @@ def validate_obligation_coverage_response(
                 or linked
                 or not obligations
                 or authoring_pending != len(obligations)
-                or represented or unrepresented or ambiguous or external_pending or scope_unresolved
+                or represented or unrepresented or ambiguous or external_pending
+                or source_verification_pending or scope_unresolved
                 or any(item.get("requirement_refs") for item in obligations)
             ):
                 raise NativeSemanticReviewError(
                     f"source-content pending must be an unlinked authoring input for {check_id}"
+                )
+            by_id[check_id] = result
+            continue
+        if verdict == "source_content_verification_pending":
+            obligations = result.get("identified_obligations", [])
+            if (
+                context.get("classification") != "requires_source_content"
+                or context.get("requires_requirement") is not False
+                or linked
+                or not obligations
+                or source_verification_pending != len(obligations)
+                or represented or unrepresented or ambiguous or external_pending
+                or authoring_pending or scope_unresolved or backend_unsupported
+                or any(item.get("requirement_refs") for item in obligations)
+            ):
+                raise NativeSemanticReviewError(
+                    f"source-content verification must be a source-bound, unlinked human check for {check_id}"
                 )
             by_id[check_id] = result
             continue
@@ -615,7 +692,8 @@ def validate_obligation_coverage_response(
                 or linked
                 or not obligations
                 or backend_unsupported != len(obligations)
-                or represented or unrepresented or ambiguous or external_pending or authoring_pending or scope_unresolved
+                or represented or unrepresented or ambiguous or external_pending or authoring_pending
+                or source_verification_pending or scope_unresolved
                 or any(item.get("requirement_refs") for item in obligations)
             ):
                 raise NativeSemanticReviewError(
@@ -939,7 +1017,13 @@ def _prompt(request: dict[str, Any]) -> str:
             "source passage as authoring_content_pending and use no requirement_refs. This means the source input "
             "is still pending, not that the content was written or a requirement satisfied. If the primary response "
             "instead classifies that explicit authoring instruction as informational, use incomplete so the bounded "
-            "primary retry can correct only that classification. Never draft the missing thesis content. "
+            "primary retry can correct only that classification. Never draft the missing thesis content. When the "
+            "source requires keywords or key terms to be selected from, derived from, or explicitly traceable to the "
+            "thesis/paper, but this request does not include the manuscript body needed to verify that provenance, "
+            "use verdict source_content_verification_pending and disposition source_content_verification_pending "
+            "for each exact source passage, with no requirement_refs. This is a human check of existing manuscript "
+            "content, not a request to write, replace, or invent keywords; it is never compliance or release approval. "
+            "Use this only for explicit keyword-to-manuscript provenance language; code validates the source quote. "
             "For a clause classified unsupported_backend, use verdict backend_unsupported only when the source is "
             "readable, every identified obligation is explicitly enumerated with disposition backend_unsupported, "
             "and there is no linked requirement or requirement reference because the current backend cannot execute "
@@ -1173,6 +1257,7 @@ def run_native_semantic_review(
     verdicts = (
         "consistent", "incomplete", "uncertain", "manual_review_required",
         "external_compliance_pending", "source_content_pending", "backend_unsupported",
+        "source_content_verification_pending",
     ) if obligation_coverage_mode else (
         "satisfied", "noncompliant", "uncertain",
     )

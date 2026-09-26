@@ -159,7 +159,7 @@ class SemanticSourceReferenceTests(unittest.TestCase):
         self.assertNotIn("scope_dependency_dimensions", normal_properties)
         self.assertEqual(normal_properties["disposition"]["enum"], [
             "represented", "unrepresented", "ambiguous", "external_action_pending",
-            "authoring_content_pending", "backend_unsupported",
+            "authoring_content_pending", "backend_unsupported", "source_content_verification_pending",
         ])
         self.assertIn("source_ref", normal_properties)
         self.assertNotIn("source_quote", normal_properties)

@@ -294,6 +294,11 @@ or abstract location. Unlocated items go at the front under
 `待定位人工处理（审查草稿，不可提交）`, each with its MR ID, source excerpt, reason,
 and editable handling prompt. Full original text stays in the bound ledger;
 placement never changes unresolved status, requirements, or source paragraphs.
+When the source requires keywords to be traceable to the thesis but the review
+packet lacks the manuscript body, record a separate
+`source_content_verification_pending` human check. Do not classify it as missing
+author-written content or ask the author to rewrite the keywords; the marker
+must ask for a manual source-location check and remains a submission blocker.
 
 `manual-review-marker-audit.json` reopens the serialized DOCX and checks unique
 coverage, red text, shading, non-hidden text and CJK font binding. Batch

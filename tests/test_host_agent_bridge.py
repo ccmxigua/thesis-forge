@@ -1469,8 +1469,8 @@ class HostAgentBridgeTests(unittest.TestCase):
         parent = {
             "contract_version": "3.0", "requirements": [], "unsupported_items": [],
             "clause_reviews": [
-                {"clause_id": "C00037", "classification": "external_compliance",
-                 "normative_basis": "external_duty", "reason": "parent reason", "obligations": None},
+                {"clause_id": "C00037", "classification": "executable",
+                 "reason": "parent reason", "obligations": None},
                 {"clause_id": "C00040", "classification": "external_compliance",
                  "normative_basis": "external_duty", "reason": "preserve this reason",
                  "obligations": [{"id": "affirm", "status": "unverifiable", "reason": "source duty"}]},
@@ -1478,7 +1478,7 @@ class HostAgentBridgeTests(unittest.TestCase):
         }
         model_retry = copy.deepcopy(parent)
         model_retry["clause_reviews"][0]["obligations"] = [
-            {"id": "signature", "status": "unverifiable", "reason": "requires a signature"},
+            {"id": "signature", "status": "covered", "reason": "source duty represented"},
         ]
         model_retry["clause_reviews"][1]["reason"] = "unrequested semantic rewrite"
         records = [{
@@ -1522,7 +1522,7 @@ class HostAgentBridgeTests(unittest.TestCase):
                 self.assertIsNone(rejected)
                 self.assertEqual(rejected_audit["status"], "blocked")
 
-    def test_mixed_retry_projects_inventories_then_repairs_external_relation(self) -> None:
+    def test_external_null_inventory_is_valid_but_mixed_requirement_edge_stays_blocked(self) -> None:
         sources = {
             "C00046": "审批表编号需由外部审批流程核验。",
             "C00049": "办公室盖章状态需由外部审批流程核验。",
@@ -1569,7 +1569,11 @@ class HostAgentBridgeTests(unittest.TestCase):
         records = bridge.contract_error_records(errors, response=parent, chunk=chunk)
         record_codes = {record["code"] for record in records}
         self.assertIn("non_requirement_classification_relation", record_codes)
-        self.assertIn("executable_review_obligations_missing", record_codes)
+        self.assertNotIn("executable_review_obligations_missing", record_codes)
+        self.assertEqual(
+            [review["obligations"] for review in parent["clause_reviews"]],
+            [None, None],
+        )
 
         model_retry = copy.deepcopy(parent)
         for review in model_retry["clause_reviews"]:
@@ -1577,57 +1581,18 @@ class HostAgentBridgeTests(unittest.TestCase):
                 "id": f"{review['clause_id']}-1", "status": "unverifiable",
                 "reason": "该外部审批状态不能由 DOCX 本身证明。",
             }]
-
-        raw_error, _ = bridge._retry_semantic_change_error(
+        retry_error, changed_paths = bridge._retry_semantic_change_error(
             parent, model_retry, records, contract_version="3.0", chunk=chunk,
         )
-        self.assertIsNotNone(raw_error, "the full mixed error set must not grant broad retry authority")
+        self.assertIsNotNone(retry_error)
+        self.assertTrue(all("obligations" in path for path in changed_paths))
 
-        projected, audit = bridge._project_validator_targeted_obligation_fields(
-            parent, model_retry, records,
-        )
-        self.assertIsNotNone(projected)
-        self.assertEqual(projected["requirements"], parent["requirements"])
-        self.assertEqual(
-            projected["clause_reviews"], model_retry["clause_reviews"],
-        )
-        unapplied_codes = {
-            item["code"] for item in audit["unapplied_validator_records"]
-        }
-        self.assertIn("non_requirement_classification_relation", unapplied_codes)
-        self.assertNotIn("executable_review_obligations_missing", unapplied_codes)
-        inventory_records = [
-            record for record in records
-            if record["code"] == "executable_review_obligations_missing"
-        ]
-        self.assertTrue(bridge._v3_source_inventory_completion_allowed(
-            parent, projected, inventory_records, bridge._retry_change_paths(parent, projected),
-            chunk=chunk,
-        ), msg=json.dumps(bridge._retry_input_fingerprints(chunk), ensure_ascii=False))
-        projected_error, projected_changes = bridge._retry_semantic_change_error(
-            parent, projected, inventory_records, contract_version="3.0", chunk=chunk,
-        )
-        self.assertIsNone(projected_error)
-        self.assertEqual(len(projected_changes), 2)
-
-        accepted, candidate_audit = bridge.prepare_native_response_candidate(projected, chunk)
-        self.assertEqual(accepted["requirements"], [])
-        self.assertTrue(all(
-            review["obligations"][0]["status"] == "unverifiable"
-            for review in accepted["clause_reviews"]
-        ))
-        self.assertEqual(bridge.validate_host_agent_response(accepted, chunk), [])
-        self.assertIn(
-            "external_action_relation_projection_v3",
-            {repair["rule_id"] for repair in candidate_audit["mechanical_repairs"]},
-        )
-
-    def test_v3_inventory_completion_is_revalidated_and_independently_reviewed(self) -> None:
+    def test_v3_executable_inventory_completion_is_revalidated_and_independently_reviewed(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             review_dir = Path(td) / "requirements"
             review_dir.mkdir(parents=True)
-            source = "论文作者须在声明页亲笔签名并填写日期。"
-            unrelated_source = "本人确认论文相关信息真实有效。"
+            source = "正文使用宋体。"
+            unrelated_source = "论文作者须在声明页亲笔签名并填写日期。"
             clauses = [{
                 "id": "C00037", "text": source, "evidence_ids": ["E1"],
                 "source_kind": "paragraph", "location": {}, "part_index": 0,
@@ -1652,12 +1617,22 @@ class HostAgentBridgeTests(unittest.TestCase):
                 request, clauses, evidence, "a" * 64, review_dir, chunk_size=2,
             )
             first = {
-                "contract_version": "3.0", "requirements": [],
+                "contract_version": "3.0",
+                "requirements": [{
+                    "role": "body_text",
+                    "properties": {"font": {"cjk": "SimSun", "size_pt": 12}},
+                    "clause_ids": ["C00037"], "evidence_ids": ["E1"],
+                    "confidence": 0.98,
+                    "reason": "The source explicitly requires SimSun body text.",
+                    "verification": {
+                        "mode": "word_render", "checks": ["Check body-text font."],
+                    },
+                }],
                 "clause_reviews": [
                     {
-                        "clause_id": "C00037", "classification": "external_compliance",
-                        "normative_basis": "external_duty",
-                        "reason": "The author must sign and date the declaration.",
+                        "clause_id": "C00037", "classification": "executable",
+                        "normative_basis": "explicit_normative_text",
+                        "reason": "The body-text font can be set in DOCX.",
                         "obligations": None,
                     },
                     {
@@ -1674,8 +1649,8 @@ class HostAgentBridgeTests(unittest.TestCase):
             }
             second = copy.deepcopy(first)
             second["clause_reviews"][0]["obligations"] = [{
-                "id": "actual_signature_and_date", "status": "unverifiable",
-                "reason": "An actual signature and date cannot be generated by the formatter.",
+                "id": "body_font", "status": "covered",
+                "reason": "The SimSun font requirement is represented by the DOCX requirement.",
             }]
             second["clause_reviews"][1]["reason"] = (
                 "Unrelated rewrite that was not named by the validator."
@@ -1710,7 +1685,7 @@ class HostAgentBridgeTests(unittest.TestCase):
             self.assertEqual(len(independent_candidates), 1)
             accepted_reviews = independent_candidates[0]["clause_reviews"]
             accepted_review = accepted_reviews[0]
-            self.assertEqual(accepted_review["classification"], "external_compliance")
+            self.assertEqual(accepted_review["classification"], "executable")
             self.assertEqual(accepted_review["obligations"], second["clause_reviews"][0]["obligations"])
             self.assertEqual(
                 accepted_reviews[1]["reason"], first["clause_reviews"][1]["reason"],
@@ -1746,7 +1721,9 @@ class HostAgentBridgeTests(unittest.TestCase):
                 "the raw provider response must remain available as unmodified evidence",
             )
             self.assertEqual(raw_retry["requirements"], second["requirements"])
-            self.assertEqual(independent_candidates[0]["requirements"], [])
+            self.assertEqual(
+                independent_candidates[0]["requirements"], second["requirements"],
+            )
             self.assertEqual(
                 audit["chunk_runs"][0]["semantic_retry_authorizations"]["paths"][0]["rule_id"],
                 "v3_source_inventory_completion",
@@ -3885,7 +3862,7 @@ class HostAgentBridgeTests(unittest.TestCase):
             item for item in missing_records
             if item["code"] == "non_requirement_classification_relation"
         ]
-        self.assertTrue(any(
+        self.assertFalse(any(
             item["code"] == "executable_review_obligations_missing"
             for item in missing_records
         ))

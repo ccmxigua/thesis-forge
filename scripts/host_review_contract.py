@@ -1080,7 +1080,11 @@ def _validate_obligations(
     require_semantic_decomposition: bool = False,
 ) -> list[str]:
     classification = str(review.get("classification"))
-    requires_inventory = classification not in {"informational", "not_applicable"}
+    # Keep inventory requirements aligned with the shared classification
+    # contract: only classifications that create a DOCX requirement need a
+    # non-empty source-obligation inventory. External duties are reviewed in
+    # their separate semantic ledger and must not be forced into the DOCX set.
+    requires_inventory = classification_requires_requirement(classification)
     obligations = review.get("obligations")
     if obligations is None:
         if require_semantic_decomposition and requires_inventory:

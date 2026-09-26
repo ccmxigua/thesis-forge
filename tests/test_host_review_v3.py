@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import hashlib
 from pathlib import Path
@@ -929,6 +930,34 @@ class HostReviewV3Tests(unittest.TestCase):
         errors = validate_response(response, self.request)
         self.assertTrue(errors)
         self.assertIn("review_requires_non_empty_source_inventory", str(errors))
+
+    def test_v3_external_compliance_does_not_require_docx_obligation_inventory(self) -> None:
+        response = self._informational_response()
+        review = response["clause_reviews"][0]
+        review.update({
+            "classification": "external_compliance",
+            "normative_basis": "external_duty",
+            "reason": "This duty is completed outside the DOCX workflow.",
+        })
+
+        for obligations in (
+            None,
+            [],
+            [{
+                "id": "external-signature",
+                "status": "unverifiable",
+                "reason": "The signature is verified by an external process.",
+            }],
+        ):
+            with self.subTest(obligations=obligations):
+                candidate = copy.deepcopy(response)
+                candidate["clause_reviews"][0]["obligations"] = obligations
+                normalized = normalize_native_response(
+                    candidate, self.request["response_schema"],
+                )
+                if obligations is None:
+                    self.assertNotIn("obligations", normalized["clause_reviews"][0])
+                self.assertEqual(validate_response(normalized, self.request), [])
 
     def test_legacy_21_review_schema_keeps_legacy_contract_shape(self) -> None:
         legacy = build_llm_request(

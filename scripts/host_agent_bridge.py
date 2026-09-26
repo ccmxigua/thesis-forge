@@ -641,6 +641,11 @@ def _structured_contract_repair_guidance(
     """Build retry guidance from structured validator facts, not error parsing."""
     lines: list[str] = []
     seen: set[str] = set()
+    record_codes = {
+        str(record.get("code") or "")
+        for record in records if isinstance(record, dict)
+    }
+    external_inventory_retry = "external_action_obligations_missing" in record_codes
     for record in records:
         if not isinstance(record, dict):
             continue
@@ -721,8 +726,19 @@ def _structured_contract_repair_guidance(
                 f"At {pointer}, do not repair an unknown clause_id by guessing a neighboring clause. Use only the exact clause IDs in the current chunk and fail closed otherwise."
             )
         elif code == "non_requirement_classification_relation":
+            if external_inventory_retry:
+                rule = (
+                    f"At {pointer}, do not remove the source-only requirement in this retry. First add only the missing, source-derived external obligations named by the external_action_obligations_missing record; the bridge will independently decide whether the invalid DOCX edge can be projected afterward."
+                )
+            else:
+                rule = (
+                    f"At {pointer}, remove only this requirement object if every clause_id it contains is classified as a non-requirement state such as unresolved, requires_source_content, unsupported, external_compliance, or informational. Preserve every clause_review classification, obligation, reason, evidence ID, and every other requirement exactly; do not reclassify a clause, split or merge requirements, or invent a replacement. If the linked classifications are mixed or removal would change any other field, return the parent unchanged and fail closed."
+                )
+        elif code == "external_action_obligations_missing":
             rule = (
-                f"At {pointer}, remove only this requirement object if every clause_id it contains is classified as a non-requirement state such as unresolved, requires_source_content, unsupported, external_compliance, or informational. Preserve every clause_review classification, obligation, reason, evidence ID, and every other requirement exactly; do not reclassify a clause, split or merge requirements, or invent a replacement. If the linked classifications are mixed or removal would change any other field, return the parent unchanged and fail closed."
+                f"At {pointer}, the current source-bound clause is external_compliance but its external-action inventory is absent. "
+                "Add only a non-empty obligations array containing distinct semantic duties explicitly supported by this exact clause and its cited evidence; set every status to unverifiable and explain that DOCX generation cannot prove the real-world action. "
+                "Do not change classification, reasons, evidence, requirements, or any other field; do not invent generic duties or mark them covered. If the source does not support a complete inventory, preserve the parent and fail closed."
             )
         elif code == "unused_executable_requirement":
             rule = (
@@ -1626,7 +1642,10 @@ def _v3_source_inventory_completion_allowed(
         or not records
         or any(
             not isinstance(record, dict)
-            or record.get("code") != "executable_review_obligations_missing"
+            or record.get("code") not in {
+                "executable_review_obligations_missing",
+                "external_action_obligations_missing",
+            }
             or not isinstance(record.get("response_sha256"), str)
             or record.get("response_sha256") != _response_sha256(previous_response)
             for record in records
@@ -1688,6 +1707,19 @@ def _v3_source_inventory_completion_allowed(
             or classification in {"informational", "not_applicable"}
         ):
             return False
+        matching_inventory_records = [
+            record for record in records
+            if record.get("json_pointer") == path
+            and record.get("clause_id") == clause_id
+        ]
+        if not matching_inventory_records:
+            return False
+        if any(
+            record.get("code") == "external_action_obligations_missing"
+            and classification != "external_compliance"
+            for record in matching_inventory_records
+        ):
+            return False
         old_present, old_inventory = _retry_pointer_lookup(previous_response, path)
         new_present, new_inventory = _retry_pointer_lookup(current_response, path)
         if (old_present and old_inventory is not None) or not new_present:
@@ -1695,7 +1727,14 @@ def _v3_source_inventory_completion_allowed(
         if not isinstance(new_inventory, list) or not new_inventory:
             return False
 
-        if classification_requires_requirement(str(classification)):
+        if any(
+            record.get("code") == "external_action_obligations_missing"
+            for record in matching_inventory_records
+        ):
+            if classification != "external_compliance":
+                return False
+            allowed_statuses = {"unverifiable"}
+        elif classification_requires_requirement(str(classification)):
             allowed_statuses = {"covered"}
         else:
             allowed_statuses = {
@@ -1777,6 +1816,12 @@ def _v3_source_inventory_completion_allowed(
             )
         ]
         if not matching_records:
+            return False
+        if any(
+            record.get("code") == "external_action_obligations_missing"
+            and classification != "external_compliance"
+            for record in matching_records
+        ):
             return False
         source_binding, _evidence_bindings, source_binding_complete = _retry_path_source_binding(
             path, previous_response, current_response, matching_records, chunk,
@@ -4447,12 +4492,12 @@ def _project_validator_targeted_obligation_fields(
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     """Project only source-inventory fields explicitly targeted by the validator.
 
-    The model's full retry response remains immutable evidence.  For the one
-    retry contract whose validator authorizes completion of a missing source
-    obligation inventory, construct the semantic candidate from the parent
-    and copy only the exact, response-bound ``clause_reviews[i].obligations``
-    values named by those validator records.  Ordinary contract and
-    independent source-first review still validate the resulting candidate.
+    The model's full retry response remains immutable evidence. For a
+    validator-authorized missing source-obligation inventory (including the
+    narrow external-action retry), construct the semantic candidate from the
+    parent and copy only the exact, response-bound
+    ``clause_reviews[i].obligations`` values named by those records. Ordinary
+    contract and independent source-first review still validate the candidate.
     """
     audit: dict[str, Any] = {
         "policy": "validator_targeted_obligation_fields_v1",
@@ -4476,7 +4521,10 @@ def _project_validator_targeted_obligation_fields(
     # copied into this projected candidate.
     target_records = [
         record for record in records
-        if record.get("code") == "executable_review_obligations_missing"
+        if record.get("code") in {
+            "executable_review_obligations_missing",
+            "external_action_obligations_missing",
+        }
     ]
     if not target_records:
         audit.update(status="not_applicable", reason="no_targeted_obligation_records")
@@ -4524,6 +4572,12 @@ def _project_validator_targeted_obligation_fields(
             or not model_value
         ):
             audit.update(status="blocked", reason="target_is_not_a_missing_inventory_completion")
+            return None, audit
+        if record.get("code") == "external_action_obligations_missing" and any(
+            not isinstance(item, dict) or item.get("status") != "unverifiable"
+            for item in model_value
+        ):
+            audit.update(status="blocked", reason="external_obligations_must_remain_unverifiable")
             return None, audit
         targets[path] = {"index": index, "value": copy.deepcopy(model_value)}
 
@@ -5053,6 +5107,7 @@ def _project_external_action_requirements(
             )
             or not isinstance(ids, list) or not ids or any(not isinstance(cid, str) for cid in ids)
             or len(set(ids)) != len(ids)
+            or len(ids) != 1
             or not isinstance(evidence_ids, list) or not evidence_ids
             or any(not isinstance(eid, str) for eid in evidence_ids)
             or len(set(evidence_ids)) != len(evidence_ids)
@@ -5350,9 +5405,19 @@ def _apply_safe_mechanical_repairs_one_rule(
     """
     if not isinstance(response, dict) or not error_records:
         return None, []
-    if all(isinstance(record, dict) and record.get("code") == "non_requirement_classification_relation"
-           for record in error_records):
-        return _project_external_action_requirements(response, error_records, chunk)
+    if all(
+        isinstance(record, dict)
+        and record.get("code") in {
+            "non_requirement_classification_relation",
+            "external_action_obligations_missing",
+        }
+        for record in error_records
+    ):
+        relation_records = [
+            record for record in error_records
+            if record.get("code") == "non_requirement_classification_relation"
+        ]
+        return _project_external_action_requirements(response, relation_records, chunk)
     allowed_codes = {
         "unknown_property", "evidence_relation_mismatch",
         "empty_requirement_properties", "informational_requirement_forbidden",
@@ -6822,6 +6887,172 @@ def _apply_safe_mechanical_repairs(
     return candidate, audit
 
 
+def _external_action_obligation_retry_records(
+    response: Any,
+    validator_records: list[dict[str, Any]],
+    chunk: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Name missing external-action inventories as retry-only source facts.
+
+    These records do not make a requirement removable. They only let a retry
+    add the missing, current-clause-bound obligation inventory; the ordinary
+    external-action projector and independent source-first review remain
+    mandatory afterward.
+    """
+    if (
+        not isinstance(response, dict)
+        or response.get("contract_version") != HOST_REVIEW_CONTRACT_V3
+        or not isinstance(chunk, dict)
+    ):
+        return []
+    requirements = response.get("requirements")
+    reviews = response.get("clause_reviews")
+    clauses = chunk.get("clauses")
+    evidence_context = chunk.get("evidence_context")
+    if not all(isinstance(value, list) for value in (requirements, reviews, clauses)) or not isinstance(evidence_context, dict):
+        return []
+    requirement_reviews: dict[str, dict[str, Any]] = {}
+    review_indexes: dict[str, int] = {}
+    for review_index, review in enumerate(reviews):
+        if not isinstance(review, dict) or not isinstance(review.get("clause_id"), str):
+            return []
+        clause_id = review["clause_id"]
+        if clause_id in requirement_reviews:
+            return []
+        requirement_reviews[clause_id] = review
+        review_indexes[clause_id] = review_index
+    clause_map: dict[str, dict[str, Any]] = {}
+    for clause in clauses:
+        if not isinstance(clause, dict) or not isinstance(clause.get("id"), str):
+            return []
+        clause_id = clause["id"]
+        if clause_id in clause_map:
+            return []
+        clause_map[clause_id] = clause
+
+    supplemental: dict[str, dict[str, Any]] = {}
+    for record in validator_records:
+        if (
+            not isinstance(record, dict)
+            or record.get("code") != "non_requirement_classification_relation"
+            or record.get("response_sha256") != _response_sha256(response)
+        ):
+            continue
+        index = record.get("requirement_index")
+        if (
+            type(index) is not int or not 0 <= index < len(requirements)
+            or record.get("json_pointer") != f"$.requirements[{index}]"
+        ):
+            continue
+        requirement = requirements[index]
+        clause_ids = requirement.get("clause_ids") if isinstance(requirement, dict) else None
+        if (
+            not isinstance(requirement, dict)
+            or requirement.get("existing_requirement_id") is not None
+            or requirement.get("role") != "body_text"
+            or not isinstance(requirement.get("properties"), dict)
+            or set(requirement["properties"]) != {"text"}
+            or not isinstance(requirement["properties"].get("text"), str)
+            or requirement.get("field_key") is not None
+            or requirement.get("applicability") not in (None, {})
+            or requirement.get("input_prerequisites") not in (None, [])
+            or not isinstance(clause_ids, list) or not clause_ids
+            or any(not isinstance(value, str) or not value for value in clause_ids)
+            or len(set(clause_ids)) != len(clause_ids)
+            # A multi-clause edge can contain a locally expressible obligation
+            # even when its payload happens to echo one linked external source.
+            # Do not offer retry inventory or remove that combined edge as a unit.
+            or len(clause_ids) != 1
+        ):
+            continue
+        verification = requirement.get("verification")
+        if verification is not None and (
+            not isinstance(verification, dict) or verification.get("mode") != "external"
+        ):
+            continue
+        exact_sources: set[str] = set()
+        allowed_evidence_ids: set[str] = set()
+        safe_external_relation = True
+        for clause_id in clause_ids:
+            clause = clause_map.get(clause_id)
+            review = requirement_reviews.get(clause_id)
+            if (
+                not isinstance(clause, dict)
+                or not isinstance(review, dict)
+                or review.get("classification") != "external_compliance"
+            ):
+                safe_external_relation = False
+                break
+            clause_evidence_ids = clause.get("evidence_ids")
+            if (
+                not isinstance(clause_evidence_ids, list)
+                or not clause_evidence_ids
+                or any(not isinstance(value, str) or not value for value in clause_evidence_ids)
+                or len(set(clause_evidence_ids)) != len(clause_evidence_ids)
+            ):
+                safe_external_relation = False
+                break
+            try:
+                exact_source = _exact_clause_source_text(clause, evidence_context)
+            except NativeSemanticReviewError:
+                safe_external_relation = False
+                break
+            if (
+                not exact_source
+                or has_mixed_external_document_action_signal(exact_source)
+                or compile_known_source_obligation_ids(exact_source)
+            ):
+                safe_external_relation = False
+                break
+            exact_sources.add(exact_source)
+            allowed_evidence_ids.update(clause_evidence_ids)
+        requirement_evidence_ids = requirement.get("evidence_ids")
+        if (
+            not safe_external_relation
+            or requirement["properties"]["text"] not in exact_sources
+            or not isinstance(requirement_evidence_ids, list)
+            or not requirement_evidence_ids
+            or any(not isinstance(value, str) or not value for value in requirement_evidence_ids)
+            or len(set(requirement_evidence_ids)) != len(requirement_evidence_ids)
+            or any(value not in allowed_evidence_ids for value in requirement_evidence_ids)
+            or any(
+                not isinstance(evidence_context.get(value), dict)
+                or evidence_context[value].get("id") != value
+                or not isinstance(evidence_context[value].get("text"), str)
+                or not evidence_context[value]["text"].strip()
+                for value in requirement_evidence_ids
+            )
+        ):
+            continue
+        for clause_id in clause_ids:
+            review = requirement_reviews[clause_id]
+            if review.get("obligations") not in (None, []):
+                continue
+            clause = clause_map[clause_id]
+            try:
+                _exact_clause_source_text(clause, evidence_context)
+            except NativeSemanticReviewError:
+                continue
+            path = f"$.clause_reviews[{review_indexes[clause_id]}].obligations"
+            supplemental[path] = {
+                "code": "external_action_obligations_missing",
+                "json_pointer": path,
+                "schema_pointer": path,
+                "clause_id": clause_id,
+                "raw_error": (
+                    "external_compliance source-only requirement projection requires "
+                    "a non-empty source-derived obligation inventory"
+                ),
+                "response_sha256": _response_sha256(response),
+                "allowed_values": None,
+                "matching_requirement_indexes": None,
+                "requirement_count": len(requirements),
+                "semantic_review_required": True,
+                "retry_only": True,
+            }
+    return [supplemental[path] for path in sorted(supplemental)]
+
+
 def prepare_native_response_candidate(
     raw_response: Any, chunk: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -6873,6 +7104,10 @@ def prepare_native_response_candidate(
         original_error_records = contract_error_records(
             contract_errors, response=response, chunk=chunk,
         )
+        retry_inventory_records = _external_action_obligation_retry_records(
+            response, original_error_records, chunk,
+        )
+        retry_error_records = [*original_error_records, *retry_inventory_records]
         repaired_response, mechanical_repairs = _apply_safe_mechanical_repairs(
             response, original_error_records, chunk=chunk,
         )
@@ -6881,7 +7116,7 @@ def prepare_native_response_candidate(
                 "local response contract validation failed before provenance binding: "
                 + _summarize_contract_errors(contract_errors)
             )
-            error.error_records = original_error_records  # type: ignore[attr-defined]
+            error.error_records = retry_error_records  # type: ignore[attr-defined]
             error.mechanical_repair_audit = {  # type: ignore[attr-defined]
                 "status": "not_applied",
                 "repairs": [],
@@ -6908,7 +7143,7 @@ def prepare_native_response_candidate(
             )
             combined_error_records: list[dict[str, Any]] = []
             seen_error_record_keys: set[tuple[str, str, str]] = set()
-            for record in [*original_error_records, *remaining_error_records]:
+            for record in [*retry_error_records, *remaining_error_records]:
                 if not isinstance(record, dict):
                     continue
                 record_key = (
@@ -7119,6 +7354,10 @@ def _host_prompt(*, request_path: Path, chunk_path: Path,
         contract_version == HOST_REVIEW_CONTRACT_V3
         and "non_requirement_classification_relation" in retry_codes
     )
+    v3_external_action_inventory_retry = (
+        contract_version == HOST_REVIEW_CONTRACT_V3
+        and "external_action_obligations_missing" in retry_codes
+    )
     if retry_parent_response_path is not None:
         if retry_parent_response_sha256 is not None:
             observed_parent_sha256 = sha256_file(retry_parent_response_path)
@@ -7147,6 +7386,8 @@ def _host_prompt(*, request_path: Path, chunk_path: Path,
             # closed if the retry changes unapproved semantic fields.
             retry_parent_inline = None
         requirement_change_rule = (
+            "For this retry, preserve every requirement and every clause review exactly except the specific obligations arrays named by external_action_obligations_missing records. Add only source-derived external duties with status unverifiable; do not remove or edit the invalid source-only requirement yourself. Afterward the bridge may project that requirement only if its exact source, evidence, and external-only relation pass the existing deterministic checks."
+            if v3_external_action_inventory_retry else
             "For every distinct executable clause explicitly identified by the validator as missing an authoritative requirement edge, "
             "the retry must add one evidence-backed requirement for that clause. Preserve every existing non-placeholder "
             "requirement and review unchanged. If the parent contains a requirement with empty clause_ids, empty evidence_ids, "
@@ -7195,9 +7436,14 @@ minimum change. The embedded payload excludes bridge-owned provenance:
             "there is no prior response file to reuse."
             if retry_parent_response_sha256 else "There is no prior response to reuse."
         )
-    retry_invariant = (
-        (
-            """\nFINAL RETRY INVARIANT: copy every clause_review classification and obligation
+    if retry_parent_response_path is None:
+        retry_invariant = ""
+    elif v3_external_action_inventory_retry:
+        retry_invariant = """\nFINAL RETRY INVARIANT: preserve every requirement and every clause review exactly except the exact obligations arrays named by external_action_obligations_missing. Add only distinct source-supported external duties with status unverifiable. Do not remove the invalid body_text requirement yourself; the bridge may project it only after current source/evidence checks and candidate validation. If the source cannot support a complete inventory, return the parent unchanged and let the bridge fail closed."""
+    elif v3_non_requirement_projection_retry:
+        retry_invariant = """\nFINAL RETRY INVARIANT: copy every clause_review classification, obligation, reason, and evidence ID from the repair baseline exactly. Remove only the validator-identified requirement objects whose clause_ids are all bound to non-requirement classifications; preserve every other requirement object and all requirement fields exactly. Do not reclassify a clause, invent a replacement, or change any unrelated field. If this exact projection is not possible, return the parent unchanged and let the bridge fail closed."""
+    elif v3_relation_addition_retry:
+        retry_invariant = """\nFINAL RETRY INVARIANT: copy every clause_review classification and obligation
 from the repair baseline exactly. Preserve every non-placeholder requirement
 identity, clause_ids, evidence_ids, and semantic payload. Add one new,
 evidence-backed requirement for EACH distinct validator-identified executable
@@ -7207,19 +7453,14 @@ unresolved or informational review into executable, do not invent properties,
 and do not reuse one requirement for an unrelated clause. If a safe local
 repair is not possible without changing semantics, return the parent object
 unchanged and let the bridge fail closed."""
-        ) if v3_relation_addition_retry else (
-            """\nFINAL RETRY INVARIANT: copy every clause_review classification, obligation, reason, and evidence ID from the repair baseline exactly. Remove only the validator-identified requirement objects whose clause_ids are all bound to non-requirement classifications; preserve every other requirement object and all requirement fields exactly. Do not reclassify a clause, invent a replacement, or change any unrelated field. If this exact projection is not possible, return the parent unchanged and let the bridge fail closed."""
-            if v3_non_requirement_projection_retry else
-            """\nFINAL RETRY INVARIANT: copy every clause_review classification, obligation,
+    else:
+        retry_invariant = """\nFINAL RETRY INVARIANT: copy every clause_review classification, obligation,
 requirement identity, clause_ids, evidence_ids, and requirement count from the
 repair baseline exactly. The only permitted differences are the exact property
 paths named by the structured validator records above. If a review is already
 classified executable, repair its missing relation only; do not turn an unresolved or informational review into executable. If a safe local repair is not possible
 without changing semantics, return the parent object unchanged and let the
 bridge fail closed."""
-        )
-        if retry_parent_response_path is not None else ""
-    )
     return f"""You are the current Host Agent for one fresh thesis-format semantic-review run.
 
 Return exactly ONE JSON object and nothing else. Do not use Markdown fences,
@@ -9219,7 +9460,10 @@ def run_bridge(
                             obligation_projection_records = [
                                 record for record in semantic_parent_error_records
                                 if isinstance(record, dict)
-                                and record.get("code") == "executable_review_obligations_missing"
+                                and record.get("code") in {
+                                    "executable_review_obligations_missing",
+                                    "external_action_obligations_missing",
+                                }
                             ]
                             projected_raw, projection_audit = (
                                 _project_validator_targeted_obligation_fields(

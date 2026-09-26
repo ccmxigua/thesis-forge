@@ -1466,6 +1466,233 @@ class HostAgentBridgeTests(unittest.TestCase):
                 )
                 self.assertIsNotNone(span_error)
 
+    def test_external_action_retry_adds_only_inventory_then_projects_source_echo(self) -> None:
+        source = "北京体育大学学位评定委员会办公室盖章(有效)"
+        evidence_doc = {"evidence": [{"id": "E1", "text": source, "kind": "paragraph"}]}
+        chunk = engine.build_llm_request(
+            [], [exact_source_clause("C00049", source)], evidence_doc, {}, "full",
+            contract_version="3.0",
+            runtime_context={"code_fingerprint_sha256": "9" * 64},
+        )
+        chunk["batch"] = {"index": 3, "count": 22}
+        chunk["case_id"] = "case-external-obligation-retry"
+        chunk = attach_request_provenance(
+            chunk, source_sha256="a" * 64, evidence_doc=evidence_doc,
+            clauses=chunk["clauses"], run_id="run-external-obligation-retry",
+        )
+        parent = {
+            "contract_version": "3.0", "provenance": chunk["provenance"],
+            "requirements": [{
+                "existing_requirement_id": None,
+                "role": "body_text", "properties": {"text": source},
+                "clause_ids": ["C00049"], "evidence_ids": ["E1"],
+                "confidence": 0.95, "reason": "The source names a real-world stamp.",
+                "verification": None,
+            }],
+            "clause_reviews": [{
+                "clause_id": "C00049", "classification": "external_compliance",
+                "normative_basis": "external_duty", "reason": "An office must apply the stamp.",
+                "obligations": None,
+            }],
+            "unsupported_items": [], "reported_conflicts": [],
+        }
+        parent = bridge.normalize_native_response(parent, chunk["response_schema"])
+        errors = bridge.validate_host_agent_response(parent, chunk)
+        self.assertTrue(errors)
+        validator_records = bridge.contract_error_records(
+            errors, response=parent, chunk=chunk,
+        )
+        inventory_records = bridge._external_action_obligation_retry_records(
+            parent, validator_records, chunk,
+        )
+        self.assertEqual(len(inventory_records), 1)
+        self.assertEqual(inventory_records[0]["clause_id"], "C00049")
+        self.assertEqual(
+            inventory_records[0]["json_pointer"], "$.clause_reviews[0].obligations",
+        )
+        with self.assertRaises(ValueError) as rejected:
+            bridge.prepare_native_response_candidate(parent, chunk)
+        self.assertIn(
+            "external_action_obligations_missing",
+            {item["code"] for item in rejected.exception.error_records},
+        )
+
+        model_retry = copy.deepcopy(parent)
+        model_retry["clause_reviews"][0]["obligations"] = [{
+            "id": "committee_stamp", "status": "unverifiable",
+            "reason": "The physical stamp must be applied by the named office.",
+        }]
+        # Even if the model follows the old deletion instruction, the retry
+        # projection must ignore that extra change and copy only the inventory.
+        model_retry["requirements"] = []
+        model_retry = bridge.normalize_native_response(model_retry, chunk["response_schema"])
+        all_retry_records = [*validator_records, *inventory_records]
+        unprojected_error, _ = bridge._retry_semantic_change_error(
+            parent, model_retry, all_retry_records,
+            contract_version="3.0", chunk=chunk,
+        )
+        self.assertIsNotNone(unprojected_error)
+        projected, projection_audit = bridge._project_validator_targeted_obligation_fields(
+            parent, model_retry, all_retry_records,
+        )
+        self.assertIsNotNone(projected)
+        self.assertEqual(projected["requirements"], parent["requirements"])
+        self.assertEqual(
+            projection_audit["discarded_unrequested_paths"], ["$.requirements"],
+        )
+        targeted_records = [
+            item for item in all_retry_records
+            if item["code"] == "external_action_obligations_missing"
+        ]
+        falsely_covered = copy.deepcopy(model_retry)
+        falsely_covered["clause_reviews"][0]["obligations"][0]["status"] = "covered"
+        falsely_covered = bridge.normalize_native_response(
+            falsely_covered, chunk["response_schema"],
+        )
+        rejected_covered_projection, _ = bridge._project_validator_targeted_obligation_fields(
+            parent, falsely_covered, all_retry_records,
+        )
+        self.assertIsNone(rejected_covered_projection)
+        rejected_covered_error, _ = bridge._retry_semantic_change_error(
+            parent,
+            {**parent, "clause_reviews": falsely_covered["clause_reviews"]},
+            targeted_records, contract_version="3.0", chunk=chunk,
+        )
+        self.assertIsNotNone(rejected_covered_error)
+        authorizations: list[dict] = []
+        drift_error, changed_paths = bridge._retry_semantic_change_error(
+            parent, projected, targeted_records,
+            contract_version="3.0", chunk=chunk,
+            authorization_out=authorizations,
+        )
+        self.assertIsNone(drift_error)
+        self.assertEqual(changed_paths, ["$.clause_reviews[0].obligations"])
+        self.assertEqual(authorizations[0]["rule_id"], "v3_source_inventory_completion")
+        self.assertTrue(authorizations[0]["source_binding_complete"])
+        self.assertEqual(
+            authorizations[0]["source_binding"]["run_id"],
+            "run-external-obligation-retry",
+        )
+
+        accepted, candidate_audit = bridge.prepare_native_response_candidate(projected, chunk)
+        self.assertEqual(accepted["requirements"], [])
+        self.assertEqual(
+            accepted["clause_reviews"][0]["classification"], "external_compliance",
+        )
+        self.assertEqual(
+            accepted["clause_reviews"][0]["obligations"][0]["status"], "unverifiable",
+        )
+        self.assertEqual(bridge.validate_host_agent_response(accepted, chunk), [])
+        self.assertIn(
+            "external_action_relation_projection_v3",
+            {item["rule_id"] for item in candidate_audit["mechanical_repairs"]},
+        )
+        guidance = bridge._structured_contract_repair_guidance(
+            all_retry_records, contract_version="3.0",
+        )
+        self.assertIn("explicitly supported by this exact clause", guidance)
+        self.assertIn("unverifiable", guidance)
+        self.assertIn("do not remove the source-only requirement in this retry", guidance)
+        with tempfile.TemporaryDirectory() as td:
+            directory = Path(td)
+            chunk_path = directory / "chunk.json"
+            parent_path = directory / "parent.json"
+            bridge._write_json(chunk_path, chunk)
+            bridge._write_json(parent_path, parent)
+            prompt = bridge._host_prompt(
+                request_path=directory / "request.json",
+                chunk_path=chunk_path,
+                response_path=directory / "response.json",
+                run_id="run-external-obligation-retry",
+                chunk_index=3, chunk_count=22, attempt=2,
+                retry_hint="non_requirement_classification_relation",
+                retry_parent_response_sha256=bridge.sha256_file(parent_path),
+                retry_parent_response_path=parent_path,
+                retry_error_records=all_retry_records,
+            )
+            self.assertIn("do not remove the source-only requirement in this retry", prompt)
+            self.assertIn("preserve every requirement", prompt)
+            self.assertNotIn("remove only this requirement object", prompt)
+
+    def test_external_action_projection_rejects_multi_clause_partial_source_echo(self) -> None:
+        source_a = "北京体育大学学位评定委员会办公室盖章(有效)"
+        source_b = "纸质材料由研究生院办公室核验后接收"
+        evidence_doc = {"evidence": [
+            {"id": "E-A", "text": source_a, "kind": "paragraph"},
+            {"id": "E-B", "text": source_b, "kind": "paragraph"},
+        ]}
+        clauses = [
+            exact_source_clause("C-A", source_a, "E-A"),
+            exact_source_clause("C-B", source_b, "E-B"),
+        ]
+        chunk = engine.build_llm_request(
+            [], clauses, evidence_doc, {}, "full", contract_version="3.0",
+            runtime_context={"code_fingerprint_sha256": "a" * 64},
+        )
+        chunk = attach_request_provenance(
+            chunk, source_sha256="b" * 64, evidence_doc=evidence_doc,
+            clauses=clauses, run_id="run-multi-clause-external-projection",
+        )
+        response = {
+            "contract_version": "3.0", "provenance": chunk["provenance"],
+            "requirements": [{
+                "existing_requirement_id": None,
+                "role": "body_text", "properties": {"text": source_a},
+                # This echoes only C-A while linking both C-A and C-B.
+                "clause_ids": ["C-A", "C-B"], "evidence_ids": ["E-A", "E-B"],
+                "confidence": 0.95,
+                "reason": "The source text is linked to two external actions.",
+                "verification": None,
+            }],
+            "clause_reviews": [
+                {"clause_id": clause_id,
+                 "classification": "external_compliance",
+                 "normative_basis": "external_duty",
+                 "reason": "The action is completed outside DOCX generation.",
+                 "obligations": None}
+                for clause_id in ("C-A", "C-B")
+            ],
+            "unsupported_items": [], "reported_conflicts": [],
+        }
+        response = bridge.normalize_native_response(response, chunk["response_schema"])
+        errors = bridge.validate_host_agent_response(response, chunk)
+        validator_records = bridge.contract_error_records(
+            errors, response=response, chunk=chunk,
+        )
+        self.assertIn(
+            "non_requirement_classification_relation",
+            {record["code"] for record in validator_records},
+        )
+        self.assertEqual(
+            bridge._external_action_obligation_retry_records(
+                response, validator_records, chunk,
+            ),
+            [],
+            "multi-clause edges must not receive source-inventory-only retry authorization",
+        )
+
+        # Even with complete-looking external inventories, exact equality to
+        # one linked source cannot authorize deleting the combined requirement.
+        projected_candidate = copy.deepcopy(response)
+        projected_candidate["clause_reviews"][0]["obligations"] = [{
+            "id": "office_stamp", "status": "unverifiable",
+            "reason": "The named office must apply the stamp.",
+        }]
+        projected_candidate["clause_reviews"][1]["obligations"] = [{
+            "id": "paper_receipt", "status": "unverifiable",
+            "reason": "The office must receive the physical materials.",
+        }]
+        projected_candidate = bridge.normalize_native_response(
+            projected_candidate, chunk["response_schema"],
+        )
+        candidate_records = bridge.contract_error_records(
+            bridge.validate_host_agent_response(projected_candidate, chunk),
+            response=projected_candidate, chunk=chunk,
+        )
+        self.assertIsNone(bridge._project_external_action_requirements(
+            projected_candidate, candidate_records, chunk,
+        )[0])
+
     def test_retry_projection_keeps_only_exact_validator_targeted_inventory_fields(self) -> None:
         parent = {
             "contract_version": "3.0", "requirements": [], "unsupported_items": [],

@@ -903,6 +903,25 @@ class HostReviewV3Tests(unittest.TestCase):
         gaps = _keyword_obligation_gaps(clause, requirements, [0])
         self.assertIn("keywords_zh.hard_count_range:unresolved_source", gaps)
 
+    def test_keyword_character_limit_with_neighboring_count_range_is_not_misread(self) -> None:
+        clause = {
+            "id": "C71",
+            "text": "最多7个汉字",
+            "source_text_full": "关键词：术语；最多7个汉字；最少3组，最多8组",
+            "source_span": {"text": "最多7个汉字"},
+            "evidence_ids": ["E61"],
+        }
+        requirements = [{
+            "role": "content_constraints",
+            "properties": {"keywords_zh": {
+                "max_item_chars": 7,
+                "item_length_metric": "cjk_characters",
+                "min_count": 3,
+                "max_count": 8,
+            }},
+        }]
+        self.assertEqual(_keyword_obligation_gaps(clause, requirements, [0]), [])
+
     def test_v3_provider_schema_requires_non_null_non_empty_executable_inventory(self) -> None:
         local = self.request["response_schema"]
         provider = native_output_schema(local)

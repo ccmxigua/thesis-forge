@@ -46,6 +46,13 @@ _COMPETING_CAPTION_POLICY = re.compile(
     re.IGNORECASE,
 )
 _QUOTE_PAIRS = (("“", "”"), ("‘", "’"), ('"', '"'), ("'", "'"))
+_KEYWORD_COUNT_CHARACTER_MEASURE = re.compile(
+    r"(?:最多|至多|不超过|不得超过|上限|maximum(?:\s+of)?|at\s+most|"
+    r"no\s+more\s+than|up\s+to)\s*\d+\s*(?:个\s*)?"
+    r"(?:汉字|中文字符|字符|字|Chinese\s+characters?|CJK\s+characters?|"
+    r"characters?|chars?)",
+    re.IGNORECASE,
+)
 _KEYWORD_COUNT_MANDATORY_SIGNAL = re.compile(
     r"(?:关键词|关键字|\bkey\s*words?\b).{0,48}"
     r"(?:至少|最少|不少于|不得少于|最多|至多|不超过|不得超过|上限|下限|"
@@ -662,7 +669,12 @@ def has_explicit_keyword_count_signal(source_text: Any) -> bool:
         return False
     if _CONTEXT_UNSAFE.search(source_text):
         return False
-    return _KEYWORD_COUNT_MANDATORY_SIGNAL.search(source_text) is not None
+    # Character limits constrain keyword length, not the number of keyword
+    # items. Remove those separately measurable bounds before detecting an
+    # unresolved item-count rule; retain any distinct count signal elsewhere
+    # in the same source passage (for example, "最多7个汉字；最少3组，最多8组").
+    count_text = _KEYWORD_COUNT_CHARACTER_MEASURE.sub(" ", source_text)
+    return _KEYWORD_COUNT_MANDATORY_SIGNAL.search(count_text) is not None
 
 
 def compile_abstract_source_constraints(

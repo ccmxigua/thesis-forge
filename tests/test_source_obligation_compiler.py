@@ -571,6 +571,15 @@ class SourceObligationCompilerTests(unittest.TestCase):
             ["quantitative_scope_unit_ambiguity"],
         )
 
+    def test_keyword_character_limit_is_not_a_keyword_item_count(self) -> None:
+        self.assertFalse(has_explicit_keyword_count_signal("关键词最多7个汉字"))
+        self.assertFalse(has_explicit_keyword_count_signal("Key Words: up to 7 Chinese characters"))
+
+    def test_character_limit_does_not_hide_separate_unresolved_keyword_count(self) -> None:
+        source = "关键词最多7个汉字；最少3，最多8"
+        self.assertTrue(has_explicit_keyword_count_signal(source))
+        self.assertIsNone(compile_explicit_keyword_count_range(source))
+
     def test_abstract_materializer_uses_exact_bound_source_span(self) -> None:
         source = (
             "中文摘要是论文内容的简要陈述，一般以第三人称语气撰写，"

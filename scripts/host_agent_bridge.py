@@ -3301,6 +3301,9 @@ def _v3_informational_projection_allowed(
     if not records or any(
         not isinstance(record, dict)
         or record.get("code") != "informational_requirement_forbidden"
+        or record.get("mechanically_removable") is not True
+        or record.get("relation_category") != "informational_only"
+        or record.get("response_sha256") != _response_sha256(previous_response)
         for record in records
     ):
         return False
@@ -3312,15 +3315,19 @@ def _v3_informational_projection_allowed(
         previous_response,
         chunk.get("clauses") if isinstance(chunk, dict) else None,
     )
+    if any(
+        type(record.get("requirement_index")) is not int
+        or record.get("json_pointer") != f"$.requirements[{record.get('requirement_index')}]"
+        for record in records
+    ):
+        return False
+    record_indexes = {record["requirement_index"] for record in records}
+    if len(record_indexes) != len(records):
+        return False
     info_indexes = {
         int(item["requirement_index"])
         for item in analysis
         if isinstance(item, dict) and item.get("category") == "informational_only"
-    }
-    record_indexes = {
-        int(record["requirement_index"])
-        for record in records
-        if isinstance(record.get("requirement_index"), int)
     }
     if not info_indexes or info_indexes != record_indexes:
         return False
@@ -3347,75 +3354,17 @@ def _v3_non_requirement_projection_allowed(
     *,
     chunk: dict[str, Any] | None = None,
 ) -> bool:
-    """Allow removal of requirements bound only to non-requirement reviews.
+    """Keep generic retry deletion limited to validator-removable info rows.
 
-    A v3 requirement cannot remain attached to a clause classified as
-    unresolved, requires_source_content, external_compliance, or another
-    non-executable state.  The model may therefore remove exactly the
-    validator-identified requirement objects while preserving every review and
-    every other requirement.  This is a relation projection, not a semantic
-    reclassification: the unresolved review remains unresolved and the
-    resulting full run remains fail-closed.
+    Unresolved, external, unsupported, and prerequisite-bound requirement
+    objects may carry semantic information and cannot be erased merely because
+    their review is non-executable. Informational rows use their dedicated
+    mechanically-removable validator fact; external actions use the stricter
+    source/evidence-bound mechanical projector.
     """
-    if (
-        changed_paths != ["$.requirements"]
-        or chunk is None
-        or not isinstance(previous_response, dict)
-        or not isinstance(current_response, dict)
-    ):
-        return False
-    records = [record for record in records if isinstance(record, dict)]
-    target_records = [
-        record for record in records
-        if record.get("code") == "non_requirement_classification_relation"
-    ]
-    if not target_records:
-        return False
-    previous_requirements = previous_response.get("requirements")
-    current_requirements = current_response.get("requirements")
-    previous_reviews = previous_response.get("clause_reviews")
-    current_reviews = current_response.get("clause_reviews")
-    if not all(isinstance(value, list) for value in (
-        previous_requirements, current_requirements, previous_reviews, current_reviews,
-    )):
-        return False
-    if previous_reviews != current_reviews:
-        return False
-
-    analysis = analyze_requirement_relations(previous_response, chunk.get("clauses", []))
-    target_indexes: set[int] = set()
-    for record in target_records:
-        index_value = record.get("requirement_index")
-        if not isinstance(index_value, int):
-            match = re.fullmatch(
-                r"\$\.requirements\[(\d+)\]", str(record.get("json_pointer") or ""),
-            )
-            if match is None:
-                return False
-            index_value = int(match.group(1))
-        target_indexes.add(index_value)
-    actual_indexes = {
-        int(item["requirement_index"])
-        for item in analysis
-        if isinstance(item, dict)
-        and item.get("category") == "non_requirement_classification"
-        and isinstance(item.get("requirement_index"), int)
-    }
-    if not target_indexes or target_indexes != actual_indexes:
-        return False
-    expected_requirements = [
-        item for index, item in enumerate(previous_requirements)
-        if index not in target_indexes
-    ]
-    if current_requirements != expected_requirements:
-        return False
-    previous_without_requirements = copy.deepcopy(previous_response)
-    current_without_requirements = copy.deepcopy(current_response)
-    previous_without_requirements.pop("requirements", None)
-    current_without_requirements.pop("requirements", None)
-    previous_without_requirements.pop("provenance", None)
-    current_without_requirements.pop("provenance", None)
-    return previous_without_requirements == current_without_requirements
+    return _v3_informational_projection_allowed(
+        previous_response, current_response, records, changed_paths, chunk=chunk,
+    )
 
 
 def _v3_non_requirement_projection_with_mechanical_repairs_allowed(
@@ -3426,15 +3375,14 @@ def _v3_non_requirement_projection_with_mechanical_repairs_allowed(
     *,
     chunk: dict[str, Any] | None = None,
 ) -> bool:
-    """Allow a non-requirement projection plus named payload cleanup.
+    """Allow an informational-only projection plus named payload cleanup.
 
-    Native retries sometimes remove a requirement that is linked only to an
-    unresolved/non-executable clause while also dropping a validator-named
-    unknown property from a preserved requirement.  The retry is safe only if
-    the preserved requirements remain identical after those exact removals;
-    an empty surviving payload must still be fillable from one exact cited
-    evidence text.  No classification, relation, or other property change is
-    admitted here.
+    Only a validator record explicitly marked mechanically removable may
+    authorize deletion here. External actions use their dedicated
+    source-bound projector; unresolved and other non-requirement states cannot
+    be erased by this retry shortcut. Preserved requirement payloads may only
+    lose exact validator-named properties, and empty payloads must remain
+    fillable from one exact cited evidence text.
     """
     if (
         changed_paths != ["$.requirements"]
@@ -3443,20 +3391,37 @@ def _v3_non_requirement_projection_with_mechanical_repairs_allowed(
         or not isinstance(current_response, dict)
     ):
         return False
-    records = [record for record in records if isinstance(record, dict)]
+    if any(not isinstance(record, dict) for record in records):
+        return False
     target_records = [
         record for record in records
-        if record.get("code") == "non_requirement_classification_relation"
+        if record.get("code") == "informational_requirement_forbidden"
     ]
     if not target_records:
         return False
     if any(record.get("code") not in {
-        "non_requirement_classification_relation",
+        "informational_requirement_forbidden",
         "unknown_property",
         "empty_requirement_properties",
         "contract_validation_error",
         "schema_contract_violation",
     } for record in records):
+        return False
+    parent_sha256 = _response_sha256(previous_response)
+    if any(
+        record.get("response_sha256") != parent_sha256
+        for record in records
+    ) or any(
+        record.get("mechanically_removable") is not True
+        or record.get("relation_category") != "informational_only"
+        for record in target_records
+    ):
+        return False
+    if any(
+        type(record.get("requirement_index")) is not int
+        or record.get("json_pointer") != f"$.requirements[{record.get('requirement_index')}]"
+        for record in target_records
+    ) or len({record["requirement_index"] for record in target_records}) != len(target_records):
         return False
     previous_reviews = previous_response.get("clause_reviews")
     current_reviews = current_response.get("clause_reviews")
@@ -3474,19 +3439,17 @@ def _v3_non_requirement_projection_with_mechanical_repairs_allowed(
     target_indexes: set[int] = set()
     for record in target_records:
         index_value = record.get("requirement_index")
-        if not isinstance(index_value, int):
-            match = re.fullmatch(
-                r"\$\.requirements\[(\d+)\]", str(record.get("json_pointer") or ""),
-            )
-            if match is None:
-                return False
-            index_value = int(match.group(1))
+        if (
+            type(index_value) is not int
+            or record.get("json_pointer") != f"$.requirements[{index_value}]"
+        ):
+            return False
         target_indexes.add(index_value)
     actual_indexes = {
         int(item["requirement_index"])
         for item in analysis
         if isinstance(item, dict)
-        and item.get("category") == "non_requirement_classification"
+        and item.get("category") == "informational_only"
         and isinstance(item.get("requirement_index"), int)
     }
     if not target_indexes or target_indexes != actual_indexes:
@@ -4500,17 +4463,28 @@ def _project_validator_targeted_obligation_fields(
     if not isinstance(parent_response, dict) or not isinstance(model_retry_response, dict):
         audit.update(status="blocked", reason="responses_must_be_objects")
         return None, audit
-    if not records or any(
-        not isinstance(record, dict)
-        or record.get("code") != "executable_review_obligations_missing"
-        or record.get("response_sha256") != _response_sha256(parent_response)
-        for record in records
-    ):
-        audit.update(status="blocked", reason="validator_records_not_bound_to_parent")
+    if not records or any(not isinstance(record, dict) for record in records):
+        audit.update(status="blocked", reason="validator_records_malformed")
+        return None, audit
+
+    # Mixed contract failures are expected: this projector is authorized only
+    # to complete the exact missing obligation inventories. Other findings
+    # remain active and must be handled by ordinary candidate validation or a
+    # separate source-bound repair rule; their model-authored changes are not
+    # copied into this projected candidate.
+    target_records = [
+        record for record in records
+        if record.get("code") == "executable_review_obligations_missing"
+    ]
+    if not target_records:
+        audit.update(status="not_applicable", reason="no_targeted_obligation_records")
         return None, audit
 
     targets: dict[str, dict[str, Any]] = {}
-    for record in records:
+    for record in target_records:
+        if record.get("response_sha256") != _response_sha256(parent_response):
+            audit.update(status="blocked", reason="validator_records_not_bound_to_parent")
+            return None, audit
         path = str(record.get("json_pointer") or "")
         if re.fullmatch(r"\$\.clause_reviews\[\d+\]\.obligations", path) is None:
             audit.update(status="blocked", reason="validator_target_not_an_exact_obligation_field")
@@ -4573,6 +4547,15 @@ def _project_validator_targeted_obligation_fields(
         "status": "projected",
         "applied_paths": applied_paths,
         "discarded_unrequested_paths": sorted(set(full_model_changes) - set(applied_paths)),
+        "unapplied_validator_records": [
+            {
+                "code": str(record.get("code") or ""),
+                "json_pointer": str(record.get("json_pointer") or ""),
+                "record_sha256": _response_sha256(record),
+            }
+            for record in records
+            if record not in target_records
+        ],
         "model_retry_changed_paths": full_model_changes,
         "projected_changed_paths": projected_changes,
         "projected_response_sha256": _response_sha256(projected),
@@ -4975,7 +4958,8 @@ def _project_external_action_requirements(
     """
     if (
         not isinstance(chunk, dict) or response.get("contract_version") != "3.0"
-        or not records or any(
+        or not records or any(not isinstance(record, dict) for record in records)
+        or any(
             record.get("code") != "non_requirement_classification_relation"
             or record.get("response_sha256") != _response_sha256(response)
             for record in records
@@ -4995,16 +4979,46 @@ def _project_external_action_requirements(
     actual_records = contract_error_records(
         validate_host_agent_response(response, chunk), response=response, chunk=chunk,
     )
+    actual_external_records = [
+        item for item in actual_records
+        if isinstance(item, dict)
+        and item.get("code") == "non_requirement_classification_relation"
+    ]
+    # A relation-only projection must not hide an independent validator
+    # failure (for example, an external review with no obligation inventory).
+    # Bind the complete supplied record set to the validator's exact output,
+    # not merely to a matching index and selected metadata fields.
+    if (
+        not actual_external_records
+        or len(actual_external_records) != len(records)
+        or any(
+            not isinstance(item, dict)
+            or item.get("code") != "non_requirement_classification_relation"
+            for item in actual_records
+        )
+    ):
+        return None, []
     targets: set[int] = set()
     for record in records:
         index = record.get("requirement_index")
-        if type(index) is not int or not 0 <= index < len(requirements):
+        if (
+            type(index) is not int or not 0 <= index < len(requirements)
+            or record.get("json_pointer") != f"$.requirements[{index}]"
+            or record.get("relation_category") != "non_requirement_classification"
+            or record.get("mechanically_removable") is not False
+            or index in targets
+        ):
             return None, []
         pointer = f"$.requirements[{index}]"
-        if record.get("json_pointer") != pointer or not any(
-            item.get("code") == record["code"] and item.get("json_pointer") == pointer
-            for item in actual_records
-        ):
+        matching_actual = [
+            item for item in actual_external_records
+            if item.get("requirement_index") == index
+            and item.get("json_pointer") == pointer
+        ]
+        if len(matching_actual) != 1:
+            return None, []
+        actual_record = matching_actual[0]
+        if record != actual_record:
             return None, []
         # Do not erase a second error on the object by deleting its container.
         if any(
@@ -5036,18 +5050,59 @@ def _project_external_action_requirements(
                 not isinstance(clause, dict) or not isinstance(review, dict)
                 or review.get("classification") != "external_compliance"
                 or not isinstance(clause_evidence, list)
-                or any(not isinstance(eid, str) for eid in clause_evidence)
-                or any(not isinstance(item, dict) or item.get("status") != "unverifiable"
-                       for item in (review.get("obligations") or []))
+                or not clause_evidence
+                or any(not isinstance(eid, str) or not eid for eid in clause_evidence)
+                or len(set(clause_evidence)) != len(clause_evidence)
+            ):
+                return None, []
+            obligations = review.get("obligations")
+            if (
+                not isinstance(obligations, list) or not obligations
+                or any(
+                    not isinstance(item, dict) or item.get("status") != "unverifiable"
+                    for item in obligations
+                )
+            ):
+                return None, []
+            # Requirement/evidence IDs alone do not prove source binding. Use
+            # the same exact source-span verifier as the independent obligation
+            # reviewer, then verify every referenced evidence object is
+            # self-identifying and contains actual source text.
+            try:
+                _exact_clause_source_text(clause, evidence)
+            except NativeSemanticReviewError:
+                return None, []
+            if any(
+                not isinstance(evidence.get(evidence_id), dict)
+                or evidence[evidence_id].get("id") != evidence_id
+                or not isinstance(evidence[evidence_id].get("text"), str)
+                or not evidence[evidence_id]["text"].strip()
+                for evidence_id in clause_evidence
             ):
                 return None, []
             allowed_evidence.update(clause_evidence)
-        if any(eid not in allowed_evidence or not isinstance(evidence.get(eid), dict) for eid in evidence_ids):
+        if any(
+            eid not in allowed_evidence
+            or not isinstance(evidence.get(eid), dict)
+            or evidence[eid].get("id") != eid
+            or not isinstance(evidence[eid].get("text"), str)
+            or not evidence[eid]["text"].strip()
+            for eid in evidence_ids
+        ):
             return None, []
         targets.add(index)
     projected = copy.deepcopy(response)
     projected["requirements"] = [item for index, item in enumerate(projected["requirements"]) if index not in targets]
-    if not _v3_non_requirement_projection_allowed(response, projected, records, ["$.requirements"], chunk=chunk):
+    # The source-bound checks above authorize this one external-action rule.
+    # Keep it separate from generic retry deletion authorization, which must
+    # not erase unresolved or external requirements based on classification
+    # alone.
+    if (
+        projected["requirements"] != [
+            item for index, item in enumerate(requirements) if index not in targets
+        ]
+        or projected["clause_reviews"] != reviews
+    ):
         return None, []
     return projected, [{
         "code": "non_requirement_classification_relation",
@@ -5610,13 +5665,15 @@ def _apply_safe_mechanical_repairs_one_rule(
         candidate_indexes: set[int] = set()
         for record in informational_records:
             requirement_index = record.get("requirement_index")
-            if not isinstance(requirement_index, int):
-                match = re.fullmatch(
-                    r"\$\.requirements\[(\d+)\]", str(record.get("json_pointer") or "")
-                )
-                if match is None:
-                    return None, []
-                requirement_index = int(match.group(1))
+            if (
+                type(requirement_index) is not int
+                or record.get("json_pointer") != f"$.requirements[{requirement_index}]"
+                or record.get("mechanically_removable") is not True
+                or record.get("relation_category") != "informational_only"
+                or record.get("response_sha256") != baseline_sha256
+                or requirement_index in candidate_indexes
+            ):
+                return None, []
             candidate_indexes.add(requirement_index)
         actual_informational_indexes = {
             index for index, fact in relation_by_index.items()
@@ -8991,6 +9048,11 @@ def run_bridge(
                         model_semantic_changes = list(semantic_changes)
                         retry_field_projection: dict[str, Any] | None = None
                         if change_error is not None:
+                            obligation_projection_records = [
+                                record for record in semantic_parent_error_records
+                                if isinstance(record, dict)
+                                and record.get("code") == "executable_review_obligations_missing"
+                            ]
                             projected_raw, projection_audit = (
                                 _project_validator_targeted_obligation_fields(
                                     previous_raw,
@@ -8998,12 +9060,12 @@ def run_bridge(
                                     semantic_parent_error_records,
                                 )
                             )
-                            if projected_raw is not None:
+                            if projected_raw is not None and obligation_projection_records:
                                 projected_authorizations: list[dict[str, Any]] = []
                                 projected_error, projected_changes = _retry_semantic_change_error(
                                     previous_raw,
                                     projected_raw,
-                                    semantic_parent_error_records,
+                                    obligation_projection_records,
                                     contract_version=contract_version,
                                     chunk=chunk,
                                     authorization_out=projected_authorizations,

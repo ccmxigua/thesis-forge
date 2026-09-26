@@ -1282,6 +1282,7 @@ class HostReviewV3Tests(unittest.TestCase):
         self.assertEqual(nonrequirement_record["requirement_index"], 0)
         self.assertEqual(nonrequirement_record["relation_category"], "non_requirement_classification")
         self.assertEqual(nonrequirement_record["clause_ids"], ["C1"])
+        self.assertIs(nonrequirement_record["mechanically_removable"], False)
 
     def test_unbacked_evidence_is_structured_as_evidence_relation_error(self) -> None:
         records = contract_error_records(

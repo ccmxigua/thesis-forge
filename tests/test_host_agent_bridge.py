@@ -1522,6 +1522,106 @@ class HostAgentBridgeTests(unittest.TestCase):
                 self.assertIsNone(rejected)
                 self.assertEqual(rejected_audit["status"], "blocked")
 
+    def test_mixed_retry_projects_inventories_then_repairs_external_relation(self) -> None:
+        sources = {
+            "C00046": "审批表编号需由外部审批流程核验。",
+            "C00049": "办公室盖章状态需由外部审批流程核验。",
+        }
+        clauses = [{
+            "id": clause_id, "text": source, "evidence_ids": [f"E{clause_id[-2:] or '1'}"],
+            "source_kind": "paragraph", "location": {}, "part_index": 0,
+        } for clause_id, source in sources.items()]
+        evidence = {"evidence": [{
+            "id": clause["evidence_ids"][0], "text": clause["text"], "kind": "paragraph",
+        } for clause in clauses]}
+        clauses = self._bind_test_source_spans(clauses, evidence)
+        chunk = engine.build_llm_request(
+            [], clauses, evidence, {}, "full", contract_version="3.0",
+            runtime_context={"code_fingerprint_sha256": "9" * 64},
+        )
+        chunk["batch"] = {"index": 1}
+        chunk["case_id"] = "case-mixed-external-inventory-retry"
+        chunk = attach_request_provenance(
+            chunk, source_sha256="e" * 64, evidence_doc=evidence,
+            clauses=clauses, run_id="mixed-external-inventory-retry",
+        )
+        parent = {
+            "contract_version": "3.0", "provenance": chunk["provenance"],
+            "requirements": [{
+                "role": "body_text",
+                "properties": {"text": sources["C00049"]},
+                "clause_ids": list(sources),
+                "evidence_ids": [clause["evidence_ids"][0] for clause in clauses],
+                "confidence": 0.98,
+                "reason": "两条证据都要求外部审批流程核验。",
+                "verification": {
+                    "mode": "external", "checks": ["由外部审批流程核验"],
+                },
+            }],
+            "clause_reviews": [{
+                "clause_id": clause_id, "classification": "external_compliance",
+                "normative_basis": "external_duty", "reason": "需外部流程核验。",
+                "obligations": None,
+            } for clause_id in sources],
+            "unsupported_items": [], "reported_conflicts": [],
+        }
+        errors = bridge.validate_host_agent_response(parent, chunk)
+        records = bridge.contract_error_records(errors, response=parent, chunk=chunk)
+        record_codes = {record["code"] for record in records}
+        self.assertIn("non_requirement_classification_relation", record_codes)
+        self.assertIn("executable_review_obligations_missing", record_codes)
+
+        model_retry = copy.deepcopy(parent)
+        for review in model_retry["clause_reviews"]:
+            review["obligations"] = [{
+                "id": f"{review['clause_id']}-1", "status": "unverifiable",
+                "reason": "该外部审批状态不能由 DOCX 本身证明。",
+            }]
+
+        raw_error, _ = bridge._retry_semantic_change_error(
+            parent, model_retry, records, contract_version="3.0", chunk=chunk,
+        )
+        self.assertIsNotNone(raw_error, "the full mixed error set must not grant broad retry authority")
+
+        projected, audit = bridge._project_validator_targeted_obligation_fields(
+            parent, model_retry, records,
+        )
+        self.assertIsNotNone(projected)
+        self.assertEqual(projected["requirements"], parent["requirements"])
+        self.assertEqual(
+            projected["clause_reviews"], model_retry["clause_reviews"],
+        )
+        unapplied_codes = {
+            item["code"] for item in audit["unapplied_validator_records"]
+        }
+        self.assertIn("non_requirement_classification_relation", unapplied_codes)
+        self.assertNotIn("executable_review_obligations_missing", unapplied_codes)
+        inventory_records = [
+            record for record in records
+            if record["code"] == "executable_review_obligations_missing"
+        ]
+        self.assertTrue(bridge._v3_source_inventory_completion_allowed(
+            parent, projected, inventory_records, bridge._retry_change_paths(parent, projected),
+            chunk=chunk,
+        ), msg=json.dumps(bridge._retry_input_fingerprints(chunk), ensure_ascii=False))
+        projected_error, projected_changes = bridge._retry_semantic_change_error(
+            parent, projected, inventory_records, contract_version="3.0", chunk=chunk,
+        )
+        self.assertIsNone(projected_error)
+        self.assertEqual(len(projected_changes), 2)
+
+        accepted, candidate_audit = bridge.prepare_native_response_candidate(projected, chunk)
+        self.assertEqual(accepted["requirements"], [])
+        self.assertTrue(all(
+            review["obligations"][0]["status"] == "unverifiable"
+            for review in accepted["clause_reviews"]
+        ))
+        self.assertEqual(bridge.validate_host_agent_response(accepted, chunk), [])
+        self.assertIn(
+            "external_action_relation_projection_v1",
+            {repair["rule_id"] for repair in candidate_audit["mechanical_repairs"]},
+        )
+
     def test_v3_inventory_completion_is_revalidated_and_independently_reviewed(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             review_dir = Path(td) / "requirements"
@@ -2716,13 +2816,39 @@ class HostAgentBridgeTests(unittest.TestCase):
         current = json.loads(json.dumps(previous))
         current["requirements"] = [json.loads(json.dumps(previous["requirements"][0]))]
         records = [
-            {"code": "informational_requirement_forbidden", "requirement_index": 1},
-            {"code": "informational_requirement_forbidden", "requirement_index": 2},
+            {
+                "code": "informational_requirement_forbidden",
+                "json_pointer": "$.requirements[1]",
+                "requirement_index": 1,
+                "relation_category": "informational_only",
+                "mechanically_removable": True,
+                "response_sha256": bridge._response_sha256(previous),
+            },
+            {
+                "code": "informational_requirement_forbidden",
+                "json_pointer": "$.requirements[2]",
+                "requirement_index": 2,
+                "relation_category": "informational_only",
+                "mechanically_removable": True,
+                "response_sha256": bridge._response_sha256(previous),
+            },
         ]
         changed = bridge._retry_change_paths(previous, current)
         self.assertEqual(changed, ["$.requirements"])
         self.assertTrue(bridge._retry_changes_allowed(
             records, changed, contract_version="3.0",
+            previous_response=previous, current_response=current,
+            chunk={"clauses": [{"id": f"C{i}"} for i in range(1, 4)]},
+        ))
+        mismatched_pointer = copy.deepcopy(records)
+        mismatched_pointer[0]["json_pointer"] = "$.requirements[999]"
+        self.assertFalse(bridge._retry_changes_allowed(
+            mismatched_pointer, changed, contract_version="3.0",
+            previous_response=previous, current_response=current,
+            chunk={"clauses": [{"id": f"C{i}"} for i in range(1, 4)]},
+        ))
+        self.assertFalse(bridge._retry_changes_allowed(
+            records + [copy.deepcopy(records[0])], changed, contract_version="3.0",
             previous_response=previous, current_response=current,
             chunk={"clauses": [{"id": f"C{i}"} for i in range(1, 4)]},
         ))
@@ -2734,7 +2860,7 @@ class HostAgentBridgeTests(unittest.TestCase):
             chunk={"clauses": [{"id": f"C{i}"} for i in range(1, 4)]},
         ))
 
-    def test_v3_retry_allows_only_proven_non_requirement_projection(self) -> None:
+    def test_v3_retry_rejects_generic_unresolved_requirement_removal(self) -> None:
         previous = {
             "contract_version": "3.0",
             "requirements": [
@@ -2766,10 +2892,10 @@ class HostAgentBridgeTests(unittest.TestCase):
         chunk = {"clauses": [{"id": "C1"}, {"id": "C2"}]}
         changed = bridge._retry_change_paths(previous, current)
         self.assertEqual(changed, ["$.requirements"])
-        self.assertTrue(bridge._v3_non_requirement_projection_allowed(
+        self.assertFalse(bridge._v3_non_requirement_projection_allowed(
             previous, current, records, changed, chunk=chunk,
         ))
-        self.assertTrue(bridge._retry_changes_allowed(
+        self.assertFalse(bridge._retry_changes_allowed(
             records, changed, contract_version="3.0",
             previous_response=previous, current_response=current, chunk=chunk,
         ))
@@ -2841,7 +2967,7 @@ class HostAgentBridgeTests(unittest.TestCase):
             )
         self.assertIsNone(rejected)
 
-    def test_v3_retry_allows_non_requirement_projection_with_named_payload_cleanup(self) -> None:
+    def test_v3_retry_allows_informational_projection_with_named_payload_cleanup(self) -> None:
         previous = {
             "contract_version": "3.0",
             "requirements": [
@@ -2856,7 +2982,7 @@ class HostAgentBridgeTests(unittest.TestCase):
             ],
             "clause_reviews": [
                 {"clause_id": "C1", "classification": "executable"},
-                {"clause_id": "C2", "classification": "unsupported_backend"},
+                {"clause_id": "C2", "classification": "informational"},
             ],
             "unsupported_items": [],
         }
@@ -2872,13 +2998,16 @@ class HostAgentBridgeTests(unittest.TestCase):
                 "raw_error": "unknown property 'style'",
             },
             {
-                "code": "non_requirement_classification_relation",
+                "code": "informational_requirement_forbidden",
                 "json_pointer": "$.requirements[1]",
                 "requirement_index": 1,
-                "relation_category": "non_requirement_classification",
+                "relation_category": "informational_only",
+                "mechanically_removable": True,
                 "clause_ids": ["C2"],
+                "response_sha256": bridge._response_sha256(previous),
             },
         ]
+        records[0]["response_sha256"] = bridge._response_sha256(previous)
         chunk = {
             "clauses": [
                 {"id": "C1", "evidence_ids": ["E1"]},
@@ -3499,14 +3628,16 @@ class HostAgentBridgeTests(unittest.TestCase):
                 "clause_id": "C1", "classification": "informational",
             }],
         }
-        repaired, repairs = bridge._apply_safe_mechanical_repairs(
-            response,
-            [{
-                "code": "informational_requirement_forbidden",
-                "requirement_index": 0,
-                "raw_error": "requirements_not_referenced_by_clause_review:0",
-            }],
-        )
+        record = {
+            "code": "informational_requirement_forbidden",
+            "json_pointer": "$.requirements[0]",
+            "requirement_index": 0,
+            "relation_category": "informational_only",
+            "mechanically_removable": True,
+            "response_sha256": bridge._response_sha256(response),
+            "raw_error": "requirements_not_referenced_by_clause_review:0",
+        }
+        repaired, repairs = bridge._apply_safe_mechanical_repairs(response, [record])
         self.assertEqual(repaired["requirements"], [])
         self.assertEqual(repairs[0]["removed_clause_ids"], ["C1"])
         self.assertEqual(repairs[0]["removed_requirement"]["clause_ids"], ["C1"])
@@ -3515,6 +3646,19 @@ class HostAgentBridgeTests(unittest.TestCase):
             bridge._response_sha256(response["requirements"][0]),
         )
         self.assertEqual(len(response["requirements"]), 1)
+        for field, bad_value in (
+            ("mechanically_removable", False),
+            ("relation_category", "non_requirement_classification"),
+            ("response_sha256", "0" * 64),
+            ("json_pointer", "$.requirements[9]"),
+        ):
+            forged = copy.deepcopy(record)
+            forged[field] = bad_value
+            rejected, _ = bridge._apply_safe_mechanical_repairs(response, [forged])
+            self.assertIsNone(rejected, field)
+        self.assertIsNone(bridge._apply_safe_mechanical_repairs(
+            response, [record, copy.deepcopy(record)],
+        )[0])
 
     def test_external_pending_requirement_edge_is_projected_with_source_bound_audit(self) -> None:
         source = "北京体育大学学位评定委员会办公室盖章(有效)"
@@ -3574,6 +3718,57 @@ class HostAgentBridgeTests(unittest.TestCase):
         self.assertIsNone(bridge._apply_safe_mechanical_repairs(
             response, stale, chunk=chunk,
         )[0])
+        for field, bad_value in (
+            ("relation_category", "informational_only"),
+            ("mechanically_removable", True),
+            ("json_pointer", "$.requirements[9]"),
+        ):
+            forged = copy.deepcopy(records)
+            forged[0][field] = bad_value
+            self.assertIsNone(bridge._project_external_action_requirements(
+                response, forged, chunk,
+            )[0], field)
+        forged_diagnostic = copy.deepcopy(records)
+        forged_diagnostic[0]["raw_error"] = "fabricated validator diagnostic"
+        self.assertIsNone(bridge._project_external_action_requirements(
+            response, forged_diagnostic, chunk,
+        )[0])
+        self.assertIsNone(bridge._project_external_action_requirements(
+            response, records + [copy.deepcopy(records[0])], chunk,
+        )[0])
+        for evidence_item in (
+            {},
+            {"id": "E2", "text": source},
+            {"id": "E1", "text": "不匹配的来源正文"},
+        ):
+            bad_chunk = copy.deepcopy(chunk)
+            bad_chunk["evidence_context"]["E1"] = evidence_item
+            self.assertIsNone(bridge._project_external_action_requirements(
+                response, records, bad_chunk,
+            )[0], evidence_item)
+        bad_span_chunk = copy.deepcopy(chunk)
+        bad_span_chunk["clauses"][0]["source_span"]["text"] = "被篡改的条款原文"
+        self.assertIsNone(bridge._project_external_action_requirements(
+            response, records, bad_span_chunk,
+        )[0])
+        missing_obligations = copy.deepcopy(response)
+        missing_obligations["clause_reviews"][0]["obligations"] = []
+        missing_errors = bridge.validate_host_agent_response(missing_obligations, chunk)
+        missing_records = bridge.contract_error_records(
+            missing_errors, response=missing_obligations, chunk=chunk,
+        )
+        relation_only = [
+            item for item in missing_records
+            if item["code"] == "non_requirement_classification_relation"
+        ]
+        self.assertTrue(any(
+            item["code"] == "executable_review_obligations_missing"
+            for item in missing_records
+        ))
+        self.assertTrue(relation_only)
+        self.assertIsNone(bridge._project_external_action_requirements(
+            missing_obligations, relation_only, chunk,
+        )[0])
 
     def test_external_pending_projection_refuses_mixed_edges_and_existing_identity(self) -> None:
         response = {
@@ -3622,12 +3817,19 @@ class HostAgentBridgeTests(unittest.TestCase):
                 {"clause_id": "C4", "classification": "informational"},
             ],
         }
+        parent_sha256 = bridge._response_sha256(response)
         repaired, repairs = bridge._apply_safe_mechanical_repairs(
             response,
             [
-                {"code": "informational_requirement_forbidden", "requirement_index": 0},
-                {"code": "informational_requirement_forbidden", "requirement_index": 1},
-                {"code": "informational_requirement_forbidden", "requirement_index": 3},
+                {
+                    "code": "informational_requirement_forbidden",
+                    "json_pointer": f"$.requirements[{index}]",
+                    "requirement_index": index,
+                    "relation_category": "informational_only",
+                    "mechanically_removable": True,
+                    "response_sha256": parent_sha256,
+                }
+                for index in (0, 1, 3)
             ],
         )
         self.assertEqual(

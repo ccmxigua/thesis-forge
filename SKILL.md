@@ -57,6 +57,30 @@ the ID to disguise a mismatch, or turning that integrity error into a red
 manual-review placeholder. Semantic uncertainty remains eligible for explicit
 review-draft markers under the separate policy below.
 
+For contract 3.0, a requirement linked only to clauses classified
+`external_compliance` is not a DOCX requirement. The bridge may remove that
+invalid requirement object only when the exact current validator records,
+source spans, clause evidence, and a non-empty `unverifiable` obligation
+inventory prove that every linked clause is an external pending action; it
+must preserve the clause reviews and obligations unchanged. Native structured
+output may encode a new requirement's absent `existing_requirement_id` as
+`null`, and an absent/null `verification` is treated as no verification claim
+for this removal check. Any non-null existing ID or non-null verification mode
+other than `external` remains ineligible. The only removable payload is a
+single `body_text` source echo whose text exactly equals one linked clause's
+verified source span; role-specific properties, field keys, applicability,
+input prerequisites, altered text, and mixed/local payloads are not removable.
+Mixed executable/external edges, empty/orphan clause/evidence relations, stale
+records, or failed source/evidence binding must fail closed; the bridge must
+never guess or attach an orphan to a clause. A source clause is also ineligible
+when code recognizes any local machine-checkable obligation or a conservative
+local-action cue together with an external physical action (for example,
+`封面应有学号` plus an advisor signature, or a repeated table header plus a
+seal). These guards reject projection; they do not infer that an arbitrary
+clause is purely external. The independent source-first review remains required
+and must reject external-only status whenever its exact source packet contains
+code-known local DOCX obligations.
+
 ## Explicit semantic issue acknowledgements
 
 When a user confirms that an unresolved clause is a real semantic ambiguity but

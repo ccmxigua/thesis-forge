@@ -58,6 +58,38 @@ _KEYWORD_COUNT_MANDATORY_SIGNAL = re.compile(
     r".{0,32}\d+.{0,48}(?:关键词|关键字|\bkey\s*words?\b)",
     re.IGNORECASE | re.DOTALL,
 )
+_EXTERNAL_REAL_WORLD_ACTION_SIGNAL = re.compile(
+    r"签字|签名|盖章|签章|印章|物理签署|实际签署|装订|打印|递交纸质|"
+    r"\b(?:signature|sign(?:ed|ing)?|stamp(?:ed|ing)?|seal(?:ed|ing)?|binding|printing)\b",
+    re.IGNORECASE,
+)
+_LOCAL_DOCUMENT_ACTION = (
+    r"(?:(?:应当|应该|必须|需要|须|应|需)?(?:有|含有|具有|包含|包括|列有|附有|载有|"
+    r"填写|填入|写明|注明|标注|载明|列出|列明|写入|显示|排版|设置|设有|安排|保持|"
+    r"重复|保留|预留|留有|增加|添加|插入|加入))"
+)
+_LOCAL_DOCUMENT_TARGET = (
+    r"(?:封面|学号|姓名|作者|题目|标题|日期|学院|专业|导师|摘要|关键词|页码|字体|字号|"
+    r"行距|页边距|目录|参考文献|图表|公式|表头|续表|落款|签名栏|签字栏|签署栏|签章栏|"
+    r"签字页|签名页|签署页|签章页|签字区|签名区|签署区|签章区|声明页|首页|页眉|页脚|"
+    r"字段|栏位|版面|签字位置|签名位置|签章位置)"
+)
+_LOCAL_DOCUMENT_FIELD_ACTION_SIGNAL = re.compile(
+    rf"{_LOCAL_DOCUMENT_ACTION}[^，,。；;\n]{{0,32}}{_LOCAL_DOCUMENT_TARGET}|"
+    rf"{_LOCAL_DOCUMENT_TARGET}[^，,。；;\n]{{0,32}}{_LOCAL_DOCUMENT_ACTION}|"
+    r"\b(?:write|state|enter|fill\s+in|list|include|display|format|align|set|repeat|retain|"
+    r"preserve|keep|add|insert|place)"
+    r"[^.;\n]{0,64}\b(?:cover|student\s*id|author|title|date|department|program|advisor|"
+    r"abstract|keywords?|page\s+number|font|margins?|table|figure|equation|header\s+row|"
+    r"signature\s+(?:block|line|page|field)|sign(?:ature)?\s+(?:block|line|page|field)|"
+    r"imprint|signing\s+area)\b|"
+    r"\b(?:cover|student\s*id|author|title|date|department|program|advisor|abstract|keywords?|"
+    r"page\s+number|font|margins?|table|figure|equation|header\s+row|signature\s+"
+    r"(?:block|line|page|field)|sign(?:ature)?\s+(?:block|line|page|field)|imprint|signing\s+area)\b"
+    r"[^.;\n]{0,64}\b(?:write|state|enter|fill\s+in|list|include|display|format|align|set|repeat|"
+    r"retain|preserve|keep|add|insert|place)\b",
+    re.IGNORECASE,
+)
 SECURITY_MARKING_OPTIONS_OBLIGATION_ID = "cover.security_marking_options"
 SECURITY_MARKING_SHORTER_ALLOWANCE_OBLIGATION_ID = (
     "cover.security_marking_options.shorter_duration_allowed"
@@ -347,6 +379,27 @@ def compile_known_source_obligation_ids(source_text: Any) -> list[str]:
             "table.continuation.caption_optional", "table.continuation.caption_required",
         })
     return sorted(result)
+
+
+def has_mixed_external_document_action_signal(source_text: Any) -> bool:
+    """Conservatively flag known DOCX actions co-located with real-world actions.
+
+    This narrow lexical guard is not a semantic classifier. It prevents a
+    recognized local field/layout action from being hidden under an external
+    compliance label. A positive result requires splitting or another
+    contract that can express both actions; absence of a cue does not prove
+    arbitrary prose contains no mixed obligation.
+    """
+    if not isinstance(source_text, str) or not source_text.strip():
+        return False
+    has_local_document_action = bool(
+        _LOCAL_DOCUMENT_FIELD_ACTION_SIGNAL.search(source_text)
+        or compile_known_source_obligation_ids(source_text)
+    )
+    return bool(
+        _EXTERNAL_REAL_WORLD_ACTION_SIGNAL.search(source_text)
+        and has_local_document_action
+    )
 
 
 def compile_known_source_obligations(source_text: Any) -> list[dict[str, Any]]:

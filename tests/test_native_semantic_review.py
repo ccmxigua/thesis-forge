@@ -850,6 +850,69 @@ class NativeSemanticReviewTests(unittest.TestCase):
             validate_obligation_coverage_response(incomplete, [linked_check])
         self.assertNotIsInstance(unsafe.exception, ExternalComplianceCorrectionRequiredError)
 
+    def test_external_projection_cannot_hide_a_mixed_docx_obligation(self) -> None:
+        sources = (
+            "封面须写明学号，并由导师签字盖章",
+            "封面应有学号，并由导师签字盖章",
+            "表格续页应重复表头，并由导师签字盖章",
+            "签章后保留签名栏。",
+            "签字后在首页保留落款。",
+            "装订并保留签字页。",
+        )
+        for source_index, source in enumerate(sources):
+            clause_id = f"C-MIXED-{source_index}"
+            evidence_id = f"E-MIXED-{source_index}"
+            run_id = f"run-mixed-external-{source_index}"
+            clause = {
+                "id": clause_id, "text": source, "evidence_ids": [evidence_id],
+                "source_span": {
+                    "evidence_id": evidence_id, "start_offset": 0,
+                    "end_offset": len(source), "text": source,
+                    "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
+                },
+            }
+            chunk = {
+                "case_id": f"case-mixed-external-{source_index}",
+                "provenance": {"run_id": run_id},
+                "clauses": [clause],
+                "evidence_context": {evidence_id: {"id": evidence_id, "text": source}},
+            }
+            projected_candidate = {
+                "clause_reviews": [{
+                    "clause_id": clause_id, "classification": "external_compliance",
+                    "reason": "The signature and seal happen outside DOCX.",
+                    "obligations": [{
+                        "id": "advisor_stamp", "status": "unverifiable",
+                        "reason": "A real advisor signature/seal requires an external action.",
+                    }],
+                }],
+                "requirements": [],
+            }
+            packet = build_obligation_coverage_request(
+                projected_candidate, chunk, run_id=run_id, chunk_index=3,
+            )
+            check = packet["checks"][0]
+            self.assertEqual(check["document_text"], source)
+            self.assertFalse(check["review_context"]["requires_requirement"])
+            self.assertEqual(check["review_context"]["linked_requirements"], [])
+
+            mixed_review_with_omission = {"results": [{
+                "check_id": clause_id,
+                "verdict": "external_compliance_pending",
+                "rationale": "Only the real-world signature remains pending.",
+                "evidence_quotes": [source],
+                "machine_obligation_ids": check["review_context"]["machine_obligation_ids"],
+                "identified_obligations": [{
+                    "source_quote": source, "disposition": "external_action_pending",
+                    "requirement_refs": [],
+                }],
+            }]}
+            with self.subTest(source=source), self.assertRaisesRegex(
+                NativeSemanticReviewError,
+                "code-known local DOCX obligation|combines a locally expressible document action",
+            ):
+                validate_obligation_coverage_response(mixed_review_with_omission, [check])
+
     def test_external_pending_correction_must_preserve_the_triggering_source_quote(self) -> None:
         original_quote = "学位论文作者签名： 年 月 日"
         alternate_quote = "原创性声明由作者负责"

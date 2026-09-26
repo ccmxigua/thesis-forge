@@ -27,6 +27,7 @@ from semantic_source_references import (
 from source_obligation_compiler import (
     compile_known_source_obligation_ids,
     compile_unresolved_manual_review_codes,
+    has_mixed_external_document_action_signal,
 )
 
 
@@ -534,6 +535,16 @@ def validate_obligation_coverage_response(
         )
         if is_external_compliance:
             identified_obligations = result.get("identified_obligations", [])
+            if expected_machine_ids:
+                raise NativeSemanticReviewError(
+                    f"external_compliance source has code-known local DOCX obligation(s) "
+                    f"that must remain represented: {check_id}"
+                )
+            if has_mixed_external_document_action_signal(source_text):
+                raise NativeSemanticReviewError(
+                    f"external_compliance source combines a locally expressible document action "
+                    f"with a real-world action and must be split before it can remain external: {check_id}"
+                )
             if (
                 context.get("requires_requirement") is False
                 and not linked

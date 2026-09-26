@@ -1618,7 +1618,7 @@ class HostAgentBridgeTests(unittest.TestCase):
         ))
         self.assertEqual(bridge.validate_host_agent_response(accepted, chunk), [])
         self.assertIn(
-            "external_action_relation_projection_v1",
+            "external_action_relation_projection_v3",
             {repair["rule_id"] for repair in candidate_audit["mechanical_repairs"]},
         )
 
@@ -3679,12 +3679,13 @@ class HostAgentBridgeTests(unittest.TestCase):
             "contract_version": "3.0",
             "provenance": chunk["provenance"],
             "requirements": [{
+                "existing_requirement_id": None,
                 "role": "body_text", "properties": {"text": source},
                 "clause_ids": ["C1"], "evidence_ids": ["E1"],
                 "confidence": 0.95, "reason": "The source requires a real-world stamp.",
-                "verification": {
-                    "mode": "external", "checks": ["Obtain and verify the actual stamp."],
-                },
+                # Native structured output emits null for both optional
+                # fields when no existing selector/local check applies.
+                "verification": None,
             }],
             "clause_reviews": [{
                 "clause_id": "C1", "classification": "external_compliance",
@@ -3696,27 +3697,150 @@ class HostAgentBridgeTests(unittest.TestCase):
             }],
             "unsupported_items": [], "reported_conflicts": [],
         }
-        errors = bridge.validate_host_agent_response(response, chunk)
-        records = bridge.contract_error_records(errors, response=response, chunk=chunk)
+        normalized_response = bridge.normalize_native_response(
+            response, chunk["response_schema"],
+        )
+        errors = bridge.validate_host_agent_response(normalized_response, chunk)
+        records = bridge.contract_error_records(
+            errors, response=normalized_response, chunk=chunk,
+        )
         self.assertEqual({item["code"] for item in records}, {
             "non_requirement_classification_relation",
         })
 
         repaired, repairs = bridge._apply_safe_mechanical_repairs(
-            response, records, chunk=chunk,
+            normalized_response, records, chunk=chunk,
         )
         self.assertIsNotNone(repaired)
         self.assertEqual(repaired["requirements"], [])
-        self.assertEqual(repaired["clause_reviews"], response["clause_reviews"])
-        self.assertEqual(repairs[0]["rule_id"], "external_action_relation_projection_v1")
-        self.assertEqual(repairs[0]["removed_requirements"], response["requirements"])
+        self.assertEqual(repaired["clause_reviews"], normalized_response["clause_reviews"])
+        self.assertEqual(repairs[0]["rule_id"], "external_action_relation_projection_v3")
+        self.assertEqual(repairs[0]["removed_requirements"], normalized_response["requirements"])
         self.assertTrue(repairs[0]["external_actions_remain_pending"])
         self.assertEqual(bridge.validate_host_agent_response(repaired, chunk), [])
+
+        accepted, candidate_audit = bridge.prepare_native_response_candidate(response, chunk)
+        self.assertEqual(accepted["requirements"], [])
+        self.assertEqual(accepted["clause_reviews"], response["clause_reviews"])
+        self.assertEqual(bridge.validate_host_agent_response(accepted, chunk), [])
+        self.assertIn(
+            "external_action_relation_projection_v3",
+            {repair["rule_id"] for repair in candidate_audit["mechanical_repairs"]},
+        )
+
+        # Missing and explicit-null native fields are semantically identical;
+        # neither grants identity or verification authority to the model.
+        for identity_mode in ("missing", "null"):
+            for verification_mode in ("missing", "null", "external"):
+                native_variant = copy.deepcopy(response)
+                requirement = native_variant["requirements"][0]
+                if identity_mode == "missing":
+                    requirement.pop("existing_requirement_id", None)
+                if verification_mode == "missing":
+                    requirement.pop("verification", None)
+                elif verification_mode == "external":
+                    requirement["verification"] = {
+                        "mode": "external", "checks": ["Obtain and verify the actual stamp."],
+                    }
+                native_variant = bridge.normalize_native_response(
+                    native_variant, chunk["response_schema"],
+                )
+                variant_errors = bridge.validate_host_agent_response(native_variant, chunk)
+                variant_records = bridge.contract_error_records(
+                    variant_errors, response=native_variant, chunk=chunk,
+                )
+                with self.subTest(identity=identity_mode, verification=verification_mode):
+                    variant_repaired, variant_audit = bridge._apply_safe_mechanical_repairs(
+                        native_variant, variant_records, chunk=chunk,
+                    )
+                    self.assertIsNotNone(variant_repaired)
+                    self.assertEqual(variant_repaired["requirements"], [])
+                    self.assertEqual(
+                        variant_audit[0]["rule_id"],
+                        "external_action_relation_projection_v3",
+                    )
+
+        identified = copy.deepcopy(response)
+        identified["requirements"][0]["existing_requirement_id"] = "R-existing"
+        identified = bridge.normalize_native_response(identified, chunk["response_schema"])
+        identified_records = bridge.contract_error_records(
+            bridge.validate_host_agent_response(identified, chunk),
+            response=identified, chunk=chunk,
+        )
+        self.assertIsNone(bridge._project_external_action_requirements(
+            identified, identified_records, chunk,
+        )[0])
+
+        local_verification = copy.deepcopy(response)
+        local_verification["requirements"][0]["verification"] = {
+            "mode": "static_docx", "checks": ["look for the seal in the document"],
+        }
+        local_verification = bridge.normalize_native_response(
+            local_verification, chunk["response_schema"],
+        )
+        local_records = bridge.contract_error_records(
+            bridge.validate_host_agent_response(local_verification, chunk),
+            response=local_verification, chunk=chunk,
+        )
+        self.assertIsNone(bridge._project_external_action_requirements(
+            local_verification, local_records, chunk,
+        )[0])
+
+        # Even a schema-valid body_text shell is not removable if its payload
+        # is only a fragment rather than an exact complete source echo.
+        local_payload = copy.deepcopy(normalized_response)
+        local_payload["requirements"][0]["properties"]["text"] = source[:8]
+        local_payload_errors = bridge.validate_host_agent_response(local_payload, chunk)
+        local_payload_records = bridge.contract_error_records(
+            local_payload_errors, response=local_payload, chunk=chunk,
+        )
+        self.assertEqual(
+            {item["code"] for item in local_payload_records},
+            {"non_requirement_classification_relation"},
+            local_payload_errors,
+        )
+        self.assertIsNone(bridge._project_external_action_requirements(
+            local_payload, local_payload_records, chunk,
+        )[0])
+
+        local_prerequisite = copy.deepcopy(normalized_response)
+        local_prerequisite["requirements"][0]["input_prerequisites"] = [{
+            "kind": "metadata", "key": "thesis_profile.cover_metadata.title_zh",
+            "required": True, "reason": "A local cover title must be supplied.",
+        }]
+        prerequisite_errors = bridge.validate_host_agent_response(local_prerequisite, chunk)
+        prerequisite_records = bridge.contract_error_records(
+            prerequisite_errors, response=local_prerequisite, chunk=chunk,
+        )
+        self.assertEqual(
+            {item["code"] for item in prerequisite_records},
+            {"non_requirement_classification_relation"},
+        )
+        self.assertIsNone(bridge._project_external_action_requirements(
+            local_prerequisite, prerequisite_records, chunk,
+        )[0])
+
+        orphan = copy.deepcopy(response)
+        orphan["requirements"][0]["clause_ids"] = []
+        orphan["requirements"][0]["evidence_ids"] = []
+        orphan = bridge.normalize_native_response(orphan, chunk["response_schema"])
+        orphan_errors = bridge.validate_host_agent_response(orphan, chunk)
+        orphan_records = bridge.contract_error_records(
+            orphan_errors, response=orphan, chunk=chunk,
+        )
+        self.assertTrue(any(
+            item["relation_category"] == "missing_clause_relation"
+            for item in orphan_records
+            if item["code"] == "requirement_relation_mismatch"
+        ))
+        self.assertIsNone(bridge._apply_safe_mechanical_repairs(
+            orphan, orphan_records, chunk=chunk,
+        )[0], "an unbound orphan must not be guessed into C1 or silently removed")
 
         stale = copy.deepcopy(records)
         stale[0]["response_sha256"] = "0" * 64
         self.assertIsNone(bridge._apply_safe_mechanical_repairs(
-            response, stale, chunk=chunk,
+            normalized_response, stale, chunk=chunk,
         )[0])
         for field, bad_value in (
             ("relation_category", "informational_only"),
@@ -3726,15 +3850,15 @@ class HostAgentBridgeTests(unittest.TestCase):
             forged = copy.deepcopy(records)
             forged[0][field] = bad_value
             self.assertIsNone(bridge._project_external_action_requirements(
-                response, forged, chunk,
+                normalized_response, forged, chunk,
             )[0], field)
         forged_diagnostic = copy.deepcopy(records)
         forged_diagnostic[0]["raw_error"] = "fabricated validator diagnostic"
         self.assertIsNone(bridge._project_external_action_requirements(
-            response, forged_diagnostic, chunk,
+            normalized_response, forged_diagnostic, chunk,
         )[0])
         self.assertIsNone(bridge._project_external_action_requirements(
-            response, records + [copy.deepcopy(records[0])], chunk,
+            normalized_response, records + [copy.deepcopy(records[0])], chunk,
         )[0])
         for evidence_item in (
             {},
@@ -3744,14 +3868,14 @@ class HostAgentBridgeTests(unittest.TestCase):
             bad_chunk = copy.deepcopy(chunk)
             bad_chunk["evidence_context"]["E1"] = evidence_item
             self.assertIsNone(bridge._project_external_action_requirements(
-                response, records, bad_chunk,
+                normalized_response, records, bad_chunk,
             )[0], evidence_item)
         bad_span_chunk = copy.deepcopy(chunk)
         bad_span_chunk["clauses"][0]["source_span"]["text"] = "被篡改的条款原文"
         self.assertIsNone(bridge._project_external_action_requirements(
-            response, records, bad_span_chunk,
+            normalized_response, records, bad_span_chunk,
         )[0])
-        missing_obligations = copy.deepcopy(response)
+        missing_obligations = copy.deepcopy(normalized_response)
         missing_obligations["clause_reviews"][0]["obligations"] = []
         missing_errors = bridge.validate_host_agent_response(missing_obligations, chunk)
         missing_records = bridge.contract_error_records(
@@ -3769,6 +3893,117 @@ class HostAgentBridgeTests(unittest.TestCase):
         self.assertIsNone(bridge._project_external_action_requirements(
             missing_obligations, relation_only, chunk,
         )[0])
+
+    def test_external_projection_refuses_a_clause_with_a_local_field_action_cue(self) -> None:
+        source = "封面须写明学号，并由导师签字盖章"
+        clauses = [{
+            "id": "C-MIXED", "text": source, "evidence_ids": ["E-MIXED"],
+            "source_kind": "paragraph", "location": {}, "part_index": 0,
+        }]
+        evidence = {"evidence": [{"id": "E-MIXED", "text": source, "kind": "paragraph"}]}
+        clauses = self._bind_test_source_spans(clauses, evidence)
+        chunk = engine.build_llm_request(
+            [], clauses, evidence, {}, "full", contract_version="3.0",
+        )
+        chunk = attach_request_provenance(
+            chunk, source_sha256="f" * 64, evidence_doc=evidence,
+            clauses=clauses, run_id="mixed-external-action-projection-test",
+        )
+        response = {
+            "contract_version": "3.0", "provenance": chunk["provenance"],
+            "requirements": [{
+                "role": "body_text", "properties": {"text": source},
+                "clause_ids": ["C-MIXED"], "evidence_ids": ["E-MIXED"],
+                "confidence": 0.95, "reason": "The clause is classified as external.",
+            }],
+            "clause_reviews": [{
+                "clause_id": "C-MIXED", "classification": "external_compliance",
+                "normative_basis": "external_duty", "reason": "The seal is external.",
+                # Deliberately incomplete inventory to reproduce the adversarial case.
+                "obligations": [{
+                    "id": "advisor_stamp", "status": "unverifiable",
+                    "reason": "The signature/seal is outside DOCX generation.",
+                }],
+            }],
+            "unsupported_items": [], "reported_conflicts": [],
+        }
+        normalized = bridge.normalize_native_response(response, chunk["response_schema"])
+        errors = bridge.validate_host_agent_response(normalized, chunk)
+        records = bridge.contract_error_records(errors, response=normalized, chunk=chunk)
+        self.assertTrue(any(
+            item["code"] == "non_requirement_classification_relation" for item in records
+        ))
+        self.assertIsNone(
+            bridge._project_external_action_requirements(normalized, records, chunk)[0],
+        )
+
+        # These semantically equivalent local actions use different wording
+        # from the original cue and must be rejected by the actual projection
+        # path, not only by the standalone lexical compiler test.
+        for index, variant_source in enumerate((
+            "签章后保留签名栏。",
+            "签字后在首页保留落款。",
+            "装订并保留签字页。",
+        ), start=1):
+            with self.subTest(source=variant_source):
+                variant_clause_id = f"C-MIXED-{index}"
+                variant_evidence_id = f"E-MIXED-{index}"
+                variant_clauses = [{
+                    "id": variant_clause_id, "text": variant_source,
+                    "evidence_ids": [variant_evidence_id],
+                    "source_kind": "paragraph", "location": {}, "part_index": 0,
+                }]
+                variant_evidence = {"evidence": [{
+                    "id": variant_evidence_id, "text": variant_source, "kind": "paragraph",
+                }]}
+                variant_clauses = self._bind_test_source_spans(
+                    variant_clauses, variant_evidence,
+                )
+                variant_chunk = engine.build_llm_request(
+                    [], variant_clauses, variant_evidence, {}, "full", contract_version="3.0",
+                )
+                variant_chunk = attach_request_provenance(
+                    variant_chunk, source_sha256="a" * 64,
+                    evidence_doc=variant_evidence, clauses=variant_clauses,
+                    run_id=f"mixed-action-variant-{index}",
+                )
+                variant_response = {
+                    "contract_version": "3.0",
+                    "provenance": variant_chunk["provenance"],
+                    "requirements": [{
+                        "role": "body_text", "properties": {"text": variant_source},
+                        "clause_ids": [variant_clause_id],
+                        "evidence_ids": [variant_evidence_id],
+                        "confidence": 0.95, "reason": "The clause is classified as external.",
+                    }],
+                    "clause_reviews": [{
+                        "clause_id": variant_clause_id,
+                        "classification": "external_compliance",
+                        "normative_basis": "external_duty",
+                        "reason": "The physical signature or binding is external.",
+                        "obligations": [{
+                            "id": "physical_action", "status": "unverifiable",
+                            "reason": "The physical action is outside DOCX generation.",
+                        }],
+                    }],
+                    "unsupported_items": [], "reported_conflicts": [],
+                }
+                variant_response = bridge.normalize_native_response(
+                    variant_response, variant_chunk["response_schema"],
+                )
+                variant_errors = bridge.validate_host_agent_response(
+                    variant_response, variant_chunk,
+                )
+                variant_records = bridge.contract_error_records(
+                    variant_errors, response=variant_response, chunk=variant_chunk,
+                )
+                self.assertIn(
+                    "non_requirement_classification_relation",
+                    {item["code"] for item in variant_records},
+                )
+                self.assertIsNone(bridge._project_external_action_requirements(
+                    variant_response, variant_records, variant_chunk,
+                )[0])
 
     def test_external_pending_projection_refuses_mixed_edges_and_existing_identity(self) -> None:
         response = {

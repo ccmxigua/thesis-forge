@@ -24,10 +24,42 @@ from source_obligation_compiler import (  # noqa: E402
     materialize_known_source_verification,
     materialize_soft_keyword_count_guidance,
     source_fact_value_matches,
+    has_mixed_external_document_action_signal,
 )
 
 
 class SourceObligationCompilerTests(unittest.TestCase):
+    def test_mixed_external_and_local_document_action_cue_is_detected_conservatively(self) -> None:
+        self.assertTrue(has_mixed_external_document_action_signal(
+            "封面须写明学号，并由导师签字盖章"
+        ))
+        self.assertTrue(has_mixed_external_document_action_signal(
+            "Enter the student ID and obtain the advisor's signature."
+        ))
+        self.assertTrue(has_mixed_external_document_action_signal(
+            "封面应有学号，并由导师签字盖章"
+        ))
+        self.assertTrue(has_mixed_external_document_action_signal(
+            "表格续页应重复表头，并由导师签字盖章"
+        ))
+        self.assertTrue(has_mixed_external_document_action_signal(
+            "封面需要有作者姓名，导师负责签字盖章"
+        ))
+        self.assertTrue(has_mixed_external_document_action_signal(
+            "签章后保留签名栏。"
+        ))
+        self.assertTrue(has_mixed_external_document_action_signal(
+            "签字后在首页保留落款。"
+        ))
+        self.assertTrue(has_mixed_external_document_action_signal(
+            "装订并保留签字页。"
+        ))
+        self.assertFalse(has_mixed_external_document_action_signal(
+            "北京体育大学学位评定委员会办公室盖章(有效)"
+        ))
+        self.assertFalse(has_mixed_external_document_action_signal("封面须写明学号"))
+        self.assertFalse(has_mixed_external_document_action_signal(None))
+
     def test_security_marking_choices_compile_and_project_from_exact_source(self) -> None:
         source = "□限制(≤2年) □秘密(≤10年) □机密(≤20年)"
         expected = [

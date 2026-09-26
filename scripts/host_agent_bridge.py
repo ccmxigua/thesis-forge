@@ -222,6 +222,8 @@ from semantic_contract import (  # noqa: E402
 )
 from source_obligation_compiler import (  # noqa: E402
     compile_continuation_caption_requirement,
+    compile_known_source_obligation_ids,
+    has_mixed_external_document_action_signal,
     materialize_complete_abstract_source_constraints,
     materialize_known_source_verification,
     materialize_soft_keyword_count_guidance,
@@ -4952,9 +4954,14 @@ def _project_external_action_requirements(
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
     """Drop only redundant DOCX edges for explicitly external, pending duties.
 
-    No classifier is changed. Existing IDs, invalid payloads, mixed relations,
-    absent evidence and stale error records are not deletion authorizations.
-    The source-first second review must still confirm external action coverage.
+    No classifier is changed. Existing requirement identities, invalid
+    payloads, mixed relations, absent evidence and stale error records are not
+    deletion authorizations. Native structured output represents a new
+    requirement selector as ``existing_requirement_id: null``; that is the
+    same no-identity state as omitting the optional field. A null/absent
+    verification object likewise carries no contradictory local verification
+    claim; any non-null verification must explicitly be external. The
+    source-first second review must still confirm external action coverage.
     """
     if (
         not isinstance(chunk, dict) or response.get("contract_version") != "3.0"
@@ -5029,20 +5036,41 @@ def _project_external_action_requirements(
         ):
             return None, []
         requirement = requirements[index]
-        if not isinstance(requirement, dict) or "existing_requirement_id" in requirement:
+        if (
+            not isinstance(requirement, dict)
+            or requirement.get("existing_requirement_id") is not None
+        ):
             return None, []
         verification = requirement.get("verification")
         ids, evidence_ids = requirement.get("clause_ids"), requirement.get("evidence_ids")
         if (
-            not isinstance(verification, dict) or verification.get("mode") != "external"
+            (
+                verification is not None
+                and (
+                    not isinstance(verification, dict)
+                    or verification.get("mode") != "external"
+                )
+            )
             or not isinstance(ids, list) or not ids or any(not isinstance(cid, str) for cid in ids)
             or len(set(ids)) != len(ids)
             or not isinstance(evidence_ids, list) or not evidence_ids
             or any(not isinstance(eid, str) for eid in evidence_ids)
             or len(set(evidence_ids)) != len(evidence_ids)
+            # Only a source-text echo is a disposable invalid DOCX edge. A
+            # role-specific property payload or multi-clause relation may
+            # contain a locally expressible obligation and must be reviewed,
+            # never removed as a unit.
+            or requirement.get("role") != "body_text"
+            or not isinstance(requirement.get("properties"), dict)
+            or set(requirement["properties"]) != {"text"}
+            or not isinstance(requirement["properties"].get("text"), str)
+            or requirement.get("field_key") is not None
+            or requirement.get("applicability") not in (None, {})
+            or requirement.get("input_prerequisites") not in (None, [])
         ):
             return None, []
         allowed_evidence: set[str] = set()
+        exact_clause_sources: set[str] = set()
         for cid in ids:
             clause, review = clause_map.get(cid), review_map.get(cid)
             clause_evidence = clause.get("evidence_ids") if isinstance(clause, dict) else None
@@ -5069,9 +5097,15 @@ def _project_external_action_requirements(
             # reviewer, then verify every referenced evidence object is
             # self-identifying and contains actual source text.
             try:
-                _exact_clause_source_text(clause, evidence)
+                exact_source = _exact_clause_source_text(clause, evidence)
             except NativeSemanticReviewError:
                 return None, []
+            if (
+                has_mixed_external_document_action_signal(exact_source)
+                or compile_known_source_obligation_ids(exact_source)
+            ):
+                return None, []
+            exact_clause_sources.add(exact_source)
             if any(
                 not isinstance(evidence.get(evidence_id), dict)
                 or evidence[evidence_id].get("id") != evidence_id
@@ -5090,6 +5124,8 @@ def _project_external_action_requirements(
             for eid in evidence_ids
         ):
             return None, []
+        if requirement["properties"].get("text") not in exact_clause_sources:
+            return None, []
         targets.add(index)
     projected = copy.deepcopy(response)
     projected["requirements"] = [item for index, item in enumerate(projected["requirements"]) if index not in targets]
@@ -5106,7 +5142,7 @@ def _project_external_action_requirements(
         return None, []
     return projected, [{
         "code": "non_requirement_classification_relation",
-        "rule_id": "external_action_relation_projection_v1",
+        "rule_id": "external_action_relation_projection_v3",
         "json_pointer": "$.requirements", "removed_indexes": sorted(targets),
         "removed_requirements": [copy.deepcopy(requirements[index]) for index in sorted(targets)],
         "source_response_sha256": _response_sha256(response),

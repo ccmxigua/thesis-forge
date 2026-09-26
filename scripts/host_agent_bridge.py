@@ -4475,6 +4475,111 @@ def _retry_semantic_change_error(
     return error, changed_paths
 
 
+def _project_validator_targeted_obligation_fields(
+    parent_response: Any,
+    model_retry_response: Any,
+    records: list[dict[str, Any]],
+) -> tuple[dict[str, Any] | None, dict[str, Any]]:
+    """Project only source-inventory fields explicitly targeted by the validator.
+
+    The model's full retry response remains immutable evidence.  For the one
+    retry contract whose validator authorizes completion of a missing source
+    obligation inventory, construct the semantic candidate from the parent
+    and copy only the exact, response-bound ``clause_reviews[i].obligations``
+    values named by those validator records.  Ordinary contract and
+    independent source-first review still validate the resulting candidate.
+    """
+    audit: dict[str, Any] = {
+        "policy": "validator_targeted_obligation_fields_v1",
+        "status": "not_applicable",
+        "parent_response_sha256": _response_sha256(parent_response),
+        "model_retry_response_sha256": _response_sha256(model_retry_response),
+        "applied_paths": [],
+        "discarded_unrequested_paths": [],
+    }
+    if not isinstance(parent_response, dict) or not isinstance(model_retry_response, dict):
+        audit.update(status="blocked", reason="responses_must_be_objects")
+        return None, audit
+    if not records or any(
+        not isinstance(record, dict)
+        or record.get("code") != "executable_review_obligations_missing"
+        or record.get("response_sha256") != _response_sha256(parent_response)
+        for record in records
+    ):
+        audit.update(status="blocked", reason="validator_records_not_bound_to_parent")
+        return None, audit
+
+    targets: dict[str, dict[str, Any]] = {}
+    for record in records:
+        path = str(record.get("json_pointer") or "")
+        if re.fullmatch(r"\$\.clause_reviews\[\d+\]\.obligations", path) is None:
+            audit.update(status="blocked", reason="validator_target_not_an_exact_obligation_field")
+            return None, audit
+        if path in targets:
+            audit.update(status="blocked", reason="duplicate_validator_target")
+            return None, audit
+        if not _retry_record_binds_exact_path(
+            record, path, parent_response, model_retry_response,
+        ):
+            audit.update(status="blocked", reason="validator_target_object_identity_mismatch")
+            return None, audit
+        index_match = re.fullmatch(r"\$\.clause_reviews\[(\d+)\]\.obligations", path)
+        assert index_match is not None
+        index = int(index_match.group(1))
+        parent_reviews = parent_response.get("clause_reviews")
+        model_reviews = model_retry_response.get("clause_reviews")
+        if (
+            not isinstance(parent_reviews, list)
+            or not isinstance(model_reviews, list)
+            or index >= len(parent_reviews)
+            or index >= len(model_reviews)
+            or not isinstance(parent_reviews[index], dict)
+            or not isinstance(model_reviews[index], dict)
+            or record.get("clause_id") != parent_reviews[index].get("clause_id")
+        ):
+            audit.update(status="blocked", reason="validator_target_clause_identity_mismatch")
+            return None, audit
+        parent_has_value, parent_value = _retry_pointer_lookup(parent_response, path)
+        model_has_value, model_value = _retry_pointer_lookup(model_retry_response, path)
+        if (
+            (parent_has_value and parent_value is not None)
+            or not model_has_value
+            or not isinstance(model_value, list)
+            or not model_value
+        ):
+            audit.update(status="blocked", reason="target_is_not_a_missing_inventory_completion")
+            return None, audit
+        targets[path] = {"index": index, "value": copy.deepcopy(model_value)}
+
+    projected = copy.deepcopy(parent_response)
+    projected_reviews = projected.get("clause_reviews")
+    if not isinstance(projected_reviews, list):
+        audit.update(status="blocked", reason="parent_clause_reviews_missing")
+        return None, audit
+    for path, target in targets.items():
+        index = target["index"]
+        if index >= len(projected_reviews) or not isinstance(projected_reviews[index], dict):
+            audit.update(status="blocked", reason="parent_target_index_out_of_range")
+            return None, audit
+        projected_reviews[index]["obligations"] = copy.deepcopy(target["value"])
+
+    full_model_changes = _retry_change_paths(parent_response, model_retry_response)
+    projected_changes = _retry_change_paths(parent_response, projected)
+    applied_paths = sorted(targets)
+    if set(projected_changes) != set(applied_paths) or not set(applied_paths) <= set(full_model_changes):
+        audit.update(status="blocked", reason="targeted_projection_did_not_match_raw_diff")
+        return None, audit
+    audit.update({
+        "status": "projected",
+        "applied_paths": applied_paths,
+        "discarded_unrequested_paths": sorted(set(full_model_changes) - set(applied_paths)),
+        "model_retry_changed_paths": full_model_changes,
+        "projected_changed_paths": projected_changes,
+        "projected_response_sha256": _response_sha256(projected),
+    })
+    return projected, audit
+
+
 def _retry_path_source_binding(
     path: str,
     previous_response: Any,
@@ -6836,7 +6941,8 @@ Read that file on this retry. The current chunk packet and cited evidence remain
 the semantic authority. Preserve every non-error semantic field from the parent
 response exactly: clause IDs, classifications, obligations, roles, clause_ids,
 evidence_ids, applicability, prerequisites, verification, and unrelated
-properties. The requirement-list membership and count may change only under
+properties. Do not rewrite explanatory reasons or improve any other field
+unless its exact JSON field is named by a validator record. The requirement-list membership and count may change only under
 the exact requirement-list projection explicitly authorized below. Apply only
 the minimum mechanical edits explicitly
 identified by the structured validator records above. {requirement_change_rule} Return the full
@@ -8882,6 +8988,39 @@ def run_bridge(
                             chunk=chunk,
                             authorization_out=pending_retry_authorizations,
                         )
+                        model_semantic_changes = list(semantic_changes)
+                        retry_field_projection: dict[str, Any] | None = None
+                        if change_error is not None:
+                            projected_raw, projection_audit = (
+                                _project_validator_targeted_obligation_fields(
+                                    previous_raw,
+                                    current_raw,
+                                    semantic_parent_error_records,
+                                )
+                            )
+                            if projected_raw is not None:
+                                projected_authorizations: list[dict[str, Any]] = []
+                                projected_error, projected_changes = _retry_semantic_change_error(
+                                    previous_raw,
+                                    projected_raw,
+                                    semantic_parent_error_records,
+                                    contract_version=contract_version,
+                                    chunk=chunk,
+                                    authorization_out=projected_authorizations,
+                                )
+                                if projected_error is None:
+                                    change_error = None
+                                    semantic_changes = projected_changes
+                                    retry_candidate_response = projected_raw
+                                    pending_retry_authorizations = projected_authorizations
+                                    retry_field_projection = projection_audit
+                                else:
+                                    projection_audit.update({
+                                        "status": "blocked_by_retry_authorization",
+                                        "authorization_error": str(projected_error),
+                                    })
+                            else:
+                                retry_field_projection = projection_audit
                         comparison_audit: dict[str, Any] = {
                             "policy": "same_stage_raw_to_raw_plus_candidate_to_candidate_v1",
                             "raw_parent_attempt": semantic_parent_receipt["attempt"],
@@ -8895,13 +9034,18 @@ def run_bridge(
                             "raw_candidate_file_sha256": sha256_file(current_raw_path),
                             "raw_parent_canonical_sha256": _response_sha256(previous_raw),
                             "raw_candidate_canonical_sha256": _response_sha256(current_raw),
-                            "raw_semantic_changed_paths": list(semantic_changes),
+                            "raw_semantic_changed_paths": model_semantic_changes,
+                            "authorized_projected_changed_paths": list(semantic_changes),
                             "authorization_parent_attempt": semantic_parent_receipt["attempt"],
                             "authorization_error_records_sha256": _response_sha256(
                                 semantic_parent_error_records
                             ),
                             "candidate_comparison_status": "not_attempted",
                         }
+                        if retry_field_projection is not None:
+                            comparison_audit["validator_targeted_field_projection"] = copy.deepcopy(
+                                retry_field_projection
+                            )
                         if change_error is not None:
                             comparison_audit["raw_drift_error"] = str(change_error)
                             audit["retry_stage_comparison"] = comparison_audit
@@ -8911,7 +9055,7 @@ def run_bridge(
                                 ).append({
                                     "error": str(change_error),
                                     "comparison_stage": "normalized_raw_to_normalized_raw",
-                                    "changed_paths": list(semantic_changes),
+                                    "changed_paths": model_semantic_changes,
                                     "parent_response_sha256": _response_sha256(previous_raw),
                                     "candidate_response_sha256": _response_sha256(current_raw),
                                     "primary_error_records": copy.deepcopy(
@@ -8923,7 +9067,7 @@ def run_bridge(
                                 })
                                 chunk_lifecycle[index].setdefault(
                                     "semantic_retry_changes", []
-                                ).extend(semantic_changes)
+                                ).extend(model_semantic_changes)
                             # Preserve the drift error's own paths and records;
                             # the original blocker is retained separately.
                             change_error.primary_error_records = copy.deepcopy(  # type: ignore[attr-defined]
@@ -8935,6 +9079,87 @@ def run_bridge(
                             attempt_response_path,
                             label=f"Host Agent projected candidate {index} attempt {attempt}",
                         )
+                        retry_field_projection_receipt: dict[str, Any] | None = None
+                        if (
+                            isinstance(retry_field_projection, dict)
+                            and retry_field_projection.get("status") == "projected"
+                        ):
+                            projected_candidate, projected_candidate_audit = (
+                                prepare_native_response_candidate(retry_candidate_response, chunk)
+                            )
+                            current_candidate = _bind_current_invocation_provenance(
+                                projected_candidate, provenance,
+                            )
+                            retry_field_projection_receipt = {
+                                **copy.deepcopy(retry_field_projection),
+                                "candidate_projection_audit_sha256": _response_sha256(
+                                    projected_candidate_audit
+                                ),
+                                "candidate_response_sha256": _response_sha256(current_candidate),
+                            }
+                            atomic_write_text(
+                                attempt_response_path,
+                                strict_json_dumps(current_candidate, ensure_ascii=False, indent=2) + "\n",
+                            )
+                            refreshed_snapshots: list[dict[str, Any]] = []
+                            for snapshot in audit.get("attempt_stage_snapshots", []):
+                                if not isinstance(snapshot, dict):
+                                    continue
+                                stage = snapshot.get("stage")
+                                if stage == "projected_candidate":
+                                    refreshed_snapshots.append(_attempt_stage_snapshot(
+                                        "projected_candidate", projected_candidate,
+                                        path=None, chunk=chunk,
+                                        projection_audit={
+                                            "candidate_projection_audit_sha256": _response_sha256(
+                                                projected_candidate_audit
+                                            ),
+                                            "validator_targeted_field_projection": copy.deepcopy(
+                                                retry_field_projection_receipt
+                                            ),
+                                        },
+                                    ))
+                                elif stage == "validated_candidate":
+                                    refreshed_snapshots.append(_attempt_stage_snapshot(
+                                        "validated_candidate", current_candidate,
+                                        path=attempt_response_path, chunk=chunk,
+                                        projection_audit={
+                                            "candidate_projection_audit_sha256": _response_sha256(
+                                                projected_candidate_audit
+                                            ),
+                                            "validator_targeted_field_projection": copy.deepcopy(
+                                                retry_field_projection_receipt
+                                            ),
+                                        },
+                                    ))
+                                else:
+                                    refreshed_snapshots.append(snapshot)
+                            audit["attempt_stage_snapshots"] = refreshed_snapshots
+                            audit["projection_audit_sha256"] = _response_sha256(
+                                projected_candidate_audit
+                            )
+                            audit["accepted_response_sha256"] = _response_sha256(current_candidate)
+                            audit["validator_targeted_field_projection"] = copy.deepcopy(
+                                retry_field_projection_receipt
+                            )
+                            for field in (
+                                "existing_requirement_payload_projections",
+                                "complete_abstract_source_projections",
+                                "soft_keyword_count_guidance_projections",
+                                "source_obligation_verification_projections",
+                                "mechanical_repairs",
+                                "mechanical_repair_revalidation",
+                            ):
+                                if field in projected_candidate_audit:
+                                    audit[field] = copy.deepcopy(projected_candidate_audit[field])
+                            with lifecycle_lock:
+                                if chunk_lifecycle[index].get("attempts"):
+                                    chunk_lifecycle[index]["attempts"][-1]["stage_snapshots"] = copy.deepcopy(
+                                        audit["attempt_stage_snapshots"]
+                                    )
+                                    chunk_lifecycle[index]["attempts"][-1][
+                                        "validator_targeted_field_projection"
+                                    ] = copy.deepcopy(retry_field_projection_receipt)
                         previous_candidate: dict[str, Any] | None = None
                         previous_projection_audit: dict[str, Any] | None = None
                         persisted_candidate_receipt = semantic_parent_receipt.get(
@@ -9101,13 +9326,25 @@ def run_bridge(
                                                 "projection_audit_sha256"
                                             ),
                                             "semantic_retry_repairs": candidate_repairs,
+                                            **({
+                                                "validator_targeted_field_projection": copy.deepcopy(
+                                                    retry_field_projection_receipt
+                                                ),
+                                            } if retry_field_projection_receipt is not None else {}),
                                         },
                                     )
                                 )
                         audit["retry_stage_comparison"] = comparison_audit
                         if semantic_changes:
                             audit["semantic_retry_changes"] = semantic_changes
-                            if all(
+                            if (
+                                isinstance(retry_field_projection, dict)
+                                and retry_field_projection.get("status") == "projected"
+                            ):
+                                audit["semantic_retry_change_policy"] = (
+                                    "validator_targeted_obligation_field_projection"
+                                )
+                            elif all(
                                 isinstance(record, dict)
                                 and record.get("code") == "informational_requirement_forbidden"
                                 for record in semantic_parent_error_records
@@ -9191,6 +9428,9 @@ def run_bridge(
                             path=response_path, chunk=chunk,
                             projection_audit={
                                 "projection_audit_sha256": audit.get("projection_audit_sha256"),
+                                "validator_targeted_field_projection": audit.get(
+                                    "validator_targeted_field_projection"
+                                ),
                                 "independent_obligation_review": audit.get(
                                     "independent_obligation_review"
                                 ),

@@ -1210,6 +1210,7 @@ class HostAgentBridgeTests(unittest.TestCase):
             )
         self.assertIn(str(parent_path), retry_with_baseline)
         self.assertIn("Preserve every non-error semantic field", retry_with_baseline)
+        self.assertIn("Do not rewrite explanatory reasons", retry_with_baseline)
         self.assertIn("Do not split, merge, add", retry_with_baseline)
         self.assertIn("FINAL RETRY INVARIANT", retry_with_baseline)
         self.assertIn("do not turn an unresolved or informational review into executable", retry_with_baseline)
@@ -1464,16 +1465,80 @@ class HostAgentBridgeTests(unittest.TestCase):
                 )
                 self.assertIsNotNone(span_error)
 
+    def test_retry_projection_keeps_only_exact_validator_targeted_inventory_fields(self) -> None:
+        parent = {
+            "contract_version": "3.0", "requirements": [], "unsupported_items": [],
+            "clause_reviews": [
+                {"clause_id": "C00037", "classification": "external_compliance",
+                 "normative_basis": "external_duty", "reason": "parent reason", "obligations": None},
+                {"clause_id": "C00040", "classification": "external_compliance",
+                 "normative_basis": "external_duty", "reason": "preserve this reason",
+                 "obligations": [{"id": "affirm", "status": "unverifiable", "reason": "source duty"}]},
+            ],
+        }
+        model_retry = copy.deepcopy(parent)
+        model_retry["clause_reviews"][0]["obligations"] = [
+            {"id": "signature", "status": "unverifiable", "reason": "requires a signature"},
+        ]
+        model_retry["clause_reviews"][1]["reason"] = "unrequested semantic rewrite"
+        records = [{
+            "code": "executable_review_obligations_missing",
+            "json_pointer": "$.clause_reviews[0].obligations",
+            "clause_id": "C00037",
+            "response_sha256": bridge._response_sha256(parent),
+            "raw_error": "review_requires_non_empty_source_inventory",
+        }]
+
+        projected, audit = bridge._project_validator_targeted_obligation_fields(
+            parent, model_retry, records,
+        )
+        self.assertIsNotNone(projected)
+        self.assertEqual(projected["clause_reviews"][0]["obligations"],
+                         model_retry["clause_reviews"][0]["obligations"])
+        self.assertEqual(projected["clause_reviews"][1]["reason"], "preserve this reason")
+        self.assertEqual(audit["status"], "projected")
+        self.assertEqual(audit["applied_paths"], ["$.clause_reviews[0].obligations"])
+        self.assertEqual(audit["discarded_unrequested_paths"], ["$.clause_reviews[1].reason"])
+
+        stale_record = copy.deepcopy(records)
+        stale_record[0]["response_sha256"] = "0" * 64
+        broad_record = copy.deepcopy(records)
+        broad_record[0]["json_pointer"] = "$.clause_reviews"
+        wrong_clause_record = copy.deepcopy(records)
+        wrong_clause_record[0]["clause_id"] = "C00040"
+        reordered = copy.deepcopy(model_retry)
+        reordered["clause_reviews"].reverse()
+        not_a_completion = copy.deepcopy(model_retry)
+        not_a_completion["clause_reviews"][0]["obligations"] = None
+        for candidate, candidate_records in (
+            (model_retry, stale_record), (model_retry, broad_record),
+            (model_retry, wrong_clause_record), (reordered, records),
+            (not_a_completion, records),
+        ):
+            with self.subTest(records=candidate_records, candidate=candidate):
+                rejected, rejected_audit = bridge._project_validator_targeted_obligation_fields(
+                    parent, candidate, candidate_records,
+                )
+                self.assertIsNone(rejected)
+                self.assertEqual(rejected_audit["status"], "blocked")
+
     def test_v3_inventory_completion_is_revalidated_and_independently_reviewed(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             review_dir = Path(td) / "requirements"
             review_dir.mkdir(parents=True)
             source = "论文作者须在声明页亲笔签名并填写日期。"
+            unrelated_source = "本人确认论文相关信息真实有效。"
             clauses = [{
-                "id": "C1", "text": source, "evidence_ids": ["E1"],
+                "id": "C00037", "text": source, "evidence_ids": ["E1"],
+                "source_kind": "paragraph", "location": {}, "part_index": 0,
+            }, {
+                "id": "C00040", "text": unrelated_source, "evidence_ids": ["E2"],
                 "source_kind": "paragraph", "location": {}, "part_index": 0,
             }]
-            evidence = {"evidence": [{"id": "E1", "text": source, "kind": "paragraph"}]}
+            evidence = {"evidence": [
+                {"id": "E1", "text": source, "kind": "paragraph"},
+                {"id": "E2", "text": unrelated_source, "kind": "paragraph"},
+            ]}
             clauses = self._bind_test_source_spans(clauses, evidence)
             request = engine.build_llm_request(
                 [], clauses, evidence, {}, "full", contract_version="3.0",
@@ -1484,16 +1549,27 @@ class HostAgentBridgeTests(unittest.TestCase):
                 clauses=clauses, run_id="run-inventory-bridge-test",
             )
             engine.prepare_host_agent_review_packets(
-                request, clauses, evidence, "a" * 64, review_dir, chunk_size=1,
+                request, clauses, evidence, "a" * 64, review_dir, chunk_size=2,
             )
             first = {
                 "contract_version": "3.0", "requirements": [],
-                "clause_reviews": [{
-                    "clause_id": "C1", "classification": "external_compliance",
-                    "normative_basis": "external_duty",
-                    "reason": "The author must sign and date the declaration.",
-                    "obligations": None,
-                }],
+                "clause_reviews": [
+                    {
+                        "clause_id": "C00037", "classification": "external_compliance",
+                        "normative_basis": "external_duty",
+                        "reason": "The author must sign and date the declaration.",
+                        "obligations": None,
+                    },
+                    {
+                        "clause_id": "C00040", "classification": "external_compliance",
+                        "normative_basis": "external_duty",
+                        "reason": "The author affirms the accuracy of the information.",
+                        "obligations": [{
+                            "id": "affirm_accuracy", "status": "unverifiable",
+                            "reason": "The author must personally affirm the statement.",
+                        }],
+                    },
+                ],
                 "unsupported_items": [], "reported_conflicts": [],
             }
             second = copy.deepcopy(first)
@@ -1501,6 +1577,9 @@ class HostAgentBridgeTests(unittest.TestCase):
                 "id": "actual_signature_and_date", "status": "unverifiable",
                 "reason": "An actual signature and date cannot be generated by the formatter.",
             }]
+            second["clause_reviews"][1]["reason"] = (
+                "Unrelated rewrite that was not named by the validator."
+            )
             envelopes = [
                 {"runId": "inventory-retry-1", "status": "ok", "provider": "openai",
                  "model": "gpt-5.6-luna", "result": {"payloads": [{"text": json.dumps(first)}]}},
@@ -1529,9 +1608,45 @@ class HostAgentBridgeTests(unittest.TestCase):
             self.assertEqual(host_call.call_count, 2)
             self.assertEqual(audit["status"], "merged")
             self.assertEqual(len(independent_candidates), 1)
-            accepted_review = independent_candidates[0]["clause_reviews"][0]
+            accepted_reviews = independent_candidates[0]["clause_reviews"]
+            accepted_review = accepted_reviews[0]
             self.assertEqual(accepted_review["classification"], "external_compliance")
             self.assertEqual(accepted_review["obligations"], second["clause_reviews"][0]["obligations"])
+            self.assertEqual(
+                accepted_reviews[1]["reason"], first["clause_reviews"][1]["reason"],
+                "unrequested model drift must not enter the validated candidate",
+            )
+            retry_comparison = audit["chunk_runs"][0]["retry_stage_comparison"]
+            targeted_projection = retry_comparison["validator_targeted_field_projection"]
+            self.assertEqual(targeted_projection["status"], "projected")
+            self.assertEqual(
+                targeted_projection["applied_paths"],
+                ["$.clause_reviews[0].obligations"],
+            )
+            self.assertIn(
+                "$.clause_reviews[1].reason",
+                targeted_projection["discarded_unrequested_paths"],
+            )
+            self.assertEqual(
+                retry_comparison["raw_semantic_changed_paths"],
+                [
+                    "$.clause_reviews[0].obligations", "$.clause_reviews[1].reason",
+                ],
+            )
+            self.assertEqual(
+                retry_comparison["authorized_projected_changed_paths"],
+                ["$.clause_reviews[0].obligations"],
+            )
+            raw_retry = json.loads(
+                Path(audit["chunk_runs"][0]["raw_response_path"]).read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                raw_retry["clause_reviews"][1]["reason"],
+                second["clause_reviews"][1]["reason"],
+                "the raw provider response must remain available as unmodified evidence",
+            )
+            self.assertEqual(raw_retry["requirements"], second["requirements"])
+            self.assertEqual(independent_candidates[0]["requirements"], [])
             self.assertEqual(
                 audit["chunk_runs"][0]["semantic_retry_authorizations"]["paths"][0]["rule_id"],
                 "v3_source_inventory_completion",
@@ -5716,6 +5831,80 @@ class HostAgentBridgeTests(unittest.TestCase):
                 record.get("code") == "schema_contract_violation"
                 for record in failure["primary_error"]["records"]
             ), repr(failure["primary_error"]["records"]))
+
+    def test_retry_will_not_dispatch_after_a_prior_decoded_raw_artifact_is_modified(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            review_dir, chunk = self._packet(Path(td) / "requirements")
+            invalid = self._executable_response(chunk, invalid_verification=True)
+            valid = self._response(chunk)
+            envelopes = [
+                {"runId": "openclaw-run-raw-modified-1", "status": "ok",
+                 "provider": "openai", "model": "gpt-5.6-luna",
+                 "result": {"payloads": [{"text": json.dumps(invalid)}]}},
+                {"runId": "openclaw-run-raw-modified-2", "status": "ok",
+                 "provider": "openai", "model": "gpt-5.6-luna",
+                 "result": {"payloads": [{"text": json.dumps(valid)}]}},
+            ]
+            response_name = json.loads(
+                (review_dir / "host-agent-review-manifest.json").read_text(encoding="utf-8")
+            )["response_files"][0]
+            response_path = review_dir / response_name
+            first_raw_path = response_path.with_name(
+                f"{response_path.stem}.attempt-01.raw{response_path.suffix}"
+            )
+            fake_results = [
+                subprocess.CompletedProcess(["openclaw"], 0, json.dumps(item), "")
+                for item in envelopes
+            ]
+            real_validate_receipt = bridge._validate_retry_attempt_artifact
+            validation_calls = 0
+
+            def mutate_raw_before_retry_receipt_validation(
+                path: Path, attempt_number: int, attempt_record: dict,
+            ):
+                nonlocal validation_calls
+                validation_calls += 1
+                if validation_calls == 1:
+                    raw = json.loads(first_raw_path.read_text(encoding="utf-8"))
+                    raw["clause_reviews"][0]["reason"] = "tampered after initial failure"
+                    first_raw_path.write_text(json.dumps(raw), encoding="utf-8")
+                return real_validate_receipt(path, attempt_number, attempt_record)
+
+            review_calls = 0
+
+            def count_review_calls(candidate, current_chunk, **kwargs):
+                nonlocal review_calls
+                review_calls += 1
+                return self._fake_independent_review(candidate, current_chunk, **kwargs)
+
+            self._independent_review_patch.stop()
+            with patch.object(
+                bridge, "_validate_retry_attempt_artifact",
+                side_effect=mutate_raw_before_retry_receipt_validation,
+            ), patch.object(
+                bridge, "_run_independent_obligation_coverage_review",
+                side_effect=count_review_calls,
+            ):
+                with patch.object(bridge, "_run_command", side_effect=fake_results) as run:
+                    with self.assertRaisesRegex(
+                        bridge.RetryRawArtifactIntegrityError,
+                        "decoded raw response artifact hash differs from its receipt",
+                    ):
+                        bridge.run_bridge(
+                            review_dir,
+                            response_out=Path(td) / "host-agent-response.json",
+                            agent_id="main", timeout=1, max_attempts=2,
+                            openclaw_bin="openclaw", model="openai/gpt-5.6-luna",
+                        )
+
+            self.assertEqual(run.call_count, 1, "modified parent evidence must stop before retry dispatch")
+            self.assertEqual(review_calls, 0, "tampered parent evidence must not reach independent review")
+            failure = json.loads((review_dir / "host-agent-run.json").read_text(encoding="utf-8"))
+            self.assertEqual(failure["terminal_error"]["type"], "RetryRawArtifactIntegrityError")
+            self.assertTrue(any(
+                record.get("code") == "retry_raw_artifact_receipt_mismatch"
+                for record in failure["chunk_lifecycle"][0]["structured_error_records"]
+            ))
 
     def test_retry_will_not_continue_after_a_prior_validated_candidate_is_tampered(self) -> None:
         with tempfile.TemporaryDirectory() as td:

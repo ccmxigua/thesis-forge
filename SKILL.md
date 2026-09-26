@@ -381,6 +381,14 @@ decoded raw sidecar. If an undecodable attempt intervenes, semantic change
 authorization comes from the most recent earlier decoded attempt that actually
 failed review; the parse failure remains separate retry feedback and cannot
 replace that semantic blocker.
+For the narrowly authorized v3 missing-obligation-inventory correction, the
+bridge constructs the candidate from the receipt-bound parent and copies only
+the exact `clause_reviews[i].obligations` fields named by matching
+response-hash- and object-bound validator records. Other fields changed in the
+model's full retry response remain in the immutable raw artifact and are
+recorded as discarded, not accepted. The projected candidate is then run
+through the ordinary contract validator and a fresh source-first review; this
+projection does not authorize unsupported obligations or weaken release gates.
 If the prior attempt failed before any semantic JSON response could be decoded,
 the bridge may proceed only with a structured no-response record and the exact
 persisted raw-envelope artifact whose current SHA-256 matches the recorded

@@ -16,12 +16,15 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import re
 import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from zipfile import BadZipFile, ZipFile
+
+from docx import Document
 
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MANIFEST = Path("inputs/ten-school-template-manifest.json")
@@ -38,6 +41,11 @@ from manual_review import HUMAN_MARKER_CATEGORIES  # noqa: E402
 from pdf_visual_audit import audit_pdf  # noqa: E402
 from manual_review_display import audit_manual_review_markers  # noqa: E402
 from native_semantic_review import NativeSemanticReviewError, validate_response  # noqa: E402
+from apply_format_spec import (  # noqa: E402
+    build_semantic_content_checks,
+    resolve_profile_constraints,
+)
+from format_spec_validation import load_and_validate  # noqa: E402
 from process_runner import run_process  # noqa: E402
 from semantic_contract import sha256_json, strict_json_dumps, strict_json_loads  # noqa: E402
 from thesis_format_pipeline import runtime_code_fingerprint  # noqa: E402
@@ -53,8 +61,15 @@ def resolve_project_path(value: str | Path, *, label: str) -> Path:
 
 def native_semantic_review_integrity(
     review: Any, *, case_id: Any, run_id: Any, case_root: Path,
+    source_path: Path, format_spec_path: Path, style_map_path: Path,
+    output_path: Path,
 ) -> bool:
-    """Require semantic-review evidence to bind to this case and cover all checks."""
+    """Rebuild current checks and bind the receipt to current run inputs.
+
+    Empty ``not_required`` responses are not self-authenticating: this
+    consumer recomputes the check set from the current generated DOCX,
+    format-spec, and style map before accepting that status.
+    """
     if not isinstance(review, dict):
         return False
     if (
@@ -68,16 +83,65 @@ def native_semantic_review_integrity(
     results = review.get("results")
     if not isinstance(checks, list) or not isinstance(results, list):
         return False
-    if not checks:
-        return review.get("status") == "not_required" and not results
-    if review.get("status") != "completed":
-        return False
     try:
+        current_inputs = (source_path, format_spec_path, style_map_path, output_path)
+        if any(not _path_within(path, case_root) or not path.is_file() for path in current_inputs):
+            return False
+        format_spec = strict_json_loads(format_spec_path.read_text(encoding="utf-8"))
+        style_map = strict_json_loads(style_map_path.read_text(encoding="utf-8"))
+        if not isinstance(format_spec, dict) or not isinstance(style_map, dict):
+            return False
+        mappings = style_map.get("mappings", style_map)
+        if not isinstance(mappings, dict):
+            return False
+        expected_checks = build_semantic_content_checks(
+            Document(output_path), format_spec,
+            resolve_profile_constraints(format_spec), mappings,
+        )
+        if checks != expected_checks:
+            return False
+        source_sha256 = hashlib.sha256(source_path.read_bytes()).hexdigest()
+        format_spec_sha256 = hashlib.sha256(format_spec_path.read_bytes()).hexdigest()
+        document_text_sha256 = hashlib.sha256(strict_json_dumps(
+            [(item["check_id"], item["document_text"]) for item in expected_checks],
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()
+        expected_request = {
+            "schema_version": "1.0",
+            "protocol": "native_semantic_content_review_v1",
+            "case_id": case_id,
+            "run_id": run_id,
+            "source_sha256": source_sha256,
+            "format_spec_sha256": format_spec_sha256,
+            "document_text_sha256": document_text_sha256,
+            "checks": expected_checks,
+        }
+        if (
+            review.get("source_sha256") != source_sha256
+            or review.get("format_spec_sha256") != format_spec_sha256
+            or review.get("document_text_sha256") != document_text_sha256
+            or review.get("request_sha256") != sha256_json(expected_request)
+        ):
+            return False
+        if not expected_checks:
+            return (
+                review.get("status") == "not_required"
+                and not results
+                and review.get("response_sha256") is None
+                and not review.get("request_path")
+                and not review.get("response_path")
+            )
+        if review.get("status") != "completed":
+            return False
         request_path = _artifact_path(review.get("request_path"), root=case_root)
         response_path = _artifact_path(review.get("response_path"), root=case_root)
-        if not _path_within(request_path, case_root) or not _path_within(response_path, case_root):
-            return False
-        if request_path is None or response_path is None:
+        if (
+            request_path is None or response_path is None
+            or not _path_within(request_path, case_root)
+            or not _path_within(response_path, case_root)
+            or not request_path.is_file() or not response_path.is_file()
+        ):
             return False
         request = strict_json_loads(request_path.read_text(encoding="utf-8"))
         response = strict_json_loads(response_path.read_text(encoding="utf-8"))
@@ -91,9 +155,9 @@ def native_semantic_review_integrity(
             or request.get("case_id") != case_id
             or request.get("run_id") != run_id
             or request.get("checks") != checks
-            or request.get("source_sha256") != review.get("source_sha256")
-            or request.get("format_spec_sha256") != review.get("format_spec_sha256")
-            or request.get("document_text_sha256") != review.get("document_text_sha256")
+            or request.get("source_sha256") != source_sha256
+            or request.get("format_spec_sha256") != format_spec_sha256
+            or request.get("document_text_sha256") != document_text_sha256
         ):
             return False
         document_text_sha256 = hashlib.sha256(strict_json_dumps(
@@ -564,8 +628,8 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
             blockers.append(f"review_draft_status:{manifest.get('status')}")
         if manifest.get("execution_compliance_mode") != "supported_subset":
             blockers.append("review_draft_not_supported_subset_execution")
-        if manifest.get("submission_ready") is True:
-            blockers.append("review_draft_claims_submission_ready")
+        if manifest.get("submission_ready") is not False:
+            blockers.append("review_draft_submission_flag_invalid_in_manifest")
         if manifest.get("blocking_reasons"):
             blockers.append("review_draft_pipeline_blocking_reasons")
 
@@ -590,15 +654,42 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
             if not isinstance(manual_ledger, dict):
                 blockers.append("manual_review_ledger_invalid")
             else:
-                if manual_ledger.get("schema_version") != "1.0":
+                if manual_ledger.get("schema_version") != "1.1":
                     blockers.append("manual_review_ledger_schema_mismatch")
+                schema_errors = load_and_validate(
+                    manual_ledger,
+                    ROOT / "schema" / "manual-review-ledger.schema.json",
+                )
+                if schema_errors:
+                    blockers.append("manual_review_ledger_schema_invalid")
                 if manual_ledger.get("policy") != "review_draft_only":
                     blockers.append("manual_review_ledger_policy_mismatch")
                 if manual_ledger.get("submission_ready") is not False:
                     blockers.append("manual_review_ledger_submission_flag_invalid")
                 binding = manual_ledger.get("binding")
-                if isinstance(binding, dict) and expected_run_id and binding.get("run_id") != expected_run_id:
+                expected_binding = manifest.get("manual_review_binding")
+                if not isinstance(binding, dict):
+                    blockers.append("manual_review_ledger_binding_missing")
+                elif expected_run_id and binding.get("run_id") != expected_run_id:
                     blockers.append("manual_review_ledger_run_mismatch")
+                if not isinstance(expected_binding, dict) or binding != expected_binding:
+                    blockers.append("manual_review_ledger_binding_mismatch")
+                if (
+                    expected_case_id and isinstance(binding, dict)
+                    and binding.get("case_id") != expected_case_id
+                ):
+                    blockers.append("manual_review_ledger_case_mismatch")
+                input_sha256 = manifest.get("manual_review_ledger_input_sha256")
+                if not isinstance(input_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", input_sha256):
+                    blockers.append("manual_review_ledger_input_hash_missing")
+                actual_ledger_sha256 = hashlib.sha256(manual_path.read_bytes()).hexdigest()
+                output_sha256 = manifest.get("manual_review_ledger_output_sha256")
+                if (
+                    not isinstance(output_sha256, str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", output_sha256)
+                    or output_sha256 != actual_ledger_sha256
+                ):
+                    blockers.append("manual_review_ledger_output_hash_mismatch")
                 items = manual_ledger.get("items")
                 if not isinstance(items, list):
                     blockers.append("manual_review_ledger_items_invalid")
@@ -750,11 +841,18 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
                 if not technical_validation_ok:
                     blockers.append("review_draft_technical_validation_not_passed")
                 semantic_review = validation.get("native_semantic_content_review")
+                source_path = case_artifact("application_input", manifest.get("application_input"))
+                format_spec_path = case_artifact("format_spec", manifest.get("format_spec"))
+                style_map_path = case_artifact("style_map", manifest.get("style_map"))
                 semantic_review_ok = native_semantic_review_integrity(
                     semantic_review,
                     case_id=manifest.get("case_id"),
                     run_id=fresh.get("run_id"),
                     case_root=case_root,
+                    source_path=source_path,
+                    format_spec_path=format_spec_path,
+                    style_map_path=style_map_path,
+                    output_path=output_path,
                 )
                 checks["native_semantic_content_review"] = {
                     "valid": semantic_review_ok,
@@ -824,8 +922,8 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
                     "failed": receipt_audit.get("failed_count") if isinstance(receipt_audit, dict) else None,
                     "unverified": receipt_audit.get("unverified_count") if isinstance(receipt_audit, dict) else None,
                 }
-                if validation.get("submission_ready") is True:
-                    blockers.append("review_draft_validation_claims_submission_ready")
+                if validation.get("submission_ready") is not False:
+                    blockers.append("review_draft_submission_flag_invalid_in_validation")
             checks["validation_report"] = str(validation_path)
 
         comparison_path = case_artifact(

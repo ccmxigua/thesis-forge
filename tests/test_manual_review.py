@@ -127,12 +127,22 @@ class ManualReviewTests(unittest.TestCase):
 
     def test_ingress_rejects_changed_stale_binding_and_duplicate_marker_ids(self) -> None:
         binding = self._binding(case_id="bsu", run_id="run-1")
-        ledger = {
-            "binding": binding,
-            "items": [
-                {"marker_id": "MR-0001"}, {"marker_id": "MR-0002"},
+        ledger = build_manual_review_ledger(
+            {}, [],
+            release_gates=[
+                {
+                    "source_code": "manual_check_one", "category": "input_prerequisite",
+                    "source_text": "第一个待确认来源。", "reason": "需要人工核验。",
+                    "action": "核验来源。", "placeholder_text": "【待核验一】",
+                },
+                {
+                    "source_code": "manual_check_two", "category": "input_prerequisite",
+                    "source_text": "第二个待确认来源。", "reason": "需要人工核验。",
+                    "action": "核验来源。", "placeholder_text": "【待核验二】",
+                },
             ],
-        }
+            binding=binding,
+        )
         payload = json.dumps(ledger, sort_keys=True).encode("utf-8")
         digest = hashlib.sha256(payload).hexdigest()
         self.assertEqual(validate_manual_review_ledger_ingress(
@@ -232,7 +242,7 @@ class ManualReviewTests(unittest.TestCase):
 
     def test_schema_rejects_unbound_semantic_content_marker(self) -> None:
         ledger = {
-            "schema_version": "1.0", "policy": "review_draft_only",
+            "schema_version": "1.1", "policy": "review_draft_only",
             "binding": self._binding(case_id="c", run_id="r"),
             "submission_ready": False,
             "items": [{
@@ -246,6 +256,55 @@ class ManualReviewTests(unittest.TestCase):
         errors = load_and_validate(ledger, ROOT / "schema" / "manual-review-ledger.schema.json")
         self.assertTrue(any("clause_ids" in error for error in errors), errors)
         self.assertTrue(any("evidence_ids" in error for error in errors), errors)
+
+    def test_schema_limits_scope_dependencies_to_scope_clarification_work(self) -> None:
+        ledger = {
+            "schema_version": "1.1", "policy": "review_draft_only",
+            "binding": self._binding(case_id="c", run_id="r"),
+            "submission_ready": False,
+            "items": [{
+                "marker_id": "MR-0001", "status": "pending_manual_review",
+                "marker_required": True, "category": "semantic_content_review",
+                "clause_ids": ["C1"], "evidence_ids": ["E1"],
+                "source_text": "关键词须源自论文", "reason": "需要人工核验出处。",
+                "action": "核对论文中的关键词来源。", "placeholder_text": "【待人工核验】",
+                "analysis_obligation_id": "AO-0123456789abcdef01234567",
+                "obligation_summary": "核验现有关键词是否源自论文。",
+                "work_type": "existing_content_verification",
+                "source_ref": "Q0123456789abcdef", "source_start": 0, "source_end": 8,
+                "source_text_sha256": "a" * 64,
+                "source_location": {
+                    "evidence_id": "E1", "start_offset": 0, "end_offset": 8,
+                    "source_sha256": "a" * 64,
+                },
+                "execution_authorized": False,
+            }],
+            "summary": {},
+        }
+        schema_path = ROOT / "schema" / "manual-review-ledger.schema.json"
+        self.assertEqual(load_and_validate(ledger, schema_path), [])
+
+        non_scope_with_scope_metadata = copy.deepcopy(ledger)
+        non_scope_with_scope_metadata["items"][0].update({
+            "scope_dependency_codes": ["abstract_target_metric_ambiguity"],
+            "scope_dependency_dimensions": ["target"],
+        })
+        errors = load_and_validate(non_scope_with_scope_metadata, schema_path)
+        self.assertTrue(any("scope_dependency_codes" in error for error in errors), errors)
+        self.assertTrue(any("scope_dependency_dimensions" in error for error in errors), errors)
+
+        scope_without_dependencies = copy.deepcopy(ledger)
+        scope_without_dependencies["items"][0]["work_type"] = "scope_clarification"
+        errors = load_and_validate(scope_without_dependencies, schema_path)
+        self.assertTrue(any("scope_dependency_codes" in error for error in errors), errors)
+        self.assertTrue(any("scope_dependency_dimensions" in error for error in errors), errors)
+
+        valid_scope = copy.deepcopy(scope_without_dependencies)
+        valid_scope["items"][0].update({
+            "scope_dependency_codes": ["abstract_target_metric_ambiguity"],
+            "scope_dependency_dimensions": ["target", "metric"],
+        })
+        self.assertEqual(load_and_validate(valid_scope, schema_path), [])
 
     def test_requirements_producer_to_ledger_to_serialized_marker_keeps_source_binding(self) -> None:
         clauses = [{
@@ -352,7 +411,7 @@ class ManualReviewTests(unittest.TestCase):
     def test_markers_are_visible_and_red(self) -> None:
         document = Document()
         ledger = {
-            "schema_version": "1.0",
+            "schema_version": "1.1",
             "policy": "review_draft_only",
             "binding": {"run_id": "run-1"},
             "submission_ready": False,

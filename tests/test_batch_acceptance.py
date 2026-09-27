@@ -7,6 +7,7 @@ import unittest
 from pathlib import Path
 
 from docx import Document
+from docx.enum.style import WD_STYLE_TYPE
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -21,10 +22,28 @@ class BatchAcceptanceTests(unittest.TestCase):
             case_root = Path(td) / "case"
             artifacts = case_root / "work" / "application" / "native-semantic-review"
             artifacts.mkdir(parents=True)
-            checks = [{
-                "check_id": "abstract_zh.require_third_person",
-                "document_text": "本文提出一种模型。",
-            }]
+            output_path = case_root / "generated.docx"
+            doc = Document()
+            doc.styles.add_style("AbstractBodyCN", WD_STYLE_TYPE.PARAGRAPH)
+            doc.add_paragraph("本文提出一种模型。", style="AbstractBodyCN")
+            doc.save(output_path)
+            source_path = case_root / "source.docx"
+            Document().save(source_path)
+            format_spec_path = case_root / "format-spec.json"
+            format_spec_path.write_text(json.dumps({
+                "content_constraints": {"abstract_zh": {"require_third_person": True}},
+                "requirements": [], "clause_compliance": [],
+            }), encoding="utf-8")
+            style_map_path = case_root / "style-map.json"
+            style_map_path.write_text(json.dumps({
+                "mappings": {"abstract_body_zh": {"style_name": "Normal"}},
+            }), encoding="utf-8")
+            spec = json.loads(format_spec_path.read_text(encoding="utf-8"))
+            checks = batch.build_semantic_content_checks(
+                Document(output_path), spec, batch.resolve_profile_constraints(spec),
+                json.loads(style_map_path.read_text(encoding="utf-8"))["mappings"],
+            )
+            self.assertEqual(len(checks), 1)
             document_text_sha256 = __import__("hashlib").sha256(json.dumps(
                 [(item["check_id"], item["document_text"]) for item in checks],
                 ensure_ascii=False, separators=(",", ":"),
@@ -33,8 +52,8 @@ class BatchAcceptanceTests(unittest.TestCase):
                 "schema_version": "1.0",
                 "protocol": "native_semantic_content_review_v1",
                 "case_id": "case-a", "run_id": "run-a",
-                "source_sha256": "a" * 64,
-                "format_spec_sha256": "b" * 64,
+                "source_sha256": __import__("hashlib").sha256(source_path.read_bytes()).hexdigest(),
+                "format_spec_sha256": __import__("hashlib").sha256(format_spec_path.read_bytes()).hexdigest(),
                 "document_text_sha256": document_text_sha256,
                 "checks": checks,
             }
@@ -61,7 +80,11 @@ class BatchAcceptanceTests(unittest.TestCase):
                 "format_spec_sha256": request["format_spec_sha256"],
                 "document_text_sha256": document_text_sha256,
             }
-            kwargs = {"case_id": "case-a", "run_id": "run-a", "case_root": case_root}
+            kwargs = {
+                "case_id": "case-a", "run_id": "run-a", "case_root": case_root,
+                "source_path": source_path, "format_spec_path": format_spec_path,
+                "style_map_path": style_map_path, "output_path": output_path,
+            }
             self.assertTrue(batch.native_semantic_review_integrity(review, **kwargs))
             self.assertFalse(batch.native_semantic_review_integrity(
                 review, **{**kwargs, "case_id": "case-b"},
@@ -71,6 +94,67 @@ class BatchAcceptanceTests(unittest.TestCase):
             ))
             review["results"] = []
             self.assertFalse(batch.native_semantic_review_integrity(review, **kwargs))
+
+    def test_not_required_semantic_review_rebuilds_empty_current_check_set(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            case_root = Path(td) / "case"
+            case_root.mkdir()
+            source_path = case_root / "source.docx"
+            output_path = case_root / "generated.docx"
+            Document().save(source_path)
+            Document().save(output_path)
+            format_spec_path = case_root / "format-spec.json"
+            format_spec_path.write_text("{}\n", encoding="utf-8")
+            style_map_path = case_root / "style-map.json"
+            style_map_path.write_text("{}\n", encoding="utf-8")
+            empty_checks: list[dict] = []
+
+            def receipt(checks: list[dict]) -> dict:
+                text_sha = __import__("hashlib").sha256(json.dumps(
+                    [(item["check_id"], item["document_text"]) for item in checks],
+                    ensure_ascii=False, separators=(",", ":"),
+                ).encode("utf-8")).hexdigest()
+                request = {
+                    "schema_version": "1.0",
+                    "protocol": "native_semantic_content_review_v1",
+                    "case_id": "case-a", "run_id": "run-a",
+                    "source_sha256": __import__("hashlib").sha256(source_path.read_bytes()).hexdigest(),
+                    "format_spec_sha256": __import__("hashlib").sha256(format_spec_path.read_bytes()).hexdigest(),
+                    "document_text_sha256": text_sha,
+                    "checks": checks,
+                }
+                return {
+                    "schema_version": "1.0",
+                    "protocol": "native_semantic_content_review_v1",
+                    "status": "not_required", "case_id": "case-a", "run_id": "run-a",
+                    "checks": checks, "results": [], "response_sha256": None,
+                    "request_sha256": batch.sha256_json(request),
+                    "source_sha256": request["source_sha256"],
+                    "format_spec_sha256": request["format_spec_sha256"],
+                    "document_text_sha256": text_sha,
+                }
+
+            kwargs = {
+                "case_id": "case-a", "run_id": "run-a", "case_root": case_root,
+                "source_path": source_path, "format_spec_path": format_spec_path,
+                "style_map_path": style_map_path, "output_path": output_path,
+            }
+            self.assertTrue(batch.native_semantic_review_integrity(receipt(empty_checks), **kwargs))
+
+            format_spec_path.write_text(json.dumps({
+                "content_constraints": {"abstract_zh": {"require_third_person": True}},
+                "requirements": [], "clause_compliance": [],
+            }), encoding="utf-8")
+            doc = Document(output_path)
+            doc.styles.add_style("AbstractBodyCN", WD_STYLE_TYPE.PARAGRAPH)
+            doc.add_paragraph("本文提出一种模型。", style="AbstractBodyCN")
+            doc.save(output_path)
+            style_map_path.write_text(json.dumps({
+                "mappings": {"abstract_body_zh": {"style_name": "Normal"}},
+            }), encoding="utf-8")
+            # The forged empty receipt is rebuilt with fresh hashes; it must
+            # still fail because the current spec/document require a check.
+            self.assertFalse(batch.native_semantic_review_integrity(receipt(empty_checks), **kwargs))
 
     def _result(self, root: Path, *, returncode: int = 0, render: bool = True,
                 compliance_mode: str = "full") -> dict:
@@ -252,6 +336,19 @@ class BatchAcceptanceTests(unittest.TestCase):
             output_sha256 = __import__("hashlib").sha256(output.read_bytes()).hexdigest()
             format_spec = requirements / "format-spec.json"
             format_spec.write_text("{}\n", encoding="utf-8")
+            style_map = work / "style-map.json"
+            style_map.write_text("{}\n", encoding="utf-8")
+            application_input = case_root / "application-input.docx"
+            Document().save(application_input)
+            binding = {
+                "case_id": "case", "run_id": "fresh-run",
+                "source_sha256": "a" * 64, "clause_sha256": "b" * 64,
+                "evidence_sha256": "c" * 64, "request_sha256": None,
+                "requirements_sha256": "d" * 64,
+                "input_source_sha256": __import__("hashlib").sha256(application_input.read_bytes()).hexdigest(),
+                "format_spec_sha256": __import__("hashlib").sha256(format_spec.read_bytes()).hexdigest(),
+                "official_template_sha256": None, "official_template_source": "not_supplied",
+            }
             (requirements / "schema-validation.json").write_text(
                 json.dumps({"valid": True, "errors": []}), encoding="utf-8"
             )
@@ -267,14 +364,23 @@ class BatchAcceptanceTests(unittest.TestCase):
             }), encoding="utf-8")
             ledger = work / "manual-review-items.json"
             ledger.write_text(json.dumps({
-                "schema_version": "1.0",
+                "schema_version": "1.1",
                 "policy": "review_draft_only",
-                "binding": {"run_id": "fresh-run"},
+                "binding": binding,
                 "submission_ready": False,
-                "items": [{"marker_id": "MR-0001", "category": "runtime_manual_unverifiable",
-                           "source_codes": ["capability.clause_gap"]}],
+                "items": [{
+                    "marker_id": "MR-0001", "status": "pending_manual_review",
+                    "marker_required": True, "category": "runtime_manual_unverifiable",
+                    "source_code": "capability.clause_gap",
+                    "source_codes": ["capability.clause_gap"],
+                    "source_text": "官方版式模板未提供",
+                    "reason": "需要人工确认官方模板。",
+                    "action": "请提供官方模板。",
+                    "placeholder_text": "【待提供：官方版式模板】",
+                }],
                 "summary": {"total": 1},
             }), encoding="utf-8")
+            input_ledger_sha256 = __import__("hashlib").sha256(ledger.read_bytes()).hexdigest()
             markers = apply_dir / "manual-review-markers.json"
             doc = Document(output)
             append_manual_review_markers(doc, json.loads(ledger.read_text()))
@@ -302,6 +408,19 @@ class BatchAcceptanceTests(unittest.TestCase):
                     "run_id": "fresh-run",
                     "checks": [],
                     "results": [],
+                    "source_sha256": __import__("hashlib").sha256(application_input.read_bytes()).hexdigest(),
+                    "format_spec_sha256": __import__("hashlib").sha256(format_spec.read_bytes()).hexdigest(),
+                    "document_text_sha256": __import__("hashlib").sha256(b"[]").hexdigest(),
+                    "request_sha256": batch.sha256_json({
+                        "schema_version": "1.0",
+                        "protocol": "native_semantic_content_review_v1",
+                        "case_id": "case", "run_id": "fresh-run",
+                        "source_sha256": __import__("hashlib").sha256(application_input.read_bytes()).hexdigest(),
+                        "format_spec_sha256": __import__("hashlib").sha256(format_spec.read_bytes()).hexdigest(),
+                        "document_text_sha256": __import__("hashlib").sha256(b"[]").hexdigest(),
+                        "checks": [],
+                    }),
+                    "response_sha256": None,
                 },
                 "property_receipt_audit": {
                     "valid": True,
@@ -335,6 +454,11 @@ class BatchAcceptanceTests(unittest.TestCase):
                 "submission_ready": False,
                 "case_id": "case",
                 "requirements_extraction": {"run_id": "fresh-run"},
+                "manual_review_binding": binding,
+                "manual_review_ledger_input_sha256": input_ledger_sha256,
+                "manual_review_ledger_output_sha256": __import__("hashlib").sha256(ledger.read_bytes()).hexdigest(),
+                "application_input": str(application_input),
+                "style_map": str(style_map),
                 "code_fingerprint": batch.runtime_code_fingerprint(),
             }), encoding="utf-8")
             result = {

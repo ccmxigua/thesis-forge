@@ -3794,7 +3794,7 @@ b&=2\notag
                 "official_template_source": "not_supplied",
             }
             ledger_value = {
-                "schema_version": "1.0", "policy": "review_draft_only",
+                "schema_version": "1.1", "policy": "review_draft_only",
                 "binding": manual_binding,
                 "submission_ready": False, "items": [], "summary": {},
             }

@@ -16,13 +16,19 @@ from typing import Any, Mapping
 
 
 def _terminate_and_reap(process: subprocess.Popen[str]) -> tuple[str, str]:
+    def text(value: str | bytes | None) -> str:
+        if isinstance(value, bytes):
+            return value.decode("utf-8", errors="replace")
+        return value or ""
+
     if os.name == "posix":
         try:
             os.killpg(process.pid, signal.SIGTERM)
         except ProcessLookupError:
             pass
     else:
-        process.terminate()
+        if process.poll() is None:
+            process.terminate()
     try:
         return process.communicate(timeout=5)
     except subprocess.TimeoutExpired:
@@ -32,8 +38,24 @@ def _terminate_and_reap(process: subprocess.Popen[str]) -> tuple[str, str]:
             except ProcessLookupError:
                 pass
         else:
-            process.kill()
-        return process.communicate()
+            if process.poll() is None:
+                process.kill()
+        try:
+            return process.communicate(timeout=1)
+        except subprocess.TimeoutExpired as exc:
+            # A descendant may have escaped the owned group and kept a pipe
+            # open. Do not turn cancellation into an unbounded wait.
+            stdout = text(exc.output)
+            stderr = text(exc.stderr)
+            for stream in (process.stdout, process.stderr, process.stdin):
+                if stream is not None:
+                    try:
+                        stream.close()
+                    except OSError:
+                        pass
+            marker = "[process-output-drain-incomplete] bounded pipe drain expired after termination"
+            stderr = (stderr + "\n" if stderr else "") + marker
+            return stdout, stderr
 
 
 def run_process(
@@ -115,8 +137,7 @@ def run_process(
     except BaseException:
         # Controller cancellation and unexpected communicate failures must not
         # leave a child or descendant alive with captured pipes open.
-        if process.poll() is None:
-            _terminate_and_reap(process)
+        _terminate_and_reap(process)
         raise
     finally:
         if registered:

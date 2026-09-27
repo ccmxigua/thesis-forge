@@ -294,11 +294,29 @@ or abstract location. Unlocated items go at the front under
 `待定位人工处理（审查草稿，不可提交）`, each with its MR ID, source excerpt, reason,
 and editable handling prompt. Full original text stays in the bound ledger;
 placement never changes unresolved status, requirements, or source paragraphs.
-When the source requires keywords to be traceable to the thesis but the review
-packet lacks the manuscript body, record a separate
-`source_content_verification_pending` human check. Do not classify it as missing
-author-written content or ask the author to rewrite the keywords; the marker
-must ask for a manual source-location check and remains a submission blocker.
+When a source obligation asks that existing thesis content, data, figures,
+citations, or keyword choices be traceable to a source artifact that is not
+included in the independent-review request, record a separate
+`source_content_verification_pending` human check. “Not included in this review
+request” does not mean the user never supplied that artifact. Do not reclassify
+existing content as missing author-written content or ask the author to rewrite
+it: the marker requests a human source-location check and remains a submission
+blocker. The semantic reviewer—not a keyword phrase allowlist—decides whether
+the source expresses this kind of verification obligation; deterministic code
+binds the exact quote, source span, evidence, review request, candidate response,
+and current run.
+
+If the primary response labels an exact existing-content verification
+obligation `informational`, the independent review may request one bounded
+correction. The bridge may change only that clause’s classification to
+`requires_source_verification`, and only when the current source/evidence and
+reviewed candidate are bound, the requirement graph and all other semantic
+fields remain unchanged, and the corrected candidate passes the complete
+contract and independent review again. This correction does not verify the
+thesis content, satisfy the source obligation, or open a release gate. The
+analysis ledger records a canonical `work_type` for each obligation; scope
+dependency dimensions are valid only for `scope_clarification`, and unknown
+work types fail closed rather than disappearing from the manual-review output.
 
 `manual-review-marker-audit.json` reopens the serialized DOCX and checks unique
 coverage, red text, shading, non-hidden text and CJK font binding. Batch

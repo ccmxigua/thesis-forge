@@ -1851,7 +1851,7 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
                 "When a clause exactly supports an existing deterministic requirement, set existing_requirement_id and preserve that requirement's role, properties, and evidence_ids exactly. Copy only the supplied candidate payload; do not expand it with shared role defaults, inherited body styles, or other properties from the surrounding schema.",
                 "Do not invent values. Use unresolved_clause_ids when evidence is insufficient.",
                 "Classify every clause exactly once in clause_reviews and provide a non-empty reason.",
-                "Prefer executable, verify_existing, not_applicable, external_compliance, informational, requires_metadata, requires_source_content, unsupported_backend, or unverifiable.",
+                "Prefer executable, verify_existing, not_applicable, external_compliance, informational, requires_metadata, requires_source_content, requires_source_verification, unsupported_backend, or unverifiable.",
                 "Normative-scope gate: a clause is not a requirement merely because it appears in the input. Use covered/executable/verify_existing only when the cited evidence contains explicit normative language or clearly identifies a fixed template structure/statement. Record the basis in normative_basis when applicable.",
                 "A numbered bibliography entry, body prose, filled author/title/date value, sample data, appendix table value, education-history entry, or publication-list entry is source/sample content unless the cited evidence explicitly says that it must be copied or prescribes its format. Do not turn exact presence in a sample thesis into an executable requirement.",
                 "Legacy covered/ignored/unresolved/unsupported remain accepted for compatibility, but unsupported means an applicable DOCX backend gap and blocks full compliance.",
@@ -1942,7 +1942,7 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
             request["instructions"].extend([
                 "Contract 2.1 uses clause_reviews[].requirement_indexes as a model-authored zero-based reverse relation into this response's requirements array.",
                 "For every covered, executable, or verify_existing clause_review, each requirement_indexes entry must point to a requirement whose clause_ids contains that exact clause_id; check every clause/index pair independently.",
-                "requirement_indexes MUST be [] for informational, requires_metadata, requires_source_content, external_compliance, not_applicable, unsupported_backend, unsupported, unverifiable, unresolved, or ignored reviews.",
+                "requirement_indexes MUST be [] for informational, requires_metadata, requires_source_content, requires_source_verification, external_compliance, not_applicable, unsupported_backend, unsupported, unverifiable, unresolved, or ignored reviews.",
             ])
             review_properties["requirement_indexes"] = {
                 "type": "array", "items": {"type": "integer", "minimum": 0},
@@ -1954,7 +1954,8 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
             # model-facing schema so the model cannot maintain two indexes.
             request["instructions"].extend([
                 "Contract 3.0 has one authoritative relation: requirements[].clause_ids. Do not emit clause_reviews[].requirement_indexes; the bridge derives that reverse view after validation.",
-                "For a covered, executable, or verify_existing clause, emit at least one requirement whose clause_ids contains that exact clause_id. For every non-executable classification, emit no requirement for that clause.",
+                "For a covered, executable, or verify_existing clause, emit at least one requirement whose clause_ids contains that exact clause_id. For every non-executable classification, including requires_source_verification, emit no requirement for that clause.",
+                "Use requires_source_verification only when existing thesis/input content is present but a human must verify its provenance or substantive correspondence. It is not requires_source_content: do not ask the author to create or replace content. The state remains unverified and blocks submission until a bound human verification record exists.",
                 "For covered, executable, and verify_existing, obligations is a required non-empty array, never null or omitted. Independently decompose the source duties; do not copy compiler IDs or insert a generic placeholder merely to satisfy this schema.",
                 "The bridge will reject any clause_reviews[].requirement_indexes property. Never repair a relation by editing clause_ids without semantic evidence.",
             ])

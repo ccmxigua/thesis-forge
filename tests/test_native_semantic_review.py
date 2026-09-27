@@ -106,7 +106,7 @@ class NativeSemanticReviewTests(unittest.TestCase):
         }
         packet = build_obligation_coverage_request(candidate, chunk, run_id="run-1", chunk_index=4)
         check = packet["checks"][0]
-        self.assertEqual(packet["protocol"], "native_source_obligation_coverage_review_v6")
+        self.assertEqual(packet["protocol"], "native_source_obligation_coverage_review_v7")
         self.assertEqual(packet["provenance"], chunk["provenance"])
         self.assertEqual(check["document_text"], source)
         requirement_ref = check["review_context"]["linked_requirements"][0]["requirement_ref"]
@@ -465,21 +465,19 @@ class NativeSemanticReviewTests(unittest.TestCase):
             "source_content_pending",
         )
 
-    def test_keyword_provenance_without_manuscript_body_is_human_verification(self) -> None:
-        source = (
-            "关键词是为了便于做文献索引和检索工作而从论文中选取出来用以表示全文主题内容信息的单词或术语，"
-            "在论文中有明确出处。"
-        )
+    def test_existing_content_verification_is_semantic_and_not_keyword_specific(self) -> None:
+        source = "论文中的实验数据须可追溯至原始实验记录。"
         check = {
             "check_id": "C00068", "document_text": source,
             "review_context": {
-                "classification": "requires_source_content", "requires_requirement": False,
+                "classification": "requires_source_verification", "requires_requirement": False,
                 "linked_requirements": [], "machine_obligation_ids": [],
+                "cited_evidence": {"E1": {"id": "E1", "text": source}},
             },
         }
         pending = {"results": [{
             "check_id": "C00068", "verdict": "source_content_verification_pending",
-            "rationale": "The manuscript body is not present in this audit request, so a human must verify keyword provenance.",
+            "rationale": "The manuscript body is not included in this audit request; a human must verify the existing data provenance.",
             "evidence_quotes": [source], "machine_obligation_ids": [],
             "identified_obligations": [{
                 "source_quote": source,
@@ -487,30 +485,6 @@ class NativeSemanticReviewTests(unittest.TestCase):
                 "requirement_refs": [],
             }],
         }]}
-        self.assertTrue(native_review.is_explicit_keyword_source_provenance_quote(source))
-        for positive_quote in (
-            "关键词要从论文中提取。",
-            "关键词来源于论文正文。",
-            "论文关键词取自论文内容。",
-            "Keywords should come from the paper.",
-            "Keywords must originate from the thesis.",
-            "Keywords must be sourced from the manuscript.",
-        ):
-            with self.subTest(quote=positive_quote):
-                self.assertTrue(
-                    native_review.is_explicit_keyword_source_provenance_quote(positive_quote),
-                )
-        for negative_quote in (
-            "关键词不得从论文中选取。",
-            "关键词不必从论文中选取。",
-            "关键词无需从论文中选取。",
-            "Keywords need not come from the paper.",
-            "Keywords are not required to originate from the thesis.",
-        ):
-            with self.subTest(quote=negative_quote):
-                self.assertFalse(
-                    native_review.is_explicit_keyword_source_provenance_quote(negative_quote),
-                )
         self.assertEqual(
             validate_obligation_coverage_response(pending, [check])[0]["verdict"],
             "source_content_verification_pending",
@@ -519,10 +493,21 @@ class NativeSemanticReviewTests(unittest.TestCase):
             "protocol": native_review.OBLIGATION_COVERAGE_PROTOCOL,
             "checks": [check],
         })
-        self.assertIn("not a request to write, replace, or invent keywords", prompt)
+        self.assertIn("not a request to write or invent content", prompt)
+        self.assertIn("Do not rely on keyword-specific wording or a lexical allowlist", prompt)
+
+        informational = json.loads(json.dumps(pending, ensure_ascii=False))
+        informational_check = {
+            **check,
+            "review_context": {**check["review_context"], "classification": "informational"},
+        }
+        with self.assertRaises(native_review.SourceVerificationClassificationCorrectionRequiredError) as caught:
+            validate_obligation_coverage_response(informational, [informational_check])
+        self.assertEqual(caught.exception.corrections[0]["check_id"], "C00068")
+        self.assertEqual(caught.exception.corrections[0]["source_quotes"], [source])
+        self.assertEqual(caught.exception.corrections[0]["evidence_ids"], ["E1"])
 
         unsafe_checks = [
-            {**check, "review_context": {**check["review_context"], "classification": "informational"}},
             {**check, "review_context": {
                 **check["review_context"], "linked_requirements": [{"requirement_ref": "RR-existing"}],
             }},

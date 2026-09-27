@@ -1675,7 +1675,7 @@ def validate_response(response: Any, chunk: dict[str, Any]) -> list[str]:
             "covered", "executable", "external_compliance", "ignored",
             "informational", "not_applicable", "requires_metadata",
             "requires_source_content", "unresolved", "unsupported",
-            "unsupported_backend", "unverifiable", "verify_existing",
+            "requires_source_verification", "unsupported_backend", "unverifiable", "verify_existing",
         }:
             errors.append(
                 f"$.clause_reviews[{review_index}].normative_basis: "

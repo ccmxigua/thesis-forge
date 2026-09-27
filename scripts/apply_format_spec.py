@@ -4155,14 +4155,33 @@ def main(argv: list[str]) -> int:
         check, spec, effective_content_constraints, mappings,
     )
     semantic_review_complete = not semantic_checks
+    semantic_document_text_sha256 = hashlib.sha256(json.dumps(
+        [(item["check_id"], item["document_text"]) for item in semantic_checks],
+        ensure_ascii=False, separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
+    semantic_request = {
+        "schema_version": "1.0",
+        "protocol": "native_semantic_content_review_v1",
+        "case_id": args.case_id,
+        "run_id": spec.get("run_id"),
+        "source_sha256": hashlib.sha256(args.input.read_bytes()).hexdigest(),
+        "format_spec_sha256": hashlib.sha256(args.format_spec.read_bytes()).hexdigest(),
+        "document_text_sha256": semantic_document_text_sha256,
+        "checks": semantic_checks,
+    }
     semantic_review: dict[str, Any] = {
         "schema_version": "1.0",
         "protocol": "native_semantic_content_review_v1",
         "status": "not_required" if not semantic_checks else "not_configured",
         "case_id": args.case_id,
         "run_id": spec.get("run_id"),
+        "source_sha256": semantic_request["source_sha256"],
+        "format_spec_sha256": semantic_request["format_spec_sha256"],
+        "document_text_sha256": semantic_document_text_sha256,
+        "request_sha256": sha256_json(semantic_request),
         "checks": semantic_checks,
         "results": [],
+        "response_sha256": None,
     }
     semantic_uncertainty_items: list[dict[str, Any]] = []
     if semantic_checks:
@@ -4176,20 +4195,7 @@ def main(argv: list[str]) -> int:
                 "reason": "存在需要自然语言判断的摘要约束，但当前运行没有绑定原生宿主和模型。",
             })
         else:
-            document_text_sha256 = hashlib.sha256(json.dumps(
-                [(item["check_id"], item["document_text"]) for item in semantic_checks],
-                ensure_ascii=False, separators=(",", ":"),
-            ).encode("utf-8")).hexdigest()
-            request = {
-                "schema_version": "1.0",
-                "protocol": "native_semantic_content_review_v1",
-                "case_id": args.case_id,
-                "run_id": spec.get("run_id"),
-                "source_sha256": hashlib.sha256(args.input.read_bytes()).hexdigest(),
-                "format_spec_sha256": hashlib.sha256(args.format_spec.read_bytes()).hexdigest(),
-                "document_text_sha256": document_text_sha256,
-                "checks": semantic_checks,
-            }
+            request = semantic_request
             if not request["run_id"]:
                 findings.append({
                     "role": "content_constraints",

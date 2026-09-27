@@ -16,7 +16,8 @@ from pathlib import Path
 from typing import Any
 
 from question_contract import bind_question_records, normalize_question_records
-from semantic_contract import strict_json_dumps
+from semantic_contract import strict_json_dumps, strict_json_loads
+from format_spec_validation import validate_instance
 
 from artifact_io import atomic_write_text
 
@@ -39,6 +40,11 @@ HUMAN_MARKER_CATEGORIES = frozenset({
     "runtime_manual_unverifiable",
     "confirmed_semantic_issue",
     "semantic_content_review",
+})
+KNOWN_TECHNICAL_CATEGORIES = frozenset({
+    "backend_capability_gap", "input_prerequisite_satisfied", "supported",
+    "external_not_applicable", "render_validation", "schema_validation",
+    "property_validation", "semantic_validation", "execution_failure",
 })
 
 # This is a document-facing policy, not a compliance result.  It is repeated
@@ -101,6 +107,7 @@ def _manual_item_identity(item: dict[str, Any]) -> tuple[Any, ...]:
     anchored = bool(clause_ids or requirement_ids or location.strip("[]"))
     return (
         str(item.get("category") or ""),
+        str(item.get("work_type") or ""),
         str(item.get("source_text") or ""),
         clause_ids,
         requirement_ids,
@@ -233,6 +240,10 @@ def build_manual_review_ledger(
         # for an interpreted requirement.
         if not finding.get("blocking") and category != "confirmed_semantic_issue":
             continue
+        if category not in HUMAN_MARKER_CATEGORIES | KNOWN_TECHNICAL_CATEGORIES:
+            raise ValueError(
+                f"unknown capability finding category cannot be silently discarded: {category!r}"
+            )
         if category not in HUMAN_MARKER_CATEGORIES:
             continue
         clause_ids = _values(evidence, "clause_id") or _ids_from_text(finding.get("message"), CLAUSE_RE)
@@ -274,6 +285,10 @@ def build_manual_review_ledger(
             continue
         code = str(gate.get("source_code") or "release_gate")
         category = str(gate.get("category") or "")
+        if category not in HUMAN_MARKER_CATEGORIES | KNOWN_TECHNICAL_CATEGORIES:
+            raise ValueError(
+                f"unknown release-gate category cannot be silently discarded: {category!r}"
+            )
         if category not in HUMAN_MARKER_CATEGORIES:
             continue
         candidates.append({
@@ -297,7 +312,7 @@ def build_manual_review_ledger(
             **{
                 key: copy.deepcopy(gate[key])
                 for key in (
-                    "analysis_obligation_id", "obligation_summary",
+                    "analysis_obligation_id", "obligation_summary", "work_type",
                     "scope_dependency_codes", "scope_dependency_dimensions",
                     "source_ref", "source_start", "source_end",
                     "source_text_sha256", "source_location", "execution_authorized",
@@ -338,7 +353,7 @@ def build_manual_review_ledger(
         category = str(item["category"])
         categories[category] = categories.get(category, 0) + 1
     return {
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "policy": "review_draft_only",
         "visual_policy": dict(MANUAL_REVIEW_VISUAL_POLICY),
         "binding": binding or {},
@@ -372,7 +387,10 @@ def add_manual_review_items(
         if not isinstance(candidate, dict):
             continue
         item = dict(candidate)
-        if str(item.get("category") or "") not in HUMAN_MARKER_CATEGORIES:
+        category = str(item.get("category") or "")
+        if category not in HUMAN_MARKER_CATEGORIES | KNOWN_TECHNICAL_CATEGORIES:
+            raise ValueError(f"unknown manual-review category cannot be silently discarded: {category!r}")
+        if category not in HUMAN_MARKER_CATEGORIES:
             continue
         _require_semantic_marker_source(item)
         identity = _manual_item_identity(item)
@@ -424,11 +442,21 @@ def filter_manual_marker_ledger(ledger: dict[str, Any]) -> dict[str, Any]:
     """
     if not isinstance(ledger, dict):
         raise ValueError("manual review ledger must be an object")
-    items = _deduplicate_manual_items([
-        dict(item) for item in ledger.get("items", [])
-        if isinstance(item, dict)
-        and str(item.get("category") or "") in HUMAN_MARKER_CATEGORIES
-    ])
+    raw_items = ledger.get("items")
+    if not isinstance(raw_items, list):
+        raise ValueError("manual-review ledger items must be an array")
+    retained: list[dict[str, Any]] = []
+    for original in raw_items:
+        if not isinstance(original, dict):
+            raise ValueError("manual-review ledger contains a non-object item")
+        category = str(original.get("category") or "")
+        if category in HUMAN_MARKER_CATEGORIES:
+            retained.append(dict(original))
+        elif category in KNOWN_TECHNICAL_CATEGORIES:
+            continue
+        elif original.get("marker_required") is True or original.get("status") == "pending_manual_review":
+            raise ValueError(f"unknown required manual-review category cannot be discarded: {category!r}")
+    items = _deduplicate_manual_items(retained)
     items.sort(key=lambda item: (
         tuple(item.get("clause_ids") or []),
         tuple(item.get("requirement_ids") or []),
@@ -466,6 +494,14 @@ def validate_manual_review_ledger_ingress(
     errors: list[str] = []
     if not isinstance(ledger, dict):
         return ["manual_review_ledger_must_be_object"]
+    schema_path = Path(__file__).resolve().parents[1] / "schema" / "manual-review-ledger.schema.json"
+    try:
+        schema = strict_json_loads(schema_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return [f"manual_review_ledger_schema_unavailable:{type(exc).__name__}"]
+    schema_errors = validate_instance(ledger, schema)
+    if schema_errors:
+        errors.append("manual_review_ledger_schema_invalid:" + ";".join(schema_errors[:8]))
     if not isinstance(expected_binding, dict) or not expected_binding:
         errors.append("current_pipeline_manual_review_binding_missing")
     elif ledger.get("binding") != expected_binding:

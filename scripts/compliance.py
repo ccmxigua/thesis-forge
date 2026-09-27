@@ -48,6 +48,9 @@ DIRECT_CLASSIFICATION_MAP = {
     "informational": INFORMATIONAL_STATE,
     "requires_metadata": "requires_metadata",
     "requires_source_content": "requires_source_content",
+    # The thesis/input exists; the remaining action is verification, not new
+    # authoring. It remains blocking until the user records a review result.
+    "requires_source_verification": "input_provided_unverified",
     "unsupported_backend": "unsupported_backend",
     "unverifiable": "unverifiable",
 }

@@ -18,6 +18,10 @@ from host_review_schema import native_output_schema, require_native_schema
 from host_runtime import automatic_adapter_id, require_host_runtime
 from process_runner import run_process
 from semantic_contract import sha256_json, strict_json_dumps
+from obligation_workflow import (
+    OBLIGATION_COVERAGE_PROTOCOL,
+    SCOPE_DEPENDENCY_DIMENSIONS,
+)
 from semantic_source_references import (
     REFERENCE_PROTOCOL,
     build_source_reference_packet,
@@ -73,11 +77,30 @@ class ExternalComplianceCorrectionRequiredError(NativeSemanticReviewError):
             item["check_id"] for item in self.corrections
             if isinstance(item, dict) and isinstance(item.get("check_id"), str)
         )
-        self.check_ids = tuple(check_ids)
         super().__init__(
             "external-compliance review found source-bound unrepresented action(s) for "
             + ", ".join(check_ids)
         )
+        self.check_ids = tuple(check_ids)
+
+
+class SourceVerificationClassificationCorrectionRequiredError(NativeSemanticReviewError):
+    """An exact source-bound human-verification finding contradicts primary classification."""
+
+    code = "source_verification_classification_conflict"
+
+    def __init__(self, corrections: list[dict[str, Any]]) -> None:
+        self.corrections = tuple(copy.deepcopy(corrections))
+        check_ids = sorted(
+            item["check_id"] for item in self.corrections
+            if isinstance(item, dict) and isinstance(item.get("check_id"), str)
+        )
+        super().__init__(
+            "independent review found existing-content verification work on clause(s) "
+            + ", ".join(check_ids)
+            + " classified as non-normative"
+        )
+        self.check_ids = tuple(check_ids)
 
 
 def is_explicit_authoring_content_quote(quote: Any) -> bool:
@@ -131,50 +154,6 @@ def is_explicit_authoring_content_quote(quote: Any) -> bool:
         "genuine content", "actual research", "original content",
     ))
     return english_author and english_action and (english_sample or english_genuine_content)
-
-
-def is_explicit_keyword_source_provenance_quote(quote: Any) -> bool:
-    """Recognize source text requiring keywords to come from the thesis.
-
-    This only authorizes a human verification marker when the current review
-    packet lacks the manuscript body. It does not prove compliance.
-    """
-    if not isinstance(quote, str) or not quote.strip():
-        return False
-    compact = re.sub(r"\s+", "", quote).casefold()
-    if any(token in compact for token in (
-        "不得", "不能", "不应", "不可以", "无须", "无需", "禁止",
-        "不必", "非必须", "不需要", "不要求", "没有必要",
-    )) or re.search(
-        r"\b(?:not|never|must\s+not|cannot|should\s+not|need\s+not|"
-        r"(?:do|does)\s+not\s+need\s+to|not\s+required\s+to|"
-        r"not\s+necessary\s+to)\b",
-        quote, re.I,
-    ):
-        return False
-    if not re.search(r"关键词|关键字|\bkey\s*words?\b", quote, re.I):
-        return False
-    if any(token in compact for token in (
-        "从论文中选取", "从论文选取", "选自论文", "源自论文", "来自论文",
-        "来源于论文", "取自论文", "提取自论文", "从论文中提取", "从论文提取",
-        "论文中提取", "关键词源于论文", "关键词来自论文", "关键词来源于论文",
-        "论文中有明确出处", "论文中有明确来源", "论文正文中有明确出处",
-        "正文中有明确出处", "从正文中选取", "从正文选取",
-    )):
-        return True
-    return bool(
-        re.search(
-            r"\b(?:selected|drawn|derived|taken|extracted|originat(?:e|es|ed)|"
-            r"come|comes|sourced?)\s+from\s+"
-            r"(?:the\s+)?(?:thesis|paper|manuscript|text|body)\b",
-            quote, re.I,
-        )
-        or re.search(
-            r"\b(?:clear|explicit)\s+(?:source|provenance)\s+(?:in|within)\s+"
-            r"(?:the\s+)?(?:thesis|paper|manuscript|text|body)\b",
-            quote, re.I,
-        )
-    )
 
 
 def _exact_clause_source_text(
@@ -237,11 +216,6 @@ RESPONSE_SCHEMA: dict[str, Any] = {
     "additionalProperties": False,
 }
 
-OBLIGATION_COVERAGE_PROTOCOL = "native_source_obligation_coverage_review_v6"
-SCOPE_DEPENDENCY_DIMENSIONS = {
-    "abstract_target_metric_ambiguity": frozenset({"target", "metric"}),
-    "quantitative_scope_unit_ambiguity": frozenset({"target", "metric"}),
-}
 _SCOPE_DEPENDENCY_CODES = tuple(sorted(SCOPE_DEPENDENCY_DIMENSIONS))
 _SCOPE_DEPENDENCY_DIMENSION_VALUES = tuple(sorted(set().union(*SCOPE_DEPENDENCY_DIMENSIONS.values())))
 _OBLIGATION_BASE_PROPERTIES: dict[str, Any] = {
@@ -441,6 +415,11 @@ def build_obligation_coverage_request(
         "clause_sha256": provenance.get("clause_sha256"),
         "evidence_sha256": provenance.get("evidence_sha256"),
         "request_sha256": provenance.get("request_sha256"),
+        "content_context": {
+            "artifact": "thesis_manuscript",
+            "availability": "not_included_in_obligation_review_request",
+            "meaning": "This request omits manuscript body text; it does not assert whether the user supplied a manuscript to the pipeline.",
+        },
         "checks": checks,
     }
 
@@ -462,6 +441,7 @@ def validate_obligation_coverage_response(
     by_id: dict[str, dict[str, Any]] = {}
     missing_source_inventory: list[str] = []
     external_compliance_corrections: list[dict[str, Any]] = []
+    source_verification_classification_corrections: list[dict[str, Any]] = []
     for result in results:
         check_id = result.get("check_id") if isinstance(result, dict) else None
         if not isinstance(check_id, str) or check_id not in expected:
@@ -541,10 +521,6 @@ def validate_obligation_coverage_response(
                     )
                 authoring_pending += 1
             elif disposition == "source_content_verification_pending":
-                if not is_explicit_keyword_source_provenance_quote(quote):
-                    raise NativeSemanticReviewError(
-                        f"source-content verification pending lacks an explicit keyword provenance rule for {check_id}"
-                    )
                 source_verification_pending += 1
             elif disposition == "backend_unsupported":
                 backend_unsupported += 1
@@ -582,7 +558,7 @@ def validate_obligation_coverage_response(
         verdict = result.get("verdict")
         if source_verification_pending and verdict != "source_content_verification_pending":
             raise NativeSemanticReviewError(
-                f"keyword source verification must remain a human-verification disposition for {check_id}"
+                f"existing-content verification must remain a human-verification disposition for {check_id}"
             )
         is_external_compliance = context.get("classification") == "external_compliance"
         primary_obligations = (
@@ -667,18 +643,53 @@ def validate_obligation_coverage_response(
             continue
         if verdict == "source_content_verification_pending":
             obligations = result.get("identified_obligations", [])
+            only_verification_or_represented = (
+                not unrepresented and not ambiguous and not external_pending
+                and not authoring_pending and not scope_unresolved and not backend_unsupported
+                and source_verification_pending + represented == len(obligations)
+            )
+            no_requirement_refs_for_verification = all(
+                not item.get("requirement_refs")
+                for item in obligations
+                if item.get("disposition") == "source_content_verification_pending"
+            )
+            pending_only = (
+                bool(obligations)
+                and source_verification_pending == len(obligations)
+                and not represented
+                and all(not item.get("requirement_refs") for item in obligations)
+            )
+            primary_is_verification = (
+                context.get("classification") == "requires_source_verification"
+                and context.get("requires_requirement") is False
+                and not linked
+                and pending_only
+            )
+            mixed_with_executable_work = (
+                classification in {"covered", "executable", "verify_existing"}
+                and bool(linked)
+                and represented > 0
+                and only_verification_or_represented
+                and no_requirement_refs_for_verification
+            )
             if (
-                context.get("classification") != "requires_source_content"
-                or context.get("requires_requirement") is not False
-                or linked
-                or not obligations
-                or source_verification_pending != len(obligations)
-                or represented or unrepresented or ambiguous or external_pending
-                or authoring_pending or scope_unresolved or backend_unsupported
-                or any(item.get("requirement_refs") for item in obligations)
+                classification == "informational"
+                and context.get("requires_requirement") is False
+                and not linked
+                and pending_only
             ):
+                source_verification_classification_corrections.append({
+                    "check_id": check_id,
+                    "source_quotes": [item.get("source_quote") for item in obligations],
+                    "evidence_ids": sorted(
+                        str(value) for value in (context.get("cited_evidence") or {})
+                    ),
+                })
+                by_id[check_id] = result
+                continue
+            if not (primary_is_verification or mixed_with_executable_work):
                 raise NativeSemanticReviewError(
-                    f"source-content verification must be a source-bound, unlinked human check for {check_id}"
+                    f"existing-content verification must be an unlinked human work item, or coexist with separately represented executable work, for {check_id}"
                 )
             by_id[check_id] = result
             continue
@@ -756,6 +767,10 @@ def validate_obligation_coverage_response(
         raise MissingSourceObligationInventoryError(missing_source_inventory)
     if external_compliance_corrections:
         raise ExternalComplianceCorrectionRequiredError(external_compliance_corrections)
+    if source_verification_classification_corrections:
+        raise SourceVerificationClassificationCorrectionRequiredError(
+            source_verification_classification_corrections,
+        )
     return [by_id[key] for key in sorted(by_id)]
 
 
@@ -1017,13 +1032,18 @@ def _prompt(request: dict[str, Any]) -> str:
             "source passage as authoring_content_pending and use no requirement_refs. This means the source input "
             "is still pending, not that the content was written or a requirement satisfied. If the primary response "
             "instead classifies that explicit authoring instruction as informational, use incomplete so the bounded "
-            "primary retry can correct only that classification. Never draft the missing thesis content. When the "
-            "source requires keywords or key terms to be selected from, derived from, or explicitly traceable to the "
-            "thesis/paper, but this request does not include the manuscript body needed to verify that provenance, "
+            "primary retry can correct only that classification. Never draft the missing thesis content. When "
+            "an exact source obligation requires existing thesis/paper content, data, figures, or citations to be "
+            "traceable to an artifact not included in this review request, "
             "use verdict source_content_verification_pending and disposition source_content_verification_pending "
-            "for each exact source passage, with no requirement_refs. This is a human check of existing manuscript "
-            "content, not a request to write, replace, or invent keywords; it is never compliance or release approval. "
-            "Use this only for explicit keyword-to-manuscript provenance language; code validates the source quote. "
+            "for each exact source passage, with no requirement_refs. This is a human check of existing content, "
+            "not a request to write or invent content, and never compliance or release approval. The semantic decision "
+            "is yours; code only validates that the selected quote is an exact current-source span. Do not rely on "
+            "keyword-specific wording or a lexical allowlist. If the same clause has separately represented executable "
+            "obligations, list those as represented with exact valid refs and keep verification obligations unlinked. "
+            "If the primary classification is informational, report the verification finding anyway; the bridge may "
+            "authorize only a source-bound classification correction. The request metadata distinguishes content not "
+            "included in this review from content the user did not provide. "
             "For a clause classified unsupported_backend, use verdict backend_unsupported only when the source is "
             "readable, every identified obligation is explicitly enumerated with disposition backend_unsupported, "
             "and there is no linked requirement or requirement reference because the current backend cannot execute "
@@ -1104,8 +1124,11 @@ def run_native_semantic_review(
             "status": "not_required", "adapter_id": adapter_id,
             "host_runtime": context.runtime, "model": model,
             "case_id": request.get("case_id"), "run_id": request.get("run_id"),
+            "source_sha256": request.get("source_sha256"),
+            "format_spec_sha256": request.get("format_spec_sha256"),
+            "document_text_sha256": request.get("document_text_sha256"),
             "request_sha256": sha256_json(request), "checks": [],
-            "results": [], "summary": {},
+            "results": [], "response_sha256": None, "summary": {},
         }
     try:
         source_packet = build_source_reference_packet(request)

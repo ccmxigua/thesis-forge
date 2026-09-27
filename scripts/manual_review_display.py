@@ -11,6 +11,8 @@ import re
 from collections import Counter
 from pathlib import Path
 from typing import Any
+from xml.etree import ElementTree
+from zipfile import BadZipFile, ZipFile
 
 from docx import Document
 from docx.enum.style import WD_STYLE_TYPE
@@ -21,14 +23,19 @@ from docx.shared import Pt, RGBColor
 from docx.text.paragraph import Paragraph
 
 from docx_semantics import all_body_paragraphs, is_abstract_body_en, is_abstract_body_zh
-from manual_review import HUMAN_MARKER_CATEGORIES
+from manual_review import (
+    HUMAN_MARKER_CATEGORIES,
+    validate_manual_obligation_ids,
+)
 
 MANUAL_REVIEW_STYLE = "Thesis Manual Review"
 MANUAL_REVIEW_PLACEHOLDER_STYLE = "Thesis Manual Review Placeholder"
 MANUAL_REVIEW_RED = RGBColor(0xC0, 0x00, 0x00)
 MANUAL_REVIEW_CJK_FONT = "Noto Sans SC"
 MARKER_START = re.compile(r"^【(MR-\d{4})｜人工待审】")
+OBLIGATION_ID = re.compile(r"MO-[0-9a-f]{64}")
 DISPLAY_STYLES = {MANUAL_REVIEW_STYLE, MANUAL_REVIEW_PLACEHOLDER_STYLE}
+_W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 
 
 def _marker_font(owner: Any) -> None:
@@ -141,6 +148,7 @@ def _text(item: dict[str, Any]) -> str:
     evidence = ", ".join(str(v) for v in item.get("evidence_ids", []))
     return (
         f"【{item['marker_id']}｜人工待审】{placeholder}"
+        + f"\n义务编号：{item['manual_obligation_id']}"
         + (f"\n条款：{clauses}" if clauses else "")
         + (f"\n问题编号：{questions}" if questions else "")
         + (f"\n证据编号：{evidence}" if evidence else "")
@@ -177,7 +185,40 @@ def _items(ledger: dict[str, Any] | None) -> list[dict[str, Any]]:
             "manual review display accepts only unresolved human decisions/inputs; "
             "technical diagnostics must stay in reports: " + ", ".join(invalid_categories)
         )
+    obligation_errors = validate_manual_obligation_ids(ledger)
+    if obligation_errors:
+        raise ValueError(
+            "manual review markers require unique, current-ledger-bound obligation IDs: "
+            + ", ".join(obligation_errors[:8])
+        )
     return items
+
+
+def _serialized_obligation_counts(path: Path) -> tuple[Counter[str], list[str]]:
+    """Count MO IDs in serialized visible Word paragraphs across story parts."""
+    counts: Counter[str] = Counter()
+    errors: list[str] = []
+    story_part = re.compile(
+        r"^word/(?:document|header\d*|footer\d*|footnotes|endnotes|comments)\.xml$"
+    )
+    try:
+        with ZipFile(path) as archive:
+            for name in archive.namelist():
+                if not story_part.fullmatch(name):
+                    continue
+                try:
+                    root = ElementTree.fromstring(archive.read(name))
+                except (ElementTree.ParseError, KeyError) as exc:
+                    errors.append(f"{name}:{type(exc).__name__}")
+                    continue
+                for paragraph in root.iter(f"{{{_W_NS}}}p"):
+                    text = "".join(
+                        node.text or "" for node in paragraph.iter(f"{{{_W_NS}}}t")
+                    )
+                    counts.update(OBLIGATION_ID.findall(text))
+    except (OSError, BadZipFile) as exc:
+        errors.append(f"docx_package:{type(exc).__name__}")
+    return counts, errors
 
 
 def insert_inline_manual_review_markers(
@@ -276,9 +317,13 @@ def append_manual_review_markers(
     binding = binding if isinstance(binding, dict) else {}
     binding_sha256 = _canonical_sha256(binding)
     return [{
-        "marker_id": item["marker_id"], "category": item.get("category"),
-        "clause_ids": item.get("clause_ids", []), "requirement_ids": item.get("requirement_ids", []),
-        "question_ids": item.get("question_ids", []), "evidence_ids": item.get("evidence_ids", []),
+        "marker_id": item["marker_id"],
+        "manual_obligation_id": item["manual_obligation_id"],
+        "category": item.get("category"),
+        "clause_ids": sorted(str(value) for value in item.get("clause_ids", []) if value),
+        "requirement_ids": sorted(str(value) for value in item.get("requirement_ids", []) if value),
+        "question_ids": sorted(str(value) for value in item.get("question_ids", []) if value),
+        "evidence_ids": sorted(str(value) for value in item.get("evidence_ids", []) if value),
         "ledger_binding_sha256": binding_sha256,
         "ledger_item_sha256": _canonical_sha256(item),
         "placeholder_text": item.get("placeholder_text"),
@@ -319,11 +364,16 @@ def audit_manual_review_markers(path: Path, ledger: dict[str, Any]) -> dict[str,
     """
     expected = {item["marker_id"] for item in _items(ledger)}
     expected_items = {item["marker_id"]: item for item in _items(ledger)}
+    expected_obligation_ids = {
+        str(item["manual_obligation_id"]) for item in expected_items.values()
+    }
     counts: Counter[str] = Counter()
     style_errors = []
     source_binding_errors = []
     payload_errors = []
+    obligation_binding_errors = []
     marker_text: dict[str, str] = {}
+    marker_locations: dict[str, str] = {}
     doc = Document(path)
     for paragraph in all_body_paragraphs(doc):
         match = MARKER_START.match(paragraph.text)
@@ -332,6 +382,11 @@ def audit_manual_review_markers(path: Path, ledger: dict[str, Any]) -> dict[str,
         marker_id = match.group(1)
         counts[marker_id] += 1
         marker_text[marker_id] = paragraph.text
+        marker_locations[marker_id] = (
+            "inline_after_role"
+            if paragraph.style.name == MANUAL_REVIEW_PLACEHOLDER_STYLE
+            else "document_front_unlocated"
+        )
         for run in paragraph.runs:
             if not run.text:
                 continue
@@ -353,6 +408,9 @@ def audit_manual_review_markers(path: Path, ledger: dict[str, Any]) -> dict[str,
         paragraph_text = marker_text.get(marker_id, "")
         if paragraph_text != _text(item):
             payload_errors.append(marker_id)
+        obligation_ids_in_marker = OBLIGATION_ID.findall(paragraph_text)
+        if obligation_ids_in_marker != [item["manual_obligation_id"]]:
+            obligation_binding_errors.append(marker_id)
         question_ids = sorted(str(value) for value in item.get("question_ids", []) if value)
         evidence_ids = sorted(str(value) for value in item.get("evidence_ids", []) if value)
         expected_refs = (
@@ -363,23 +421,41 @@ def audit_manual_review_markers(path: Path, ledger: dict[str, Any]) -> dict[str,
             source_binding_errors.append(marker_id)
         marker_bindings.append({
             "marker_id": marker_id,
+            "manual_obligation_id": item["manual_obligation_id"],
+            "category": item.get("category"),
             "question_ids": question_ids,
             "evidence_ids": evidence_ids,
             "clause_ids": sorted(str(value) for value in item.get("clause_ids", []) if value),
             "requirement_ids": sorted(str(value) for value in item.get("requirement_ids", []) if value),
             "ledger_binding_sha256": ledger_binding_sha256,
             "ledger_item_sha256": _canonical_sha256(item),
+            "placeholder_text": item.get("placeholder_text"),
+            "paragraph_text": paragraph_text,
+            "location": marker_locations.get(marker_id),
         })
+    obligation_counts, obligation_scan_errors = _serialized_obligation_counts(path)
+    missing_obligation_ids = sorted(expected_obligation_ids - obligation_counts.keys())
+    unexpected_obligation_ids = sorted(obligation_counts.keys() - expected_obligation_ids)
+    duplicate_obligation_ids = sorted(
+        obligation_id for obligation_id in expected_obligation_ids
+        if obligation_counts[obligation_id] != 1
+    )
     return {
         "valid": not (
             missing or extra or duplicate or style_errors or source_binding_errors
-            or payload_errors
+            or payload_errors or obligation_binding_errors or missing_obligation_ids
+            or unexpected_obligation_ids or duplicate_obligation_ids or obligation_scan_errors
         ),
         "expected_count": len(expected), "visible_marker_count": sum(counts.values()),
         "missing_ids": missing, "unexpected_ids": extra, "duplicate_ids": duplicate,
         "style_errors": sorted(set(style_errors)),
         "source_binding_errors": sorted(set(source_binding_errors)),
         "payload_errors": sorted(set(payload_errors)),
+        "obligation_binding_errors": sorted(set(obligation_binding_errors)),
+        "missing_obligation_ids": missing_obligation_ids,
+        "unexpected_obligation_ids": unexpected_obligation_ids,
+        "duplicate_obligation_ids": duplicate_obligation_ids,
+        "obligation_scan_errors": obligation_scan_errors,
         "marker_bindings": marker_bindings,
         "docx_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
         "visual_verification": "required", "submission_ready": False,

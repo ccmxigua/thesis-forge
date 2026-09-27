@@ -2,9 +2,10 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://thesis-forge.local/schema/manual-review-ledger.schema.json",
   "type": "object",
-  "required": ["schema_version", "policy", "binding", "submission_ready", "items", "summary"],
+  "required": ["schema_version", "obligation_identity_protocol", "policy", "binding", "submission_ready", "items", "summary"],
   "properties": {
-    "schema_version": {"const": "1.1"},
+    "schema_version": {"const": "1.2"},
+    "obligation_identity_protocol": {"const": "manual_review_obligation_v1"},
     "policy": {"const": "review_draft_only"},
     "visual_policy": {
       "type": "object",
@@ -46,9 +47,21 @@
       "type": "array",
       "items": {
         "type": "object",
-        "required": ["marker_id", "status", "marker_required", "category", "source_text", "reason", "action", "placeholder_text"],
+        "required": ["marker_id", "manual_obligation_id", "producer_records", "status", "marker_required", "category", "source_text", "reason", "action", "placeholder_text"],
         "properties": {
           "marker_id": {"type": "string", "pattern": "^MR-[0-9]{4}$"},
+          "manual_obligation_id": {"type": "string", "pattern": "^MO-[0-9a-f]{64}$"},
+          "producer_records": {
+            "type": "array", "minItems": 1,
+            "items": {
+              "type": "object", "required": ["producer", "record"],
+              "properties": {
+                "producer": {"type": "string", "minLength": 1},
+                "record": {"type": "object"}
+              },
+              "additionalProperties": false
+            }
+          },
           "status": {"const": "pending_manual_review"},
           "marker_required": {"const": true},
           "category": {

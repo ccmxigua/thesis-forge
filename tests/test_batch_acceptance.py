@@ -13,7 +13,11 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import batch_rerun_ten_schools as batch  # noqa: E402
-from manual_review_display import append_manual_review_markers  # noqa: E402
+from manual_review import build_manual_review_ledger  # noqa: E402
+from manual_review_display import (  # noqa: E402
+    append_manual_review_markers,
+    audit_manual_review_markers,
+)
 
 
 class BatchAcceptanceTests(unittest.TestCase):
@@ -363,32 +367,30 @@ class BatchAcceptanceTests(unittest.TestCase):
                 }],
             }), encoding="utf-8")
             ledger = work / "manual-review-items.json"
-            ledger.write_text(json.dumps({
-                "schema_version": "1.1",
-                "policy": "review_draft_only",
-                "binding": binding,
-                "submission_ready": False,
-                "items": [{
-                    "marker_id": "MR-0001", "status": "pending_manual_review",
-                    "marker_required": True, "category": "runtime_manual_unverifiable",
-                    "source_code": "capability.clause_gap",
-                    "source_codes": ["capability.clause_gap"],
-                    "source_text": "官方版式模板未提供",
-                    "reason": "需要人工确认官方模板。",
-                    "action": "请提供官方模板。",
-                    "placeholder_text": "【待提供：官方版式模板】",
-                }],
-                "summary": {"total": 1},
-            }), encoding="utf-8")
+            ledger_value = build_manual_review_ledger({}, [], binding=binding, release_gates=[{
+                "source_code": "capability.clause_gap",
+                "category": "runtime_manual_unverifiable",
+                "source_text": "官方版式模板未提供",
+                "reason": "需要人工确认官方模板。",
+                "action": "请提供官方模板。",
+                "placeholder_text": "【待提供：官方版式模板】",
+            }])
+            ledger.write_text(json.dumps(ledger_value), encoding="utf-8")
             input_ledger_sha256 = __import__("hashlib").sha256(ledger.read_bytes()).hexdigest()
             markers = apply_dir / "manual-review-markers.json"
             doc = Document(output)
-            append_manual_review_markers(doc, json.loads(ledger.read_text()))
+            marker_receipts = append_manual_review_markers(doc, json.loads(ledger.read_text()))
             doc.save(output)
             output_sha256 = __import__("hashlib").sha256(output.read_bytes()).hexdigest()
+            marker_audit = audit_manual_review_markers(output, ledger_value)
             markers.write_text(json.dumps({
                 "schema_version": "1.0", "policy": "review_draft",
-                "markers": [{"marker_id": "MR-0001"}],
+                "ingress_binding": {
+                    "status": "validated", "case_id": "case", "run_id": "fresh-run",
+                    "ledger_input_sha256": input_ledger_sha256, "binding": binding,
+                },
+                "markers": marker_receipts,
+                "serialized_marker_audit": marker_audit,
             }), encoding="utf-8")
             validation = apply_dir / "validation-report.json"
             validation.write_text(json.dumps({
@@ -473,6 +475,22 @@ class BatchAcceptanceTests(unittest.TestCase):
             accepted = batch.case_acceptance(result, root=root)
             self.assertTrue(accepted["accepted"], accepted)
             self.assertEqual(accepted["status"], "accepted_review_draft")
+            marker_payload = json.loads(markers.read_text(encoding="utf-8"))
+            marker_payload["markers"][0]["ledger_item_sha256"] = "f" * 64
+            markers.write_text(json.dumps(marker_payload), encoding="utf-8")
+            forged_marker = batch.case_acceptance(result, root=root)
+            self.assertFalse(forged_marker["accepted"])
+            self.assertIn("manual_review_marker_payload_mismatch", forged_marker["blockers"])
+            marker_payload["markers"] = marker_receipts
+            markers.write_text(json.dumps(marker_payload), encoding="utf-8")
+            manifest_payload = json.loads(manifest.read_text(encoding="utf-8"))
+            manifest_payload["manual_review_ledger_input_sha256"] = "f" * 64
+            manifest.write_text(json.dumps(manifest_payload), encoding="utf-8")
+            forged_input_hash = batch.case_acceptance(result, root=root)
+            self.assertFalse(forged_input_hash["accepted"])
+            self.assertIn("manual_review_ingress_binding_mismatch", forged_input_hash["blockers"])
+            manifest_payload["manual_review_ledger_input_sha256"] = input_ledger_sha256
+            manifest.write_text(json.dumps(manifest_payload), encoding="utf-8")
             validation_payload = json.loads(validation.read_text(encoding="utf-8"))
             validation_payload["diagnostic_draft_generated"] = False
             validation.write_text(json.dumps(validation_payload), encoding="utf-8")
@@ -546,18 +564,27 @@ class BatchAcceptanceTests(unittest.TestCase):
             work = case_root / "work"
             apply_dir = work / "application"
             manual = work / "manual-review-items.json"
-            manual.write_text(json.dumps({
-                "schema_version": "1.0",
-                "policy": "review_draft_only",
-                "binding": {"run_id": "fresh-run"},
-                "submission_ready": False,
-                "items": [{
-                    "marker_id": "MR-0001",
+            binding = {
+                "case_id": "case", "run_id": "fresh-run",
+                "source_sha256": "0" * 64, "clause_sha256": "1" * 64,
+                "evidence_sha256": "2" * 64, "request_sha256": None,
+                "requirements_sha256": "3" * 64, "input_source_sha256": "4" * 64,
+                "format_spec_sha256": "5" * 64,
+                "official_template_sha256": None,
+                "official_template_source": "not_supplied",
+            }
+            manual_payload = build_manual_review_ledger(
+                {}, [], binding=binding,
+                release_gates=[{
+                    "source_code": "official_template_missing",
                     "category": "input_prerequisite",
-                    "source_codes": ["official_template_missing"],
+                    "source_text": "官方版式模板未提供",
+                    "reason": "当前仅有中性参考文档。",
+                    "action": "提供官方模板后重新运行。",
+                    "placeholder_text": "【待提供：官方版式模板】",
                 }],
-                "summary": {"total": 1},
-            }), encoding="utf-8")
+            )
+            manual.write_text(json.dumps(manual_payload, ensure_ascii=False), encoding="utf-8")
             (apply_dir / "manual-review-markers.json").write_text(json.dumps({
                 "schema_version": "1.0", "policy": "review_draft",
                 "markers": [{"marker_id": "MR-0001"}],
@@ -607,6 +634,7 @@ class BatchAcceptanceTests(unittest.TestCase):
                 "submission_ready": False,
                 "case_id": "case",
                 "requirements_extraction": {"run_id": "fresh-run"},
+                "manual_review_binding": binding,
                 "manual_review_items": str(manual),
                 "validation_report": str(apply_dir / "validation-report.json"),
                 "format_comparison": str(comparison),

@@ -287,6 +287,29 @@ explicit East Asian font (`Noto Sans SC`); make that font available to the targe
 renderer and verify actual glyph rendering, not merely text extraction.
 The renderer must not replace Chinese explanations with English-only labels.
 
+The current sidecar contract is `manual-review-ledger.schema.json` 1.2 with
+`manual_review_obligation_v1`. Each atomic manual obligation receives a
+full-length `MO-<sha256>` identity derived from the current ledger binding and
+the complete canonical semantic obligation payload. Append-only `producer_records`
+are preserved as provenance but excluded from the MO digest so adding another
+producer cannot invalidate existing DOCX or audit references. `MR-xxxx` is only
+the document-facing label; it is not the obligation identity. Deduplicate only
+exact normalized semantic duplicates after defaults are applied, preserving all
+producer records; never merge different obligations by unioning selected fields
+or keeping whichever record arrived first. Multiple independent obligations
+for one clause must remain distinct. Validation recomputes and checks MO IDs at
+sidecar ingress, filtering, serialized DOCX audit, and batch acceptance. The
+DOCX audit verifies the MO→MR→serialized-paragraph crosswalk exactly once and
+rejects missing, duplicate, unexpected, or misbound IDs. A complete current-run
+binding is required to create or mutate a ledger. All legacy or unversioned
+ledgers are rejected by mutation helpers and must be rebuilt from the current
+run; do not promote them by relabeling their version. Batch acceptance compares
+the marker receipt payload and stored serialization audit against the live
+ledger and freshly audited DOCX, not merely item counts. None of these checks
+asserts that the upstream semantic source-obligation inventory is complete:
+when its producer says inventory is incomplete, preserve that fact and do not
+infer missing obligations downstream.
+
 Only code-owned role/property paths may anchor a marker beside source content.
 Table-related notes go outside the table. Free-text questions, measurements
 such as `3cm`, and missing official templates must never trigger a guessed cover

@@ -37,7 +37,11 @@ from host_runtime import (  # noqa: E402
     automatic_adapter_id,
     require_host_runtime,
 )
-from manual_review import HUMAN_MARKER_CATEGORIES  # noqa: E402
+from manual_review import (  # noqa: E402
+    HUMAN_MARKER_CATEGORIES,
+    MANUAL_REVIEW_LEDGER_SCHEMA_VERSION,
+    validate_manual_obligation_ids,
+)
 from pdf_visual_audit import audit_pdf  # noqa: E402
 from manual_review_display import audit_manual_review_markers  # noqa: E402
 from native_semantic_review import NativeSemanticReviewError, validate_response  # noqa: E402
@@ -49,6 +53,92 @@ from format_spec_validation import load_and_validate  # noqa: E402
 from process_runner import run_process  # noqa: E402
 from semantic_contract import sha256_json, strict_json_dumps, strict_json_loads  # noqa: E402
 from thesis_format_pipeline import runtime_code_fingerprint  # noqa: E402
+
+
+def manual_review_marker_sidecar_errors(
+    markers: Any, ledger: Any, live_audit: Any,
+) -> list[str]:
+    """Cross-check marker JSON receipts against the current ledger and DOCX.
+
+    A sidecar's count is not a receipt.  The marker IDs, atomic-obligation
+    identity, source references, item/binding digests, rendered paragraph, and
+    placement kind must all agree with the freshly audited serialized DOCX.
+    """
+    errors: list[str] = []
+    if not isinstance(markers, dict) or not isinstance(ledger, dict):
+        return ["marker_sidecar_or_ledger_invalid"]
+    rows = markers.get("markers")
+    items = ledger.get("items")
+    audit_rows = live_audit.get("marker_bindings") if isinstance(live_audit, dict) else None
+    if not isinstance(rows, list) or not isinstance(items, list) or not isinstance(audit_rows, list):
+        return ["marker_sidecar_payload_shape_invalid"]
+    if markers.get("serialized_marker_audit") != live_audit:
+        errors.append("serialized_marker_audit_mismatch")
+
+    actual_by_id: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        marker_id = row.get("marker_id") if isinstance(row, dict) else None
+        if not isinstance(marker_id, str) or not marker_id:
+            errors.append("marker_id_missing")
+            continue
+        if marker_id in actual_by_id:
+            errors.append(f"marker_id_duplicate:{marker_id}")
+            continue
+        actual_by_id[marker_id] = row
+
+    expected_ids = {
+        str(item.get("marker_id")) for item in items if isinstance(item, dict)
+    }
+    if len(expected_ids) != len(items):
+        errors.append("ledger_marker_ids_invalid")
+    actual_ids = set(actual_by_id)
+    for marker_id in sorted(expected_ids - actual_ids):
+        errors.append(f"marker_missing:{marker_id}")
+    for marker_id in sorted(actual_ids - expected_ids):
+        errors.append(f"marker_unexpected:{marker_id}")
+
+    audit_by_id = {
+        str(row.get("marker_id")): row
+        for row in audit_rows if isinstance(row, dict) and row.get("marker_id")
+    }
+    if len(audit_by_id) != len(audit_rows) or set(audit_by_id) != expected_ids:
+        errors.append("serialized_marker_bindings_incomplete")
+
+    fields = (
+        "marker_id", "manual_obligation_id", "category", "clause_ids",
+        "requirement_ids", "question_ids", "evidence_ids",
+        "ledger_binding_sha256", "ledger_item_sha256", "placeholder_text",
+        "paragraph_text", "location",
+    )
+    for marker_id in sorted(expected_ids & actual_ids & set(audit_by_id)):
+        actual = actual_by_id[marker_id]
+        expected = audit_by_id[marker_id]
+        for field in fields:
+            if actual.get(field) != expected.get(field):
+                errors.append(f"marker_payload_mismatch:{marker_id}:{field}")
+        if expected.get("location") == "inline_after_role":
+            inline_fields = ("location", "anchor_role", "anchor_text", "anchor_kind", "paragraph_text")
+            inline = actual.get("inline")
+            if (
+                not isinstance(actual.get("anchor_role"), str)
+                or not actual.get("anchor_role")
+                or not isinstance(actual.get("anchor_text"), str)
+                or actual.get("anchor_kind") not in {"paragraph", "table"}
+                or not isinstance(inline, dict)
+                or any(inline.get(field) != actual.get(field) for field in inline_fields)
+            ):
+                errors.append(f"marker_inline_location_invalid:{marker_id}")
+        elif expected.get("location") == "document_front_unlocated":
+            if (
+                actual.get("anchor_role") is not None
+                or "inline" in actual
+                or "anchor_text" in actual
+                or "anchor_kind" in actual
+            ):
+                errors.append(f"marker_unlocated_location_invalid:{marker_id}")
+        else:
+            errors.append(f"marker_location_invalid:{marker_id}")
+    return errors
 
 
 def resolve_project_path(value: str | Path, *, label: str) -> Path:
@@ -643,6 +733,8 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
 
         manual_path = case_artifact("manual_review_items", manifest.get("manual_review_items"))
         manual_ledger = None
+        expected_manual_binding = manifest.get("manual_review_binding")
+        manual_ledger_input_sha256 = manifest.get("manual_review_ledger_input_sha256")
         if manual_path is None or not manual_path.is_file():
             blockers.append("manual_review_ledger_missing")
         else:
@@ -654,7 +746,7 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
             if not isinstance(manual_ledger, dict):
                 blockers.append("manual_review_ledger_invalid")
             else:
-                if manual_ledger.get("schema_version") != "1.1":
+                if manual_ledger.get("schema_version") != MANUAL_REVIEW_LEDGER_SCHEMA_VERSION:
                     blockers.append("manual_review_ledger_schema_mismatch")
                 schema_errors = load_and_validate(
                     manual_ledger,
@@ -662,25 +754,34 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
                 )
                 if schema_errors:
                     blockers.append("manual_review_ledger_schema_invalid")
+                obligation_id_errors = validate_manual_obligation_ids(manual_ledger)
+                if obligation_id_errors:
+                    blockers.append("manual_review_ledger_obligation_ids_invalid")
+                else:
+                    checks["manual_review_obligation_ids"] = {
+                        "count": len(manual_ledger.get("items", [])),
+                        "protocol": manual_ledger.get("obligation_identity_protocol"),
+                        "valid": True,
+                    }
                 if manual_ledger.get("policy") != "review_draft_only":
                     blockers.append("manual_review_ledger_policy_mismatch")
                 if manual_ledger.get("submission_ready") is not False:
                     blockers.append("manual_review_ledger_submission_flag_invalid")
                 binding = manual_ledger.get("binding")
-                expected_binding = manifest.get("manual_review_binding")
                 if not isinstance(binding, dict):
                     blockers.append("manual_review_ledger_binding_missing")
                 elif expected_run_id and binding.get("run_id") != expected_run_id:
                     blockers.append("manual_review_ledger_run_mismatch")
-                if not isinstance(expected_binding, dict) or binding != expected_binding:
+                if not isinstance(expected_manual_binding, dict) or binding != expected_manual_binding:
                     blockers.append("manual_review_ledger_binding_mismatch")
                 if (
                     expected_case_id and isinstance(binding, dict)
                     and binding.get("case_id") != expected_case_id
                 ):
                     blockers.append("manual_review_ledger_case_mismatch")
-                input_sha256 = manifest.get("manual_review_ledger_input_sha256")
-                if not isinstance(input_sha256, str) or not re.fullmatch(r"[0-9a-f]{64}", input_sha256):
+                if not isinstance(manual_ledger_input_sha256, str) or not re.fullmatch(
+                    r"[0-9a-f]{64}", manual_ledger_input_sha256,
+                ):
                     blockers.append("manual_review_ledger_input_hash_missing")
                 actual_ledger_sha256 = hashlib.sha256(manual_path.read_bytes()).hexdigest()
                 output_sha256 = manifest.get("manual_review_ledger_output_sha256")
@@ -730,6 +831,27 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
                 blockers.append("manual_review_markers_invalid")
             elif not isinstance(markers.get("markers"), list):
                 blockers.append("manual_review_markers_invalid")
+            else:
+                ingress = markers.get("ingress_binding")
+                if (
+                    not isinstance(ingress, dict)
+                    or ingress.get("status") != "validated"
+                    or not isinstance(ingress.get("ledger_input_sha256"), str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", ingress["ledger_input_sha256"])
+                    or ingress.get("ledger_input_sha256") != manual_ledger_input_sha256
+                    or ingress.get("case_id") != expected_case_id
+                    or ingress.get("run_id") != expected_run_id
+                    or ingress.get("binding") != expected_manual_binding
+                ):
+                    blockers.append("manual_review_ingress_binding_mismatch")
+                    checks["manual_review_ingress_binding"] = {"valid": False}
+                else:
+                    checks["manual_review_ingress_binding"] = {
+                        "valid": True,
+                        "case_id": ingress.get("case_id"),
+                        "run_id": ingress.get("run_id"),
+                        "ledger_input_sha256": ingress.get("ledger_input_sha256"),
+                    }
             checks["manual_review_markers"] = str(markers_path)
 
         capability_path = case_artifact("capability_preflight", manifest.get("capability_preflight"))
@@ -810,6 +932,17 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
                 checks["serialized_manual_review_markers"] = marker_audit
                 if marker_audit.get("valid") is not True:
                     blockers.append("manual_review_serialized_markers_invalid")
+                sidecar_errors = manual_review_marker_sidecar_errors(
+                    markers, manual_ledger, marker_audit,
+                )
+                checks["manual_review_marker_sidecar_integrity"] = {
+                    "valid": not sidecar_errors,
+                    "errors": sidecar_errors,
+                }
+                if any(error == "serialized_marker_audit_mismatch" for error in sidecar_errors):
+                    blockers.append("manual_review_marker_audit_sidecar_mismatch")
+                if any(error != "serialized_marker_audit_mismatch" for error in sidecar_errors):
+                    blockers.append("manual_review_marker_payload_mismatch")
 
         validation_path = case_artifact("validation_report", manifest.get("validation_report"))
         validation = None

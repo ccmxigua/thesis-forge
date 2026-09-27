@@ -22,6 +22,86 @@ from semantic_contract import sha256_json  # noqa: E402
 
 class ThesisFormatPipelinePolicyTests(unittest.TestCase):
     @staticmethod
+    def _pending_bundle(
+        *, clause_id: str, text: str, start: int, end: int, obligation_index: int = 0,
+        raw_prefix: str = "前文：", raw_suffix: str = "。后文", run_id: str = "run-1",
+        evidence_id: str = "E00009",
+    ) -> tuple[dict, dict, dict, dict]:
+        raw_source = raw_prefix + text + raw_suffix
+        span_start = len(raw_prefix)
+        source_sha = hashlib.sha256(raw_source.encode("utf-8")).hexdigest()
+        source_text_sha = sha256_json(text)
+        review_request_sha = "b" * 64
+        case_id = "bsu"
+        source_ref = "Q" + sha256_json({
+            "request_sha256": review_request_sha,
+            "check_id": clause_id,
+            "start": start,
+            "end": end,
+            "text": text[start:end],
+        })[:16]
+        identity = {
+            "protocol": OBLIGATION_ANALYSIS_LEDGER_PROTOCOL,
+            "run_id": run_id,
+            "case_id": case_id,
+            "chunk_index": 1,
+            "attempt": 1,
+            "candidate_response_sha256": "a" * 64,
+            "review_request_sha256": review_request_sha,
+            "review_response_sha256": "c" * 64,
+            "check_id": clause_id,
+            "obligation_index": obligation_index,
+            "source_ref": source_ref,
+            "source_sha256": source_text_sha,
+            "start": start,
+            "end": end,
+        }
+        obligation_id = "AO-" + sha256_json(identity)[:24]
+        item = {
+            "analysis_obligation_id": obligation_id,
+            "analysis_obligation_identity": identity,
+            "work_type": "authoring_content",
+            "clause_id": clause_id,
+            "source_ref": source_ref,
+            "source_quote": text[start:end],
+            "source_start": start,
+            "source_end": end,
+            "source_text_sha256": source_text_sha,
+            "obligation_summary": f"作者需补充：{text[start:end]}",
+            "evidence_ids": [evidence_id],
+            "requirement_refs": [],
+            "execution_authorized": False,
+            "source_location": {
+                "evidence_id": evidence_id,
+                "start_offset": span_start + start,
+                "end_offset": span_start + end,
+                "source_sha256": source_sha,
+            },
+        }
+        review = {
+            "run_id": run_id,
+            "case_id": case_id,
+            "chunk_index": 1,
+            "attempt": 1,
+            "candidate_response_sha256": "a" * 64,
+            "review_request_sha256": review_request_sha,
+            "review_response_sha256": "c" * 64,
+            "source_content_pending_items": [item],
+        }
+        clause = {
+            "id": clause_id, "text": text, "evidence_ids": [evidence_id],
+            "source_span": {
+                "evidence_id": evidence_id,
+                "start_offset": span_start,
+                "end_offset": span_start + len(text),
+                "text": text,
+                "source_sha256": source_sha,
+            },
+        }
+        evidence_doc = {"evidence": [{"id": evidence_id, "text": raw_source}]}
+        return review, clause, evidence_doc, item
+
+    @staticmethod
     def _canonical_scope_source() -> tuple[list[dict], dict, dict]:
         quote = "at least 3 groups"
         raw_source = f"prefix {quote} suffix"
@@ -78,33 +158,40 @@ class ThesisFormatPipelinePolicyTests(unittest.TestCase):
 
     def test_source_content_pending_generates_an_evidence_bound_author_input_gate(self) -> None:
         quote = "这些内容是示例，请作者自行撰写真实内容。"
-        source_sha = hashlib.sha256(quote.encode("utf-8")).hexdigest()
-        gates = _source_content_pending_release_gates([{
-            "source_content_pending_items": [{
-                "clause_id": "C00102",
-                "source_quotes": [quote],
-                "evidence_ids": ["E00009"],
-                "reason": "原文明确要求作者补写真实研究内容。",
-            }],
-        }], clauses=[{
-            "id": "C00102", "text": quote, "evidence_ids": ["E00009"],
-            "source_span": {
-                "evidence_id": "E00009", "start_offset": 0,
-                "end_offset": len(quote), "text": quote,
-                "source_sha256": source_sha,
-            },
-        }], evidence_doc={"evidence": [{"id": "E00009", "text": quote}]})
+        review, clause, evidence_doc, item = self._pending_bundle(
+            clause_id="C00102", text=quote, start=0, end=len(quote),
+        )
+        gates = _source_content_pending_release_gates(
+            [review], clauses=[clause], evidence_doc=evidence_doc, expected_run_id="run-1",
+        )
         self.assertEqual(len(gates), 1)
         self.assertEqual(gates[0]["category"], "input_prerequisite")
         self.assertEqual(gates[0]["clause_ids"], ["C00102"])
         self.assertEqual(gates[0]["evidence_ids"], ["E00009"])
-        self.assertEqual(gates[0]["source_location"], {
-            "evidence_id": "E00009", "start_offset": 0,
-            "end_offset": len(quote), "source_sha256": source_sha,
-        })
+        self.assertEqual(gates[0]["source_location"], item["source_location"])
+        self.assertEqual(gates[0]["analysis_obligation_id"], item["analysis_obligation_id"])
         self.assertIn("本人真实研究内容", gates[0]["action"])
-        self.assertIn("【待补写真实论文内容：C00102】", gates[0]["placeholder_text"])
+        self.assertIn(item["analysis_obligation_id"], gates[0]["placeholder_text"])
         self.assertNotIn("generated content", gates[0]["action"])
+
+    def test_source_content_pending_keeps_multiple_atomic_obligations_for_one_clause(self) -> None:
+        text = "请作者补写研究背景；请作者补写研究方法。"
+        review, clause, evidence_doc, first = self._pending_bundle(
+            clause_id="C00102", text=text, start=0, end=10, obligation_index=0,
+        )
+        _, _, _, second = self._pending_bundle(
+            clause_id="C00102", text=text, start=11, end=len(text), obligation_index=1,
+        )
+        review["source_content_pending_items"].append(second)
+        gates = _source_content_pending_release_gates(
+            [review], clauses=[clause], evidence_doc=evidence_doc, expected_run_id="run-1",
+        )
+        self.assertEqual(len(gates), 2)
+        self.assertEqual({gate["clause_ids"][0] for gate in gates}, {"C00102"})
+        self.assertEqual(
+            {gate["analysis_obligation_id"] for gate in gates},
+            {first["analysis_obligation_id"], second["analysis_obligation_id"]},
+        )
 
     def test_existing_content_verification_creates_human_marker_not_authoring_todo(self) -> None:
         quote = (
@@ -186,6 +273,26 @@ class ThesisFormatPipelinePolicyTests(unittest.TestCase):
         self.assertNotIn("补写", gate["action"])
         self.assertNotIn("替换", gate["action"])
 
+        second_identity = {**identity, "obligation_index": 1}
+        second_obligation_id = "AO-" + sha256_json(second_identity)[:24]
+        first_item = reviews[0]["source_content_verification_items"][0]
+        second_item = {
+            **first_item,
+            "analysis_obligation_id": second_obligation_id,
+            "analysis_obligation_identity": second_identity,
+            "obligation_summary": "另一项独立义务也需人工核对现有正文出处。",
+        }
+        multiple_gates = _source_content_verification_release_gates(
+            [{**reviews[0], "source_content_verification_items": [first_item, second_item]}],
+            clauses=[clause], evidence_doc=evidence_doc, expected_run_id="run-1",
+        )
+        self.assertEqual(len(multiple_gates), 2)
+        self.assertEqual({tuple(item["clause_ids"]) for item in multiple_gates}, {("C00068",)})
+        self.assertEqual(
+            {item["analysis_obligation_id"] for item in multiple_gates},
+            {obligation_id, second_obligation_id},
+        )
+
         stale_run = [{**reviews[0], "source_content_verification_items": [
             reviews[0]["source_content_verification_items"][0],
         ]}]
@@ -250,58 +357,55 @@ class ThesisFormatPipelinePolicyTests(unittest.TestCase):
             enforce_obligation_review_output_policy(results, output_policy="submission")
 
     def test_source_content_pending_rejects_missing_evidence_ids(self) -> None:
-        with self.assertRaisesRegex(ValueError, "requires non-empty evidence IDs"):
-            _source_content_pending_release_gates([{
-                "source_content_pending_items": [{
-                    "clause_id": "C00102",
-                    "source_quotes": ["这些示例内容请作者自行撰写真实内容。"],
-                    "evidence_ids": [],
-                    "reason": "待作者提供真实内容。",
-                }],
-            }], clauses=[], evidence_doc={"evidence": []})
-
-    def test_source_content_pending_rejects_unbound_quotes_ids_hash_ranges_and_duplicates(self) -> None:
-        quote = "请作者撰写真实研究内容"
-        raw_source = f"前文：{quote}。后文"
-        start = raw_source.index(quote)
-        source_sha = hashlib.sha256(raw_source.encode("utf-8")).hexdigest()
-        clause = {
-            "id": "C00102", "text": quote, "evidence_ids": ["E00009"],
-            "source_span": {
-                "evidence_id": "E00009", "start_offset": start,
-                "end_offset": start + len(quote), "text": quote,
-                "source_sha256": source_sha,
-            },
-        }
-        evidence_doc = {"evidence": [{"id": "E00009", "text": raw_source}]}
-        item = {
-            "clause_id": "C00102", "source_quotes": [quote],
-            "evidence_ids": ["E00009"], "reason": "待作者提供真实内容。",
-        }
-        mutations = [
-            ({**item, "source_quotes": ["伪造的作者指令"]}, [clause], evidence_doc),
-            ({**item, "evidence_ids": ["E99999"]}, [clause], evidence_doc),
-            (item, [{**clause, "id": "C99999"}], evidence_doc),
-            (item, [{**clause, "source_span": {**clause["source_span"], "start_offset": 999}}], evidence_doc),
-            (item, [{**clause, "source_span": {**clause["source_span"], "source_sha256": "a" * 64}}], evidence_doc),
-        ]
-        for changed_item, changed_clauses, changed_evidence in mutations:
-            with self.subTest(item=changed_item, clauses=changed_clauses):
-                with self.assertRaisesRegex(ValueError, "not bound to current source"):
-                    _source_content_pending_release_gates(
-                        [{"source_content_pending_items": [changed_item]}],
-                        clauses=changed_clauses, evidence_doc=changed_evidence,
-                    )
-        with self.assertRaisesRegex(ValueError, "duplicate source-content pending clause"):
+        review, clause, evidence_doc, item = self._pending_bundle(
+            clause_id="C00102", text="请作者撰写真实研究内容。", start=0, end=13,
+        )
+        item["evidence_ids"] = []
+        review["source_content_pending_items"] = [item]
+        with self.assertRaisesRegex(ValueError, "obligation is malformed"):
             _source_content_pending_release_gates(
-                [{"source_content_pending_items": [item, item]}],
-                clauses=[clause], evidence_doc=evidence_doc,
+                [review], clauses=[clause], evidence_doc=evidence_doc, expected_run_id="run-1",
+            )
+
+    def test_source_content_pending_rejects_tampering_stale_run_and_duplicate_ao(self) -> None:
+        text = "前句。请作者撰写真实研究内容。后句。"
+        quote = "请作者撰写真实研究内容。"
+        start = text.index(quote)
+        review, clause, evidence_doc, item = self._pending_bundle(
+            clause_id="C00102", text=text, start=start, end=start + len(quote),
+        )
+        mutations = [
+            ({**item, "source_quote": "伪造的作者指令"}, [clause], evidence_doc, "current-source-bound"),
+            ({**item, "evidence_ids": ["E99999"]}, [clause], evidence_doc, "current-source-bound"),
+            (item, [{**clause, "id": "C99999"}], evidence_doc, "current-source-bound"),
+            (item, [{**clause, "source_span": {**clause["source_span"], "start_offset": 999}}], evidence_doc,
+             "current-source-bound"),
+            (item, [{**clause, "source_span": {**clause["source_span"], "source_sha256": "a" * 64}}],
+             evidence_doc, "current-source-bound"),
+        ]
+        for changed_item, changed_clauses, changed_evidence, _ in mutations:
+            with self.subTest(item=changed_item, clauses=changed_clauses):
+                with self.assertRaisesRegex(ValueError, "current-source-bound"):
+                    _source_content_pending_release_gates(
+                        [{**review, "source_content_pending_items": [changed_item]}],
+                        clauses=changed_clauses, evidence_doc=changed_evidence,
+                        expected_run_id="run-1",
+                    )
+        with self.assertRaisesRegex(ValueError, "current-source-bound"):
+            _source_content_pending_release_gates(
+                [{**review, "run_id": "stale-run"}], clauses=[clause],
+                evidence_doc=evidence_doc, expected_run_id="run-1",
+            )
+        with self.assertRaisesRegex(ValueError, "duplicate source-content pending obligation"):
+            _source_content_pending_release_gates(
+                [{**review, "source_content_pending_items": [item, item]}],
+                clauses=[clause], evidence_doc=evidence_doc, expected_run_id="run-1",
             )
 
     def test_source_content_pending_rejects_malformed_review_container(self) -> None:
         with self.assertRaisesRegex(ValueError, "must be an array"):
             _source_content_pending_release_gates(  # type: ignore[arg-type]
-                {}, clauses=[], evidence_doc={"evidence": []},
+                {}, clauses=[], evidence_doc={"evidence": []}, expected_run_id="run-1",
             )
 
     def test_each_scope_unresolved_obligation_gets_a_distinct_non_executable_marker(self) -> None:
@@ -335,7 +439,14 @@ class ThesisFormatPipelinePolicyTests(unittest.TestCase):
         self.assertNotEqual(gates[0]["analysis_obligation_id"], gates[1]["analysis_obligation_id"])
         self.assertTrue(all(not gate["execution_authorized"] for gate in gates))
 
-        ledger = build_manual_review_ledger({}, [], release_gates=gates)
+        ledger = build_manual_review_ledger({}, [], release_gates=gates, binding={
+            "case_id": "bsu", "run_id": "run-1",
+            "source_sha256": "a" * 64, "clause_sha256": "b" * 64,
+            "evidence_sha256": "c" * 64, "request_sha256": None,
+            "requirements_sha256": "d" * 64, "input_source_sha256": "e" * 64,
+            "format_spec_sha256": "f" * 64, "official_template_sha256": None,
+            "official_template_source": "not_supplied",
+        })
         self.assertEqual(len(ledger["items"]), 2)
         self.assertFalse(ledger["submission_ready"])
         self.assertEqual(

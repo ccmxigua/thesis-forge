@@ -31,6 +31,17 @@ CATEGORY_ACTIONS = {
     "semantic_content_review": "对照权威条款人工核实；系统不会改写论文正文。",
 }
 
+MANUAL_REVIEW_LEDGER_SCHEMA_VERSION = "1.2"
+MANUAL_REVIEW_OBLIGATION_ID_PROTOCOL = "manual_review_obligation_v1"
+MANUAL_OBLIGATION_ID_RE = re.compile(r"^MO-[0-9a-f]{64}$")
+_GENERATED_ITEM_FIELDS = frozenset({
+    "marker_id", "manual_obligation_id", "status", "marker_required",
+})
+_SET_LIKE_ITEM_FIELDS = (
+    "clause_ids", "requirement_ids", "question_ids", "evidence_ids",
+    "source_codes", "scope_dependency_codes", "scope_dependency_dimensions",
+)
+
 # Red markers are reserved for an actual human decision/input. Deterministic
 # format, schema, property-receipt, capability, and render failures belong in
 # their technical reports and keep release gates closed; they are not TODOs
@@ -97,26 +108,159 @@ def _source_location_identity(item: dict[str, Any]) -> str:
     return json.dumps(sorted(unique), ensure_ascii=False, separators=(",", ":"))
 
 
-def _manual_item_identity(item: dict[str, Any]) -> tuple[Any, ...]:
-    clause_ids = tuple(sorted(_string_list(item.get("clause_ids"))))
-    requirement_ids = tuple(sorted(_string_list(item.get("requirement_ids"))))
-    location = _source_location_identity(item)
-    evidence_ids = tuple(sorted(_string_list(item.get("evidence_ids"))))
-    question_ids = tuple(sorted(_string_list(item.get("question_ids"))))
-    source_code = str(item.get("source_code") or "")
-    anchored = bool(clause_ids or requirement_ids or location.strip("[]"))
-    return (
-        str(item.get("category") or ""),
-        str(item.get("work_type") or ""),
-        str(item.get("source_text") or ""),
-        clause_ids,
-        requirement_ids,
-        location,
-        str(item.get("analysis_obligation_id") or ""),
-        evidence_ids,
-        () if anchored else question_ids,
-        "" if anchored else source_code,
+def _canonical_json(value: Any) -> str:
+    return json.dumps(
+        value, ensure_ascii=False, sort_keys=True,
+        separators=(",", ":"), allow_nan=False,
     )
+
+
+def _manual_item_identity(item: dict[str, Any]) -> str:
+    """Identify the complete normalized obligation, not a lossy display key.
+
+    The producer records are excluded only from semantic deduplication: two
+    producers may report the same exact obligation, in which case both raw
+    records are retained by ``_merge_manual_item``. Every field that can
+    change the meaning, source, disposition, or requested action participates.
+    """
+    payload = {
+        key: copy.deepcopy(value)
+        for key, value in item.items()
+        if key not in _GENERATED_ITEM_FIELDS and key != "producer_records"
+    }
+    for field in _SET_LIKE_ITEM_FIELDS:
+        if isinstance(payload.get(field), list):
+            payload[field] = sorted(set(_string_list(payload[field])))
+    if isinstance(payload.get("source_locations"), list):
+        payload["source_locations"] = sorted(
+            (copy.deepcopy(value) for value in payload["source_locations"]
+             if isinstance(value, dict)),
+            key=_canonical_json,
+        )
+    return _canonical_json(payload)
+
+
+def _manual_obligation_payload(item: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: copy.deepcopy(value)
+        for key, value in item.items()
+        # Producer records are an append-only provenance collection.  They are
+        # deliberately excluded from identity because adding a second producer
+        # must not invalidate an already serialized MR/MO reference.
+        if key not in _GENERATED_ITEM_FIELDS and key != "producer_records"
+    }
+
+
+def _manual_review_binding_errors(binding: Any) -> list[str]:
+    if not isinstance(binding, dict):
+        return ["manual_review_ledger_binding_must_be_object"]
+    errors: list[str] = []
+    for field in ("case_id", "run_id"):
+        value = binding.get(field)
+        if not isinstance(value, str) or not value.strip():
+            errors.append(f"manual_review_ledger_binding_{field}_missing")
+    for field in (
+        "source_sha256", "clause_sha256", "evidence_sha256",
+        "requirements_sha256", "input_source_sha256", "format_spec_sha256",
+    ):
+        value = binding.get(field)
+        if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value):
+            errors.append(f"manual_review_ledger_binding_{field}_invalid")
+    for field in ("request_sha256", "official_template_sha256"):
+        value = binding.get(field)
+        if value is not None and (
+            not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value)
+        ):
+            errors.append(f"manual_review_ledger_binding_{field}_invalid")
+    if binding.get("official_template_source") not in {
+        "not_supplied", "style_template", "template_profile",
+    }:
+        errors.append("manual_review_ledger_binding_official_template_source_invalid")
+    return errors
+
+
+def manual_obligation_id_for_item(binding: Any, item: dict[str, Any]) -> str:
+    """Compute a full-length current-ledger-bound atomic obligation ID."""
+    current_binding = binding if isinstance(binding, dict) else {}
+    binding_errors = _manual_review_binding_errors(current_binding)
+    if binding_errors:
+        raise ValueError(
+            "manual obligation identity requires a complete current-run binding: "
+            + ", ".join(binding_errors)
+        )
+    identity = {
+        "protocol": MANUAL_REVIEW_OBLIGATION_ID_PROTOCOL,
+        "binding": current_binding,
+        "obligation": _manual_obligation_payload(item),
+    }
+    return "MO-" + hashlib.sha256(_canonical_json(identity).encode("utf-8")).hexdigest()
+
+
+def validate_manual_obligation_ids(ledger: Any) -> list[str]:
+    """Verify presence, uniqueness, and recomputation of every MO identity."""
+    if not isinstance(ledger, dict):
+        return ["manual_review_ledger_must_be_object"]
+    if ledger.get("schema_version") != MANUAL_REVIEW_LEDGER_SCHEMA_VERSION:
+        return ["manual_review_ledger_schema_version_mismatch"]
+    if ledger.get("obligation_identity_protocol") != MANUAL_REVIEW_OBLIGATION_ID_PROTOCOL:
+        return ["manual_review_obligation_identity_protocol_mismatch"]
+    items = ledger.get("items")
+    if not isinstance(items, list):
+        return ["manual_review_ledger_items_must_be_array"]
+    binding = ledger.get("binding")
+    if not isinstance(binding, dict):
+        return ["manual_review_ledger_binding_must_be_object"]
+    binding_errors = _manual_review_binding_errors(binding)
+    if binding_errors:
+        return binding_errors
+    ids = [
+        item.get("manual_obligation_id")
+        for item in items if isinstance(item, dict)
+    ]
+    errors: list[str] = []
+    if len(ids) != len(items) or any(
+        not isinstance(value, str) or not MANUAL_OBLIGATION_ID_RE.fullmatch(value)
+        for value in ids
+    ):
+        errors.append("manual_review_obligation_ids_missing_or_invalid")
+    elif len(ids) != len(set(ids)):
+        errors.append("manual_review_obligation_ids_not_unique")
+    for index, item in enumerate(items):
+        if not isinstance(item, dict):
+            continue
+        expected = manual_obligation_id_for_item(binding, item)
+        if item.get("manual_obligation_id") != expected:
+            errors.append(f"manual_review_obligation_id_mismatch:{index}")
+    return errors
+
+
+def _producer_record(producer: str, record: Any) -> dict[str, Any]:
+    payload = copy.deepcopy(record)
+    if isinstance(payload, dict):
+        for field in _GENERATED_ITEM_FIELDS:
+            payload.pop(field, None)
+    if not isinstance(payload, dict):
+        payload = {"value": payload}
+    return {"producer": producer, "record": payload}
+
+
+def _ensure_producer_records(
+    item: dict[str, Any], *, producer: str = "manual_review_item", record: Any = None,
+) -> None:
+    records = item.get("producer_records")
+    if not isinstance(records, list) or not records:
+        item["producer_records"] = [_producer_record(
+            producer, record if record is not None else item,
+        )]
+        return
+    unique: dict[str, dict[str, Any]] = {}
+    for value in records:
+        if not isinstance(value, dict) or not isinstance(value.get("producer"), str) or not isinstance(
+            value.get("record"), dict
+        ):
+            raise ValueError("manual-review producer record must preserve producer and object record")
+        unique[_canonical_json(value)] = copy.deepcopy(value)
+    item["producer_records"] = [unique[key] for key in sorted(unique)]
 
 
 def _require_semantic_marker_source(item: dict[str, Any]) -> None:
@@ -144,23 +288,21 @@ def _normalize_manual_marker_text(item: dict[str, Any]) -> None:
 
 
 def _merge_manual_item(target: dict[str, Any], candidate: dict[str, Any]) -> None:
-    for field in ("question_ids", "evidence_ids", "clause_ids", "requirement_ids", "source_codes"):
-        target[field] = sorted(set(_string_list(target.get(field))) | set(_string_list(candidate.get(field))))
-    for field in ("reason", "action"):
-        values = [str(value).strip() for value in (target.get(field), candidate.get(field)) if value]
-        target[field] = "；".join(dict.fromkeys(values))
-    if target.get("source_type") != candidate.get("source_type"):
-        target["source_type"] = "multiple_bound_sources"
-    target["original_blocking"] = bool(target.get("original_blocking")) or bool(
-        candidate.get("original_blocking")
-    )
-    target["release_gate"] = bool(target.get("release_gate")) or bool(candidate.get("release_gate"))
+    # Callers may merge only byte-for-byte-equivalent normalized semantics.
+    # Keep all producer evidence without selecting one producer as authoritative.
+    left = target.get("producer_records", [])
+    right = candidate.get("producer_records", [])
+    unique = {_canonical_json(value): copy.deepcopy(value) for value in [*left, *right]}
+    target["producer_records"] = [unique[key] for key in sorted(unique)]
 
 
 def _deduplicate_manual_items(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    merged: dict[tuple[Any, ...], dict[str, Any]] = {}
+    merged: dict[str, dict[str, Any]] = {}
     for original in items:
-        item = dict(original)
+        if not isinstance(original, dict):
+            raise ValueError("manual-review ledger contains a non-object item")
+        item = copy.deepcopy(original)
+        _ensure_producer_records(item, record=original)
         _normalize_manual_marker_text(item)
         _require_semantic_marker_source(item)
         key = _manual_item_identity(item)
@@ -171,7 +313,9 @@ def _deduplicate_manual_items(items: list[dict[str, Any]]) -> list[dict[str, Any
     return list(merged.values())
 
 
-def _question_item(question: dict[str, Any]) -> dict[str, Any]:
+def _question_item(
+    question: dict[str, Any], *, producer_records: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
     normalized = normalize_question_records([question])
     question = normalized[0] if normalized else {}
     question_id = question.get("question_id")
@@ -200,6 +344,9 @@ def _question_item(question: dict[str, Any]) -> dict[str, Any]:
         "action": "请人工确认该条款的适用对象、数值单位或权威解释。",
         "placeholder_text": f"【待人工处理：{clause_id or question_id or '未绑定问题'}】",
         "original_blocking": True,
+        "producer_records": copy.deepcopy(producer_records or [
+            _producer_record("open_question_normalized", question),
+        ]),
     }
 
 
@@ -218,17 +365,26 @@ def build_manual_review_ledger(
     clause/category/message so the same problem is not shown twice while all
     question/evidence IDs remain attached to the item.
     """
+    binding_errors = _manual_review_binding_errors(binding)
+    if binding_errors:
+        raise ValueError(
+            "manual review ledger requires a complete current-run binding: "
+            + ", ".join(binding_errors)
+        )
     report = capability_report if isinstance(capability_report, dict) else {}
+    raw_questions = copy.deepcopy(questions or [])
     if clauses is not None:
         questions = bind_question_records(questions or [], clauses, evidence_doc)
     else:
         questions = normalize_question_records(questions or [])
     candidates: list[dict[str, Any]] = []
-    question_clause_ids = {
-        str(item.get("clause_id"))
-        for item in (questions or [])
-        if isinstance(item, dict) and item.get("clause_id")
-    }
+    raw_questions_by_id: dict[str, dict[str, Any]] = {}
+    for raw_question in raw_questions:
+        if not isinstance(raw_question, dict):
+            continue
+        raw_id = raw_question.get("question_id") or raw_question.get("id")
+        if isinstance(raw_id, str) and raw_id:
+            raw_questions_by_id[raw_id] = raw_question
     for finding in report.get("findings", []):
         if not isinstance(finding, dict):
             continue
@@ -247,11 +403,6 @@ def build_manual_review_ledger(
         if category not in HUMAN_MARKER_CATEGORIES:
             continue
         clause_ids = _values(evidence, "clause_id") or _ids_from_text(finding.get("message"), CLAUSE_RE)
-        if category == "confirmed_semantic_issue" and question_clause_ids.intersection(clause_ids):
-            # The open-question item carries the same clause's user-facing
-            # wording and evidence.  Keep one marker, not two visually
-            # different markers for the same unresolved semantic choice.
-            continue
         requirement_ids = _values(evidence, "requirement_id") or _ids_from_text(
             finding.get("message"), REQUIREMENT_RE
         )
@@ -271,6 +422,7 @@ def build_manual_review_ledger(
                 f"【待人工处理：{finding.get('code') or category}】"
             ),
             "original_blocking": bool(finding.get("blocking")),
+            "producer_records": [_producer_record("capability_finding", finding)],
         })
 
     for question in questions or []:
@@ -278,7 +430,15 @@ def build_manual_review_ledger(
         # decisions. Keep them in the run manifest rather than emitting a red
         # source marker with no clause/evidence anchor.
         if isinstance(question, dict) and question.get("scope") != "global":
-            candidates.append(_question_item(question))
+            question_id = question.get("question_id") or question.get("id")
+            raw_question = raw_questions_by_id.get(str(question_id), question)
+            candidates.append(_question_item(
+                question,
+                producer_records=[
+                    _producer_record("open_question_input", raw_question),
+                    _producer_record("open_question_normalized", question),
+                ],
+            ))
 
     for gate in release_gates or []:
         if not isinstance(gate, dict):
@@ -291,7 +451,8 @@ def build_manual_review_ledger(
             )
         if category not in HUMAN_MARKER_CATEGORIES:
             continue
-        candidates.append({
+        candidate = copy.deepcopy(gate)
+        candidate.update({
             "source_type": "release_gate",
             "source_code": code,
             "source_codes": [code],
@@ -309,20 +470,17 @@ def build_manual_review_ledger(
             ),
             "original_blocking": bool(gate.get("original_blocking", True)),
             "release_gate": True,
-            **{
-                key: copy.deepcopy(gate[key])
-                for key in (
-                    "analysis_obligation_id", "obligation_summary", "work_type",
-                    "scope_dependency_codes", "scope_dependency_dimensions",
-                    "source_ref", "source_start", "source_end",
-                    "source_text_sha256", "source_location", "execution_authorized",
-                )
-                if key in gate
-            },
         })
+        for generated_field in _GENERATED_ITEM_FIELDS:
+            candidate.pop(generated_field, None)
+        _ensure_producer_records(
+            candidate, producer="release_gate", record=gate,
+        )
+        candidates.append(candidate)
 
-    merged: dict[tuple[Any, ...], dict[str, Any]] = {}
+    merged: dict[str, dict[str, Any]] = {}
     for candidate in candidates:
+        _ensure_producer_records(candidate, record=candidate)
         _normalize_manual_marker_text(candidate)
         _require_semantic_marker_source(candidate)
         key = _manual_item_identity(candidate)
@@ -341,19 +499,22 @@ def build_manual_review_ledger(
             value.get("source_text", ""),
         ),
     ), start=1):
-        items.append({
+        item = {
             "marker_id": f"MR-{index:04d}",
             "status": "pending_manual_review",
             "marker_required": True,
             **item,
-        })
+        }
+        item["manual_obligation_id"] = manual_obligation_id_for_item(binding or {}, item)
+        items.append(item)
 
     categories: dict[str, int] = {}
     for item in items:
         category = str(item["category"])
         categories[category] = categories.get(category, 0) + 1
     return {
-        "schema_version": "1.1",
+        "schema_version": MANUAL_REVIEW_LEDGER_SCHEMA_VERSION,
+        "obligation_identity_protocol": MANUAL_REVIEW_OBLIGATION_ID_PROTOCOL,
         "policy": "review_draft_only",
         "visual_policy": dict(MANUAL_REVIEW_VISUAL_POLICY),
         "binding": binding or {},
@@ -379,6 +540,17 @@ def add_manual_review_items(
     """
     if not isinstance(ledger, dict):
         raise ValueError("manual review ledger must be an object")
+    version = ledger.get("schema_version")
+    if version != MANUAL_REVIEW_LEDGER_SCHEMA_VERSION:
+        raise ValueError(f"unsupported manual-review ledger schema version: {version!r}")
+    if ledger.get("obligation_identity_protocol") != MANUAL_REVIEW_OBLIGATION_ID_PROTOCOL:
+        raise ValueError("manual-review obligation identity protocol mismatch")
+    identity_errors = validate_manual_obligation_ids(ledger)
+    if identity_errors:
+        raise ValueError(
+            "current manual-review ledger obligation identity is invalid: "
+            + ", ".join(identity_errors[:8])
+        )
     existing = _deduplicate_manual_items([
         item for item in ledger.get("items", []) if isinstance(item, dict)
     ])
@@ -386,16 +558,12 @@ def add_manual_review_items(
     for candidate in candidates or []:
         if not isinstance(candidate, dict):
             continue
-        item = dict(candidate)
+        item = copy.deepcopy(candidate)
+        _ensure_producer_records(item, record=candidate)
         category = str(item.get("category") or "")
         if category not in HUMAN_MARKER_CATEGORIES | KNOWN_TECHNICAL_CATEGORIES:
             raise ValueError(f"unknown manual-review category cannot be silently discarded: {category!r}")
         if category not in HUMAN_MARKER_CATEGORIES:
-            continue
-        _require_semantic_marker_source(item)
-        identity = _manual_item_identity(item)
-        if identity in items_by_identity:
-            _merge_manual_item(items_by_identity[identity], item)
             continue
         item.setdefault("source_type", "release_gate")
         item.setdefault("source_codes", [str(item.get("source_code") or "release_gate")])
@@ -404,7 +572,10 @@ def add_manual_review_items(
         item.setdefault("question_ids", [])
         item.setdefault("evidence_ids", [])
         item.setdefault("reason", item.get("source_text", ""))
-        item.setdefault("action", "请人工核对并记录结果。")
+        item.setdefault(
+            "action",
+            CATEGORY_ACTIONS.get(category, "请人工核对并记录结果。"),
+        )
         item.setdefault(
             "placeholder_text",
             f"【待人工处理：{item.get('source_code') or item.get('category') or '未命名项目'}】",
@@ -412,17 +583,28 @@ def add_manual_review_items(
         item.setdefault("original_blocking", True)
         _normalize_manual_marker_text(item)
         _require_semantic_marker_source(item)
+        # Dedupe only after applying the same defaults and normalizers as the
+        # canonical ledger builder.  Otherwise an omitted default field can
+        # make an exact duplicate look distinct during identity comparison.
+        identity = _manual_item_identity(item)
+        if identity in items_by_identity:
+            _merge_manual_item(items_by_identity[identity], item)
+            continue
         existing.append(item)
         items_by_identity[identity] = item
+    current_binding = ledger.get("binding") if isinstance(ledger.get("binding"), dict) else {}
     for index, item in enumerate(existing, start=1):
         item["marker_id"] = f"MR-{index:04d}"
         item["status"] = "pending_manual_review"
         item["marker_required"] = True
+        item["manual_obligation_id"] = manual_obligation_id_for_item(current_binding, item)
     categories: dict[str, int] = {}
     for item in existing:
         category = str(item.get("category") or "runtime_manual_unverifiable")
         categories[category] = categories.get(category, 0) + 1
     ledger["visual_policy"] = dict(MANUAL_REVIEW_VISUAL_POLICY)
+    ledger["schema_version"] = MANUAL_REVIEW_LEDGER_SCHEMA_VERSION
+    ledger["obligation_identity_protocol"] = MANUAL_REVIEW_OBLIGATION_ID_PROTOCOL
     ledger["items"] = existing
     ledger["summary"] = {
         "total": len(existing),
@@ -442,6 +624,17 @@ def filter_manual_marker_ledger(ledger: dict[str, Any]) -> dict[str, Any]:
     """
     if not isinstance(ledger, dict):
         raise ValueError("manual review ledger must be an object")
+    version = ledger.get("schema_version")
+    if version != MANUAL_REVIEW_LEDGER_SCHEMA_VERSION:
+        raise ValueError(f"unsupported manual-review ledger schema version: {version!r}")
+    if ledger.get("obligation_identity_protocol") != MANUAL_REVIEW_OBLIGATION_ID_PROTOCOL:
+        raise ValueError("manual-review obligation identity protocol mismatch")
+    identity_errors = validate_manual_obligation_ids(ledger)
+    if identity_errors:
+        raise ValueError(
+            "current manual-review ledger obligation identity is invalid: "
+            + ", ".join(identity_errors[:8])
+        )
     raw_items = ledger.get("items")
     if not isinstance(raw_items, list):
         raise ValueError("manual-review ledger items must be an array")
@@ -468,9 +661,12 @@ def filter_manual_marker_ledger(ledger: dict[str, Any]) -> dict[str, Any]:
         item["marker_id"] = f"MR-{index:04d}"
         item["status"] = "pending_manual_review"
         item["marker_required"] = True
+        item["manual_obligation_id"] = manual_obligation_id_for_item(ledger["binding"], item)
         category = str(item.get("category") or "")
         categories[category] = categories.get(category, 0) + 1
     ledger["visual_policy"] = dict(MANUAL_REVIEW_VISUAL_POLICY)
+    ledger["schema_version"] = MANUAL_REVIEW_LEDGER_SCHEMA_VERSION
+    ledger["obligation_identity_protocol"] = MANUAL_REVIEW_OBLIGATION_ID_PROTOCOL
     ledger["items"] = items
     ledger["summary"] = {
         "total": len(items),
@@ -525,6 +721,7 @@ def validate_manual_review_ledger_ingress(
             errors.append("manual_review_ledger_marker_ids_missing")
         elif len(set(marker_ids)) != len(marker_ids):
             errors.append("manual_review_ledger_marker_ids_not_unique")
+        errors.extend(validate_manual_obligation_ids(ledger))
     return errors
 
 

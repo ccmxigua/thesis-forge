@@ -598,6 +598,7 @@ def _validate_independent_obligation_receipts(
             raise ValueError(f"obligation analysis ledger {index} is not bound to the current review")
         expected_ledger_items: list[dict[str, Any]] = []
         expected_identity_by_obligation_id: dict[str, dict[str, Any]] = {}
+        expected_obligation_by_check_index: dict[tuple[str, int], tuple[dict[str, Any], dict[str, Any]]] = {}
         for result in normalized_results:
             check_id = str(result.get("check_id"))
             selected = selections.get(check_id)
@@ -644,7 +645,7 @@ def _validate_independent_obligation_receipts(
                         f"obligation analysis ledger {index} has a duplicate deterministic obligation ID"
                     )
                 expected_identity_by_obligation_id[analysis_obligation_id] = identity
-                expected_ledger_items.append({
+                expected_item = {
                     "analysis_obligation_id": analysis_obligation_id,
                     "check_id": check_id,
                     "source_ref": source_ref,
@@ -661,7 +662,11 @@ def _validate_independent_obligation_receipts(
                     ),
                     "requirement_refs": copy.deepcopy(obligation.get("requirement_refs") or []),
                     "execution_authorized": False,
-                })
+                }
+                expected_ledger_items.append(expected_item)
+                expected_obligation_by_check_index[(check_id, obligation_index)] = (
+                    expected_item, identity,
+                )
         if ledger_items != expected_ledger_items:
             raise ValueError(f"obligation analysis ledger {index} does not match the reviewed source obligations")
         manual_review_clause_ids = enforce_obligation_review_output_policy(
@@ -704,16 +709,15 @@ def _validate_independent_obligation_receipts(
                 else {}
             )
             obligations = result.get("identified_obligations")
-            source_quotes = [
-                str(item.get("source_quote"))
-                for item in obligations or []
+            pending_indexes = [
+                obligation_index
+                for obligation_index, item in enumerate(obligations or [])
                 if isinstance(item, dict)
                 and item.get("disposition") == "authoring_content_pending"
-                and isinstance(item.get("source_quote"), str)
             ]
             if (
                 not check_id
-                or not source_quotes
+                or not pending_indexes
                 or not cited_evidence
                 or any(
                     not isinstance(evidence_id, str) or not evidence_id.strip()
@@ -725,12 +729,65 @@ def _validate_independent_obligation_receipts(
                     "source-content pending receipt has no exact clause, authoring quote, "
                     "or valid cited evidence"
                 )
-            source_content_pending_items.append({
-                "clause_id": check_id,
-                "source_quotes": source_quotes,
-                "evidence_ids": sorted(str(key) for key in cited_evidence),
-                "reason": str(result.get("rationale") or ""),
-            })
+            source_clause = packet_clauses.get(check_id)
+            source_span = source_clause.get("source_span") if isinstance(source_clause, dict) else None
+            document_text = check.get("document_text") if isinstance(check, dict) else None
+            span_evidence_id = source_span.get("evidence_id") if isinstance(source_span, dict) else None
+            span_start = source_span.get("start_offset") if isinstance(source_span, dict) else None
+            span_text = source_span.get("text") if isinstance(source_span, dict) else None
+            span_sha = source_span.get("source_sha256") if isinstance(source_span, dict) else None
+            if (
+                not isinstance(source_span, dict)
+                or not isinstance(document_text, str)
+                or span_text != document_text
+                or not isinstance(span_evidence_id, str)
+                or span_evidence_id not in cited_evidence
+                or isinstance(span_start, bool) or not isinstance(span_start, int)
+                or span_start < 0
+                or not isinstance(span_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", span_sha)
+            ):
+                raise ValueError(
+                    "source-content pending receipt has no exact current-source span/evidence binding"
+                )
+            for obligation_index in pending_indexes:
+                selected_pair = expected_obligation_by_check_index.get((check_id, obligation_index))
+                if selected_pair is None:
+                    raise ValueError("source-content pending receipt references an unknown obligation index")
+                obligation, obligation_identity = selected_pair
+                quote = obligation.get("source_quote")
+                start, end = obligation.get("source_start"), obligation.get("source_end")
+                obligation_id = obligation.get("analysis_obligation_id")
+                if (
+                    obligation.get("disposition") != "authoring_content_pending"
+                    or obligation.get("work_type") != "authoring_content"
+                    or not isinstance(quote, str) or not quote
+                    or isinstance(start, bool) or not isinstance(start, int)
+                    or isinstance(end, bool) or not isinstance(end, int)
+                    or not 0 <= start < end <= len(span_text)
+                    or span_text[start:end] != quote
+                    or obligation.get("source_text_sha256") != sha256_json(span_text)
+                    or not isinstance(obligation_identity, dict)
+                    or not isinstance(obligation_id, str)
+                    or "AO-" + sha256_json(obligation_identity)[:24] != obligation_id
+                ):
+                    raise ValueError(
+                        "source-content pending obligation is not an exact current source selection"
+                    )
+                source_location = {
+                    "evidence_id": span_evidence_id,
+                    "start_offset": span_start + start,
+                    "end_offset": span_start + end,
+                    "source_sha256": span_sha,
+                }
+                source_content_pending_items.append({
+                    **copy.deepcopy(obligation),
+                    "clause_id": check_id,
+                    "analysis_obligation_identity": copy.deepcopy(obligation_identity),
+                    "evidence_ids": [span_evidence_id],
+                    "reason": str(obligation.get("obligation_summary") or result.get("rationale") or quote),
+                    "source_location": source_location,
+                    "execution_authorized": False,
+                })
         for obligation in ledger_items:
             if (
                 not isinstance(obligation, dict)
@@ -939,15 +996,37 @@ def enforce_obligation_review_output_policy(
     return manual_review_clause_ids
 
 
+def _independent_obligation_producer_record(
+    independent_review: dict[str, Any], obligation: dict[str, Any],
+) -> dict[str, Any]:
+    """Keep the original AO and the receipt identity beside its manual projection."""
+    context_fields = (
+        "run_id", "case_id", "chunk_index", "attempt", "candidate_response_sha256",
+        "review_request_sha256", "review_response_sha256",
+    )
+    return {
+        "producer": "independent_obligation_review",
+        "record": {
+            "review_context": {
+                key: copy.deepcopy(independent_review.get(key)) for key in context_fields
+            },
+            "obligation": copy.deepcopy(obligation),
+        },
+    }
+
+
 def _source_content_pending_release_gates(
     independent_reviews: list[dict[str, Any]],
     *, clauses: list[dict[str, Any]], evidence_doc: dict[str, Any],
+    expected_run_id: str,
 ) -> list[dict[str, Any]]:
-    """Project source-bound author-input findings into draft-only visible gates."""
+    """Project each current-run AO into its own source-bound draft-only gate."""
     if not isinstance(independent_reviews, list):
         raise ValueError("independent obligation reviews must be an array")
     if not isinstance(clauses, list) or not isinstance(evidence_doc, dict):
         raise ValueError("current clause and evidence artifacts are required for source-content gates")
+    if not isinstance(expected_run_id, str) or not expected_run_id:
+        raise ValueError("source-content pending requires a current run ID")
     clauses_by_id = {
         str(item.get("id")): item for item in clauses
         if isinstance(item, dict) and isinstance(item.get("id"), str)
@@ -957,7 +1036,7 @@ def _source_content_pending_release_gates(
         if isinstance(item, dict) and isinstance(item.get("id"), str)
     }
     gates: list[dict[str, Any]] = []
-    seen_clause_ids: set[str] = set()
+    seen_obligation_ids: set[str] = set()
     for independent_review in independent_reviews:
         if not isinstance(independent_review, dict):
             raise ValueError("independent obligation review must be an object")
@@ -968,79 +1047,170 @@ def _source_content_pending_release_gates(
             if not isinstance(pending, dict):
                 raise ValueError("independent review source-content item must be an object")
             clause_id = pending.get("clause_id")
-            quotes = pending.get("source_quotes")
+            obligation_id = pending.get("analysis_obligation_id")
+            quote = pending.get("source_quote")
+            summary = pending.get("obligation_summary")
+            source_ref = pending.get("source_ref")
+            source_start, source_end = pending.get("source_start"), pending.get("source_end")
+            source_sha = pending.get("source_text_sha256")
+            analysis_identity = pending.get("analysis_obligation_identity")
+            evidence_ids = pending.get("evidence_ids", [])
+            if isinstance(obligation_id, str) and obligation_id in seen_obligation_ids:
+                raise ValueError("duplicate source-content pending obligation")
+            review_request_sha = (
+                independent_review.get("review_request_sha256")
+                if isinstance(independent_review, dict) else None
+            )
+            identity_metadata = {
+                "protocol": OBLIGATION_ANALYSIS_LEDGER_PROTOCOL,
+                "run_id": expected_run_id,
+                "case_id": independent_review.get("case_id"),
+                "chunk_index": independent_review.get("chunk_index"),
+                "attempt": independent_review.get("attempt"),
+                "candidate_response_sha256": independent_review.get("candidate_response_sha256"),
+                "review_request_sha256": review_request_sha,
+                "review_response_sha256": independent_review.get("review_response_sha256"),
+                "check_id": clause_id,
+                "obligation_index": (
+                    analysis_identity.get("obligation_index")
+                    if isinstance(analysis_identity, dict) else None
+                ),
+                "source_ref": source_ref,
+                "source_sha256": source_sha,
+                "start": source_start,
+                "end": source_end,
+            }
             if (
                 not isinstance(clause_id, str) or not clause_id
-                or not isinstance(quotes, list) or not quotes
-                or any(not isinstance(quote, str) or not quote.strip() for quote in quotes)
+                or pending.get("work_type") != "authoring_content"
+                or not isinstance(obligation_id, str)
+                or not re.fullmatch(r"AO-[0-9a-f]{24}", obligation_id)
+                or obligation_id in seen_obligation_ids
+                or not isinstance(quote, str) or not quote.strip()
+                or not isinstance(summary, str) or not summary.strip()
+                or not isinstance(source_ref, str) or not source_ref
+                or isinstance(source_start, bool) or not isinstance(source_start, int) or source_start < 0
+                or isinstance(source_end, bool) or not isinstance(source_end, int) or source_end <= source_start
+                or not isinstance(source_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", source_sha)
+                or not isinstance(evidence_ids, list) or not evidence_ids
+                or any(not isinstance(value, str) or not value for value in evidence_ids)
+                or pending.get("execution_authorized") is not False
             ):
-                raise ValueError("validated independent review has a malformed source-content pending item")
-            evidence_ids = pending.get("evidence_ids", [])
-            if not isinstance(evidence_ids, list) or not evidence_ids or any(
-                not isinstance(value, str) or not value for value in evidence_ids
-            ):
-                raise ValueError("source-content pending requires non-empty evidence IDs")
-            if clause_id in seen_clause_ids:
-                raise ValueError("duplicate source-content pending clause")
+                raise ValueError("validated source-content pending obligation is malformed")
             clause = clauses_by_id.get(clause_id)
             span = clause.get("source_span") if isinstance(clause, dict) else None
             span_evidence_id = span.get("evidence_id") if isinstance(span, dict) else None
             source_evidence = evidence_by_id.get(span_evidence_id) if isinstance(span_evidence_id, str) else None
             raw_source = source_evidence.get("text") if isinstance(source_evidence, dict) else None
-            start = span.get("start_offset") if isinstance(span, dict) else None
-            end = span.get("end_offset") if isinstance(span, dict) else None
+            span_start = span.get("start_offset") if isinstance(span, dict) else None
+            span_end = span.get("end_offset") if isinstance(span, dict) else None
             span_text = span.get("text") if isinstance(span, dict) else None
             clause_evidence_ids = clause.get("evidence_ids") if isinstance(clause, dict) else None
             clause_text = clause.get("text") if isinstance(clause, dict) else None
-            source_location = None
+            expected_location = None
             if (
                 isinstance(clause, dict)
                 and isinstance(span, dict)
                 and isinstance(span_evidence_id, str)
                 and isinstance(raw_source, str)
-                and isinstance(start, int) and not isinstance(start, bool)
-                and isinstance(end, int) and not isinstance(end, bool)
-                and 0 <= start < end <= len(raw_source)
+                and isinstance(span_start, int) and not isinstance(span_start, bool)
+                and isinstance(span_end, int) and not isinstance(span_end, bool)
+                and 0 <= span_start < span_end <= len(raw_source)
                 and isinstance(span_text, str)
-                and raw_source[start:end] == span_text
+                and raw_source[span_start:span_end] == span_text
                 and hashlib.sha256(raw_source.encode("utf-8")).hexdigest()
                 == span.get("source_sha256")
                 and isinstance(clause_text, str)
-                and re.sub(r"\s+", " ", span_text).strip() == clause_text
+                and span_text == clause_text
                 and isinstance(clause_evidence_ids, list)
                 and set(clause_evidence_ids) == {span_evidence_id}
-                and set(evidence_ids) == {span_evidence_id}
-                and all(
-                    isinstance(quote, str)
-                    and quote in clause_text
-                    and re.sub(r"\s+", " ", quote).strip()
-                    in re.sub(r"\s+", " ", span_text).strip()
-                    for quote in quotes
-                )
+                and evidence_ids == [span_evidence_id]
+                and source_start < source_end <= len(span_text)
+                and span_text[source_start:source_end] == quote
+                and source_sha == sha256_json(span_text)
             ):
-                source_location = {
+                expected_location = {
                     "evidence_id": span_evidence_id,
-                    "start_offset": start,
-                    "end_offset": end,
+                    "start_offset": span_start + source_start,
+                    "end_offset": span_start + source_end,
                     "source_sha256": span["source_sha256"],
                 }
-            if source_location is None:
+            expected_identity = {
+                **identity_metadata,
+            }
+            expected_source_ref = "Q" + sha256_json({
+                "request_sha256": review_request_sha,
+                "check_id": clause_id,
+                "start": source_start,
+                "end": source_end,
+                "text": quote,
+            })[:16]
+            if (
+                expected_location is None
+                or pending.get("source_location") != expected_location
+                or not isinstance(analysis_identity, dict)
+                or analysis_identity != expected_identity
+                or independent_review.get("run_id") != expected_run_id
+                or isinstance(identity_metadata["chunk_index"], bool)
+                or not isinstance(identity_metadata["chunk_index"], int)
+                or identity_metadata["chunk_index"] <= 0
+                or isinstance(identity_metadata["attempt"], bool)
+                or not isinstance(identity_metadata["attempt"], int)
+                or identity_metadata["attempt"] <= 0
+                or isinstance(identity_metadata["obligation_index"], bool)
+                or not isinstance(identity_metadata["obligation_index"], int)
+                or identity_metadata["obligation_index"] < 0
+                or any(
+                    not isinstance(identity_metadata[field], str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", identity_metadata[field])
+                    for field in (
+                        "candidate_response_sha256", "review_request_sha256",
+                        "review_response_sha256",
+                    )
+                )
+                or pending.get("requirement_refs") != []
+                or "AO-" + sha256_json(analysis_identity)[:24] != obligation_id
+                or source_ref != expected_source_ref
+            ):
                 raise ValueError(
-                    "source-content pending quote, evidence, range, or hash is not bound to current source"
+                    "source-content pending obligation, evidence, range, hash, or run is not current-source-bound"
                 )
             gate = {
                 "source_code": "independent_authoring_content_pending",
                 "category": "input_prerequisite",
-                "source_text": "\n".join(quotes),
-                "reason": "原文含明确的作者内容指令；当前输入仍待作者提供真实内容。",
-                "action": "请用本人真实研究内容替换示例或虚构内容；系统不会代写论文实质内容。完成后以 submission 模式重新开始一轮新运行。",
-                "placeholder_text": f"【待补写真实论文内容：{clause_id}】",
+                "source_text": quote,
+                "reason": summary,
+                "action": "请按这条来源义务补入本人真实研究内容；系统不会代写论文实质内容。完成后以 submission 模式重新开始一轮新运行。",
+                "placeholder_text": f"【待补写真实论文内容：{clause_id}｜{obligation_id}】",
                 "clause_ids": [clause_id],
                 "evidence_ids": [span_evidence_id],
-                "source_location": source_location,
+                "analysis_obligation_id": obligation_id,
+                "analysis_obligation_identity": copy.deepcopy(analysis_identity),
+                "work_type": "authoring_content",
+                "obligation_summary": summary,
+                "source_ref": source_ref,
+                "source_start": source_start,
+                "source_end": source_end,
+                "source_text_sha256": source_sha,
+                "source_location": expected_location,
+                "producer_context": {
+                    "run_id": expected_run_id,
+                    "case_id": independent_review.get("case_id"),
+                    "chunk_index": independent_review.get("chunk_index"),
+                    "attempt": independent_review.get("attempt"),
+                    "candidate_response_sha256": independent_review.get("candidate_response_sha256"),
+                    "review_request_sha256": review_request_sha,
+                    "review_response_sha256": independent_review.get("review_response_sha256"),
+                },
+                "requirement_ids": [],
+                "question_ids": [],
+                "execution_authorized": False,
+                "producer_records": [
+                    _independent_obligation_producer_record(independent_review, pending)
+                ],
             }
             gates.append(gate)
-            seen_clause_ids.add(clause_id)
+            seen_obligation_ids.add(obligation_id)
     return gates
 
 
@@ -1223,6 +1393,9 @@ def _source_content_verification_release_gates(
                 "source_text_sha256": source_sha,
                 "source_location": expected_location,
                 "execution_authorized": False,
+                "producer_records": [
+                    _independent_obligation_producer_record(independent_review, pending)
+                ],
             })
             seen_obligation_ids.add(obligation_id)
     return gates
@@ -1350,6 +1523,9 @@ def _scope_unresolved_release_gates(
                 "execution_authorized": False,
             }
             gate["source_location"] = copy.deepcopy(expected_location)
+            gate["producer_records"] = [
+                _independent_obligation_producer_record(independent_review, item)
+            ]
             gates.append(gate)
     return gates
 
@@ -2549,15 +2725,13 @@ def _main(argv: list[str]) -> int:
         manual_review_release_gates.extend(
             _source_content_verification_release_gates(
                 independent_reviews, clauses=clauses, evidence_doc=evidence_doc,
-                expected_run_id=(
-                    str(host_review_receipts.get("run_id") or "")
-                    if isinstance(host_review_receipts, dict) else ""
-                ),
+                expected_run_id=str(extraction_manifest.get("run_id") or ""),
             )
         )
         manual_review_release_gates.extend(
             _source_content_pending_release_gates(
                 independent_reviews, clauses=clauses, evidence_doc=evidence_doc,
+                expected_run_id=str(extraction_manifest.get("run_id") or ""),
             )
         )
         manual_review_release_gates.extend(

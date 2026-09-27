@@ -3892,12 +3892,10 @@ def main(argv: list[str]) -> int:
         pending_cover_fields = cover_changes.get("metadata_pending_fields", [])
         if pending_cover_fields:
             if manual_review_document_ledger is None:
-                manual_review_document_ledger = {
-                    "schema_version": "1.0",
-                    "policy": "review_draft_only",
-                    "submission_ready": False,
-                    "items": [],
-                }
+                raise SystemExit(
+                    "review-draft cover markers require a current-run-bound manual-review ledger; "
+                    "provide --manual-review-items and --pipeline-manifest"
+                )
             cover_items = []
             for field_id in sorted(set(pending_cover_fields)):
                 source_code = f"missing_cover_metadata:{field_id}"
@@ -3955,14 +3953,9 @@ def main(argv: list[str]) -> int:
                         args.manual_review_items, manual_review_document_ledger,
                     )
             else:
-                manual_review_document_ledger = {
-                    "schema_version": "1.0",
-                    "policy": "review_draft_only",
-                    "submission_ready": False,
-                    "items": [],
-                }
-                manual_review_document_ledger = add_manual_review_items(
-                    manual_review_document_ledger, normalized_constraint_items,
+                raise SystemExit(
+                    "review-draft format-constraint markers require a current-run-bound "
+                    "manual-review ledger; provide --manual-review-items and --pipeline-manifest"
                 )
     # Findings are collected against the document before review markers are
     # appended.  This prevents the marker page itself from manufacturing role
@@ -4332,22 +4325,18 @@ def main(argv: list[str]) -> int:
         late_review_items.extend(semantic_uncertainty_items)
         manual_review_receipts = manual_review_receipt_items(property_receipts)
         late_review_items.extend(manual_review_receipts)
-        if manual_review_document_ledger is None:
-            manual_review_document_ledger = {
-                "schema_version": "1.0",
-                "policy": "review_draft_only",
-                "binding": {},
-                "submission_ready": False,
-                "items": [],
-                "summary": {},
-            }
-        manual_review_document_ledger = add_manual_review_items(
-            copy.deepcopy(manual_review_document_ledger), late_review_items,
-        )
-        manual_review_document_ledger = filter_manual_marker_ledger(
-            manual_review_document_ledger,
-        )
-        if args.manual_review_items:
+        if late_review_items and manual_review_document_ledger is None:
+            raise SystemExit(
+                "review-draft manual markers require a current-run-bound manual-review ledger; "
+                "provide --manual-review-items and --pipeline-manifest"
+            )
+        if manual_review_document_ledger is not None:
+            manual_review_document_ledger = add_manual_review_items(
+                copy.deepcopy(manual_review_document_ledger), late_review_items,
+            )
+            manual_review_document_ledger = filter_manual_marker_ledger(
+                manual_review_document_ledger,
+            )
             ledger_errors = load_and_validate(
                 manual_review_document_ledger,
                 Path(__file__).resolve().parents[1] / "schema" / "manual-review-ledger.schema.json",
@@ -4356,7 +4345,8 @@ def main(argv: list[str]) -> int:
                 raise SystemExit(
                     "invalid generated manual-review ledger schema:\n" + "\n".join(ledger_errors)
                 )
-            write_manual_review_ledger(args.manual_review_items, manual_review_document_ledger)
+            if args.manual_review_items:
+                write_manual_review_ledger(args.manual_review_items, manual_review_document_ledger)
         inline_manual_review_locations = insert_inline_manual_review_markers(
             check, manual_review_document_ledger, mappings,
         )

@@ -428,6 +428,15 @@ decoded raw sidecar. If an undecodable attempt intervenes, semantic change
 authorization comes from the most recent earlier decoded attempt that actually
 failed review; the parse failure remains separate retry feedback and cannot
 replace that semantic blocker.
+For a text property rejected only because its literal differs from the uniquely
+bound current source span by Unicode whitespace, the native bridge may copy the
+exact source text into that candidate field. It must validate current
+invocation fingerprints, cited primary evidence, span offsets, and source hash;
+preserve the raw model response; record before/after and source hashes; and rerun
+the full validator. This projection cannot change punctuation or any
+non-whitespace character. Missing, stale, foreign, or ambiguous source bindings
+remain failures; the rule does not normalize source evidence or weaken the
+exact-literal contract.
 For the narrowly authorized v3 missing-obligation-inventory correction, the
 bridge constructs the candidate from the receipt-bound parent and copies only
 the exact `clause_reviews[i].obligations` fields named by matching

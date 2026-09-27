@@ -942,6 +942,20 @@ class HostAgentBridgeTests(unittest.TestCase):
         chunk = json.loads((directory / "llm-request-chunks.json").read_text(encoding="utf-8"))[0]
         return directory, chunk
 
+    def _validated_chunk_projection_sha256(self, review_dir: Path, chunk: dict) -> str:
+        full_request = json.loads((review_dir / "llm-request.json").read_text(encoding="utf-8"))
+        chunks = json.loads(
+            (review_dir / "llm-request-chunks.json").read_text(encoding="utf-8")
+        )
+        manifest = json.loads(
+            (review_dir / "host-agent-review-manifest.json").read_text(encoding="utf-8")
+        )
+        engine.validate_host_review_chunk_source_projection(full_request, chunks, manifest)
+        index = chunk.get("batch", {}).get("index", 0) - 1
+        self.assertGreaterEqual(index, 0)
+        self.assertEqual(chunks[index], chunk)
+        return bridge._response_sha256(chunk)
+
     @staticmethod
     def _bind_test_source_spans(clauses: list[dict], evidence_doc: dict) -> list[dict]:
         evidence_by_id = {
@@ -5081,6 +5095,223 @@ class HostAgentBridgeTests(unittest.TestCase):
         self.assertEqual(bridge.validate_host_agent_response(candidate, chunk), [])
         self.assertEqual(raw_response, raw_before, "candidate preparation must preserve the original response")
 
+    def test_source_literal_whitespace_projection_uses_only_unique_current_source_text(self) -> None:
+        cases = (
+            ("学    号：", "学 号：", "cover_field_label"),
+            ("硕  士 学 位 论 文", "硕士 学位 论 文", "thesis_type_zh"),
+            ("年　月", "年月", "cover_field_label"),
+        )
+        for source, model_text, role in cases:
+            with self.subTest(source=source, role=role), tempfile.TemporaryDirectory() as td:
+                _, chunk = self._packet(
+                    Path(td) / "requirements", contract_version="3.0", source=source,
+                )
+                review_dir = Path(td) / "requirements"
+                validated_chunk_sha256 = self._validated_chunk_projection_sha256(
+                    review_dir, chunk,
+                )
+                raw_response = {
+                    "contract_version": "3.0",
+                    "provenance": copy.deepcopy(chunk["provenance"]),
+                    "requirements": [{
+                        "role": role,
+                        "properties": {"text": model_text},
+                        "clause_ids": ["C1"],
+                        "evidence_ids": ["E1"],
+                        "confidence": 0.98,
+                        "reason": "Preserve the exact source literal.",
+                        "verification": {
+                            "mode": "word_render",
+                            "checks": ["Verify the literal after DOCX rendering."],
+                            "checker_ids": ["docx.property_receipts", "docx.word_render"],
+                        },
+                    }],
+                    "clause_reviews": [{
+                        "clause_id": "C1",
+                        "classification": "executable",
+                        "normative_basis": "explicit_normative_text",
+                        "reason": "The source label is represented exactly.",
+                        "obligations": [{
+                            "id": "literal",
+                            "status": "covered",
+                            "reason": "The exact source label is represented.",
+                        }],
+                    }],
+                    "unsupported_items": [],
+                    "reported_conflicts": [],
+                }
+                raw_before = copy.deepcopy(raw_response)
+                candidate, audit = bridge.prepare_native_response_candidate(
+                    raw_response, chunk,
+                    source_projection_validation_sha256=validated_chunk_sha256,
+                )
+
+                self.assertEqual(candidate["requirements"][0]["properties"]["text"], source)
+                self.assertEqual(bridge.validate_host_agent_response(candidate, chunk), [])
+                self.assertEqual(raw_response, raw_before, "the raw model response must stay unchanged")
+                projection = audit["source_literal_whitespace_projections"]
+                self.assertEqual(len(projection), 1)
+                self.assertEqual(projection[0]["rule_id"], "source_literal_whitespace_projection_v1")
+                self.assertEqual(projection[0]["json_pointer"], "$.requirements[0].properties.text")
+                self.assertEqual(projection[0]["run_id"], chunk["provenance"]["run_id"])
+                self.assertEqual(projection[0]["clause_id"], "C1")
+                self.assertEqual(projection[0]["evidence_id"], "E1")
+                self.assertEqual(projection[0]["change_kind"], "unicode_whitespace_only")
+                self.assertNotEqual(
+                    projection[0]["response_before_sha256"],
+                    projection[0]["response_after_sha256"],
+                )
+
+    def test_source_literal_projection_never_repairs_punctuation_or_content(self) -> None:
+        rejected_texts = ("学 号;", "学X号：", "学 号：额外")
+        for model_text in rejected_texts:
+            with self.subTest(model_text=model_text), tempfile.TemporaryDirectory() as td:
+                review_dir, chunk = self._packet(
+                    Path(td) / "requirements", contract_version="3.0", source="学    号：",
+                )
+                validated_chunk_sha256 = self._validated_chunk_projection_sha256(
+                    review_dir, chunk,
+                )
+                response = {
+                    "contract_version": "3.0",
+                    "provenance": copy.deepcopy(chunk["provenance"]),
+                    "requirements": [{
+                        "role": "cover_field_label", "properties": {"text": model_text},
+                        "clause_ids": ["C1"], "evidence_ids": ["E1"],
+                        "confidence": 0.98, "reason": "Preserve the exact source literal.",
+                        "verification": {
+                            "mode": "word_render", "checks": ["Verify the literal."],
+                            "checker_ids": ["docx.property_receipts", "docx.word_render"],
+                        },
+                    }],
+                    "clause_reviews": [{
+                        "clause_id": "C1", "classification": "executable",
+                        "normative_basis": "explicit_normative_text",
+                        "reason": "The source label is represented.",
+                        "obligations": [{
+                            "id": "literal", "status": "covered",
+                            "reason": "The source label is represented.",
+                        }],
+                    }],
+                    "unsupported_items": [], "reported_conflicts": [],
+                }
+                with self.assertRaisesRegex(ValueError, "must_be_exact_substring_of_cited_source_span"):
+                    bridge.prepare_native_response_candidate(
+                        response, chunk,
+                        source_projection_validation_sha256=validated_chunk_sha256,
+                    )
+
+    def test_source_literal_projection_requires_valid_cited_primary_span(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            review_dir, chunk = self._packet(
+                Path(td) / "requirements", contract_version="3.0", source="学    号：",
+            )
+            validated_chunk_sha256 = self._validated_chunk_projection_sha256(
+                review_dir, chunk,
+            )
+            response = {
+                "contract_version": "3.0",
+                "provenance": copy.deepcopy(chunk["provenance"]),
+                "requirements": [{
+                    "role": "cover_field_label", "properties": {"text": "学 号："},
+                    "clause_ids": ["C1"], "evidence_ids": ["E1"],
+                    "confidence": 0.98, "reason": "Preserve the exact source literal.",
+                    "verification": {
+                        "mode": "word_render", "checks": ["Verify the literal."],
+                        "checker_ids": ["docx.property_receipts", "docx.word_render"],
+                    },
+                }],
+                "clause_reviews": [{
+                    "clause_id": "C1", "classification": "executable",
+                    "normative_basis": "explicit_normative_text",
+                    "reason": "The source label is represented.",
+                    "obligations": [{
+                        "id": "literal", "status": "covered",
+                        "reason": "The source label is represented.",
+                    }],
+                }],
+                "unsupported_items": [], "reported_conflicts": [],
+            }
+            bad_evidence = copy.deepcopy(response)
+            bad_evidence["requirements"][0]["evidence_ids"] = ["E-FOREIGN"]
+            with self.assertRaises(ValueError):
+                bridge.prepare_native_response_candidate(
+                    bad_evidence, chunk,
+                    source_projection_validation_sha256=validated_chunk_sha256,
+                )
+
+            bad_span_chunk = copy.deepcopy(chunk)
+            bad_span_chunk["clauses"][0]["source_span"]["source_sha256"] = "f" * 64
+            bad_span_chunk_sha256 = bridge._response_sha256(bad_span_chunk)
+            with self.assertRaises(ValueError):
+                bridge.prepare_native_response_candidate(
+                    response, bad_span_chunk,
+                    source_projection_validation_sha256=bad_span_chunk_sha256,
+                )
+
+            stale_run_chunk = copy.deepcopy(chunk)
+            stale_run_chunk.pop("provenance")
+            unchanged, projections = bridge._project_source_literal_whitespace_only(
+                bridge.normalize_native_response(response, chunk["response_schema"]),
+                stale_run_chunk,
+                ["$.requirements[0].properties.text: must_be_exact_substring_of_cited_source_span"],
+                source_projection_validation_sha256=bridge._response_sha256(stale_run_chunk),
+            )
+            self.assertEqual(unchanged["requirements"][0]["properties"]["text"], "学 号：")
+            self.assertEqual(projections, [])
+
+    def test_source_literal_projection_fails_closed_on_unverified_or_ambiguous_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            _, chunk = self._packet(
+                Path(td) / "requirements", contract_version="3.0", source="字段：学    号：填写",
+            )
+            response = {
+                "provenance": copy.deepcopy(chunk["provenance"]),
+                "requirements": [{
+                    "properties": {"text": "学 号"},
+                    "clause_ids": ["C1"],
+                    "evidence_ids": ["E1"],
+                }],
+            }
+            exact_error = [
+                "$.requirements[0].properties.text: "
+                "must_be_exact_substring_of_cited_source_span"
+            ]
+
+            unchanged, projections = bridge._project_source_literal_whitespace_only(
+                response,
+                chunk,
+                exact_error,
+                source_projection_validation_sha256="0" * 64,
+            )
+            self.assertEqual(unchanged, response)
+            self.assertEqual(projections, [])
+
+            ambiguous_chunk = copy.deepcopy(chunk)
+            source = ambiguous_chunk["evidence_context"]["E1"]["text"]
+            start = source.index("学    号")
+            end = start + len("学    号")
+            span = ambiguous_chunk["clauses"][0]["source_span"]
+            span.update({
+                "start_offset": start,
+                "end_offset": end,
+                "text": source[start:end],
+            })
+            duplicate_clause = copy.deepcopy(ambiguous_chunk["clauses"][0])
+            duplicate_clause["id"] = "C2"
+            ambiguous_chunk["clauses"].append(duplicate_clause)
+            ambiguous_response = copy.deepcopy(response)
+            ambiguous_response["requirements"][0]["clause_ids"] = ["C1", "C2"]
+
+            unchanged, projections = bridge._project_source_literal_whitespace_only(
+                ambiguous_response,
+                ambiguous_chunk,
+                exact_error,
+                source_projection_validation_sha256=bridge._response_sha256(ambiguous_chunk),
+            )
+            self.assertEqual(unchanged, ambiguous_response)
+            self.assertEqual(projections, [])
+
     def test_mechanical_repair_compiles_explicit_empty_table_caption_properties(self) -> None:
         response = {
             "requirements": [
@@ -6020,9 +6251,25 @@ class HostAgentBridgeTests(unittest.TestCase):
 
     def test_bridge_retries_locally_rejected_contract_in_a_new_session(self) -> None:
         with tempfile.TemporaryDirectory() as td:
-            review_dir, chunk = self._packet(Path(td) / "requirements")
+            review_dir, chunk = self._packet(
+                Path(td) / "requirements", contract_version="3.0",
+            )
             invalid = self._executable_response(chunk, invalid_verification=True)
             valid = self._executable_response(chunk)
+            for response in (invalid, valid):
+                response["contract_version"] = "3.0"
+                response["clause_reviews"][0].pop("requirement_indexes", None)
+                response["clause_reviews"][0].update({
+                    "normative_basis": "explicit_normative_text",
+                    "obligations": [{
+                        "id": "body-font", "status": "covered",
+                        "reason": "The current source requirement is represented.",
+                    }],
+                })
+                response["requirements"][0]["role"] = "cover_field_label"
+                response["requirements"][0]["properties"] = {
+                    "text": "正文 使用宋体",
+                }
             envelopes = [
                 {"runId": "openclaw-run-contract-retry-1", "status": "ok",
                  "provider": "openai", "model": "gpt-5.6-luna",
@@ -6056,6 +6303,24 @@ class HostAgentBridgeTests(unittest.TestCase):
                 "$.requirements[0].verification",
             )
             self.assertTrue(retry_ledger["paths"][0]["validator_records"])
+            literal_projections = audit["chunk_runs"][0][
+                "source_literal_whitespace_projections"
+            ]
+            self.assertEqual(len(literal_projections), 1)
+            self.assertEqual(
+                literal_projections[0]["source_projection_validation"]["status"],
+                "matched",
+            )
+            accepted = json.loads(response_out.read_text(encoding="utf-8"))
+            self.assertEqual(
+                accepted["requirements"][0]["properties"]["text"], "正文使用宋体",
+            )
+            raw_retry = json.loads(Path(audit["chunk_runs"][0]["raw_response_path"]).read_text(
+                encoding="utf-8",
+            ))
+            self.assertEqual(
+                raw_retry["requirements"][0]["properties"]["text"], "正文 使用宋体",
+            )
             second_prompt = Path(
                 run.call_args_list[1].args[0][run.call_args_list[1].args[0].index("--message-file") + 1]
             ).read_text(encoding="utf-8")

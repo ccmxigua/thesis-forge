@@ -7239,8 +7239,206 @@ def _external_action_obligation_retry_records(
     return [supplemental[path] for path in sorted(supplemental)]
 
 
+_SOURCE_LITERAL_ADJACENT_PUNCTUATION = re.compile(
+    r"^[\s，,、：:;；。！？!?…“”‘’（）()【】\[\]{}]*$"
+)
+
+
+def _source_literal_whitespace_key(value: str) -> str:
+    """Compare literal candidates while ignoring Unicode whitespace only."""
+    return "".join(character for character in value if not character.isspace())
+
+
+def _source_literal_fringe(source: str, start: int, end: int) -> tuple[str, str]:
+    """Return bounded adjacent punctuation, excluding whitespace-only fringes."""
+    left_chars: list[str] = []
+    for character in reversed(source[max(0, start - 8):start]):
+        if not _SOURCE_LITERAL_ADJACENT_PUNCTUATION.fullmatch(character):
+            break
+        left_chars.append(character)
+    left = "".join(reversed(left_chars))
+    if not any(not character.isspace() for character in left):
+        left = ""
+
+    right_chars: list[str] = []
+    for character in source[end:min(len(source), end + 8)]:
+        if not _SOURCE_LITERAL_ADJACENT_PUNCTUATION.fullmatch(character):
+            break
+        right_chars.append(character)
+    right = "".join(right_chars)
+    if not any(not character.isspace() for character in right):
+        right = ""
+    return left, right
+
+
+def _project_source_literal_whitespace_only(
+    response: dict[str, Any], chunk: dict[str, Any], contract_errors: list[str],
+    *, source_projection_validation_sha256: str | None,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Project only whitespace-drifted literals from verified current source spans.
+
+    This repair is considered only for an exact validator error at the literal
+    text path. It does not normalize punctuation or other characters: the
+    accepted value is copied from one uniquely bound source span and then the
+    ordinary full validator is run again by the caller.
+    """
+    if not isinstance(response, dict) or not isinstance(chunk, dict):
+        return response, []
+    current_chunk_sha256 = _response_sha256(chunk)
+    if (
+        not isinstance(source_projection_validation_sha256, str)
+        or source_projection_validation_sha256 != current_chunk_sha256
+    ):
+        return response, []
+    identity = _retry_input_fingerprints(chunk)
+    if not _retry_fingerprints_complete(identity):
+        return response, []
+    requirements = response.get("requirements")
+    clauses = chunk.get("clauses")
+    evidence_context = chunk.get("evidence_context")
+    if not isinstance(requirements, list) or not isinstance(clauses, list) or not isinstance(evidence_context, dict):
+        return response, []
+
+    clause_map = {
+        str(clause["id"]): clause for clause in clauses
+        if isinstance(clause, dict) and isinstance(clause.get("id"), str)
+    }
+    error_set = set(contract_errors)
+    candidate = copy.deepcopy(response)
+    audits: list[dict[str, Any]] = []
+    for index, requirement in enumerate(requirements):
+        pointer = f"$.requirements[{index}].properties.text"
+        exact_error = (
+            f"{pointer}: must_be_exact_substring_of_cited_source_span"
+        )
+        if exact_error not in error_set or not isinstance(requirement, dict):
+            continue
+        properties = requirement.get("properties")
+        original_text = properties.get("text") if isinstance(properties, dict) else None
+        clause_ids = requirement.get("clause_ids")
+        requirement_evidence_ids = requirement.get("evidence_ids")
+        if (
+            not isinstance(original_text, str) or not original_text.strip()
+            or not isinstance(clause_ids, list) or not clause_ids
+            or any(not isinstance(value, str) or not value for value in clause_ids)
+            or len(set(clause_ids)) != len(clause_ids)
+            or not isinstance(requirement_evidence_ids, list)
+            or any(not isinstance(value, str) or not value for value in requirement_evidence_ids)
+        ):
+            continue
+        cited_evidence = set(requirement_evidence_ids)
+        bindings: list[dict[str, Any]] = []
+        for clause_id in clause_ids:
+            clause = clause_map.get(clause_id)
+            span = clause.get("source_span") if isinstance(clause, dict) else None
+            clause_evidence_ids = clause.get("evidence_ids") if isinstance(clause, dict) else None
+            if not isinstance(span, dict):
+                bindings = []
+                break
+            evidence_id = span.get("evidence_id")
+            evidence = evidence_context.get(evidence_id) if isinstance(evidence_id, str) else None
+            source = evidence.get("text") if isinstance(evidence, dict) else None
+            start, end = span.get("start_offset"), span.get("end_offset")
+            span_text, source_digest = span.get("text"), span.get("source_sha256")
+            if (
+                not isinstance(evidence_id, str) or not evidence_id
+                or not isinstance(clause_evidence_ids, list)
+                or evidence_id not in clause_evidence_ids
+                or evidence_id not in cited_evidence
+                or not isinstance(evidence, dict) or evidence.get("id") != evidence_id
+                or not isinstance(source, str)
+                or isinstance(start, bool) or not isinstance(start, int) or start < 0
+                or isinstance(end, bool) or not isinstance(end, int)
+                or end <= start or end > len(source)
+                or not isinstance(span_text, str) or not span_text
+                or source[start:end] != span_text
+                or not isinstance(source_digest, str)
+                or hashlib.sha256(source.encode("utf-8")).hexdigest() != source_digest
+            ):
+                bindings = []
+                break
+
+            left_fringe, right_fringe = _source_literal_fringe(source, start, end)
+            left_options = [""] + ([left_fringe] if left_fringe else [])
+            right_options = [""] + ([right_fringe] if right_fringe else [])
+            for left in left_options:
+                for right in right_options:
+                    canonical_text = source[start - len(left):end + len(right)]
+                    if (
+                        canonical_text != original_text
+                        and _source_literal_whitespace_key(canonical_text)
+                        == _source_literal_whitespace_key(original_text)
+                    ):
+                        bindings.append({
+                            "clause_id": clause_id,
+                            "evidence_id": evidence_id,
+                            "source": source,
+                            "start_offset": start - len(left),
+                            "end_offset": end + len(right),
+                            "source_span_start_offset": start,
+                            "source_span_end_offset": end,
+                            "source_span_text": span_text,
+                            "source_sha256": source_digest,
+                            "canonical_text": canonical_text,
+                        })
+
+        # A model literal must resolve to one current clause/evidence/source
+        # occurrence. Ambiguous or incomplete bindings remain hard failures.
+        if len(bindings) != 1:
+            continue
+        binding = bindings[0]
+        before_sha256 = _response_sha256(candidate)
+        projected_text = binding["canonical_text"]
+        candidate["requirements"][index]["properties"]["text"] = projected_text
+        after_sha256 = _response_sha256(candidate)
+        audits.append({
+            "rule_id": "source_literal_whitespace_projection_v1",
+            "rule_version": 1,
+            "json_pointer": pointer,
+            "run_id": identity["run_id"],
+            "case_id": identity["case_id"],
+            "source_sha256": identity["source_sha256"],
+            "clause_sha256": identity["clause_sha256"],
+            "evidence_sha256": identity["evidence_sha256"],
+            "request_sha256": identity["request_sha256"],
+            "chunk_sha256": identity["chunk_sha256"],
+            "source_projection_validation": {
+                "protocol": "host_review_chunk_source_projection",
+                "status": "matched",
+                "chunk_sha256": source_projection_validation_sha256,
+            },
+            "schema_sha256": identity["schema_sha256"],
+            "code_fingerprint_sha256": identity["code_fingerprint_sha256"],
+            "clause_id": binding["clause_id"],
+            "evidence_id": binding["evidence_id"],
+            "source_offsets": {
+                "start": binding["start_offset"],
+                "end": binding["end_offset"],
+            },
+            "source_span_offsets": {
+                "start": binding["source_span_start_offset"],
+                "end": binding["source_span_end_offset"],
+            },
+            "source_span_sha256": hashlib.sha256(
+                binding["source_span_text"].encode("utf-8")
+            ).hexdigest(),
+            "evidence_text_sha256": binding["source_sha256"],
+            "original_text_sha256": hashlib.sha256(
+                original_text.encode("utf-8")
+            ).hexdigest(),
+            "projected_text_sha256": hashlib.sha256(
+                projected_text.encode("utf-8")
+            ).hexdigest(),
+            "response_before_sha256": before_sha256,
+            "response_after_sha256": after_sha256,
+            "change_kind": "unicode_whitespace_only",
+        })
+    return candidate, audits
+
+
 def prepare_native_response_candidate(
-    raw_response: Any, chunk: dict[str, Any],
+    raw_response: Any, chunk: dict[str, Any], *,
+    source_projection_validation_sha256: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
     """Run the exact offline normalization/projection/repair/validation path.
 
@@ -7279,6 +7477,7 @@ def prepare_native_response_candidate(
     response, soft_keyword_guidance_projections = materialize_soft_keyword_count_guidance(
         response, chunk.get("clauses"),
     )
+    source_literal_whitespace_projections: list[dict[str, Any]] = []
     mechanical_repairs: list[dict[str, Any]] = []
     mechanical_revalidation: dict[str, Any] = {
         "status": "not_needed",
@@ -7286,6 +7485,15 @@ def prepare_native_response_candidate(
         "remaining_error_codes": [],
     }
     contract_errors = validate_host_agent_response(response, chunk)
+    if contract_errors:
+        response, source_literal_whitespace_projections = (
+            _project_source_literal_whitespace_only(
+                response, chunk, contract_errors,
+                source_projection_validation_sha256=source_projection_validation_sha256,
+            )
+        )
+        if source_literal_whitespace_projections:
+            contract_errors = validate_host_agent_response(response, chunk)
     if contract_errors:
         original_error_records = contract_error_records(
             contract_errors, response=response, chunk=chunk,
@@ -7312,6 +7520,9 @@ def prepare_native_response_candidate(
                     for item in original_error_records if isinstance(item, dict)
                 }),
             }
+            error.source_literal_whitespace_projections = copy.deepcopy(  # type: ignore[attr-defined]
+                source_literal_whitespace_projections
+            )
             raise error
 
         remaining_errors = validate_host_agent_response(repaired_response, chunk)
@@ -7356,6 +7567,9 @@ def prepare_native_response_candidate(
                 }),
                 **mechanical_revalidation,
             }
+            error.source_literal_whitespace_projections = copy.deepcopy(  # type: ignore[attr-defined]
+                source_literal_whitespace_projections
+            )
             raise error
         response = repaired_response
 
@@ -7364,6 +7578,7 @@ def prepare_native_response_candidate(
         "complete_abstract_source_projections": abstract_source_projections,
         "soft_keyword_count_guidance_projections": soft_keyword_guidance_projections,
         "source_obligation_verification_projections": source_verification_projections,
+        "source_literal_whitespace_projections": source_literal_whitespace_projections,
         "mechanical_repairs": mechanical_repairs,
         "mechanical_repair_revalidation": mechanical_revalidation,
     }
@@ -7860,6 +8075,7 @@ def run_host_agent_chunk(
     retry_parent_response_sha256: str | None = None,
     retry_parent_response_path: Path | None = None,
     retry_error_records: list[dict[str, Any]] | None = None,
+    source_projection_validation_sha256: str | None = None,
 ) -> dict[str, Any]:
     if controller is not None:
         controller.check()
@@ -8079,7 +8295,10 @@ def run_host_agent_chunk(
     )
     try:
         normalized_raw_response = normalize_native_response(raw_response, response_schema)
-        response, candidate_audit = prepare_native_response_candidate(raw_response, chunk)
+        response, candidate_audit = prepare_native_response_candidate(
+            raw_response, chunk,
+            source_projection_validation_sha256=source_projection_validation_sha256,
+        )
     except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
         exc.retry_stage_snapshots = [decoded_raw_snapshot]  # type: ignore[attr-defined]
         raise
@@ -8098,6 +8317,9 @@ def run_host_agent_chunk(
     ]
     source_verification_projections = candidate_audit[
         "source_obligation_verification_projections"
+    ]
+    source_literal_whitespace_projections = candidate_audit[
+        "source_literal_whitespace_projections"
     ]
     mechanical_repairs = candidate_audit["mechanical_repairs"]
     mechanical_repair_revalidation = candidate_audit[
@@ -8170,8 +8392,9 @@ def run_host_agent_chunk(
             "soft_keyword_count_guidance_projections"
         ],
         "source_obligation_verification_projections": source_verification_projections,
+        "source_literal_whitespace_projections": source_literal_whitespace_projections,
         "mechanical_repair_policy": (
-            "bounded-source-bound-projections-v2"
+            "bounded-source-bound-projections-v3"
         ),
         "enabled_projection_audits": {
             "existing_requirement_payload": len(existing_payload_projections),
@@ -8182,6 +8405,7 @@ def run_host_agent_chunk(
                 "soft_keyword_count_guidance_projections"
             ]),
             "source_obligation_verification": len(source_verification_projections),
+            "source_literal_whitespace": len(source_literal_whitespace_projections),
             "mechanical_repairs": len(mechanical_repairs),
         },
         "authorization_policy": "every_nonlisted_semantic_change_requires_retry_authorization",
@@ -9551,6 +9775,12 @@ def run_bridge(
     validate_host_review_chunk_source_projection(
         full_request, chunks, manifest,
     )
+    # Bind later candidate projections to the exact chunk snapshots that were
+    # checked against the frozen full request and manifest above.
+    validated_chunk_sha256_by_index = {
+        index: _response_sha256(chunk)
+        for index, chunk in enumerate(chunks, start=1)
+    }
     expected_run_id = ((full_request.get("provenance") or {}).get("run_id")
                        if isinstance(full_request, dict) else None)
     runtime_context = copy.deepcopy(full_request.get("runtime_context"))
@@ -9852,6 +10082,7 @@ def run_bridge(
         controller.check()
         if not isinstance(chunk, dict):
             raise ValueError(f"host-agent chunk {index} is not an object")
+        source_projection_validation_sha256 = validated_chunk_sha256_by_index.get(index)
         if not isinstance(response_name, str) or not response_name:
             raise ValueError(f"host-agent response filename {index} is invalid")
         response_path = _bound_path(
@@ -9962,6 +10193,7 @@ def run_bridge(
                     ),
                     retry_parent_response_path=retry_parent_response_path,
                     retry_error_records=copy.deepcopy(retry_error_records),
+                    source_projection_validation_sha256=source_projection_validation_sha256,
                     retry_hint=(
                         "local contract validation failed; repair the response: "
                         + failures[-1]
@@ -10188,7 +10420,12 @@ def run_bridge(
                             and retry_field_projection.get("status") == "projected"
                         ):
                             projected_candidate, projected_candidate_audit = (
-                                prepare_native_response_candidate(retry_candidate_response, chunk)
+                                prepare_native_response_candidate(
+                                    retry_candidate_response, chunk,
+                                    source_projection_validation_sha256=(
+                                        source_projection_validation_sha256
+                                    ),
+                                )
                             )
                             current_candidate = _bind_current_invocation_provenance(
                                 projected_candidate, provenance,
@@ -10250,6 +10487,7 @@ def run_bridge(
                                 "complete_abstract_source_projections",
                                 "soft_keyword_count_guidance_projections",
                                 "source_obligation_verification_projections",
+                                "source_literal_whitespace_projections",
                                 "mechanical_repairs",
                                 "mechanical_repair_revalidation",
                             ):
@@ -10319,7 +10557,12 @@ def run_bridge(
                             # than claiming a persisted candidate receipt.
                             try:
                                 previous_candidate, previous_projection_audit = (
-                                    prepare_native_response_candidate(previous_raw, chunk)
+                                    prepare_native_response_candidate(
+                                        previous_raw, chunk,
+                                        source_projection_validation_sha256=(
+                                            source_projection_validation_sha256
+                                        ),
+                                    )
                                 )
                                 previous_candidate = _bind_current_invocation_provenance(
                                     previous_candidate, provenance,
@@ -10851,6 +11094,9 @@ def run_bridge(
                             mechanical_repair_audit=(
                                 copy.deepcopy(repair_audit)
                                 if isinstance(repair_audit, dict) else None
+                            ),
+                            source_literal_whitespace_projections=copy.deepcopy(
+                                getattr(exc, "source_literal_whitespace_projections", [])
                             ),
                             independent_obligation_review=copy.deepcopy(
                                 getattr(exc, "independent_review_audit", None)

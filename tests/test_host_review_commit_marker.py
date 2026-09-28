@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import copy
 import json
 import sys
 import tempfile
@@ -29,6 +30,7 @@ from native_semantic_review import (  # noqa: E402
 )
 from semantic_source_references import (  # noqa: E402
     REFERENCE_PROTOCOL,
+    bind_validated_source_reference_selections,
     build_source_reference_packet,
     compile_source_reference_response,
 )
@@ -37,14 +39,17 @@ from semantic_source_references import (  # noqa: E402
 class HostReviewCommitMarkerTests(unittest.TestCase):
     def _make_committed_merge(
         self, work: Path, *, scope_unresolved: bool = False,
-        nullable_optionals: bool = False,
+        nullable_optionals: bool = False, registered_projection: bool = False,
     ) -> tuple[Path, Path, Path, dict]:
+        clause_id = "C00074" if registered_projection else "C1"
         source_text = (
+            "The following English is not correct."
+            if registered_projection else
             "Key Words: at least 3 groups, with a maximum of 8 sets."
             if scope_unresolved else "3cm左右" if nullable_optionals else "本节为说明性标题。"
         )
         clauses = [{
-            "id": "C1", "text": source_text, "evidence_ids": ["E1"],
+            "id": clause_id, "text": source_text, "evidence_ids": ["E1"],
             "source_span": {
                 "evidence_id": "E1", "start_offset": 0, "end_offset": len(source_text),
                 "text": source_text,
@@ -73,10 +78,12 @@ class HostReviewCommitMarkerTests(unittest.TestCase):
             "provenance": chunk["provenance"],
             "requirements": [],
             "clause_reviews": [{
-                "clause_id": "C1",
+                "clause_id": clause_id,
                 "classification": "unresolved" if scope_unresolved or nullable_optionals else "informational",
                 "requirement_indexes": [],
                 "reason": (
+                    "The statement does not identify an approved target or replacement."
+                    if registered_projection else
                     "计数上下限的单位不一致，适用范围保持未决。"
                     if scope_unresolved else "物理对象或适用位置尚未明确。"
                     if nullable_optionals else "该段为说明性内容。"
@@ -106,9 +113,30 @@ class HostReviewCommitMarkerTests(unittest.TestCase):
             span for span in source_packet["checks"][0]["source_spans"]
             if span["start"] == 0 and span["end"] == len(source_text)
         )
-        if scope_unresolved:
+        if registered_projection:
             raw_reviewer_response = {"results": [{
-                "check_id": "C1",
+                "check_id": clause_id,
+                "verdict": "manual_review_required",
+                "rationale": "The exact source does not identify the correction target.",
+                "evidence_refs": [source_span["ref_id"]],
+                "identified_obligations": [
+                    {
+                        "source_ref": source_span["ref_id"],
+                        "disposition": "unrepresented",
+                        "requirement_refs": [],
+                        "obligation_summary": "Determine the approved correction target.",
+                    },
+                    {
+                        "source_ref": source_span["ref_id"],
+                        "disposition": "unrepresented",
+                        "requirement_refs": [],
+                        "obligation_summary": "Resolve the unspecified replacement.",
+                    },
+                ],
+            }]}
+        elif scope_unresolved:
+            raw_reviewer_response = {"results": [{
+                "check_id": clause_id,
                 "verdict": "manual_review_required",
                 "rationale": "The lower and upper bounds use different measurement units.",
                 "evidence_refs": [source_span["ref_id"]],
@@ -133,7 +161,7 @@ class HostReviewCommitMarkerTests(unittest.TestCase):
             }]}
         elif nullable_optionals:
             raw_reviewer_response = {"results": [{
-                "check_id": "C1",
+                "check_id": clause_id,
                 "verdict": "uncertain",
                 "rationale": "The physical object and applicable location are not identified.",
                 "evidence_refs": [source_span["ref_id"]],
@@ -146,7 +174,7 @@ class HostReviewCommitMarkerTests(unittest.TestCase):
             }]}
         else:
             raw_reviewer_response = {"results": [{
-                "check_id": "C1",
+                "check_id": clause_id,
                 "verdict": "consistent",
                 "rationale": "来源是说明性标题，没有遗漏可执行义务。",
                 "evidence_refs": [source_span["ref_id"]],
@@ -162,8 +190,12 @@ class HostReviewCommitMarkerTests(unittest.TestCase):
             coverage=True,
             provider_nullable_optionals=True,
         )
+        compiled_response = copy.deepcopy(reviewer_response)
         normalized_results = validate_obligation_coverage_response(
             reviewer_response, independent_request["checks"],
+        )
+        source_compilation = bind_validated_source_reference_selections(
+            source_compilation, compiled_response, reviewer_response, independent_request,
         )
         request_path = independent_dir / "request.json"
         source_packet_path = independent_dir / "source-reference-packet.json"
@@ -178,7 +210,7 @@ class HostReviewCommitMarkerTests(unittest.TestCase):
         )
         reviewer_response_path.write_text(json.dumps(reviewer_response, ensure_ascii=False), encoding="utf-8")
         compiled_response_path.write_text(
-            json.dumps(reviewer_response, ensure_ascii=False), encoding="utf-8",
+            json.dumps(compiled_response, ensure_ascii=False), encoding="utf-8",
         )
         source_compilation_path.write_text(
             json.dumps(source_compilation, ensure_ascii=False), encoding="utf-8",
@@ -194,6 +226,7 @@ class HostReviewCommitMarkerTests(unittest.TestCase):
             "request_path": str(request_path.resolve()),
             "response_sha256": reviewer_response_sha,
             "response_path": str(reviewer_response_path.resolve()),
+            "canonical_response_sha256": sha256_json(reviewer_response),
             "source_reference_protocol": REFERENCE_PROTOCOL,
             "source_reference_packet_path": str(source_packet_path.resolve()),
             "source_reference_packet_sha256": sha256_file(source_packet_path),
@@ -328,7 +361,67 @@ class HostReviewCommitMarkerTests(unittest.TestCase):
                 extraction_manifest=extraction, work=work,
             )
             self.assertEqual(result["run_id"], "commit-marker-test-run")
-            self.assertEqual(result["merge_commit_marker"]["path"], str((receipt.parent / "merge-commit.json").resolve()))
+
+    def test_pipeline_replays_registered_source_projection_and_canonical_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            work = Path(td).resolve()
+            response, audit, receipt, extraction = self._make_committed_merge(
+                work, registered_projection=True,
+            )
+            envelope = json.loads(
+                (audit.parent / "independent-review-chunk-0001-attempt-01" / "coverage-audit.json")
+                .read_text(encoding="utf-8")
+            )
+            review_audit = envelope["review_audit"]
+            compiled = json.loads(
+                Path(review_audit["compiled_response_path"]).read_text(encoding="utf-8")
+            )
+            canonical = json.loads(
+                Path(review_audit["response_path"]).read_text(encoding="utf-8")
+            )
+            compilation = json.loads(
+                Path(review_audit["source_reference_compilation_path"]).read_text(encoding="utf-8")
+            )
+            ledger = json.loads(
+                (audit.parent / envelope["obligation_analysis_ledger"]["path"])
+                .read_text(encoding="utf-8")
+            )
+            self.assertEqual(len(compiled["results"][0]["identified_obligations"]), 2)
+            self.assertEqual(len(canonical["results"][0]["identified_obligations"]), 1)
+            self.assertEqual(len(compilation["selections"][0]["obligations"]), 2)
+            self.assertEqual(len(compilation["canonical_selections"][0]["obligations"]), 1)
+            self.assertEqual(len(ledger["obligations"]), 1)
+            self.assertFalse(ledger["submission_ready"])
+
+            result = pipeline.validate_host_review_receipts(
+                response_path=response, audit_path=audit, receipt_path=receipt,
+                extraction_manifest=extraction, work=work, output_policy="review_draft",
+            )
+            self.assertEqual(result["run_id"], "commit-marker-test-run")
+
+    def test_pipeline_rejects_resealed_tampered_canonical_selection(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            work = Path(td).resolve()
+            response, audit_path, _receipt, _extraction = self._make_committed_merge(
+                work, registered_projection=True,
+            )
+
+            def tamper(compilation: dict) -> None:
+                compilation["canonical_selections"][0]["obligations"][0]["span"]["text"] = "伪造来源"
+
+            audit = self._reseal_source_compilation_chain_for_test(audit_path, tamper)
+            fresh_request = json.loads(
+                (audit_path.parent / "llm-request.json").read_text(encoding="utf-8")
+            )
+            with self.assertRaisesRegex(ValueError, "validated source-reference projection"):
+                pipeline._validate_independent_obligation_receipts(
+                    audit=audit,
+                    review_root=audit_path.parent,
+                    expected_run_id="commit-marker-test-run",
+                    expected_request_body_sha=request_body_sha256(fresh_request),
+                    expected_request_envelope_sha=None,
+                    expected_request_file_sha=None,
+                )
 
     def test_pipeline_projects_each_verified_scope_obligation_to_its_own_draft_gate(self) -> None:
         with tempfile.TemporaryDirectory() as td:

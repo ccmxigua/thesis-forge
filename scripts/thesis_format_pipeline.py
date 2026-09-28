@@ -48,6 +48,7 @@ from native_semantic_review import (
 from obligation_workflow import OBLIGATION_ANALYSIS_LEDGER_PROTOCOL, work_type_for_disposition
 from semantic_source_references import (
     REFERENCE_PROTOCOL,
+    bind_validated_source_reference_selections,
     build_source_reference_packet,
     compile_source_reference_response,
 )
@@ -526,6 +527,8 @@ def _validate_independent_obligation_receipts(
         ):
             raise ValueError(f"source-reference compilation {index} bytes do not match its receipt")
         compilation = read_json(compilation_path)
+        if not isinstance(compilation, dict):
+            raise ValueError(f"source-reference compilation {index} is malformed")
         source_packet = build_source_reference_packet(review_request)
         source_packet_path = _audit_artifact_path(
             review_root, review_audit.get("source_reference_packet_path"),
@@ -552,13 +555,33 @@ def _validate_independent_obligation_receipts(
         persisted_source_packet = read_json(source_packet_path)
         raw_review_response = read_json(raw_response_path)
         persisted_compiled_response = read_json(compiled_response_path)
-        if persisted_source_packet != source_packet or persisted_compiled_response != review_response:
-            raise ValueError(f"independent source-reference artifacts {index} do not match the canonical request/response")
+        if persisted_source_packet != source_packet:
+            raise ValueError(f"independent source-reference packet {index} does not match the canonical request")
         reconstructed_response, reconstructed_compilation = compile_source_reference_response(
             raw_review_response, review_request, OBLIGATION_COVERAGE_SCHEMA, coverage=True,
             provider_nullable_optionals=review_audit.get("adapter_id") == "codex",
         )
-        if reconstructed_response != review_response or reconstructed_compilation != compilation:
+        if persisted_compiled_response != reconstructed_response:
+            raise ValueError(
+                f"pre-validation source-reference response {index} does not reproduce from the persisted raw response"
+            )
+        if compilation.get("canonicalization_protocol") == "validated_source_reference_projection_v1":
+            canonical_replay = copy.deepcopy(reconstructed_response)
+            canonical_results = validate_obligation_coverage_response(canonical_replay, checks)
+            reconstructed_compilation = bind_validated_source_reference_selections(
+                reconstructed_compilation, reconstructed_response, canonical_replay,
+                review_request,
+            )
+            if (
+                canonical_replay != review_response
+                or review_audit.get("canonical_response_sha256") != sha256_json(canonical_replay)
+                or canonical_results != normalized_results
+                or reconstructed_compilation != compilation
+            ):
+                raise ValueError(
+                    f"validated source-reference projection {index} does not reproduce from the persisted raw response"
+                )
+        elif reconstructed_response != review_response or reconstructed_compilation != compilation:
             raise ValueError(
                 f"source-reference compilation {index} does not reproduce from the persisted raw response"
             )
@@ -570,6 +593,14 @@ def _validate_independent_obligation_receipts(
             str(item.get("check_id")): item for item in compilation.get("selections", [])
             if isinstance(item, dict) and isinstance(item.get("check_id"), str)
         } if isinstance(compilation, dict) else {}
+        if compilation.get("canonicalization_protocol") == "validated_source_reference_projection_v1":
+            canonical_selections = compilation.get("canonical_selections")
+            if not isinstance(canonical_selections, list):
+                raise ValueError(f"obligation analysis ledger {index} has no canonical source selections")
+            selections = {
+                str(item.get("check_id")): item for item in canonical_selections
+                if isinstance(item, dict) and isinstance(item.get("check_id"), str)
+            }
         ledger_items = ledger.get("obligations") if isinstance(ledger, dict) else None
         if (
             not isinstance(ledger, dict)

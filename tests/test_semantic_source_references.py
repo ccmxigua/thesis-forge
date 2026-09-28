@@ -9,10 +9,15 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
-from native_semantic_review import OBLIGATION_COVERAGE_SCHEMA, RESPONSE_SCHEMA
+from native_semantic_review import (
+    OBLIGATION_COVERAGE_SCHEMA,
+    RESPONSE_SCHEMA,
+    validate_obligation_coverage_response,
+)
 from host_review_schema import native_output_schema, native_schema_support_errors
 from semantic_contract import sha256_json
 from semantic_source_references import (
+    bind_validated_source_reference_selections,
     build_source_reference_packet,
     compile_source_reference_response,
     source_reference_schema,
@@ -134,6 +139,144 @@ class SemanticSourceReferenceTests(unittest.TestCase):
             audit["selections"][0]["obligations"][1]["source_ref"],
         )
         self.assertNotIn("machine_obligation_ids", wire_schema["properties"]["results"]["items"]["anyOf"][0]["properties"])
+
+    def test_registered_projection_keeps_provider_and_canonical_source_selections(self) -> None:
+        source = "The following English is not correct."
+        request = {
+            "protocol": "obligation_coverage_v1", "run_id": "run-c74",
+            "case_id": "bsu", "checks": [{
+                "check_id": "C00074", "document_text": source,
+                "review_context": {
+                    "classification": "informational", "requires_requirement": False,
+                    "primary_obligations": [], "linked_requirements": [],
+                    "machine_obligation_ids": [],
+                    "manual_review_codes": ["source_correction_target_ambiguity"],
+                    "source_content_verification_codes": [],
+                },
+            }],
+        }
+        packet = build_source_reference_packet(request)
+        ref = packet["checks"][0]["source_spans"][0]["ref_id"]
+        raw = {"results": [{
+            "check_id": "C00074", "verdict": "manual_review_required",
+            "rationale": "The source does not identify a correction target.",
+            "evidence_refs": [ref], "identified_obligations": [
+                {
+                    "source_ref": ref, "disposition": "unrepresented",
+                    "obligation_summary": "Identify the approved target or replacement.",
+                    "requirement_refs": [],
+                },
+                {
+                    "source_ref": ref, "disposition": "unrepresented",
+                    "obligation_summary": "Resolve the unspecified correction target.",
+                    "requirement_refs": [],
+                },
+            ],
+        }]}
+        raw_before = copy.deepcopy(raw)
+        compiled, compilation = compile_source_reference_response(
+            raw, request, OBLIGATION_COVERAGE_SCHEMA, coverage=True,
+        )
+        compiled_before = copy.deepcopy(compiled)
+        canonical = copy.deepcopy(compiled)
+        validate_obligation_coverage_response(canonical, request["checks"])
+        bound = bind_validated_source_reference_selections(
+            compilation, compiled_before, canonical, request,
+        )
+
+        self.assertEqual(raw, raw_before)
+        self.assertEqual(compiled, compiled_before)
+        self.assertEqual(len(bound["selections"][0]["obligations"]), 2)
+        self.assertEqual(len(canonical["results"][0]["identified_obligations"]), 1)
+        self.assertEqual(len(bound["canonical_selections"][0]["obligations"]), 1)
+        self.assertEqual(
+            bound["canonical_selections"][0]["obligations"][0]["span"]["text"], source,
+        )
+        self.assertEqual(
+            bound["canonical_response_sha256"], sha256_json(canonical),
+        )
+        self.assertEqual(
+            bound["validation_projection"]["pre_validation_obligation_counts"],
+            {"C00074": 2},
+        )
+        self.assertEqual(
+            bound["validation_projection"]["canonical_obligation_counts"],
+            {"C00074": 1},
+        )
+        self.assertEqual(bound["validation_projection"]["changed_check_ids"], ["C00074"])
+
+    def test_registered_projection_fails_closed_without_a_selected_exact_source_span(self) -> None:
+        source = "The following English is not correct."
+        request = {
+            "protocol": "obligation_coverage_v1", "run_id": "run-c74-ambiguous",
+            "checks": [{
+                "check_id": "C00074", "document_text": source,
+                "review_context": {
+                    "classification": "informational", "requires_requirement": False,
+                    "primary_obligations": [], "linked_requirements": [],
+                    "machine_obligation_ids": [],
+                    "manual_review_codes": ["source_correction_target_ambiguity"],
+                    "source_content_verification_codes": [],
+                },
+            }],
+        }
+        packet = build_source_reference_packet(request)
+        source_ref = packet["checks"][0]["source_spans"][0]["ref_id"]
+        raw = {"results": [{
+            "check_id": "C00074", "verdict": "manual_review_required",
+            "rationale": "The correction target is unresolved.",
+            "evidence_refs": [source_ref],
+            "identified_obligations": [{
+                "source_ref": source_ref, "disposition": "unrepresented",
+                "obligation_summary": "Determine the correction target.",
+                "requirement_refs": [],
+            }],
+        }]}
+        compiled, compilation = compile_source_reference_response(
+            raw, request, OBLIGATION_COVERAGE_SCHEMA, coverage=True,
+        )
+        canonical = copy.deepcopy(compiled)
+        canonical["results"][0]["identified_obligations"][0]["source_quote"] = (
+            "English is not correct."
+        )
+        with self.assertRaisesRegex(ValueError, "not uniquely bound"):
+            bind_validated_source_reference_selections(
+                compilation, compiled, canonical, request,
+            )
+
+    def test_same_quote_obligation_reordering_does_not_reuse_source_refs_by_index(self) -> None:
+        quote = "The following English is not correct."
+        source = quote + "\n" + quote
+        request = {
+            "protocol": "coverage", "run_id": "run-same-quote-reorder",
+            "checks": [{"check_id": "C1", "document_text": source}],
+        }
+        packet = build_source_reference_packet(request)
+        refs = [
+            span["ref_id"] for span in packet["checks"][0]["source_spans"]
+            if span["text"] == quote
+        ]
+        self.assertEqual(len(refs), 2)
+        raw = {"results": [{
+            "check_id": "C1", "verdict": "manual_review_required",
+            "rationale": "Two source occurrences are present.",
+            "evidence_refs": refs,
+            "identified_obligations": [
+                {"source_ref": refs[0], "disposition": "unrepresented",
+                 "obligation_summary": "First occurrence.", "requirement_refs": []},
+                {"source_ref": refs[1], "disposition": "unrepresented",
+                 "obligation_summary": "Second occurrence.", "requirement_refs": []},
+            ],
+        }]}
+        compiled, compilation = compile_source_reference_response(
+            raw, request, OBLIGATION_COVERAGE_SCHEMA, coverage=True,
+        )
+        reordered = copy.deepcopy(compiled)
+        reordered["results"][0]["identified_obligations"].reverse()
+        with self.assertRaisesRegex(ValueError, "not uniquely bound"):
+            bind_validated_source_reference_selections(
+                compilation, compiled, reordered, request,
+            )
 
     def test_scope_dependency_fields_are_discriminated_by_disposition(self) -> None:
         request = {"protocol": "coverage", "run_id": "run-scope-schema", "checks": [{

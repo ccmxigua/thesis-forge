@@ -17,6 +17,7 @@ from native_semantic_review import (  # noqa: E402
     ExternalComplianceCorrectionRequiredError,
     MissingExecutableObligationInventoryError,
     NativeSemanticReviewError,
+    OBLIGATION_COVERAGE_PROTOCOL,
     OBLIGATION_COVERAGE_SCHEMA,
     RetryableNativeSemanticReviewError,
     build_obligation_coverage_request,
@@ -509,6 +510,77 @@ class NativeSemanticReviewTests(unittest.TestCase):
         recovered = validate_obligation_coverage_response(omitted, [check])[0]
         self.assertEqual(recovered["verdict"], "manual_review_required")
         self.assertEqual(recovered["identified_obligations"][0]["source_quote"], source)
+
+    def test_native_runner_binds_validator_projection_without_rewriting_provider_artifacts(self) -> None:
+        source = "The following English is not correct."
+        check = {
+            "check_id": "C00074", "document_text": source,
+            "review_context": {
+                "classification": "informational", "requires_requirement": False,
+                "primary_obligations": [], "linked_requirements": [],
+                "machine_obligation_ids": [],
+                "manual_review_codes": ["source_correction_target_ambiguity"],
+                "source_content_verification_codes": [],
+            },
+        }
+        request = {
+            "protocol": OBLIGATION_COVERAGE_PROTOCOL,
+            "case_id": "bsu", "run_id": "run-c74", "checks": [check],
+        }
+        packet = native_review.build_source_reference_packet(request)
+        source_ref = packet["checks"][0]["source_spans"][0]["ref_id"]
+        provider_response = {"results": [{
+            "check_id": "C00074", "verdict": "manual_review_required",
+            "rationale": "The source reports incorrect English but has no target.",
+            "evidence_refs": [source_ref], "identified_obligations": [
+                {
+                    "source_ref": source_ref, "disposition": "unrepresented",
+                    "obligation_summary": "Determine the approved target or replacement.",
+                    "requirement_refs": [],
+                },
+                {
+                    "source_ref": source_ref, "disposition": "unrepresented",
+                    "obligation_summary": "Resolve the unspecified correction target.",
+                    "requirement_refs": [],
+                },
+            ],
+        }]}
+        observed = {}
+
+        def build_command(**kwargs):
+            observed.update(kwargs)
+            kwargs["last_message_path"].write_text("{}", encoding="utf-8")
+            return ["codex"]
+
+        patches = self._stub_codex_host(CompletedProcess(["codex"], 0, "{}", ""))
+        patches[4] = patch.object(native_review.codex_adapter, "build_command", side_effect=build_command)
+        patches.append(patch.object(
+            native_review.codex_adapter, "parse_result",
+            return_value=(provider_response, {"event_types": ["task_complete"]}),
+        ))
+        with tempfile.TemporaryDirectory() as td:
+            output_dir = Path(td) / "native"
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+                audit = native_review.run_native_semantic_review(
+                    request, output_dir=output_dir, host_runtime="codex",
+                    model="gpt-5.6-luna", timeout=5,
+                )
+            raw = json.loads((output_dir / "raw-response.json").read_text(encoding="utf-8"))
+            compiled = json.loads((output_dir / "compiled-response.json").read_text(encoding="utf-8"))
+            canonical = json.loads((output_dir / "response.json").read_text(encoding="utf-8"))
+            compilation = json.loads(
+                (output_dir / "source-reference-compilation.json").read_text(encoding="utf-8")
+            )
+
+            self.assertEqual(raw, provider_response)
+            self.assertEqual(len(compiled["results"][0]["identified_obligations"]), 2)
+            self.assertEqual(len(canonical["results"][0]["identified_obligations"]), 1)
+            self.assertEqual(len(compilation["selections"][0]["obligations"]), 2)
+            self.assertEqual(len(compilation["canonical_selections"][0]["obligations"]), 1)
+            self.assertEqual(compilation["canonicalization_protocol"], "validated_source_reference_projection_v1")
+            self.assertEqual(compilation["canonical_response_sha256"], native_review.sha256_json(canonical))
+            self.assertEqual(audit["canonical_response_sha256"], native_review.sha256_json(canonical))
+            self.assertEqual(audit["results"][0]["verdict"], "manual_review_required")
 
     def test_code_owned_keyword_traceability_route_is_explicit_and_not_a_pass(self) -> None:
         source = (

@@ -240,3 +240,167 @@ def compile_source_reference_response(
             "canonical_input_response_sha256": sha256_json(canonical_input),
         }
     return compiled, compilation
+
+
+def bind_validated_source_reference_selections(
+    compilation: dict[str, Any],
+    compiled_response: dict[str, Any],
+    validated_response: dict[str, Any],
+    request: dict[str, Any],
+) -> dict[str, Any]:
+    """Bind post-validator obligations without overwriting provider selections.
+
+    ``selections`` remains the exact source-reference compiler output for the
+    compiled response. Validators may apply an explicitly registered,
+    deterministic projection (for example, collapsing a non-explicit English
+    correction claim to one human-review item). ``canonical_selections`` is a
+    second, source-bound view for the final response. A changed quote can only
+    reuse a span that the original response selected for that same check; if
+    the selection cannot be resolved uniquely, this fails closed.
+    """
+    if not isinstance(compilation, dict) or not isinstance(request, dict):
+        raise ValueError("source-reference canonical binding requires object inputs")
+    packet = build_source_reference_packet(request)
+    if (
+        compilation.get("protocol") != REFERENCE_PROTOCOL
+        or compilation.get("run_id") != request.get("run_id")
+        or compilation.get("request_sha256") != sha256_json(request)
+        or compilation.get("packet_sha256") != sha256_json(packet)
+        or compilation.get("compiled_response_sha256") != sha256_json(compiled_response)
+    ):
+        raise ValueError("source-reference canonical binding does not match the compiled request")
+
+    def index_results(response: dict[str, Any], label: str) -> dict[str, dict[str, Any]]:
+        items = response.get("results")
+        if not isinstance(items, list):
+            raise ValueError(f"{label} source-reference response has no results")
+        indexed: dict[str, dict[str, Any]] = {}
+        for item in items:
+            if not isinstance(item, dict) or not isinstance(item.get("check_id"), str):
+                raise ValueError(f"{label} source-reference response has a malformed result")
+            check_id = item["check_id"]
+            if check_id in indexed:
+                raise ValueError(f"{label} source-reference response duplicates {check_id}")
+            indexed[check_id] = item
+        return indexed
+
+    source_checks = {
+        str(item["check_id"]): item
+        for item in packet.get("checks", [])
+        if isinstance(item, dict) and isinstance(item.get("check_id"), str)
+    }
+    before = index_results(compiled_response, "compiled")
+    after = index_results(validated_response, "validated")
+    raw_selections = compilation.get("selections")
+    selections = {
+        str(item["check_id"]): item
+        for item in raw_selections
+        if isinstance(item, dict) and isinstance(item.get("check_id"), str)
+    } if isinstance(raw_selections, list) else {}
+    if set(before) != set(source_checks) or set(after) != set(source_checks) or set(selections) != set(source_checks):
+        raise ValueError("source-reference canonical binding does not cover the current checks")
+    if len(selections) != len(raw_selections or []):
+        raise ValueError("source-reference canonical binding has duplicate selections")
+
+    canonical_selections: list[dict[str, Any]] = []
+    changed_check_ids: list[str] = []
+    before_counts: dict[str, int] = {}
+    after_counts: dict[str, int] = {}
+    for check_id in [str(item["check_id"]) for item in packet["checks"]]:
+        source_check = source_checks[check_id]
+        source_text = source_check.get("document_text")
+        span_catalog = {
+            span.get("ref_id"): span
+            for span in source_check.get("source_spans", [])
+            if isinstance(span, dict) and isinstance(span.get("ref_id"), str)
+        }
+        before_result = before[check_id]
+        after_result = after[check_id]
+        selection = selections[check_id]
+        before_obligations = before_result.get("identified_obligations")
+        after_obligations = after_result.get("identified_obligations")
+        selected_obligations = selection.get("obligations")
+        selected_spans = selection.get("spans")
+        if (
+            not isinstance(source_text, str)
+            or not isinstance(before_obligations, list)
+            or not isinstance(after_obligations, list)
+            or not isinstance(selected_obligations, list)
+            or not isinstance(selected_spans, list)
+            or len(before_obligations) != len(selected_obligations)
+        ):
+            raise ValueError(f"source-reference canonical binding is incomplete for {check_id}")
+        for obligation_index, (obligation, selected) in enumerate(zip(before_obligations, selected_obligations)):
+            source_ref = selected.get("source_ref") if isinstance(selected, dict) else None
+            span = selected.get("span") if isinstance(selected, dict) else None
+            if (
+                not isinstance(obligation, dict)
+                or not isinstance(span, dict)
+                or selected.get("obligation_index") != obligation_index
+                or span_catalog.get(source_ref) != span
+                or obligation.get("source_quote") != span.get("text")
+            ):
+                raise ValueError(f"pre-validation source selection is invalid for {check_id}")
+        for span in selected_spans:
+            if not isinstance(span, dict) or span_catalog.get(span.get("ref_id")) != span:
+                raise ValueError(f"pre-validation source span is invalid for {check_id}")
+
+        before_counts[check_id] = len(before_obligations)
+        after_counts[check_id] = len(after_obligations)
+        if before_result != after_result:
+            changed_check_ids.append(check_id)
+
+        obligations_unchanged = before_obligations == after_obligations
+        canonical_obligation_selections: list[dict[str, Any]] = []
+        for obligation_index, obligation in enumerate(after_obligations):
+            quote = obligation.get("source_quote") if isinstance(obligation, dict) else None
+            if not isinstance(quote, str) or not quote or quote not in source_text:
+                raise ValueError(f"validated obligation is not an exact source quote for {check_id}")
+            if obligations_unchanged:
+                source_ref = selected_obligations[obligation_index]["source_ref"]
+            else:
+                matching_obligation_refs = {
+                    selected.get("source_ref")
+                    for selected in selected_obligations
+                    if isinstance(selected, dict)
+                    and isinstance(selected.get("span"), dict)
+                    and selected["span"].get("text") == quote
+                }
+                if len(matching_obligation_refs) != 1:
+                    matching_span_refs = {
+                        span.get("ref_id") for span in selected_spans
+                        if isinstance(span, dict) and span.get("text") == quote
+                    }
+                    matching_obligation_refs = matching_span_refs
+                if len(matching_obligation_refs) != 1:
+                    raise ValueError(
+                        f"validated obligation source selection is not uniquely bound for {check_id}"
+                    )
+                source_ref = next(iter(matching_obligation_refs))
+            span = span_catalog.get(source_ref)
+            if not isinstance(span, dict) or span.get("text") != quote:
+                raise ValueError(f"validated obligation source span is stale for {check_id}")
+            canonical_obligation_selections.append({
+                "obligation_index": obligation_index,
+                "source_ref": source_ref,
+                "span": copy.deepcopy(span),
+            })
+        canonical_selections.append({
+            "check_id": check_id,
+            "spans": copy.deepcopy(selected_spans),
+            "obligations": canonical_obligation_selections,
+        })
+
+    canonical = copy.deepcopy(compilation)
+    canonical["canonicalization_protocol"] = "validated_source_reference_projection_v1"
+    canonical["canonical_response_sha256"] = sha256_json(validated_response)
+    canonical["canonical_selections"] = canonical_selections
+    canonical["validation_projection"] = {
+        "protocol": "validated_source_reference_projection_v1",
+        "pre_validation_response_sha256": sha256_json(compiled_response),
+        "canonical_response_sha256": sha256_json(validated_response),
+        "changed_check_ids": sorted(changed_check_ids),
+        "pre_validation_obligation_counts": before_counts,
+        "canonical_obligation_counts": after_counts,
+    }
+    return canonical

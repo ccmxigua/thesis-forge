@@ -83,7 +83,7 @@ def bind_mock_review_to_source_spans(review_result: dict, request: dict, output_
         "request_sha256": request_sha,
         "packet_sha256": bridge.sha256_json(packet),
         "raw_response_sha256": "0" * 64,
-        "compiled_response_sha256": "1" * 64,
+        "compiled_response_sha256": bridge.sha256_json({"results": results}),
         "selections": selections,
         "semantic_verdicts_unchanged": True,
     }
@@ -93,6 +93,7 @@ def bind_mock_review_to_source_spans(review_result: dict, request: dict, output_
         **review_result,
         "request_sha256": request_sha,
         "results": results,
+        "canonical_response_sha256": bridge.sha256_json({"results": results}),
         "source_reference_compilation_path": str(compilation_path),
         "source_reference_compilation_sha256": bridge.sha256_file(compilation_path),
     }
@@ -205,6 +206,7 @@ class HostAgentBridgeTests(unittest.TestCase):
             "raw_response_file_sha256": bridge.sha256_file(raw_response_path),
             "compiled_response_path": str(compiled_response_path.resolve()),
             "compiled_response_sha256": bridge.sha256_file(compiled_response_path),
+            "canonical_response_sha256": bridge.sha256_json(compiled_response),
             "source_reference_protocol": "semantic_source_references_v2",
             "source_reference_packet_path": str(source_packet_path.resolve()),
             "source_reference_packet_sha256": bridge.sha256_file(source_packet_path),
@@ -289,6 +291,9 @@ class HostAgentBridgeTests(unittest.TestCase):
             }],
             "summary": {"consistent": 1, "incomplete": 0, "uncertain": 0},
         }
+        reviewer_result["canonical_response_sha256"] = sha256_json({
+            "results": reviewer_result["results"],
+        })
         with tempfile.TemporaryDirectory() as td:
             review_dir = Path(td)
             coverage_request = bridge.build_obligation_coverage_request(
@@ -309,6 +314,7 @@ class HostAgentBridgeTests(unittest.TestCase):
                 "run_id": "run-coverage-test",
                 "request_sha256": reviewer_result["request_sha256"],
                 "packet_sha256": bridge.sha256_json(source_packet),
+                "compiled_response_sha256": reviewer_result["canonical_response_sha256"],
                 "selections": [{
                     "check_id": "C1",
                     "spans": [source_span],
@@ -2697,6 +2703,7 @@ class HostAgentBridgeTests(unittest.TestCase):
                     "request_sha256": sha256_json(request),
                     "response_path": str(response_path.resolve()),
                     "response_sha256": sha256_file(response_path),
+                    "canonical_response_sha256": sha256_json(compiled_response),
                     "compiled_response_path": str(compiled_path.resolve()),
                     "compiled_response_sha256": sha256_file(compiled_path),
                     "raw_response_path": str(raw_path.resolve()),

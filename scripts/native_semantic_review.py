@@ -24,6 +24,7 @@ from obligation_workflow import (
 )
 from semantic_source_references import (
     REFERENCE_PROTOCOL,
+    bind_validated_source_reference_selections,
     build_source_reference_packet,
     compile_source_reference_response,
     source_reference_schema,
@@ -1343,14 +1344,18 @@ def run_native_semantic_review(
             response, request, canonical_schema, coverage=obligation_coverage_mode,
             provider_nullable_optionals=adapter_id == "codex",
         )
-        _write_fresh(compilation_path, strict_json_dumps(compilation, ensure_ascii=False, indent=2) + "\n")
         _write_fresh(
             compiled_response_path,
             strict_json_dumps(response, ensure_ascii=False, indent=2) + "\n",
         )
+        compiled_response = copy.deepcopy(response)
         results = response_validator(response, checks)
         if obligation_coverage_mode:
             _validate_external_compliance_retry_result(response, request)
+            compilation = bind_validated_source_reference_selections(
+                compilation, compiled_response, response, request,
+            )
+        _write_fresh(compilation_path, strict_json_dumps(compilation, ensure_ascii=False, indent=2) + "\n")
     except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
         raise NativeSemanticReviewError(f"native semantic response rejected: {exc}") from exc
     _write_fresh(response_path, strict_json_dumps(response, ensure_ascii=False, indent=2) + "\n")
@@ -1382,6 +1387,7 @@ def run_native_semantic_review(
         "prompt_sha256": sha256_file(prompt_path),
         "response_path": str(response_path.resolve()),
         "response_sha256": sha256_file(response_path),
+        "canonical_response_sha256": sha256_json(response),
         "compiled_response_path": str(compiled_response_path.resolve()),
         "compiled_response_sha256": sha256_file(compiled_response_path),
         "source_reference_protocol": REFERENCE_PROTOCOL,

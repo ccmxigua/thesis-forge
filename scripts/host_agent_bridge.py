@@ -217,10 +217,12 @@ from native_semantic_review import (  # noqa: E402
     build_obligation_coverage_request,
     is_explicit_authoring_content_quote,
     run_native_semantic_review,
+    validate_obligation_coverage_response,
 )
 from obligation_workflow import OBLIGATION_ANALYSIS_LEDGER_PROTOCOL, work_type_for_disposition
 from semantic_source_references import (  # noqa: E402
     REFERENCE_PROTOCOL,
+    bind_validated_source_reference_selections,
     build_source_reference_packet,
     compile_source_reference_response,
 )
@@ -9103,6 +9105,8 @@ def _validate_completed_obligation_ledger_chain(
     )
     source_packet = _read_json(source_packet_path, label=f"source-reference packet {chunk_index}")
     compilation = _read_json(compilation_path, label=f"source-reference compilation {chunk_index}")
+    if not isinstance(compilation, dict):
+        raise ValueError(f"Host Agent chunk {chunk_index} source-reference compilation is malformed")
     request_sha = sha256_json(review_request)
     response_file_sha = sha256_file(response_path)
     raw_response_file_sha = sha256_file(raw_response_path)
@@ -9137,6 +9141,9 @@ def _validate_completed_obligation_ledger_chain(
         or response_file_sha != review_audit.get("response_sha256")
         or response_file_sha != independent_envelope.get("review_response_sha256")
         or response_file_sha != independent.get("review_response_sha256")
+        or review_audit.get("canonical_response_sha256") not in {
+            None, sha256_json(review_response),
+        }
         or raw_response_file_sha != review_audit.get("raw_response_file_sha256")
         or compiled_response_file_sha != review_audit.get("compiled_response_sha256")
         or source_packet_sha != review_audit.get("source_reference_packet_sha256")
@@ -9163,9 +9170,33 @@ def _validate_completed_obligation_ledger_chain(
         raw_response, review_request, OBLIGATION_COVERAGE_SCHEMA, coverage=True,
         provider_nullable_optionals=review_audit.get("adapter_id") == "codex",
     )
-    if (
+    if reconstructed_response != compiled_response:
+        raise ValueError(
+            f"Host Agent chunk {chunk_index} pre-validation source compilation does not reproduce"
+        )
+
+    checks = expected_source_packet.get("checks")
+    if not isinstance(checks, list):
+        raise ValueError(f"Host Agent chunk {chunk_index} source review lacks checks")
+    if compilation.get("canonicalization_protocol") == "validated_source_reference_projection_v1":
+        normalized_response = copy.deepcopy(reconstructed_response)
+        normalized_results = validate_obligation_coverage_response(normalized_response, checks)
+        reconstructed_compilation = bind_validated_source_reference_selections(
+            reconstructed_compilation, reconstructed_response, normalized_response,
+            review_request,
+        )
+        if (
+            normalized_response != review_response
+            or review_audit.get("canonical_response_sha256") != sha256_json(normalized_response)
+            or reconstructed_compilation != compilation
+            or normalized_results != independent_envelope.get("results")
+            or normalized_results != review_audit.get("results")
+        ):
+            raise ValueError(
+                f"Host Agent chunk {chunk_index} validated source-reference projection does not reproduce"
+            )
+    elif (
         reconstructed_response != review_response
-        or reconstructed_response != compiled_response
         or reconstructed_compilation != compilation
         or review_response.get("results") != independent_envelope.get("results")
     ):
@@ -9173,7 +9204,6 @@ def _validate_completed_obligation_ledger_chain(
             f"Host Agent chunk {chunk_index} source-reference compilation does not reproduce"
         )
 
-    checks = expected_source_packet.get("checks")
     results = review_response.get("results")
     if not isinstance(checks, list) or not isinstance(results, list):
         raise ValueError(f"Host Agent chunk {chunk_index} source review lacks checks/results")
@@ -9181,8 +9211,11 @@ def _validate_completed_obligation_ledger_chain(
         item.get("check_id"): item for item in checks
         if isinstance(item, dict) and isinstance(item.get("check_id"), str)
     }
+    canonical_selection_items = compilation.get("canonical_selections")
+    if not isinstance(canonical_selection_items, list):
+        canonical_selection_items = compilation.get("selections", [])
     selections = {
-        item.get("check_id"): item for item in compilation.get("selections", [])
+        item.get("check_id"): item for item in canonical_selection_items
         if isinstance(item, dict) and isinstance(item.get("check_id"), str)
     }
     if (
@@ -9505,6 +9538,22 @@ def _write_obligation_analysis_ledger(
         or review_result.get("source_reference_compilation_sha256") != sha256_file(compilation_path)
     ):
         raise ValueError("source-reference compilation is not bound to the current review")
+    canonical_response_sha256 = review_result.get("canonical_response_sha256")
+    if not isinstance(canonical_response_sha256, str) or len(canonical_response_sha256) != 64:
+        raise ValueError("independent review has no canonical response digest")
+    if compilation.get("canonicalization_protocol") == "validated_source_reference_projection_v1":
+        if compilation.get("canonical_response_sha256") != canonical_response_sha256:
+            raise ValueError("source-reference selections are not bound to the validated response")
+        selection_items = compilation.get("canonical_selections")
+    else:
+        # Legacy, unchanged-only compilation artifacts remain readable. If a
+        # validator changed the response, the old one-view receipt is not
+        # sufficient to authorize an obligation ledger.
+        if compilation.get("compiled_response_sha256") != canonical_response_sha256:
+            raise ValueError("legacy source-reference compilation predates a response projection")
+        selection_items = compilation.get("selections")
+    if not isinstance(selection_items, list):
+        raise ValueError("source-reference compilation has no canonical obligation selections")
     source_checks = {
         item.get("check_id"): item
         for item in expected_packet.get("checks", [])
@@ -9512,7 +9561,7 @@ def _write_obligation_analysis_ledger(
     }
     selections = {
         item.get("check_id"): item
-        for item in compilation.get("selections", [])
+        for item in selection_items
         if isinstance(item, dict) and isinstance(item.get("check_id"), str)
     }
     provenance = chunk.get("provenance") if isinstance(chunk.get("provenance"), dict) else {}

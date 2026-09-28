@@ -1594,9 +1594,17 @@ class HostAgentBridgeTests(unittest.TestCase):
             "contract_version": "3.0", "provenance": chunk["provenance"],
             "requirements": [{
                 "existing_requirement_id": None,
-                "role": "body_text", "properties": {"text": source},
+                "role": "body_text", "properties": {
+                    "font": None, "paragraph": None, "numbering": None,
+                    "position": None, "prefix": None, "separator": None,
+                    "style_hint": None, "text": source,
+                    "header_content": None, "bottom_border": None,
+                },
                 "clause_ids": ["C00049"], "evidence_ids": ["E1"],
                 "confidence": 0.95, "reason": "The source names a real-world stamp.",
+                "applicability": {
+                    "status": "always", "conditions": None, "exceptions": None,
+                },
                 "verification": None,
             }],
             "clause_reviews": [{
@@ -1697,6 +1705,10 @@ class HostAgentBridgeTests(unittest.TestCase):
             "external_action_relation_projection_v3",
             {item["rule_id"] for item in candidate_audit["mechanical_repairs"]},
         )
+        self.assertEqual(
+            candidate_audit["mechanical_repairs"][0]["removed_requirements"],
+            parent["requirements"],
+        )
         guidance = bridge._structured_contract_repair_guidance(
             all_retry_records, contract_version="3.0",
         )
@@ -1722,7 +1734,74 @@ class HostAgentBridgeTests(unittest.TestCase):
             )
             self.assertIn("do not remove the source-only requirement in this retry", prompt)
             self.assertIn("preserve every requirement", prompt)
-            self.assertNotIn("remove only this requirement object", prompt)
+        self.assertNotIn("remove only this requirement object", prompt)
+
+    def test_external_action_projection_rejects_non_null_or_conditional_payload(self) -> None:
+        source = "北京体育大学学位评定委员会办公室盖章(有效)"
+        evidence = {"evidence": [{"id": "E1", "text": source, "kind": "paragraph"}]}
+        clauses = self._bind_test_source_spans(
+            [exact_source_clause("C1", source)], evidence,
+        )
+        chunk = engine.build_llm_request(
+            [], clauses, evidence, {}, "full", contract_version="3.0",
+        )
+        chunk = attach_request_provenance(
+            chunk, source_sha256="f" * 64, evidence_doc=evidence,
+            clauses=clauses, run_id="external-action-null-payload-rejection",
+        )
+        baseline = {
+            "contract_version": "3.0", "provenance": chunk["provenance"],
+            "requirements": [{
+                "existing_requirement_id": None, "field_key": None,
+                "role": "body_text", "properties": {"text": source},
+                "clause_ids": ["C1"], "evidence_ids": ["E1"],
+                "confidence": 0.95, "reason": "The source names an external action.",
+                "applicability": {
+                    "status": "always", "conditions": None, "exceptions": None,
+                },
+                "input_prerequisites": None, "verification": {
+                    "mode": "external", "checks": ["Confirm the physical action."],
+                    "checker_ids": None,
+                },
+            }],
+            "clause_reviews": [{
+                "clause_id": "C1", "classification": "external_compliance",
+                "normative_basis": "external_duty", "reason": "A physical action is required.",
+                "obligations": [{
+                    "id": "office_stamp", "status": "unverifiable",
+                    "reason": "The real-world stamp must be applied by the office.",
+                }],
+            }],
+            "unsupported_items": [], "reported_conflicts": [],
+        }
+        for label, mutate in (
+            ("non_null_role_property", lambda item: item["properties"].update(prefix="must remain")),
+            ("conditional_applicability", lambda item: item.update(applicability={
+                "status": "not_applicable", "conditions": None, "exceptions": None,
+            })),
+            ("local_verification", lambda item: item.update(verification={
+                "mode": "local", "checks": ["Verify in the DOCX."], "checker_ids": None,
+            })),
+            ("input_prerequisite", lambda item: item.update(input_prerequisites=[{
+                "kind": "source_content", "key": "source_inventory.thesis_title_zh",
+                "reason": "A required source value.",
+            }])),
+        ):
+            candidate = copy.deepcopy(baseline)
+            mutate(candidate["requirements"][0])
+            candidate = bridge.normalize_native_response(candidate, chunk["response_schema"])
+            with self.subTest(case=label):
+                self.assertFalse(
+                    bridge._is_source_only_external_requirement(candidate["requirements"][0], chunk)
+                )
+
+        null_only = copy.deepcopy(baseline["requirements"][0])
+        for property_name in (
+            "font", "paragraph", "numbering", "position", "prefix", "separator",
+            "style_hint", "header_content", "bottom_border",
+        ):
+            null_only["properties"][property_name] = None
+        self.assertTrue(bridge._is_source_only_external_requirement(null_only, chunk))
 
     def test_external_action_projection_rejects_multi_clause_partial_source_echo(self) -> None:
         source_a = "北京体育大学学位评定委员会办公室盖章(有效)"

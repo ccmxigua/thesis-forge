@@ -179,6 +179,7 @@ from host_review_contract import (  # noqa: E402
     HOST_REVIEW_CONTRACT_V2,
     HOST_REVIEW_CONTRACT_V3,
     SUPPORTED_HOST_REVIEW_CONTRACTS,
+    _resolve_contract_schema,
     contract_error_records,
     provenance_error_records,
     analyze_requirement_relations,
@@ -5670,6 +5671,69 @@ def _retry_authorization_ledger(
     return ledger
 
 
+def _is_source_only_external_requirement(
+    requirement: Any, chunk: dict[str, Any] | None,
+) -> bool:
+    """Recognize a source-text echo with no executable DOCX payload.
+
+    Native structured output may explicitly emit nulls for optional role
+    fields and may encode the unconditional applicability default as
+    ``status=always`` with empty conditions/exceptions. Those values carry no
+    formatting, condition, or prerequisite semantics. Only schema-declared
+    nullable role fields are accepted, and every non-text property must be
+    exactly null; the ordinary contract validator and exact source/evidence
+    binding checks remain mandatory.
+    """
+    if not isinstance(requirement, dict) or not isinstance(chunk, dict):
+        return False
+    if (
+        requirement.get("role") != "body_text"
+        or requirement.get("existing_requirement_id") is not None
+        or requirement.get("field_key") is not None
+        or requirement.get("input_prerequisites") not in (None, [])
+    ):
+        return False
+    verification = requirement.get("verification")
+    if verification is not None and (
+        not isinstance(verification, dict) or verification.get("mode") != "external"
+    ):
+        return False
+
+    applicability = requirement.get("applicability")
+    if applicability not in (None, {}) and not (
+        isinstance(applicability, dict)
+        and set(applicability) <= {"status", "conditions", "exceptions"}
+        and applicability.get("status") == "always"
+        and applicability.get("conditions") in (None, [])
+        and applicability.get("exceptions") in (None, [])
+    ):
+        return False
+
+    properties = requirement.get("properties")
+    contract = chunk.get("requirement_contract")
+    if not isinstance(properties, dict) or not isinstance(contract, dict):
+        return False
+    role_schemas = contract.get("role_properties_schema")
+    role_schema = (
+        role_schemas.get("body_text") if isinstance(role_schemas, dict) else None
+    )
+    resolved_role_schema = _resolve_contract_schema(role_schema, contract)
+    schema_properties = (
+        resolved_role_schema.get("properties")
+        if isinstance(resolved_role_schema, dict) else None
+    )
+    text = properties.get("text")
+    if (
+        not isinstance(schema_properties, dict)
+        or "text" not in schema_properties
+        or not isinstance(text, str)
+        or not text.strip()
+        or not set(properties) <= set(schema_properties)
+    ):
+        return False
+    return all(name == "text" or value is None for name, value in properties.items())
+
+
 def _project_external_action_requirements(
     response: dict[str, Any], records: list[dict[str, Any]], chunk: dict[str, Any] | None,
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
@@ -5762,33 +5826,15 @@ def _project_external_action_requirements(
             or requirement.get("existing_requirement_id") is not None
         ):
             return None, []
-        verification = requirement.get("verification")
         ids, evidence_ids = requirement.get("clause_ids"), requirement.get("evidence_ids")
         if (
-            (
-                verification is not None
-                and (
-                    not isinstance(verification, dict)
-                    or verification.get("mode") != "external"
-                )
-            )
+            not _is_source_only_external_requirement(requirement, chunk)
             or not isinstance(ids, list) or not ids or any(not isinstance(cid, str) for cid in ids)
             or len(set(ids)) != len(ids)
             or len(ids) != 1
             or not isinstance(evidence_ids, list) or not evidence_ids
             or any(not isinstance(eid, str) for eid in evidence_ids)
             or len(set(evidence_ids)) != len(evidence_ids)
-            # Only a source-text echo is a disposable invalid DOCX edge. A
-            # role-specific property payload or multi-clause relation may
-            # contain a locally expressible obligation and must be reviewed,
-            # never removed as a unit.
-            or requirement.get("role") != "body_text"
-            or not isinstance(requirement.get("properties"), dict)
-            or set(requirement["properties"]) != {"text"}
-            or not isinstance(requirement["properties"].get("text"), str)
-            or requirement.get("field_key") is not None
-            or requirement.get("applicability") not in (None, {})
-            or requirement.get("input_prerequisites") not in (None, [])
         ):
             return None, []
         allowed_evidence: set[str] = set()
@@ -7615,14 +7661,7 @@ def _external_action_obligation_retry_records(
         clause_ids = requirement.get("clause_ids") if isinstance(requirement, dict) else None
         if (
             not isinstance(requirement, dict)
-            or requirement.get("existing_requirement_id") is not None
-            or requirement.get("role") != "body_text"
-            or not isinstance(requirement.get("properties"), dict)
-            or set(requirement["properties"]) != {"text"}
-            or not isinstance(requirement["properties"].get("text"), str)
-            or requirement.get("field_key") is not None
-            or requirement.get("applicability") not in (None, {})
-            or requirement.get("input_prerequisites") not in (None, [])
+            or not _is_source_only_external_requirement(requirement, chunk)
             or not isinstance(clause_ids, list) or not clause_ids
             or any(not isinstance(value, str) or not value for value in clause_ids)
             or len(set(clause_ids)) != len(clause_ids)
@@ -7630,11 +7669,6 @@ def _external_action_obligation_retry_records(
             # even when its payload happens to echo one linked external source.
             # Do not offer retry inventory or remove that combined edge as a unit.
             or len(clause_ids) != 1
-        ):
-            continue
-        verification = requirement.get("verification")
-        if verification is not None and (
-            not isinstance(verification, dict) or verification.get("mode") != "external"
         ):
             continue
         exact_sources: set[str] = set()

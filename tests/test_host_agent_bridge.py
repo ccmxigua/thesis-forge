@@ -7893,6 +7893,73 @@ class HostAgentBridgeTests(unittest.TestCase):
         )
         self.assertIsNotNone(stale_error)
 
+    def test_source_fragment_retry_rejects_null_selector_and_unrequested_obligation_rewrite(self) -> None:
+        label = "答辩委员会"
+        source = label + "："
+        location = {"part": "document", "child_index": 12, "order": 8}
+        clause = {
+            "id": "C1", "text": label, "evidence_ids": ["E1"],
+            "source_kind": "paragraph", "location": location,
+            "source_evidence_text": source,
+            "source_span": {
+                "evidence_id": "E1", "start_offset": 0, "end_offset": len(label),
+                "text": label, "source_sha256": hashlib.sha256(source.encode()).hexdigest(),
+                "location": location,
+            },
+        }
+        chunk = {
+            "clauses": [clause],
+            "evidence_context": {"E1": {
+                "id": "E1", "kind": "paragraph", "text": source,
+                "location": location,
+            }},
+            "requirement_contract": {
+                "role_properties_schema": {
+                    "cover_field_label": {"$ref": "#/$defs/roleSpec"},
+                },
+            },
+        }
+        previous = {
+            "contract_version": "3.0",
+            "requirements": [{
+                "role": "cover_field_label", "properties": {"text": source},
+                "clause_ids": ["C1"], "evidence_ids": ["E1"],
+                "source_fragment_clause_ids": ["C1"],
+            }],
+            "clause_reviews": [{
+                "clause_id": "C1", "classification": "executable",
+                "normative_basis": "explicit_normative_text",
+                "reason": "The source label is represented exactly.",
+                "obligations": [{
+                    "id": "label", "status": "covered",
+                    "reason": "The defense committee section label is represented by the exact cover_field_label text.",
+                }],
+            }],
+            "unsupported_items": [], "reported_conflicts": [],
+        }
+        records = [{
+            "code": "source_fragment_binding_violation",
+            "json_pointer": "$.requirements[0].properties.text",
+            "response_sha256": bridge._response_sha256(previous),
+            "raw_error": "source_fragment_literal_conflict",
+        }]
+
+        rewritten_reason = copy.deepcopy(previous)
+        rewritten_reason["clause_reviews"][0]["obligations"][0]["reason"] = (
+            "The defense committee section label is represented by the cover_field_label text property."
+        )
+        changed = bridge._retry_change_paths(previous, rewritten_reason)
+        self.assertFalse(bridge._source_fragment_binding_retry_allowed(
+            previous, rewritten_reason, records, changed, chunk=chunk,
+        ))
+
+        dropped_selector = copy.deepcopy(rewritten_reason)
+        dropped_selector["requirements"][0]["source_fragment_clause_ids"] = None
+        changed = bridge._retry_change_paths(previous, dropped_selector)
+        self.assertFalse(bridge._source_fragment_binding_retry_allowed(
+            previous, dropped_selector, records, changed, chunk=chunk,
+        ))
+
     def test_declaration_source_fragment_retry_corrects_selector_without_text_or_link_drift(self) -> None:
         title = "声明标题"
         body = "完整声明正文。"

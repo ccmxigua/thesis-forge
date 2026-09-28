@@ -1791,6 +1791,7 @@ def validate_content_instance_source_bindings(
                     evidence_by_id,
                     requirement_clause_ids=clause_ids,
                     requirement_evidence_ids=evidence_ids,
+                    literal_role=instance.get("role"),
                 )
             except SourceFragmentBindingError as exc:
                 errors.append(f"{label}:source_fragment_binding_invalid:{exc}")

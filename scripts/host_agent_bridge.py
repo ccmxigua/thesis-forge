@@ -2229,6 +2229,7 @@ def _source_fragment_binding_retry_allowed(
                 chunk.get("evidence_context"),
                 requirement_clause_ids=current.get("clause_ids"),
                 requirement_evidence_ids=current.get("evidence_ids"),
+                literal_role=current.get("role"),
             )
         except SourceFragmentBindingError:
             return False
@@ -2277,6 +2278,7 @@ def _source_fragment_binding_retry_allowed(
             chunk.get("evidence_context"),
             requirement_clause_ids=current.get("clause_ids"),
             requirement_evidence_ids=current.get("evidence_ids"),
+            literal_role=current.get("role"),
         )
         previous["source_fragment_clause_ids"] = copy.deepcopy(
             current["source_fragment_clause_ids"]

@@ -348,6 +348,7 @@ def _register_content_instance(
                 source_fragment_ids, clause_map,
                 requirement_clause_ids=sorted(clause_ids),
                 requirement_evidence_ids=sorted(cited_evidence),
+                literal_role=role,
             )
         except SourceFragmentBindingError as exc:
             return None, {"reason": "source_fragment_binding_invalid", "detail": str(exc)}

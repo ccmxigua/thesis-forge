@@ -15,6 +15,7 @@ from typing import Any
 _BOUNDARY_ONLY = re.compile(r"^[\s，,、：:;；。！？!?…“”‘’（）()【】\[\]{}]*$")
 _NORMALIZE_CLAUSE = re.compile(r"\s+")
 _CLAUSE_EDGE_PUNCTUATION = " \t\r\n，,、：:;；。！？!?…“”‘’（）()【】[]{}"
+_COVER_LABEL_TERMINAL_DELIMITERS = frozenset({"：", ":"})
 
 # These roles carry text through typed, role-native properties rather than a
 # top-level ``properties.text`` field. Keep this list shared with the contract
@@ -230,6 +231,7 @@ def compose_source_fragments(
     *,
     requirement_clause_ids: Any = None,
     requirement_evidence_ids: Any = None,
+    literal_role: str | None = None,
 ) -> dict[str, Any]:
     """Validate an ordered source-fragment selection and derive its exact text.
 
@@ -237,6 +239,8 @@ def compose_source_fragments(
     exclusively of whitespace/boundary punctuation. Different evidence items
     may be joined only when their code-owned document locations prove direct
     structural adjacency; the separator is then an explicit paragraph break.
+    A cover-field label additionally binds one immediately adjacent terminal
+    colon only when that exact character occurs in the current source evidence.
     """
     if (
         not isinstance(source_fragment_clause_ids, list)
@@ -332,12 +336,26 @@ def compose_source_fragments(
                 raise SourceFragmentBindingError("cross_evidence_boundary_unproven")
             current["separator_before"] = "\n"
 
+    boundary_policy = None
+    if literal_role == "cover_field_label" and fragments:
+        final_fragment = fragments[-1]
+        source = evidence_map[final_fragment["evidence_id"]]["text"]
+        end = final_fragment["end_offset"]
+        if end < len(source) and source[end] in _COVER_LABEL_TERMINAL_DELIMITERS:
+            delimiter = source[end]
+            final_fragment["end_offset"] = end + 1
+            final_fragment["text"] += delimiter
+            boundary_policy = "cover_field_label_terminal_colon_v1"
+
     materialized = "".join(item["separator_before"] + item["text"] for item in fragments)
     public_fragments = [
         {key: copy.deepcopy(value) for key, value in item.items() if key != "kind"}
         for item in fragments
     ]
-    return {"text": materialized, "source_fragments": public_fragments}
+    binding = {"text": materialized, "source_fragments": public_fragments}
+    if boundary_policy:
+        binding["boundary_policy"] = boundary_policy
+    return binding
 
 
 def _verify_non_text_role_selector(
@@ -420,6 +438,7 @@ def materialize_source_fragment_literals(
                 item.get("source_fragment_clause_ids"), clause_map, evidence_context,
                 requirement_clause_ids=item.get("clause_ids"),
                 requirement_evidence_ids=item.get("evidence_ids"),
+                literal_role=role,
             )
         except SourceFragmentBindingError as exc:
             errors.append(f"{pointer}.source_fragment_clause_ids:{exc}")
@@ -458,5 +477,7 @@ def materialize_source_fragment_literals(
             "source_fragments": copy.deepcopy(binding["source_fragments"]),
             "materialized_text_sha256": hashlib.sha256(binding["text"].encode("utf-8")).hexdigest(),
             "action": action,
+            **({"boundary_policy": binding["boundary_policy"]}
+               if binding.get("boundary_policy") else {}),
         })
     return output, audits, errors

@@ -171,6 +171,103 @@ class SourceLiteralBindingTests(unittest.TestCase):
         self.assertTrue(any("source_fragment_literal_conflict" in error for error in errors))
         self.assertEqual(unchanged["requirements"][0]["properties"]["text"], "硕 士 学 位 论 文")
 
+    def test_cover_field_label_binds_only_an_immediate_source_colon(self) -> None:
+        label = "答辩委员会"
+        location = {"part": "document", "child_index": 10, "order": 7}
+        for delimiter in ("：", ":"):
+            with self.subTest(delimiter=delimiter):
+                source = label + delimiter
+                clause = _source_clause(
+                    "C1", "E1", source, label, 0, len(label),
+                    kind="paragraph", location=location,
+                )
+                evidence = {"E1": {
+                    "id": "E1", "kind": "paragraph", "text": source,
+                    "location": location,
+                }}
+                binding = compose_source_fragments(
+                    ["C1"], {"C1": clause}, evidence,
+                    requirement_clause_ids=["C1"],
+                    requirement_evidence_ids=["E1"],
+                    literal_role="cover_field_label",
+                )
+
+                self.assertEqual(binding["text"], source)
+                self.assertEqual(binding["source_fragments"][0]["text"], source)
+                self.assertEqual(binding["source_fragments"][0]["end_offset"], len(source))
+                self.assertEqual(
+                    binding["boundary_policy"],
+                    "cover_field_label_terminal_colon_v1",
+                )
+
+                span_only = compose_source_fragments(
+                    ["C1"], {"C1": clause}, evidence,
+                    requirement_clause_ids=["C1"],
+                    requirement_evidence_ids=["E1"],
+                )
+                self.assertEqual(span_only["text"], label)
+                self.assertNotIn("boundary_policy", span_only)
+
+        sentence_source = label + "。"
+        sentence_clause = _source_clause(
+            "C1", "E1", sentence_source, label, 0, len(label),
+            kind="paragraph", location=location,
+        )
+        sentence_binding = compose_source_fragments(
+            ["C1"], {"C1": sentence_clause}, {"E1": {
+                "id": "E1", "kind": "paragraph", "text": sentence_source,
+                "location": location,
+            }},
+            literal_role="cover_field_label",
+        )
+        self.assertEqual(sentence_binding["text"], label)
+        self.assertNotIn("boundary_policy", sentence_binding)
+
+    def test_cover_label_materializer_preserves_the_bound_colon_and_audits_policy(self) -> None:
+        label = "答辩委员会"
+        source = label + "："
+        location = {"part": "document", "child_index": 11, "order": 8}
+        clause = _source_clause(
+            "C1", "E1", source, label, 0, len(label),
+            kind="paragraph", location=location,
+        )
+        evidence = {"E1": {
+            "id": "E1", "kind": "paragraph", "text": source,
+            "location": location,
+        }}
+        response = {"requirements": [{
+            "role": "cover_field_label",
+            "properties": {"text": source},
+            "clause_ids": ["C1"],
+            "evidence_ids": ["E1"],
+            "source_fragment_clause_ids": ["C1"],
+        }]}
+
+        output, audits, errors = materialize_source_fragment_literals(
+            response, [clause], evidence,
+        )
+
+        self.assertEqual(errors, [])
+        self.assertEqual(output["requirements"][0]["properties"]["text"], source)
+        self.assertEqual(audits[0]["boundary_policy"], "cover_field_label_terminal_colon_v1")
+        self.assertEqual(audits[0]["materialized_text_sha256"], hashlib.sha256(source.encode()).hexdigest())
+        self.assertEqual(audits[0]["source_fragments"][0]["text"], source)
+
+        response["requirements"][0]["properties"]["text"] = None
+        materialized, materialized_audits, errors = materialize_source_fragment_literals(
+            response, [clause], evidence,
+        )
+        self.assertEqual(errors, [])
+        self.assertEqual(materialized["requirements"][0]["properties"]["text"], source)
+        self.assertEqual(materialized_audits[0]["boundary_policy"], "cover_field_label_terminal_colon_v1")
+
+        response["requirements"][0]["properties"]["text"] = label
+        rejected, _, errors = materialize_source_fragment_literals(
+            response, [clause], evidence,
+        )
+        self.assertTrue(any("source_fragment_literal_conflict" in error for error in errors))
+        self.assertEqual(rejected["requirements"][0]["properties"]["text"], label)
+
     def test_declarations_bind_fragments_to_role_native_text_without_injecting_text(self) -> None:
         clauses, evidence = _adjacent_paragraphs()
         response = {"requirements": [{

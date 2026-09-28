@@ -3699,6 +3699,46 @@ b&=2\notag
         )
         self.assertEqual(invalid_error["reason"], "source_fragment_binding_invalid")
 
+    def test_content_instance_registration_preserves_terminal_colon_for_cover_labels(self) -> None:
+        label = "答辩委员会"
+        source = label + "："
+        location = {"part": "document", "child_index": 17, "order": 12}
+        clause_map = {
+            "C1": {
+                "text": label,
+                "source_evidence_text": source,
+                "source_kind": "paragraph",
+                "location": location,
+                "evidence_ids": ["E1"],
+                "source_span": {
+                    "evidence_id": "E1",
+                    "start_offset": 0,
+                    "end_offset": len(label),
+                    "text": label,
+                    "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
+                    "location": location,
+                },
+            },
+        }
+        instances = []
+
+        instance_id, error = requirements_engine._register_content_instance(
+            instances,
+            {"field_key": "defense_committee", "source_fragment_clause_ids": ["C1"]},
+            "cover_field_label",
+            {"text": source},
+            {"C1"},
+            {"E1"},
+            clause_map,
+            "exact source cover label",
+        )
+
+        self.assertIsNone(error)
+        self.assertIsNotNone(instance_id)
+        self.assertEqual(instances[0]["text"], source)
+        self.assertEqual(instances[0]["source_fragments"][0]["text"], source)
+        self.assertEqual(instances[0]["source_fragments"][0]["end_offset"], len(source))
+
     def test_same_literal_at_distinct_source_occurrences_stays_separately_bound(self) -> None:
         source = "分类号；分类号"
         source_sha = hashlib.sha256(source.encode("utf-8")).hexdigest()

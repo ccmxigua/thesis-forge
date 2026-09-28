@@ -4555,6 +4555,10 @@ def _v3_source_verification_reclassification_response(
             or record.get("candidate_response_sha256") != expected_parent_response_sha
             or not re.fullmatch(r"[0-9a-f]{64}", str(record.get("review_request_sha256") or ""))
             or not re.fullmatch(r"[0-9a-f]{64}", str(record.get("review_response_sha256") or ""))
+            or not re.fullmatch(
+                r"[0-9a-f]{64}",
+                str(record.get("source_reference_compilation_sha256") or ""),
+            )
             or not isinstance(quotes, list)
             or not quotes
             or any(not isinstance(quote, str) or not quote for quote in quotes)
@@ -9931,10 +9935,15 @@ def _run_independent_obligation_coverage_review(
         return pointer
     except SourceVerificationClassificationCorrectionRequiredError as review_error:
         request_path = output_dir / "request.json"
+        raw_response_path = output_dir / "raw-response.json"
+        source_packet_path = output_dir / "source-reference-packet.json"
         compiled_response_path = output_dir / "compiled-response.json"
         compilation_path = output_dir / "source-reference-compilation.json"
         artifacts_valid = all(
-            path.is_file() for path in (request_path, compiled_response_path, compilation_path)
+            path.is_file() for path in (
+                request_path, raw_response_path, source_packet_path,
+                compiled_response_path, compilation_path,
+            )
         )
         review_request_sha = None
         review_response_sha = None
@@ -9948,18 +9957,53 @@ def _run_independent_obligation_coverage_review(
                 persisted_compilation = _read_json(
                     compilation_path, label="source-verification reference compilation",
                 )
+                persisted_raw_response = _read_json(
+                    raw_response_path, label="source-verification raw response",
+                )
+                persisted_source_packet = _read_json(
+                    source_packet_path, label="source-verification source packet",
+                )
+                reconstructed_response, reconstructed_compilation = compile_source_reference_response(
+                    persisted_raw_response,
+                    persisted_request,
+                    OBLIGATION_COVERAGE_SCHEMA,
+                    coverage=True,
+                    provider_nullable_optionals=host_runtime == "codex",
+                )
+                expected_source_packet = build_source_reference_packet(persisted_request)
+                replayed_corrections_match = False
+                try:
+                    validate_obligation_coverage_response(
+                        copy.deepcopy(reconstructed_response),
+                        coverage_request.get("checks", []),
+                    )
+                except SourceVerificationClassificationCorrectionRequiredError as replayed_error:
+                    replayed_corrections_match = (
+                        replayed_error.corrections == review_error.corrections
+                    )
+                except (NativeSemanticReviewError, ValueError, TypeError, KeyError):
+                    replayed_corrections_match = False
                 artifacts_valid = (
                     persisted_request == coverage_request
                     and isinstance(persisted_compiled_response, dict)
                     and isinstance(persisted_compilation, dict)
+                    and persisted_compiled_response == reconstructed_response
+                    and persisted_compilation == reconstructed_compilation
+                    and persisted_source_packet == expected_source_packet
+                    and persisted_compilation.get("protocol") == REFERENCE_PROTOCOL
                     and persisted_compilation.get("run_id") == run_id
                     and persisted_compilation.get("request_sha256") == sha256_json(coverage_request)
+                    and persisted_compilation.get("packet_sha256") == sha256_json(expected_source_packet)
+                    and persisted_compilation.get("compiled_response_sha256") == sha256_json(
+                        persisted_compiled_response
+                    )
+                    and replayed_corrections_match
                 )
                 if artifacts_valid:
                     review_request_sha = sha256_json(persisted_request)
                     review_response_sha = sha256_file(compiled_response_path)
                     compilation_sha = sha256_file(compilation_path)
-            except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            except (OSError, NativeSemanticReviewError, ValueError, TypeError, KeyError, json.JSONDecodeError):
                 artifacts_valid = False
         check_indexes = {
             str(item.get("clause_id")): index

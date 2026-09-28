@@ -17,6 +17,7 @@ from host_adapters import openclaw as openclaw_adapter
 from host_review_schema import native_output_schema, require_native_schema
 from host_runtime import automatic_adapter_id, require_host_runtime
 from process_runner import run_process
+from artifact_io import atomic_write_text
 from semantic_contract import sha256_json, strict_json_dumps
 from obligation_workflow import (
     OBLIGATION_COVERAGE_PROTOCOL,
@@ -1348,6 +1349,15 @@ def run_native_semantic_review(
             compiled_response_path,
             strict_json_dumps(response, ensure_ascii=False, indent=2) + "\n",
         )
+        # Keep the source-bound pre-validation compilation available if the
+        # validator raises a narrowly authorized classification-correction
+        # error. The bridge replays this artifact against the raw response
+        # before it can authorize that correction; it is not a successful
+        # review receipt and cannot be used as a release result.
+        _write_fresh(
+            compilation_path,
+            strict_json_dumps(compilation, ensure_ascii=False, indent=2) + "\n",
+        )
         compiled_response = copy.deepcopy(response)
         results = response_validator(response, checks)
         if obligation_coverage_mode:
@@ -1355,7 +1365,10 @@ def run_native_semantic_review(
             compilation = bind_validated_source_reference_selections(
                 compilation, compiled_response, response, request,
             )
-        _write_fresh(compilation_path, strict_json_dumps(compilation, ensure_ascii=False, indent=2) + "\n")
+        atomic_write_text(
+            compilation_path,
+            strict_json_dumps(compilation, ensure_ascii=False, indent=2) + "\n",
+        )
     except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
         raise NativeSemanticReviewError(f"native semantic response rejected: {exc}") from exc
     _write_fresh(response_path, strict_json_dumps(response, ensure_ascii=False, indent=2) + "\n")

@@ -20,6 +20,7 @@ from native_semantic_review import (  # noqa: E402
     OBLIGATION_COVERAGE_PROTOCOL,
     OBLIGATION_COVERAGE_SCHEMA,
     RetryableNativeSemanticReviewError,
+    SourceVerificationClassificationCorrectionRequiredError,
     build_obligation_coverage_request,
     validate_response,
     validate_obligation_coverage_response,
@@ -1483,6 +1484,80 @@ class NativeSemanticReviewTests(unittest.TestCase):
             run_process_patch,
         ]
         return patches
+
+    def test_native_runner_persists_source_binding_before_verification_classification_error(self) -> None:
+        source = "关键词是为了便于做文献索引和检索工作而从论文中选取出来表示全文主题，在论文中有明确出处"
+        check = {
+            "check_id": "C00068", "document_text": source,
+            "review_context": {
+                "classification": "informational", "requires_requirement": False,
+                "primary_obligations": [], "linked_requirements": [],
+                "machine_obligation_ids": [],
+                "manual_review_codes": [],
+                "source_content_verification_codes": ["keyword_source_traceability_verification"],
+                "cited_evidence": {"E00060": {"id": "E00060", "text": source}},
+            },
+        }
+        request = {
+            "protocol": OBLIGATION_COVERAGE_PROTOCOL,
+            "case_id": "bsu", "run_id": "run-source-verification-conflict", "checks": [check],
+        }
+        source_packet = native_review.build_source_reference_packet(request)
+        source_ref = source_packet["checks"][0]["source_spans"][0]["ref_id"]
+        provider_response = {"results": [{
+            "check_id": "C00068",
+            "verdict": "source_content_verification_pending",
+            "rationale": "A human must verify that each keyword is sourced from the thesis and represents its topic.",
+            "evidence_refs": [source_ref],
+            "identified_obligations": [{
+                "source_ref": source_ref,
+                "disposition": "source_content_verification_pending",
+                "obligation_summary": "Verify keyword traceability against the thesis body.",
+                "requirement_refs": [],
+            }],
+        }]}
+
+        def build_command(**kwargs):
+            kwargs["last_message_path"].write_text("{}", encoding="utf-8")
+            return ["codex"]
+
+        patches = self._stub_codex_host(CompletedProcess(["codex"], 0, "{}", ""))
+        patches[4] = patch.object(native_review.codex_adapter, "build_command", side_effect=build_command)
+        patches.append(patch.object(
+            native_review.codex_adapter, "parse_result",
+            return_value=(provider_response, {"event_types": ["task_complete"]}),
+        ))
+        with tempfile.TemporaryDirectory() as td:
+            output_dir = Path(td) / "native"
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+                with self.assertRaises(SourceVerificationClassificationCorrectionRequiredError) as caught:
+                    native_review.run_native_semantic_review(
+                        request, output_dir=output_dir, host_runtime="codex",
+                        model="gpt-5.6-luna", timeout=5,
+                    )
+
+            persisted_request = json.loads((output_dir / "request.json").read_text(encoding="utf-8"))
+            raw = json.loads((output_dir / "raw-response.json").read_text(encoding="utf-8"))
+            compiled = json.loads((output_dir / "compiled-response.json").read_text(encoding="utf-8"))
+            persisted_packet = json.loads(
+                (output_dir / "source-reference-packet.json").read_text(encoding="utf-8")
+            )
+            compilation = json.loads(
+                (output_dir / "source-reference-compilation.json").read_text(encoding="utf-8")
+            )
+
+            self.assertEqual(persisted_request, request)
+            self.assertEqual(raw, provider_response)
+            self.assertEqual(persisted_packet, source_packet)
+            self.assertEqual(compilation["run_id"], request["run_id"])
+            self.assertEqual(compilation["request_sha256"], native_review.sha256_json(request))
+            self.assertEqual(compilation["packet_sha256"], native_review.sha256_json(source_packet))
+            self.assertEqual(
+                compilation["compiled_response_sha256"], native_review.sha256_json(compiled),
+            )
+            self.assertEqual(caught.exception.corrections[0]["check_id"], "C00068")
+            self.assertEqual(caught.exception.corrections[0]["source_quotes"], [source])
+            self.assertFalse((output_dir / "response.json").exists())
 
     def test_native_runner_persists_timeout_outputs_before_failing(self) -> None:
         with tempfile.TemporaryDirectory() as td:

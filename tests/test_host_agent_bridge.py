@@ -8,6 +8,7 @@ import os
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
 from pathlib import Path
 from unittest.mock import Mock, patch
@@ -2516,6 +2517,7 @@ class HostAgentBridgeTests(unittest.TestCase):
             ),
             "review_request_sha256": "e" * 64,
             "review_response_sha256": "f" * 64,
+            "source_reference_compilation_sha256": "a" * 64,
             "primary_retry_authorization": authorization,
         }
 
@@ -2606,6 +2608,77 @@ class HostAgentBridgeTests(unittest.TestCase):
                     )
                     self.assertIsNone(result)
 
+    def test_source_verification_retry_fails_closed_when_prevalidation_compilation_is_tampered(self) -> None:
+        self._independent_review_patch.stop()
+        source = "关键词须源自论文，人工核验现有关键词是否可追溯至正文。"
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td).resolve()
+            review_dir, chunk = self._packet(
+                root / "requirements", contract_version="3.0", source=source,
+            )
+            candidate = {
+                "contract_version": "3.0", "provenance": chunk["provenance"],
+                "requirements": [],
+                "clause_reviews": [{
+                    "clause_id": "C1", "classification": "informational",
+                    "reason": "The rule only describes keywords.",
+                }],
+                "unsupported_items": [], "reported_conflicts": [],
+            }
+
+            def tampered_review(request: dict, *, output_dir: Path, **_kwargs: object) -> dict:
+                source_packet = build_source_reference_packet(request)
+                source_span = next(
+                    span for span in source_packet["checks"][0]["source_spans"]
+                    if span["text"] == source
+                )
+                raw_response = {"results": [{
+                    "check_id": "C1",
+                    "verdict": "source_content_verification_pending",
+                    "rationale": "A human must verify the existing keyword traceability.",
+                    "evidence_refs": [source_span["ref_id"]],
+                    "identified_obligations": [{
+                        "source_ref": source_span["ref_id"],
+                        "disposition": "source_content_verification_pending",
+                        "obligation_summary": "Verify that each existing keyword is traceable to the thesis.",
+                        "requirement_refs": [],
+                    }],
+                }]}
+                compiled_response, compilation = compile_source_reference_response(
+                    raw_response, request, bridge.OBLIGATION_COVERAGE_SCHEMA, coverage=True,
+                )
+                paths = {
+                    "request.json": request,
+                    "raw-response.json": raw_response,
+                    "source-reference-packet.json": source_packet,
+                    "compiled-response.json": compiled_response,
+                }
+                for name, payload in paths.items():
+                    bridge._write_json(output_dir / name, payload)
+                compilation["compiled_response_sha256"] = "0" * 64
+                bridge._write_json(output_dir / "source-reference-compilation.json", compilation)
+                bridge.validate_obligation_coverage_response(
+                    copy.deepcopy(compiled_response), request["checks"],
+                )
+                raise AssertionError("expected source-verification classification correction")
+
+            with patch.object(bridge, "run_native_semantic_review", side_effect=tampered_review):
+                with self.assertRaises(bridge.IndependentObligationReviewError) as caught:
+                    bridge._run_independent_obligation_coverage_review(
+                        candidate, chunk, review_dir=review_dir,
+                        run_id=chunk["provenance"]["run_id"], chunk_index=1,
+                        attempt=1, host_runtime="openclaw", model="openai/gpt-5.6-luna",
+                        timeout=5, agent_id="main", runner="exec", binary=None,
+                        config_path=None, controller=SimpleNamespace(check=lambda: None),
+                    )
+
+            self.assertFalse(caught.exception.retryable)
+            pointer = caught.exception.independent_review_audit
+            failure_audit = json.loads((review_dir / pointer["audit_path"]).read_text(encoding="utf-8"))
+            self.assertFalse(failure_audit["retryable"])
+            self.assertFalse(failure_audit["error_records"][0]["primary_repairable"])
+            self.assertIsNone(failure_audit["error_records"][0]["source_reference_compilation_sha256"])
+
     def test_source_verification_correction_reaches_bound_red_release_marker(self) -> None:
         """Exercise conflict, authorized retry, accepted receipt, and visible non-release marker offline."""
         source = "论文中的关键词须源自论文，并可追溯至对应原文。"
@@ -2649,21 +2722,38 @@ class HostAgentBridgeTests(unittest.TestCase):
                 compiled_path = output_dir / "compiled-response.json"
                 compilation_path = output_dir / "source-reference-compilation.json"
                 if native_calls == 1:
-                    # Reproduce the production exception boundary: only the
-                    # exact persisted request/response/compilation bindings
-                    # may authorize the narrow primary-classification retry.
-                    bridge._write_json(request_path, request)
-                    bridge._write_json(compiled_path, {"results": []})
-                    bridge._write_json(compilation_path, {
-                        "run_id": request["run_id"],
-                        "request_sha256": sha256_json(request),
-                    })
-                    raise bridge.SourceVerificationClassificationCorrectionRequiredError([{
+                    # Reproduce the production failure lifecycle: persist the
+                    # source-bound pre-validation compilation, then let the
+                    # validator raise the narrow classification correction.
+                    check = source_packet["checks"][0]
+                    exact_span = next(span for span in check["source_spans"] if span["text"] == source)
+                    raw_response = {"results": [{
                         "check_id": "C1",
-                        "baseline_classification": "requires_source_content",
-                        "source_quotes": [source],
-                        "evidence_ids": ["E1"],
-                    }])
+                        "verdict": "source_content_verification_pending",
+                        "rationale": "关键词出处须由人工在论文正文中核验。",
+                        "evidence_refs": [exact_span["ref_id"]],
+                        "identified_obligations": [{
+                            "source_ref": exact_span["ref_id"],
+                            "disposition": "source_content_verification_pending",
+                            "obligation_summary": "核验论文现有关键词是否能追溯到对应原文。",
+                            "requirement_refs": [],
+                        }],
+                    }]}
+                    compiled_response, compilation = compile_source_reference_response(
+                        raw_response, request, bridge.OBLIGATION_COVERAGE_SCHEMA, coverage=True,
+                    )
+                    packet_path = output_dir / "source-reference-packet.json"
+                    raw_path = output_dir / "raw-response.json"
+                    for path, payload in (
+                        (request_path, request), (packet_path, source_packet),
+                        (raw_path, raw_response), (compiled_path, compiled_response),
+                        (compilation_path, compilation),
+                    ):
+                        bridge._write_json(path, payload)
+                    bridge.validate_obligation_coverage_response(
+                        copy.deepcopy(compiled_response), request["checks"],
+                    )
+                    raise AssertionError("expected source-verification classification correction")
 
                 check = source_packet["checks"][0]
                 exact_span = next(span for span in check["source_spans"] if span["text"] == source)

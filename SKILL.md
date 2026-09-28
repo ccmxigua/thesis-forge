@@ -81,16 +81,43 @@ clause is purely external. The independent source-first review remains required
 and must reject external-only status whenever its exact source packet contains
 code-known local DOCX obligations.
 
+When one response has both a non-removable external-only requirement and a
+different unbound requirement with no clause/evidence links, the two errors do
+not form a mechanical relation-addition retry. Stop before sending a parent
+retry, retain both raw/error records, and require a fresh source-bound semantic
+review. The external requirement may carry conditional meaning, while the
+orphan may not be assigned a guessed relation; deleting both just to satisfy
+the schema is not an authorized correction. Initial Host Agent generation
+should emit only the executable cover structure and put real-world consent,
+application, and approval in distinct pending clause-review obligations. An
+empty/default cover shell is never an additional requirement.
+
+For a source-first review that explicitly authorizes a single existing-content
+verification reclassification, the authorization hashes identify the
+source-materialized candidate, not the raw provider JSON. On retry, recompute
+the fixed-declaration literal projection from both immutable raw responses
+and the current chunk before comparing candidate hashes. Only the named
+classification path may change; changed source links, declaration text not
+derived from current evidence, stale hashes, or incomplete path/source
+authorization still fail closed.
+
 Fixed-declaration candidates are source-text groupings, not executable-clause
 lists. A requirement may link only clauses independently classified as
-executable/covered/verify_existing and evidence backing those clauses; the
+executable/covered/verify_existing/executable_with_external_check and evidence backing those clauses; the
 nested `source_evidence_ids` selects the exact current source paragraphs to
 print. Printing an approval, signature, or seal instruction does not attest
 that the real-world action occurred. Administrative approval/marking regions
-remain conditional cover structures, not fixed declarations. A mixed
-executable/external edge is a semantic split failure: retain the raw response
-and source references, stop the mechanical retry, and require a fresh
-source-bound review. A missing edge caused by that mixed parent is diagnostic,
+remain conditional cover structures, not fixed declarations. A clause with
+both a DOCX action and a distinct real-world approval, consent, signature, or
+seal action may use `executable_with_external_check` only after a source-bound
+review identifies at least one covered DOCX obligation and at least one
+`unverifiable` external obligation. The requirement edge applies only to the
+DOCX obligation. Independent review must map each obligation one-to-one,
+leave the external action pending, and emit a current-run-bound manual marker.
+This state is never submission-ready. A mixed edge without that complete
+inventory is a semantic split failure: retain the raw response and source
+references, stop the mechanical retry, and require a fresh source-bound
+review. A missing edge caused by that mixed parent is diagnostic,
 not permission to add a title-only declaration. Empty declarations that cannot
 be materialized from current evidence block merge; they are never silently
 reclassified as informational. Draft markers may show pending actions but

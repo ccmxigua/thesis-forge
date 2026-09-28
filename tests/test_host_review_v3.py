@@ -34,6 +34,7 @@ from host_review_schema import (  # noqa: E402
 from requirements_engine import build_llm_request  # noqa: E402
 from semantic_contract import attach_request_provenance  # noqa: E402
 from semantic_review_ledger import build_semantic_review_ledger  # noqa: E402
+from compliance import build_clause_records, finalize_records, summarize  # noqa: E402
 
 
 def _with_test_source_spans(clauses: list[dict], evidence_doc: dict) -> list[dict]:
@@ -132,6 +133,54 @@ class HostReviewV3Tests(unittest.TestCase):
             "unsupported_items": [],
             "reported_conflicts": [],
         }
+
+    def test_mixed_docx_and_external_obligations_keep_requirement_but_block_release(self) -> None:
+        source = "正文使用宋体，并须由导师签字确认"
+        clauses = _with_test_source_spans([{
+            "id": "C-MIX", "text": source, "evidence_ids": ["E-MIX"],
+            "source_kind": "paragraph", "location": {}, "part_index": 0,
+        }], {"evidence": [{"id": "E-MIX", "text": source, "kind": "paragraph"}]})
+        evidence = {"evidence": [{"id": "E-MIX", "text": source, "kind": "paragraph"}]}
+        request = build_llm_request([], clauses, evidence, {}, "full", contract_version="3.0")
+        request = attach_request_provenance(
+            request, source_sha256="a" * 64, evidence_doc=evidence,
+            clauses=clauses, run_id="mixed-obligation-test",
+        )
+        response = self._executable_response()
+        response["provenance"] = request["provenance"]
+        response["requirements"][0]["clause_ids"] = ["C-MIX"]
+        response["requirements"][0]["evidence_ids"] = ["E-MIX"]
+        response["clause_reviews"] = [{
+            "clause_id": "C-MIX", "classification": "executable_with_external_check",
+            "reason": "Font is a DOCX rule; the actual signature is external.",
+            "obligations": [
+                {"id": "font", "status": "covered", "reason": "Cited font rule."},
+                {"id": "signature", "status": "unverifiable", "reason": "Actual advisor signature is pending."},
+            ],
+        }]
+        self.assertEqual(validate_response(response, request), [])
+        review = copy.deepcopy(response["clause_reviews"][0])
+        review["requirement_indexes"] = [0]
+        records = build_clause_records(
+            clauses, {"C-MIX": review}, {0: ["R-MIX"]}, {0},
+        )
+        self.assertEqual(records[0]["status"], "unverifiable")
+        self.assertEqual(records[0]["requirement_ids"], ["R-MIX"])
+        self.assertFalse(summarize(records, "full", "analysis")["docx_fully_compliant"])
+        finalized = finalize_records(records, [{"id": "R-MIX", "role": "body_text"}],
+                                     {"body_text": True}, set())
+        self.assertEqual(finalized[0]["status"], "unverifiable")
+
+        for statuses in (("covered", "covered"), ("unverifiable", "unverifiable"),
+                         ("covered", "unresolved")):
+            with self.subTest(statuses=statuses):
+                broken = copy.deepcopy(response)
+                for obligation, status in zip(broken["clause_reviews"][0]["obligations"], statuses):
+                    obligation["status"] = status
+                self.assertTrue(validate_response(broken, request))
+        unlinked = copy.deepcopy(response)
+        unlinked["requirements"] = []
+        self.assertTrue(validate_response(unlinked, request))
 
     def test_shorter_security_marking_fact_requires_exact_allowance_property(self) -> None:
         clause = {"id": "C50", "text": "注：限制★2年(可少于2年)"}

@@ -1178,6 +1178,20 @@ def _validate_obligations(
         errors.append(
             f"$.clause_reviews[{review_index}].obligations: external_compliance_review_requires_non_empty_inventory"
         )
+    if classification == "executable_with_external_check":
+        statuses = [
+            item.get("status") for item in obligations if isinstance(item, dict)
+        ]
+        if (
+            len(statuses) != len(obligations)
+            or "covered" not in statuses
+            or "unverifiable" not in statuses
+            or set(statuses) != {"covered", "unverifiable"}
+        ):
+            errors.append(
+                f"$.clause_reviews[{review_index}].obligations: "
+                "mixed_execution_requires_covered_and_unverifiable_actions"
+            )
     seen: set[str] = set()
     for index, obligation in enumerate(obligations):
         if not isinstance(obligation, dict):
@@ -1196,7 +1210,7 @@ def _validate_obligations(
             )
         if not isinstance(obligation.get("reason"), str) or not obligation["reason"].strip():
             errors.append(f"$.clause_reviews[{review_index}].obligations[{index}].reason: must_be_non_empty")
-    if classification_requires_requirement(str(review.get("classification"))) and any(
+    if classification_requires_requirement(str(review.get("classification"))) and classification != "executable_with_external_check" and any(
         isinstance(item, dict) and item.get("status") != "covered" for item in obligations
     ):
         errors.append(

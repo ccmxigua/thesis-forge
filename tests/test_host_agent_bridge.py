@@ -1457,13 +1457,14 @@ class HostAgentBridgeTests(unittest.TestCase):
             chunk_count=1,
         )
         self.assertIn("classification and normative_basis are different fields", prompt)
-        self.assertIn("Only covered, executable, and verify_existing", prompt)
+        self.assertIn("Only covered, executable, verify_existing, and executable_with_external_check", prompt)
         self.assertIn("require_after_role", prompt)
         self.assertIn("A single clause may support multiple requirements", prompt)
         self.assertIn("Role boundary for equations", prompt)
         self.assertIn("The bridge materializes heading/body_parts", prompt)
         self.assertIn("do not copy normalized clause fragments or repeat an evidence paragraph", prompt)
         self.assertIn("partial_clause_coverage error never authorizes changing classification", prompt)
+        self.assertIn("Never emit a spare", prompt)
         retry = bridge._host_prompt(
             request_path=Path("request.json"),
             chunk_path=Path("chunk.json"),

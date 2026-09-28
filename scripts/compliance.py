@@ -43,6 +43,10 @@ LEGACY_CLASSIFICATION_MAP = {
 DIRECT_CLASSIFICATION_MAP = {
     "executable": "pending_execution",
     "verify_existing": "pending_execution",
+    # A DOCX rule may coexist with a real-world action that the document
+    # cannot prove.  Preserve the executable edge, but keep the clause blocked
+    # for release until the external action has been independently verified.
+    "executable_with_external_check": "unverifiable",
     "not_applicable": "not_applicable",
     "external_compliance": EXTERNAL_STATE,
     "informational": INFORMATIONAL_STATE,
@@ -55,7 +59,9 @@ DIRECT_CLASSIFICATION_MAP = {
     "unverifiable": "unverifiable",
 }
 ALLOWED_REVIEW_CLASSIFICATIONS = set(LEGACY_CLASSIFICATION_MAP) | set(DIRECT_CLASSIFICATION_MAP)
-REQUIREMENT_CLASSIFICATIONS = {"covered", "executable", "verify_existing"}
+REQUIREMENT_CLASSIFICATIONS = {
+    "covered", "executable", "verify_existing", "executable_with_external_check",
+}
 
 
 def normalized_state(classification: str) -> str:

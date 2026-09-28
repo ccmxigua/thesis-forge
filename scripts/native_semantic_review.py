@@ -238,7 +238,7 @@ OBLIGATION_COVERAGE_SCHEMA: dict[str, Any] = {
                     "check_id": {"type": "string", "minLength": 1},
                     "verdict": {"enum": [
                         "consistent", "incomplete", "uncertain", "manual_review_required",
-                        "external_compliance_pending", "source_content_pending",
+                        "external_compliance_pending", "mixed_execution_external_pending", "source_content_pending",
                         "backend_unsupported", "source_content_verification_pending",
                     ]},
                     "rationale": {"type": "string", "minLength": 1},
@@ -648,7 +648,40 @@ def validate_obligation_coverage_response(
             # deliberately not a DOCX pass state.
             by_id[check_id] = result
             continue
-        if verdict == "external_compliance_pending" or external_pending:
+        if context.get("classification") == "executable_with_external_check":
+            identified = result.get("identified_obligations", [])
+            primary_by_id = {
+                item.get("id"): item.get("status")
+                for item in primary_obligations if isinstance(item, dict)
+            }
+            mapped_ids = [
+                item.get("primary_obligation_id")
+                for item in identified if isinstance(item, dict)
+            ]
+            if (
+                verdict != "mixed_execution_external_pending"
+                or context.get("requires_requirement") is not True
+                or not linked
+                or not represented or not external_pending
+                or represented + external_pending != len(identified)
+                or len(primary_by_id) != len(primary_obligations)
+                or len(mapped_ids) != len(identified)
+                or len(set(mapped_ids)) != len(mapped_ids)
+                or set(mapped_ids) != set(primary_by_id)
+                or any(
+                    (primary_by_id.get(item.get("primary_obligation_id")) != (
+                        "covered" if item.get("disposition") == "represented" else "unverifiable"
+                    ))
+                    or (item.get("disposition") == "external_action_pending" and item.get("requirement_refs"))
+                    for item in identified if isinstance(item, dict)
+                )
+            ):
+                raise NativeSemanticReviewError(
+                    f"mixed executable/external clause lacks a one-to-one represented and pending source-obligation inventory for {check_id}"
+                )
+            by_id[check_id] = result
+            continue
+        if verdict in {"external_compliance_pending", "mixed_execution_external_pending"} or external_pending:
             raise NativeSemanticReviewError(
                 f"external-action disposition is only valid for external_compliance clauses: {check_id}"
             )
@@ -1072,8 +1105,10 @@ def _prompt(request: dict[str, Any]) -> str:
             "its own actor/action entry, without merging consent, application, approval, signature, or seal into a generic item. "
             "For every external_action_pending entry, set primary_obligation_id to the one current primary obligation id it independently matches; use each id exactly once. If a primary action is missing, duplicate, or semantically wrong, do not force a mapping or claim external_compliance_pending; report the mismatch. "
             "disposition external_action_pending and no requirement_refs. This records an outstanding external "
-            "action, never DOCX satisfaction. Never use this verdict for executable DOCX work or to hide a missing "
-            "requirement. For a clause classified requires_source_content, use source_content_pending only when "
+            "action, never DOCX satisfaction. Never use the external_compliance_pending verdict for executable DOCX work or to hide a missing "
+            "requirement. "
+            "For executable_with_external_check, use mixed_execution_external_pending only if each covered primary obligation is independently represented by an exact linked DOCX requirement and each unverifiable primary obligation is a real-world action with external_action_pending, no requirement_refs, and its matching primary_obligation_id. Map every primary obligation exactly once; preserve a distinct pending action even when the DOCX rule is valid. This state never authorizes submission. "
+            "For a clause classified requires_source_content, use source_content_pending only when "
             "the exact source explicitly requires the author to provide genuine thesis content; identify each such "
             "source passage as authoring_content_pending and use no requirement_refs. This means the source input "
             "is still pending, not that the content was written or a requirement satisfied. If the primary response "
@@ -1350,7 +1385,7 @@ def run_native_semantic_review(
     finished_at = datetime.now(timezone.utc).isoformat()
     verdicts = (
         "consistent", "incomplete", "uncertain", "manual_review_required",
-        "external_compliance_pending", "source_content_pending", "backend_unsupported",
+        "external_compliance_pending", "mixed_execution_external_pending", "source_content_pending", "backend_unsupported",
         "source_content_verification_pending",
     ) if obligation_coverage_mode else (
         "satisfied", "noncompliant", "uncertain",

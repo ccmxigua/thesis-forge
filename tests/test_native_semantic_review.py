@@ -1125,6 +1125,58 @@ class NativeSemanticReviewTests(unittest.TestCase):
         with self.assertRaisesRegex(NativeSemanticReviewError, "only valid for external_compliance"):
             validate_obligation_coverage_response(forged, [executable])
 
+    def test_mixed_docx_rule_and_real_world_approval_remain_distinct(self) -> None:
+        source = "未经批准的均为公开学位论文（公开的学位论文本项为空白）"
+        check = {
+            "check_id": "C00040", "document_text": source,
+            "review_context": {
+                "classification": "executable_with_external_check",
+                "requires_requirement": True,
+                "linked_requirements": [{"requirement_ref": "RR-public-blank"}],
+                "primary_obligations": [
+                    {"id": "blank_public_field", "status": "covered", "reason": "DOCX field rule"},
+                    {"id": "approval_evidence", "status": "unverifiable", "reason": "External approval"},
+                ],
+                "machine_obligation_ids": [],
+            },
+        }
+        result = {"results": [{
+            "check_id": "C00040",
+            "verdict": "mixed_execution_external_pending",
+            "rationale": "The public-field rule is expressible, but approval remains unproved.",
+            "evidence_quotes": [source],
+            "machine_obligation_ids": [],
+            "identified_obligations": [
+                {"source_quote": "公开的学位论文本项为空白", "disposition": "represented",
+                 "primary_obligation_id": "blank_public_field",
+                 "requirement_refs": ["RR-public-blank"]},
+                {"source_quote": "未经批准", "disposition": "external_action_pending",
+                 "primary_obligation_id": "approval_evidence", "requirement_refs": []},
+            ],
+        }]}
+        validated = validate_obligation_coverage_response(result, [check])
+        self.assertEqual(validated[0]["verdict"], "mixed_execution_external_pending")
+
+        broken_cases = []
+        for field, value in (
+            ("primary_obligation_id", "blank_public_field"),
+            ("primary_obligation_id", "unknown"),
+            ("requirement_refs", ["RR-public-blank"]),
+            ("disposition", "represented"),
+        ):
+            broken = json.loads(json.dumps(result, ensure_ascii=False))
+            broken["results"][0]["identified_obligations"][1][field] = value
+            broken_cases.append(broken)
+        missing = json.loads(json.dumps(result, ensure_ascii=False))
+        missing["results"][0]["identified_obligations"].pop()
+        broken_cases.append(missing)
+        forged_pass = json.loads(json.dumps(result, ensure_ascii=False))
+        forged_pass["results"][0]["verdict"] = "consistent"
+        broken_cases.append(forged_pass)
+        for broken in broken_cases:
+            with self.subTest(broken=broken), self.assertRaises(NativeSemanticReviewError):
+                validate_obligation_coverage_response(broken, [check])
+
     def test_three_distinct_external_actions_remain_three_pending_items(self) -> None:
         source = "须经导师同意、作者申请和学院批准。"
         check = {

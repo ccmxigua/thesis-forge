@@ -385,6 +385,51 @@ class ThesisFormatPipelinePolicyTests(unittest.TestCase):
                 duplicate, clauses=[clause], evidence_doc=evidence_doc, expected_run_id="run-1",
             )
 
+    def test_mixed_external_approval_creates_current_source_bound_draft_gate(self) -> None:
+        source = "未经批准的均为公开学位论文（公开的学位论文本项为空白）"
+        review, clause, evidence_doc, item = self._pending_bundle(
+            clause_id="C00040", text=source, start=0, end=len("未经批准"),
+            evidence_id="E00040",
+        )
+        item["work_type"] = "external_action"
+        item["disposition"] = "external_action_pending"
+        item["requirement_refs"] = []
+        item["obligation_summary"] = "人工核对真实批准记录；文档字段不能证明批准。"
+        review.pop("source_content_pending_items")
+        review["mixed_external_items"] = [item]
+        gates = _source_content_verification_release_gates(
+            [review], clauses=[clause], evidence_doc=evidence_doc,
+            expected_run_id="run-1",
+        )
+        self.assertEqual(len(gates), 1)
+        gate = gates[0]
+        self.assertEqual(gate["source_code"], "independent_mixed_external_action")
+        self.assertEqual(gate["category"], "runtime_manual_unverifiable")
+        self.assertEqual(gate["source_text"], "未经批准")
+        self.assertEqual(gate["analysis_obligation_id"], item["analysis_obligation_id"])
+        self.assertFalse(gate["execution_authorized"])
+        self.assertIn("不得提交", gate["action"])
+        with self.assertRaises(ValueError):
+            _source_content_verification_release_gates(
+                [review], clauses=[clause], evidence_doc=evidence_doc,
+                expected_run_id="stale-run",
+            )
+        tampered = {"evidence": [{"id": "E00040", "text": "changed source"}]}
+        with self.assertRaises(ValueError):
+            _source_content_verification_release_gates(
+                [review], clauses=[clause], evidence_doc=tampered,
+                expected_run_id="run-1",
+            )
+
+    def test_mixed_external_review_allows_draft_but_never_submission(self) -> None:
+        results = [{"check_id": "C00040", "verdict": "mixed_execution_external_pending"}]
+        self.assertEqual(
+            enforce_obligation_review_output_policy(results, output_policy="review_draft"),
+            ["C00040"],
+        )
+        with self.assertRaisesRegex(ValueError, "submission output is blocked"):
+            enforce_obligation_review_output_policy(results, output_policy="submission")
+
     def test_keyword_provenance_human_verification_is_review_draft_only(self) -> None:
         results = [{"check_id": "C00068", "verdict": "source_content_verification_pending"}]
         self.assertEqual(

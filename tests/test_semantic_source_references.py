@@ -164,6 +164,32 @@ class SemanticSourceReferenceTests(unittest.TestCase):
         self.assertIn("primary_obligation_id", normal["required"])
         self.assertEqual(native_schema_support_errors(native_output_schema(wire)), [])
 
+    def test_mixed_action_wire_schema_requires_current_primary_ids(self) -> None:
+        request = {"protocol": "coverage", "run_id": "run-mixed-map", "checks": [{
+            "check_id": "C00040",
+            "document_text": "未经批准的均为公开学位论文（公开的学位论文本项为空白）",
+            "review_context": {
+                "classification": "executable_with_external_check",
+                "requires_requirement": True,
+                "primary_obligations": [
+                    {"id": "approval_status", "status": "unverifiable", "reason": "external"},
+                    {"id": "public_blank", "status": "covered", "reason": "DOCX"},
+                ],
+                "linked_requirements": [{"requirement_ref": "RR-public-blank"}],
+                "machine_obligation_ids": [],
+            },
+        }]}
+        packet = build_source_reference_packet(request)
+        wire = source_reference_schema(OBLIGATION_COVERAGE_SCHEMA, packet, coverage=True)
+        obligation = wire["properties"]["results"]["items"]["anyOf"][0]["properties"]["identified_obligations"]["items"]
+        normal = obligation.get("anyOf", [obligation])[0]
+        self.assertEqual(
+            normal["properties"]["primary_obligation_id"]["enum"],
+            ["approval_status", "public_blank"],
+        )
+        self.assertIn("primary_obligation_id", normal["required"])
+        self.assertEqual(native_schema_support_errors(native_output_schema(wire)), [])
+
     def test_registered_projection_keeps_provider_and_canonical_source_selections(self) -> None:
         source = "The following English is not correct."
         request = {

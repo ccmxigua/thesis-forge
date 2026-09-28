@@ -121,7 +121,9 @@ def source_reference_schema(
             review_context = review_context if isinstance(review_context, dict) else {}
             primary_obligations = review_context.get("primary_obligations")
             primary_ids: list[str] = []
-            if review_context.get("classification") == "external_compliance" and primary_obligations:
+            if review_context.get("classification") in {
+                "external_compliance", "executable_with_external_check",
+            } and primary_obligations:
                 if not isinstance(primary_obligations, list):
                     raise ValueError("external primary obligation inventory is malformed")
                 primary_ids = [

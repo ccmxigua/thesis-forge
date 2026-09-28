@@ -2136,7 +2136,7 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
             "type": "source_fragment_literal_projection",
             "rule_id": "current_source_bound_literal_fragments_v1",
             "semantic_inference": "none",
-            "authorization": "ordered_clause_refs_plus_exact_source_and_boundary_proof",
+            "authorization": "role_aware_current_source_binding_with_exact_boundary_proof_when_materialized",
             "projections": source_fragment_repairs,
             "errors": source_fragment_errors,
         })

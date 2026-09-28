@@ -340,6 +340,36 @@ def compose_source_fragments(
     return {"text": materialized, "source_fragments": public_fragments}
 
 
+def _verify_non_text_role_selector(
+    requirement: dict[str, Any], clause_map: dict[str, dict[str, Any]],
+    evidence_context: Any,
+) -> list[dict[str, Any]]:
+    """Verify source references without pretending typed payloads are prose.
+
+    ``source_fragment_clause_ids`` is only a materialization hint. Typed roles
+    have no generic text destination, so each cited span is checked on its own
+    and the unused hint is removed. No role-native property is changed.
+    """
+    selector = requirement.get("source_fragment_clause_ids")
+    if (
+        not isinstance(selector, list) or not selector
+        or any(not isinstance(value, str) or not value for value in selector)
+    ):
+        raise SourceFragmentBindingError("clause_ids_must_be_nonempty_string_array")
+    if len(set(selector)) != len(selector):
+        raise SourceFragmentBindingError("duplicate_clause_id")
+
+    fragments: list[dict[str, Any]] = []
+    for clause_id in selector:
+        binding = compose_source_fragments(
+            [clause_id], clause_map, evidence_context,
+            requirement_clause_ids=requirement.get("clause_ids"),
+            requirement_evidence_ids=requirement.get("evidence_ids"),
+        )
+        fragments.extend(binding["source_fragments"])
+    return fragments
+
+
 def materialize_source_fragment_literals(
     response: Any,
     clauses: list[dict[str, Any]],
@@ -363,6 +393,28 @@ def materialize_source_fragment_literals(
         if not isinstance(item, dict) or "source_fragment_clause_ids" not in item:
             continue
         pointer = f"$.requirements[{index}]"
+        properties = item.get("properties")
+        if not isinstance(properties, dict):
+            errors.append(f"{pointer}.properties:must_be_object_for_source_fragments")
+            continue
+        role = item.get("role")
+        if role in TOP_LEVEL_NON_TEXT_ROLES and role != "declarations":
+            try:
+                source_fragments = _verify_non_text_role_selector(
+                    item, clause_map, evidence_context,
+                )
+            except SourceFragmentBindingError as exc:
+                errors.append(f"{pointer}.source_fragment_clause_ids:{exc}")
+                continue
+            selector = copy.deepcopy(item.pop("source_fragment_clause_ids"))
+            audits.append({
+                "requirement_index": index,
+                "role": role,
+                "clause_ids": selector,
+                "source_fragments": source_fragments,
+                "action": "discarded_non_applicable_typed_role_selector",
+            })
+            continue
         try:
             binding = compose_source_fragments(
                 item.get("source_fragment_clause_ids"), clause_map, evidence_context,
@@ -372,11 +424,6 @@ def materialize_source_fragment_literals(
         except SourceFragmentBindingError as exc:
             errors.append(f"{pointer}.source_fragment_clause_ids:{exc}")
             continue
-        properties = item.get("properties")
-        if not isinstance(properties, dict):
-            errors.append(f"{pointer}.properties:must_be_object_for_source_fragments")
-            continue
-        role = item.get("role")
         if role == "declarations":
             declaration_error = _declaration_fragment_payload_error(
                 item, binding, evidence_map,
@@ -395,11 +442,6 @@ def materialize_source_fragment_literals(
                 ).hexdigest(),
                 "action": "verified_against_role_native_declaration_text",
             })
-            continue
-        if role in TOP_LEVEL_NON_TEXT_ROLES:
-            errors.append(
-                f"{pointer}.source_fragment_clause_ids:role_has_no_top_level_text_target:{role}"
-            )
             continue
         supplied_text = properties.get("text")
         if supplied_text is not None and supplied_text != binding["text"]:

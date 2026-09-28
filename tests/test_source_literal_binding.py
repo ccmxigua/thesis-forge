@@ -306,12 +306,63 @@ class SourceLiteralBindingTests(unittest.TestCase):
             response, clauses, evidence,
         )
 
-        self.assertEqual(audits, [])
-        self.assertTrue(any(
-            "role_has_no_top_level_text_target:equations" in error
-            for error in errors
-        ))
+        self.assertEqual(errors, [])
+        self.assertEqual(
+            audits[0]["action"],
+            "discarded_non_applicable_typed_role_selector",
+        )
+        self.assertEqual(audits[0]["role"], "equations")
+        self.assertNotIn(
+            "source_fragment_clause_ids", output["requirements"][0],
+        )
         self.assertNotIn("text", output["requirements"][0]["properties"])
+
+    def test_content_constraint_discards_selector_but_preserves_typed_payload(self) -> None:
+        clauses, evidence = _adjacent_paragraphs()
+        requirement = {
+            "role": "content_constraints",
+            "properties": {
+                "abstract_zh": {"required": True, "min_words": 300},
+            },
+            "clause_ids": ["C19"],
+            "evidence_ids": ["E20"],
+            "source_fragment_clause_ids": ["C19"],
+        }
+        response = {"requirements": [requirement]}
+
+        output, audits, errors = materialize_source_fragment_literals(
+            response, clauses, evidence,
+        )
+
+        self.assertEqual(errors, [])
+        self.assertEqual(output["requirements"][0]["properties"], requirement["properties"])
+        self.assertEqual(output["requirements"][0]["clause_ids"], ["C19"])
+        self.assertEqual(output["requirements"][0]["evidence_ids"], ["E20"])
+        self.assertNotIn("source_fragment_clause_ids", output["requirements"][0])
+        self.assertEqual(len(audits), 1)
+        self.assertEqual(audits[0]["role"], "content_constraints")
+        self.assertEqual(
+            audits[0]["action"],
+            "discarded_non_applicable_typed_role_selector",
+        )
+        self.assertEqual(audits[0]["source_fragments"][0]["clause_id"], "C19")
+
+    def test_typed_role_selector_still_requires_current_cited_clause(self) -> None:
+        clauses, evidence = _adjacent_paragraphs()
+        response = {"requirements": [{
+            "role": "content_constraints",
+            "properties": {"abstract_zh": {"required": True}},
+            "clause_ids": ["C404"],
+            "evidence_ids": ["E404"],
+            "source_fragment_clause_ids": ["C404"],
+        }]}
+
+        _, audits, errors = materialize_source_fragment_literals(
+            response, clauses, evidence,
+        )
+
+        self.assertEqual(audits, [])
+        self.assertTrue(any("unknown_clause:C404" in error for error in errors))
 
 
 if __name__ == "__main__":

@@ -805,11 +805,11 @@ def validate_obligation_coverage_response(
             not manual_review_authorized
             or not live_manual_codes
             or not (ambiguous or scope_unresolved)
-            or unrepresented
+            or (unrepresented and not scope_unresolved)
             or represented
             or not result.get("identified_obligations")
             or any(
-                item.get("disposition") not in {"ambiguous", "scope_unresolved"}
+                item.get("disposition") not in {"ambiguous", "scope_unresolved", "unrepresented"}
                 for item in result.get("identified_obligations", [])
             )
         ):
@@ -1022,7 +1022,9 @@ def _prompt(request: dict[str, Any]) -> str:
                 "authorize execution. Do not use scope_unresolved to hide a readable obligation whose execution "
                 "scope is independently clear; keep such an omission unrepresented. Do not change source, primary "
                 "classification, requirement links, or any candidate field, and do not invent, merge, or omit an "
-                "obligation. Any remaining independent omission stays incomplete.\n"
+                "obligation. If at least one authorized scope_unresolved obligation remains, preserve any independent "
+                "unrepresented obligations alongside it and keep the overall verdict manual_review_required; if no "
+                "authorized scope_unresolved obligation remains, use incomplete for any unrepresented obligation.\n"
             )
         elif retry_clause_ids:
             retry_instruction = (
@@ -1078,9 +1080,12 @@ def _prompt(request: dict[str, Any]) -> str:
             "check's code-owned manual_review_codes, affected dependency dimensions, and empty "
             "requirement_refs. Emit scope dependency fields only for scope_unresolved; omit them for every "
             "other disposition, including represented conditional requirements. This is analysis-only and "
-            "never represented or executable. Any readable "
-            "obligation independent of that ambiguity remains unrepresented; never hide it under a manual "
-            "deferral. Use ambiguous only when the source text itself cannot be interpreted reliably. "
+            "never represented or executable. Any readable obligation independent of that ambiguity remains "
+            "unrepresented; never relabel it scope_unresolved. Such an unrepresented obligation may coexist with "
+            "manual_review_required only when the same result also contains at least one valid, ambiguity-backed "
+            "scope_unresolved obligation; preserve both dispositions and keep the clause non-passing. Without such "
+            "a scope_unresolved obligation, an unrepresented obligation requires verdict=incomplete. Use ambiguous "
+            "only when the source text itself cannot be interpreted reliably. "
             "For the registered code source_correction_target_ambiguity, when the exact source only says "
             "'The following English is not correct.' and does not identify an approved target or replacement, "
             "do not invent an authoring instruction or English correction. Return manual_review_required with "

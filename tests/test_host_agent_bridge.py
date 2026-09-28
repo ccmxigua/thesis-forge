@@ -349,7 +349,7 @@ class HostAgentBridgeTests(unittest.TestCase):
         self._independent_review_patch.stop()
         source = (
             "The Chinese abstract is usually written in third person, "
-            "300 to 1,000 words."
+            "300 to 1,000 words, without comment and explanation."
         )
         provenance = {
             "run_id": "run-c76-ledger", "source_sha256": "a" * 64,
@@ -375,14 +375,21 @@ class HostAgentBridgeTests(unittest.TestCase):
             "results": [{
                 "check_id": "C00076", "verdict": "manual_review_required",
                 "rationale": "The scope depends on the registered target and metric ambiguity.",
-                "evidence_quotes": [source], "machine_obligation_ids": [],
-                "identified_obligations": [{
-                    "source_quote": source, "disposition": "scope_unresolved",
-                    "obligation_summary": "The word-count guidance has an unresolved target.",
-                    "scope_dependency_codes": ["abstract_target_metric_ambiguity"],
-                    "scope_dependency_dimensions": ["target", "metric"],
-                    "requirement_refs": [],
-                }],
+                "evidence_quotes": ["300 to 1,000 words", "without comment and explanation"],
+                "machine_obligation_ids": [],
+                "identified_obligations": [
+                    {
+                        "source_quote": "300 to 1,000 words", "disposition": "scope_unresolved",
+                        "obligation_summary": "The word-count guidance has an unresolved target.",
+                        "scope_dependency_codes": ["abstract_target_metric_ambiguity"],
+                        "scope_dependency_dimensions": ["target", "metric"],
+                        "requirement_refs": [],
+                    },
+                    {
+                        "source_quote": "without comment and explanation",
+                        "disposition": "unrepresented", "requirement_refs": [],
+                    },
+                ],
             }],
             "summary": {"consistent": 0, "incomplete": 0, "uncertain": 0},
         }
@@ -406,9 +413,11 @@ class HostAgentBridgeTests(unittest.TestCase):
             self.assertEqual(ledger["run_id"], "run-c76-ledger")
             self.assertEqual(ledger["candidate_response_sha256"], bridge._response_sha256(response))
             self.assertFalse(ledger["submission_ready"])
-            self.assertEqual(ledger["obligations"][0]["disposition"], "scope_unresolved")
-            self.assertEqual(ledger["obligations"][0]["requirement_refs"], [])
-            self.assertFalse(ledger["obligations"][0]["execution_authorized"])
+            by_disposition = {item["disposition"]: item for item in ledger["obligations"]}
+            self.assertEqual(set(by_disposition), {"scope_unresolved", "unrepresented"})
+            for obligation in by_disposition.values():
+                self.assertEqual(obligation["requirement_refs"], [])
+                self.assertFalse(obligation["execution_authorized"])
 
     def test_independent_coverage_retries_capacity_once_with_same_model_and_fresh_attempt_dir(self) -> None:
         self._independent_review_patch.stop()

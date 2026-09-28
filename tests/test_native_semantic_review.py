@@ -822,6 +822,59 @@ class NativeSemanticReviewTests(unittest.TestCase):
         with self.assertRaisesRegex(NativeSemanticReviewError, "manual deferral is not authorized"):
             validate_obligation_coverage_response(unrepresented, [check])
 
+    def test_manual_scope_deferral_preserves_independent_unrepresented_obligations(self) -> None:
+        source = (
+            "The Chinese abstract is usually written in third person, "
+            "300 to 1,000 words, without comment and explanation."
+        )
+        check = {
+            "check_id": "C00076",
+            "document_text": source,
+            "review_context": {
+                "classification": "unresolved",
+                "requires_requirement": False,
+                "linked_requirements": [],
+                "machine_obligation_ids": [],
+                "manual_review_codes": ["abstract_target_metric_ambiguity"],
+            },
+        }
+        response = {"results": [{
+            "check_id": "C00076",
+            "verdict": "manual_review_required",
+            "rationale": "The metric requires manual resolution; other obligations remain separately unrepresented.",
+            "evidence_quotes": ["300 to 1,000 words", "without comment and explanation"],
+            "machine_obligation_ids": [],
+            "identified_obligations": [
+                {
+                    "source_quote": "300 to 1,000 words",
+                    "disposition": "scope_unresolved",
+                    "obligation_summary": "The word-count metric remains ambiguous for the named abstract.",
+                    "scope_dependency_codes": ["abstract_target_metric_ambiguity"],
+                    "scope_dependency_dimensions": ["metric"],
+                    "requirement_refs": [],
+                },
+                {
+                    "source_quote": "without comment and explanation",
+                    "disposition": "unrepresented",
+                    "requirement_refs": [],
+                },
+            ],
+        }]}
+
+        accepted = validate_obligation_coverage_response(response, [check])[0]
+        self.assertEqual(accepted["verdict"], "manual_review_required")
+        self.assertEqual(
+            [item["disposition"] for item in accepted["identified_obligations"]],
+            ["scope_unresolved", "unrepresented"],
+        )
+
+        unsafe = json.loads(json.dumps(response, ensure_ascii=False))
+        unsafe["results"][0]["identified_obligations"][0]["disposition"] = "unrepresented"
+        unsafe["results"][0]["identified_obligations"][0].pop("scope_dependency_codes")
+        unsafe["results"][0]["identified_obligations"][0].pop("scope_dependency_dimensions")
+        with self.assertRaisesRegex(NativeSemanticReviewError, "manual deferral is not authorized"):
+            validate_obligation_coverage_response(unsafe, [check])
+
     def test_abstract_scope_ambiguity_code_excludes_examples_conditions_and_quotes(self) -> None:
         valid = (
             "The Chinese abstract is described as 300 to 1,000 words, "
@@ -934,13 +987,13 @@ class NativeSemanticReviewTests(unittest.TestCase):
             },
         }
         cases.append((linked, linked_check))
-        hidden_omission = json.loads(json.dumps(accepted))
-        hidden_omission["results"][0]["identified_obligations"].append({
-            "source_quote": "figures or tables",
-            "disposition": "unrepresented",
-            "requirement_refs": [],
-        })
-        cases.append(hidden_omission)
+        manual_without_scope = json.loads(json.dumps(accepted))
+        for obligation in manual_without_scope["results"][0]["identified_obligations"]:
+            if obligation["disposition"] == "scope_unresolved":
+                obligation["disposition"] = "unrepresented"
+                obligation.pop("scope_dependency_codes")
+                obligation.pop("scope_dependency_dimensions")
+        cases.append(manual_without_scope)
         for case in cases:
             candidate, candidate_check = case if isinstance(case, tuple) else (case, check)
             with self.subTest(case=candidate), self.assertRaises(NativeSemanticReviewError):
@@ -1323,6 +1376,7 @@ class NativeSemanticReviewTests(unittest.TestCase):
         self.assertIn("hardening or weakening source qualifiers", prompt)
         self.assertIn("Use ambiguous only when the source text itself cannot be interpreted reliably", prompt)
         self.assertIn("use incomplete when any obligation is missing or materially misrepresented", prompt)
+        self.assertIn("may coexist with manual_review_required only when the same result also contains", prompt)
         self.assertIn("never emit numeric positions or invent a reference", prompt)
 
     def test_backend_unsupported_prompt_is_explicitly_analysis_only(self) -> None:

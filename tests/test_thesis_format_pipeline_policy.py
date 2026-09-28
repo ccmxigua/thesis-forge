@@ -12,6 +12,7 @@ from thesis_format_pipeline import (  # noqa: E402
     _scope_unresolved_release_gates,
     _source_content_pending_release_gates,
     _source_content_verification_release_gates,
+    _code_owned_source_content_verification_release_gates,
     enforce_obligation_review_output_policy,
 )
 from obligation_workflow import OBLIGATION_ANALYSIS_LEDGER_PROTOCOL  # noqa: E402
@@ -129,14 +130,16 @@ class ThesisFormatPipelinePolicyTests(unittest.TestCase):
         return [clause], {"evidence": [{"id": "E1", "text": raw_source}]}, item_base
 
     @staticmethod
-    def _scope_identity(item_base: dict, *, source_ref: str, obligation_index: int = 0):
+    def _scope_identity(
+        item_base: dict, *, source_ref: str, obligation_index: int = 0, clause_id: str = "C1",
+    ):
         identity = {
             "protocol": OBLIGATION_ANALYSIS_LEDGER_PROTOCOL,
             "run_id": "run-1", "case_id": "bsu", "chunk_index": 1, "attempt": 1,
             "candidate_response_sha256": "a" * 64,
             "review_request_sha256": "b" * 64,
             "review_response_sha256": "c" * 64,
-            "check_id": "C1", "obligation_index": obligation_index,
+            "check_id": clause_id, "obligation_index": obligation_index,
             "source_ref": source_ref,
             "source_sha256": item_base["source_text_sha256"],
             "start": item_base["source_start"], "end": item_base["source_end"],
@@ -390,6 +393,80 @@ class ThesisFormatPipelinePolicyTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "human verification.*C00068.*submission output is blocked"):
             enforce_obligation_review_output_policy(results, output_policy="submission")
 
+    def test_code_owned_keyword_verification_emits_bound_red_marker_and_blocks_submission(self) -> None:
+        quote = "关键词须源自论文。"
+        raw_source = f"{quote}\n关键词：图神经网络；交通预测"
+        source_sha = hashlib.sha256(raw_source.encode("utf-8")).hexdigest()
+        clause = {
+            "id": "C00068", "text": quote, "evidence_ids": ["E00068"],
+            "source_span": {
+                "evidence_id": "E00068", "start_offset": 0,
+                "end_offset": len(quote), "text": quote, "source_sha256": source_sha,
+            },
+        }
+        evidence_doc = {"evidence": [{"id": "E00068", "text": raw_source}]}
+        gates = _code_owned_source_content_verification_release_gates(
+            [clause], evidence_doc=evidence_doc, expected_run_id="run-current",
+        )
+        self.assertEqual(len(gates), 1)
+        gate = gates[0]
+        self.assertEqual(gate["category"], "semantic_content_review")
+        self.assertEqual(gate["clause_ids"], ["C00068"])
+        self.assertEqual(gate["evidence_ids"], ["E00068"])
+        self.assertFalse(gate["execution_authorized"])
+        self.assertIn("关键词", gate["placeholder_text"])
+        self.assertIn("run-current", str(gate["producer_records"]))
+
+        ledger = build_manual_review_ledger(
+            {}, [], release_gates=gates,
+            binding={
+                "case_id": "bsu", "run_id": "run-current",
+                "source_sha256": "a" * 64, "clause_sha256": "b" * 64,
+                "evidence_sha256": "c" * 64, "request_sha256": "d" * 64,
+                "requirements_sha256": "e" * 64, "input_source_sha256": "f" * 64,
+                "format_spec_sha256": "0" * 64, "official_template_sha256": None,
+                "official_template_source": "not_supplied",
+            },
+        )
+        self.assertFalse(ledger["submission_ready"])
+        self.assertEqual(ledger["items"][0]["category"], "semantic_content_review")
+        self.assertEqual(load_and_validate(ledger, ROOT / "schema" / "manual-review-ledger.schema.json"), [])
+        self.assertEqual(
+            enforce_obligation_review_output_policy(
+                [], output_policy="review_draft",
+                code_owned_source_content_verification_clause_ids=["C00068"],
+            ),
+            [],
+        )
+        with self.assertRaisesRegex(ValueError, "human verification.*C00068.*submission output is blocked"):
+            enforce_obligation_review_output_policy(
+                [], output_policy="submission",
+                code_owned_source_content_verification_clause_ids=["C00068"],
+            )
+
+        tampered = [{**clause, "source_span": {**clause["source_span"], "text": "关键词须源自别处。"}}]
+        with self.assertRaisesRegex(ValueError, "lost its registered source text|not bound to an exact current evidence span"):
+            _code_owned_source_content_verification_release_gates(
+                tampered, evidence_doc=evidence_doc, expected_run_id="run-current",
+            )
+        missing_span = [{key: value for key, value in clause.items() if key != "source_span"}]
+        with self.assertRaisesRegex(ValueError, "has no exact current evidence span"):
+            _code_owned_source_content_verification_release_gates(
+                missing_span, evidence_doc=evidence_doc, expected_run_id="run-current",
+            )
+        missing_evidence_reference = [{**clause, "evidence_ids": []}]
+        with self.assertRaisesRegex(ValueError, "not bound to an exact current evidence span"):
+            _code_owned_source_content_verification_release_gates(
+                missing_evidence_reference, evidence_doc=evidence_doc,
+                expected_run_id="run-current",
+            )
+        duplicate_evidence_reference = [{**clause, "evidence_ids": ["E00068", "E00068"]}]
+        with self.assertRaisesRegex(ValueError, "not bound to an exact current evidence span"):
+            _code_owned_source_content_verification_release_gates(
+                duplicate_evidence_reference, evidence_doc=evidence_doc,
+                expected_run_id="run-current",
+            )
+
     def test_source_content_pending_rejects_missing_evidence_ids(self) -> None:
         review, clause, evidence_doc, item = self._pending_bundle(
             clause_id="C00102", text="请作者撰写真实研究内容。", start=0, end=13,
@@ -500,6 +577,73 @@ class ThesisFormatPipelinePolicyTests(unittest.TestCase):
             item["marker_required"] and "待确认适用范围" in item["placeholder_text"]
             for item in ledger["items"]
         ))
+
+    def test_english_correction_notice_becomes_bound_human_scope_marker(self) -> None:
+        quote = "The following English is not correct."
+        prefix, suffix = "before: ", " :after"
+        raw_source = prefix + quote + suffix
+        start = len(prefix)
+        raw_sha = hashlib.sha256(raw_source.encode("utf-8")).hexdigest()
+        clause = {
+            "id": "C00074", "text": quote, "evidence_ids": ["E00074"],
+            "source_span": {
+                "evidence_id": "E00074", "start_offset": start,
+                "end_offset": start + len(quote), "text": quote,
+                "source_sha256": raw_sha,
+            },
+        }
+        evidence_doc = {"evidence": [{"id": "E00074", "text": raw_source}]}
+        request_sha = "b" * 64
+        source_ref = "Q" + sha256_json({
+            "request_sha256": request_sha, "check_id": "C00074",
+            "start": 0, "end": len(quote), "text": quote,
+        })[:16]
+        item_base = {
+            "clause_id": "C00074", "source_ref": source_ref,
+            "source_quote": quote, "source_start": 0, "source_end": len(quote),
+            "source_text_sha256": sha256_json(quote),
+            "obligation_summary": (
+                "The notice identifies incorrect English but does not identify its target or approved replacement."
+            ),
+            "evidence_ids": ["E00074"], "requirement_refs": [],
+            "execution_authorized": False,
+            "source_location": {
+                "evidence_id": "E00074", "start_offset": start,
+                "end_offset": start + len(quote), "source_sha256": raw_sha,
+            },
+        }
+        obligation_id, identity = self._scope_identity(
+            item_base, source_ref=source_ref, clause_id="C00074",
+        )
+        item = {
+            "analysis_obligation_id": obligation_id,
+            "analysis_obligation_identity": identity,
+            "work_type": "scope_clarification",
+            **item_base,
+            "scope_dependency_codes": ["source_correction_target_ambiguity"],
+            "scope_dependency_dimensions": ["target"],
+        }
+        gates = _scope_unresolved_release_gates(
+            [{**self._scope_review_context(), "scope_unresolved_items": [item]}],
+            clauses=[clause], evidence_doc=evidence_doc,
+        )
+        self.assertEqual(len(gates), 1)
+        self.assertEqual(gates[0]["clause_ids"], ["C00074"])
+        self.assertIn("C00074", gates[0]["placeholder_text"])
+        self.assertFalse(gates[0]["execution_authorized"])
+        ledger = build_manual_review_ledger({}, [], release_gates=gates, binding={
+            "case_id": "bsu", "run_id": "run-1",
+            "source_sha256": "a" * 64, "clause_sha256": "b" * 64,
+            "evidence_sha256": "c" * 64, "request_sha256": None,
+            "requirements_sha256": "d" * 64, "input_source_sha256": "e" * 64,
+            "format_spec_sha256": "f" * 64, "official_template_sha256": None,
+            "official_template_source": "not_supplied",
+        })
+        self.assertFalse(ledger["submission_ready"])
+        self.assertEqual(ledger["items"][0]["category"], "runtime_manual_unverifiable")
+        self.assertEqual(
+            load_and_validate(ledger, ROOT / "schema" / "manual-review-ledger.schema.json"), [],
+        )
 
     def test_scope_unresolved_release_gate_rejects_authorized_or_duplicate_records(self) -> None:
         clauses, evidence_doc, item_base = self._canonical_scope_source()

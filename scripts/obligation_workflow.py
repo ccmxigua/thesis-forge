@@ -9,12 +9,13 @@ from __future__ import annotations
 from typing import Any
 
 
-OBLIGATION_COVERAGE_PROTOCOL = "native_source_obligation_coverage_review_v7"
+OBLIGATION_COVERAGE_PROTOCOL = "native_source_obligation_coverage_review_v8"
 OBLIGATION_ANALYSIS_LEDGER_PROTOCOL = "obligation_analysis_ledger_v2"
 
 SCOPE_DEPENDENCY_DIMENSIONS = {
     "abstract_target_metric_ambiguity": frozenset({"target", "metric", "condition"}),
     "quantitative_scope_unit_ambiguity": frozenset({"target", "metric", "condition", "strength"}),
+    "source_correction_target_ambiguity": frozenset({"target"}),
 }
 
 WORK_TYPE_BY_DISPOSITION = {

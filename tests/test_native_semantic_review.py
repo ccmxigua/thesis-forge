@@ -106,7 +106,7 @@ class NativeSemanticReviewTests(unittest.TestCase):
         }
         packet = build_obligation_coverage_request(candidate, chunk, run_id="run-1", chunk_index=4)
         check = packet["checks"][0]
-        self.assertEqual(packet["protocol"], "native_source_obligation_coverage_review_v7")
+        self.assertEqual(packet["protocol"], "native_source_obligation_coverage_review_v8")
         self.assertEqual(packet["provenance"], chunk["provenance"])
         self.assertEqual(check["document_text"], source)
         requirement_ref = check["review_context"]["linked_requirements"][0]["requirement_ref"]
@@ -464,6 +464,96 @@ class NativeSemanticReviewTests(unittest.TestCase):
             validate_obligation_coverage_response(pending, [check])[0]["verdict"],
             "source_content_pending",
         )
+
+    def test_nonexplicit_english_correction_notice_becomes_manual_target_review(self) -> None:
+        source = "The following English is not correct."
+        check = {
+            "check_id": "C00074", "document_text": source,
+            "review_context": {
+                "classification": "requires_source_content", "requires_requirement": False,
+                "primary_obligations": [], "linked_requirements": [],
+                "machine_obligation_ids": [],
+                "manual_review_codes": ["source_correction_target_ambiguity"],
+                "source_content_verification_codes": [],
+            },
+        }
+        response = {"results": [{
+            "check_id": "C00074", "verdict": "source_content_pending",
+            "rationale": "The following English content needs correction.",
+            "evidence_quotes": [source], "machine_obligation_ids": [],
+            "identified_obligations": [{
+                "source_quote": source,
+                "disposition": "authoring_content_pending", "requirement_refs": [],
+            }],
+        }]}
+        result = validate_obligation_coverage_response(response, [check])[0]
+        self.assertEqual(result["verdict"], "manual_review_required")
+        self.assertEqual(result["identified_obligations"][0]["disposition"], "scope_unresolved")
+        self.assertEqual(
+            result["identified_obligations"][0]["scope_dependency_codes"],
+            ["source_correction_target_ambiguity"],
+        )
+        self.assertEqual(result["identified_obligations"][0]["requirement_refs"], [])
+
+        linked = json.loads(json.dumps(check, ensure_ascii=False))
+        linked["review_context"]["linked_requirements"] = [{"requirement_ref": "RR-linked"}]
+        with self.assertRaises(NativeSemanticReviewError):
+            validate_obligation_coverage_response(response, [linked])
+
+        omitted = {"results": [{
+            "check_id": "C00074", "verdict": "consistent",
+            "rationale": "No authoring instruction was provided.",
+            "evidence_quotes": [source], "machine_obligation_ids": [],
+            "identified_obligations": [],
+        }]}
+        recovered = validate_obligation_coverage_response(omitted, [check])[0]
+        self.assertEqual(recovered["verdict"], "manual_review_required")
+        self.assertEqual(recovered["identified_obligations"][0]["source_quote"], source)
+
+    def test_code_owned_keyword_traceability_route_is_explicit_and_not_a_pass(self) -> None:
+        source = (
+            "关键词是为了便于做文献索引和检索工作而从论文中选取出来用以表示全文主题内容信息的"
+            "单词或术语，在论文中有明确出处"
+        )
+        check = {
+            "check_id": "C00068", "document_text": source,
+            "review_context": {
+                "classification": "informational", "requires_requirement": False,
+                "linked_requirements": [], "machine_obligation_ids": [],
+                "manual_review_codes": [],
+                "source_content_verification_codes": ["keyword_source_traceability_verification"],
+            },
+        }
+        incomplete = {"results": [{
+            "check_id": "C00068", "verdict": "incomplete",
+            "rationale": "The source requires keywords to come from thesis content, but no requirement is linked.",
+            "evidence_quotes": [source], "machine_obligation_ids": [],
+            "identified_obligations": [{
+                "source_quote": source, "disposition": "unrepresented", "requirement_refs": [],
+            }],
+        }]}
+        result = validate_obligation_coverage_response(incomplete, [check])[0]
+        self.assertEqual(result["verdict"], "incomplete")
+        self.assertEqual(
+            native_review.compile_source_content_verification_codes(source),
+            ["keyword_source_traceability_verification"],
+        )
+        self.assertEqual(
+            native_review.compile_source_content_verification_codes("关键词须源自论文。"),
+            ["keyword_source_traceability_verification"],
+        )
+        self.assertEqual(
+            native_review.compile_source_content_verification_codes(
+                "关键词须源自论文，但应在论文中有明确出处。"
+            ),
+            ["keyword_source_traceability_verification"],
+        )
+        prompt = native_review._prompt({
+            "protocol": native_review.OBLIGATION_COVERAGE_PROTOCOL,
+            "checks": [check],
+        })
+        self.assertIn("explicit human-only verification route", prompt)
+        self.assertIn("It remains pending and blocks submission", prompt)
 
     def test_existing_content_verification_is_semantic_and_not_keyword_specific(self) -> None:
         source = "论文中的实验数据须可追溯至原始实验记录。"

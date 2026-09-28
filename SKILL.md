@@ -344,10 +344,16 @@ included in the independent-review request, record a separate
 request” does not mean the user never supplied that artifact. Do not reclassify
 existing content as missing author-written content or ask the author to rewrite
 it: the marker requests a human source-location check and remains a submission
-blocker. The semantic reviewer—not a keyword phrase allowlist—decides whether
-the source expresses this kind of verification obligation; deterministic code
-binds the exact quote, source span, evidence, review request, candidate response,
-and current run.
+blocker. For the explicit requirement that keywords originate from or be
+selected from the thesis, emit a visible, source-bound red marker asking the
+user to record where each keyword appears in the thesis. This is a code-owned
+human-verification route, not an automated semantic match: it never passes the
+requirement and blocks submission until the user supplies a verified result in
+a fresh run. Deterministic code binds the exact quote, source span, evidence,
+review request, candidate response, and current run. Exact correction notices
+such as “The following English is not correct.” without an identified target or
+approved replacement stay as scope-unresolved human markers; never reinterpret
+them as author instructions or fabricate a correction.
 
 If the primary response labels an exact existing-content verification
 obligation `informational`, the independent review may request one bounded

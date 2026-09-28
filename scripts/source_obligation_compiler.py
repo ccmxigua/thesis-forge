@@ -252,6 +252,55 @@ _ABSTRACT_SOURCE_MANUAL_REVIEW = re.compile(
     r".{0,300}?(?:the\s+chinese\s+abstract)",
     re.IGNORECASE | re.DOTALL,
 )
+
+_SOURCE_CORRECTION_TARGET_AMBIGUITY = re.compile(
+    r"^\s*the following english is not correct[.!]?\s*$",
+    re.IGNORECASE,
+)
+_KEYWORD_SOURCE_SELECTION_ZH = re.compile(
+    r"(?:关键词|关键字).{0,100}从.{0,12}(?:论文|学位论文|本文).{0,12}选取",
+    re.IGNORECASE,
+)
+_KEYWORD_SOURCE_ORIGIN_ZH = re.compile(
+    r"(?:关键词|关键字).{0,80}(?:(?:须|应|需|必须|需要).{0,20}(?:源自|来自|选自|取自).{0,20}"
+    r"(?:论文|学位论文|本文)|(?:源自|来自|选自|取自).{0,20}(?:论文|学位论文|本文))",
+    re.IGNORECASE,
+)
+_KEYWORD_SOURCE_TRACEABILITY_ZH = re.compile(
+    r"(?:关键词|关键字).{0,160}(?:在论文中|论文中).{0,12}(?:有明确出处|可追溯|明确来源)",
+    re.IGNORECASE,
+)
+_KEYWORD_SOURCE_SELECTION_EN = re.compile(
+    r"\bkeywords?\b.{0,120}\bselected\s+from\s+(?:the\s+)?(?:thesis|paper)\b",
+    re.IGNORECASE,
+)
+_KEYWORD_SOURCE_ORIGIN_EN = re.compile(
+    r"\bkeywords?\b.{0,80}\b(?:must|should|required\s+to)\b.{0,20}"
+    r"\b(?:originate|come|derive)\s+from\s+(?:the\s+)?(?:thesis|paper)\b",
+    re.IGNORECASE,
+)
+_KEYWORD_SOURCE_TRACEABILITY_EN = re.compile(
+    r"\bkeywords?\b.{0,160}\b(?:traceable|clear\s+source)\b.{0,80}\b(?:thesis|paper|text)\b",
+    re.IGNORECASE,
+)
+_SOURCE_VERIFICATION_EXAMPLE_CONTEXT = re.compile(
+    r"(?:例如|比如|示例|反例|例[：:]|for\s+example|e\.g\.|as\s+an?\s+example|"
+    r"the\s+following\s+example|counterexample)\s*[,，:：;；]?",
+    re.IGNORECASE,
+)
+_KEYWORD_SOURCE_NEGATION_ZH = re.compile(
+    r"(?:关键词|关键字).{0,40}(?:无需|无须|不必|不要求|不需要).{0,24}"
+    r"(?:源自|来自|选自|取自|从|出自).{0,24}(?:论文|学位论文|本文)|"
+    r"(?:关键词|关键字).{0,40}(?:论文|学位论文|本文).{0,16}"
+    r"(?:不是|并非|无需|无须|不必|不要求|不需要).{0,16}(?:来源|出处|选取依据)",
+    re.IGNORECASE,
+)
+_KEYWORD_SOURCE_NEGATION_EN = re.compile(
+    r"\bkeywords?\b.{0,48}\b(?:need\s+not|not\s+required\s+to|do\s+not\s+need\s+to)\b"
+    r".{0,32}\b(?:originate|come|derive|be\s+selected)\b.{0,20}"
+    r"\b(?:from\s+)?(?:the\s+)?(?:thesis|paper)\b",
+    re.IGNORECASE,
+)
 _ABSTRACT_MANUAL_REVIEW_CONTEXT_UNSAFE = re.compile(
     r"\b(?:for\s+example|e\.g\.|example|counterexample|if\s+(?:applicable|the|this|these|those)|"
     r"where\s+applicable|only\s+if|unless)\b|"
@@ -819,7 +868,47 @@ def compile_unresolved_manual_review_codes(source_text: Any) -> list[str]:
         codes.append("abstract_target_metric_ambiguity")
     if not _CONTEXT_UNSAFE.search(source_text) and _has_ambiguous_explicit_count_units(source_text):
         codes.append("quantitative_scope_unit_ambiguity")
+    if (
+        _SOURCE_CORRECTION_TARGET_AMBIGUITY.fullmatch(source_text)
+        and not _inside_quote(source_text, 0)
+    ):
+        codes.append("source_correction_target_ambiguity")
     return sorted(set(codes))
+
+
+def compile_source_content_verification_codes(source_text: Any) -> list[str]:
+    """Recognize source-origin checks that require a human, never an auto-pass."""
+    if not isinstance(source_text, str) or not source_text.strip():
+        return []
+    if (
+        _KEYWORD_SOURCE_NEGATION_ZH.search(source_text)
+        or _KEYWORD_SOURCE_NEGATION_EN.search(source_text)
+    ):
+        return []
+    chinese_selection = _KEYWORD_SOURCE_SELECTION_ZH.search(source_text)
+    chinese_origin = _KEYWORD_SOURCE_ORIGIN_ZH.search(source_text)
+    chinese_traceability = _KEYWORD_SOURCE_TRACEABILITY_ZH.search(source_text)
+    english_selection = _KEYWORD_SOURCE_SELECTION_EN.search(source_text)
+    english_origin = _KEYWORD_SOURCE_ORIGIN_EN.search(source_text)
+    english_traceability = _KEYWORD_SOURCE_TRACEABILITY_EN.search(source_text)
+    if not (
+        chinese_origin
+        or english_origin
+        or (chinese_selection and chinese_traceability)
+        or (english_selection and english_traceability)
+    ):
+        return []
+    source_match = chinese_origin or english_origin or chinese_selection or english_selection
+    prefix = source_text[:source_match.start()] if source_match is not None else ""
+    sentence_start = max(
+        (prefix.rfind(mark) for mark in (".", "!", "?", "。", "！", "？", "\n")),
+        default=-1,
+    )
+    if _SOURCE_VERIFICATION_EXAMPLE_CONTEXT.search(prefix[sentence_start + 1:]):
+        return []
+    if source_match is not None and _inside_quote(source_text, source_match.start()):
+        return []
+    return ["keyword_source_traceability_verification"]
 
 
 def _explicit_abstract_hard_support(source_text: Any, property_name: str) -> bool:

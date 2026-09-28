@@ -57,6 +57,7 @@ from requirements_engine import (
 )
 from artifact_io import atomic_write_text, paths_alias
 from process_runner import run_process
+from source_obligation_compiler import compile_source_content_verification_codes
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -669,13 +670,21 @@ def _validate_independent_obligation_receipts(
                 )
         if ledger_items != expected_ledger_items:
             raise ValueError(f"obligation analysis ledger {index} does not match the reviewed source obligations")
-        manual_review_clause_ids = enforce_obligation_review_output_policy(
-            normalized_results, output_policy=output_policy,
-        )
         checks_by_id = {
             str(item.get("check_id")): item for item in checks
             if isinstance(item, dict) and isinstance(item.get("check_id"), str)
         }
+        code_owned_source_verification_clause_ids = sorted({
+            check_id for check_id, check in checks_by_id.items()
+            if isinstance(check.get("review_context"), dict)
+            and check["review_context"].get("source_content_verification_codes")
+        })
+        manual_review_clause_ids = enforce_obligation_review_output_policy(
+            normalized_results, output_policy=output_policy,
+            code_owned_source_content_verification_clause_ids=(
+                code_owned_source_verification_clause_ids
+            ),
+        )
         source_content_pending_items: list[dict[str, Any]] = []
         source_content_verification_items: list[dict[str, Any]] = []
         scope_unresolved_items: list[dict[str, Any]] = []
@@ -947,9 +956,14 @@ def _validate_independent_obligation_receipts(
             "submission_blocked_by_source_content_pending": bool(source_content_pending_items),
             "source_content_verification_clause_ids": sorted({
                 item["clause_id"] for item in source_content_verification_items
-            }),
+            } | set(code_owned_source_verification_clause_ids)),
+            "code_owned_source_content_verification_clause_ids": (
+                code_owned_source_verification_clause_ids
+            ),
             "source_content_verification_items": source_content_verification_items,
-            "submission_blocked_by_source_content_verification": bool(source_content_verification_items),
+            "submission_blocked_by_source_content_verification": bool(
+                source_content_verification_items or code_owned_source_verification_clause_ids
+            ),
             "scope_unresolved_items": scope_unresolved_items,
             "submission_blocked_by_scope_unresolved": bool(scope_unresolved_items),
         })
@@ -958,8 +972,117 @@ def _validate_independent_obligation_receipts(
     return sorted(validated, key=lambda item: item["chunk_index"])
 
 
+def _code_owned_source_content_verification_release_gates(
+    clauses: list[dict[str, Any]], *, evidence_doc: dict[str, Any], expected_run_id: str,
+    covered_clause_ids: set[str] | None = None,
+) -> list[dict[str, Any]]:
+    """Create current-source red markers for known human-only provenance checks."""
+    if not isinstance(clauses, list) or not isinstance(evidence_doc, dict):
+        raise ValueError("current clauses and evidence are required for source-content verification")
+    if not isinstance(expected_run_id, str) or not expected_run_id:
+        raise ValueError("current run_id is required for source-content verification")
+    covered_clause_ids = covered_clause_ids or set()
+    evidence_by_id = {
+        str(item.get("id")): item for item in evidence_doc.get("evidence", [])
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    gates: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for clause in clauses:
+        if not isinstance(clause, dict) or not isinstance(clause.get("id"), str):
+            continue
+        clause_id = clause["id"]
+        span = clause.get("source_span")
+        if not isinstance(span, dict):
+            if compile_source_content_verification_codes(clause.get("text")):
+                raise ValueError(
+                    f"source-content verification for {clause_id} has no exact current evidence span"
+                )
+            continue
+        quote = span.get("text")
+        clause_codes = compile_source_content_verification_codes(clause.get("text"))
+        codes = compile_source_content_verification_codes(quote)
+        if clause_codes and not codes:
+            raise ValueError(
+                f"source-content verification for {clause_id} lost its registered source text"
+            )
+        if not codes:
+            continue
+        evidence_id = span.get("evidence_id")
+        evidence = evidence_by_id.get(evidence_id) if isinstance(evidence_id, str) else None
+        raw_source = evidence.get("text") if isinstance(evidence, dict) else None
+        start, end = span.get("start_offset"), span.get("end_offset")
+        source_sha = span.get("source_sha256")
+        clause_evidence_ids = clause.get("evidence_ids")
+        if (
+            not isinstance(quote, str)
+            or not isinstance(evidence_id, str)
+            or not isinstance(clause_evidence_ids, list)
+            or any(not isinstance(value, str) or not value for value in clause_evidence_ids)
+            or len(clause_evidence_ids) != len(set(clause_evidence_ids))
+            or not isinstance(raw_source, str)
+            or isinstance(start, bool) or not isinstance(start, int)
+            or isinstance(end, bool) or not isinstance(end, int)
+            or not 0 <= start < end <= len(raw_source)
+            or raw_source[start:end] != quote
+            or not isinstance(source_sha, str)
+            or hashlib.sha256(raw_source.encode("utf-8")).hexdigest() != source_sha
+            or evidence_id not in clause_evidence_ids
+        ):
+            raise ValueError(
+                f"source-content verification for {clause_id} is not bound to an exact current evidence span"
+            )
+        if clause_id in covered_clause_ids:
+            continue
+        for code in codes:
+            key = (clause_id, code)
+            if key in seen:
+                raise ValueError("duplicate code-owned source-content verification")
+            seen.add(key)
+            gates.append({
+                "source_code": code,
+                "category": "semantic_content_review",
+                "source_text": quote,
+                "reason": (
+                    "来源要求关键词从论文中选取并有明确出处；代码无法判断每个关键词与论文正文的语义对应关系。"
+                ),
+                "action": (
+                    "请人工逐项核对每个关键词在论文正文中的具体出处并记录位置；此项不代表已通过，"
+                    "完成核验后须以 submission 模式重新开始一轮新运行。"
+                ),
+                "placeholder_text": "【待人工核验：逐项确认关键词是否来源于论文正文】",
+                "clause_ids": [clause_id],
+                "evidence_ids": [evidence_id],
+                "source_location": {
+                    "evidence_id": evidence_id,
+                    "start_offset": start,
+                    "end_offset": end,
+                    "source_sha256": source_sha,
+                },
+                "work_type": "existing_content_verification",
+                "execution_authorized": False,
+                "producer_records": [{
+                    "producer": "code_owned_source_content_verification",
+                    "record": {
+                        "protocol": OBLIGATION_COVERAGE_PROTOCOL,
+                        "run_id": expected_run_id,
+                        "clause_id": clause_id,
+                        "evidence_id": evidence_id,
+                        "source_sha256": source_sha,
+                        "source_start": start,
+                        "source_end": end,
+                        "source_quote": quote,
+                        "verification_code": code,
+                        "execution_authorized": False,
+                    },
+                }],
+            })
+    return gates
+
+
 def enforce_obligation_review_output_policy(
     results: list[dict[str, Any]], *, output_policy: str,
+    code_owned_source_content_verification_clause_ids: list[str] | set[str] | tuple[str, ...] = (),
 ) -> list[str]:
     """Permit irreducible ambiguity only in an explicitly non-release draft."""
     if output_policy not in {"review_draft", "submission"}:
@@ -987,6 +1110,9 @@ def enforce_obligation_review_output_policy(
         if isinstance(item, dict)
         and item.get("verdict") == "source_content_verification_pending"
         and isinstance(item.get("check_id"), str)
+    } | {
+        str(clause_id) for clause_id in code_owned_source_content_verification_clause_ids
+        if isinstance(clause_id, str) and clause_id
     })
     if source_content_verification_clause_ids and output_policy != "review_draft":
         raise ValueError(
@@ -2791,6 +2917,21 @@ def _main(argv: list[str]) -> int:
             _source_content_verification_release_gates(
                 independent_reviews, clauses=clauses, evidence_doc=evidence_doc,
                 expected_run_id=str(extraction_manifest.get("run_id") or ""),
+            )
+        )
+        already_verified_clause_ids = {
+            str(clause_id)
+            for gate in manual_review_release_gates
+            if gate.get("work_type") == "existing_content_verification"
+            for clause_id in gate.get("clause_ids", [])
+            if isinstance(clause_id, str)
+        }
+        manual_review_release_gates.extend(
+            _code_owned_source_content_verification_release_gates(
+                clauses,
+                evidence_doc=evidence_doc,
+                expected_run_id=str(extraction_manifest.get("run_id") or ""),
+                covered_clause_ids=already_verified_clause_ids,
             )
         )
         manual_review_release_gates.extend(

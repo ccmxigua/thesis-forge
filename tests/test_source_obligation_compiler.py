@@ -19,6 +19,7 @@ from source_obligation_compiler import (  # noqa: E402
     compile_security_marking_options,
     compile_security_marking_shorter_allowances,
     compile_soft_keyword_count_guidance,
+    compile_source_content_verification_codes,
     compile_unresolved_manual_review_codes,
     materialize_complete_abstract_source_constraints,
     materialize_known_source_verification,
@@ -521,6 +522,76 @@ class SourceObligationCompilerTests(unittest.TestCase):
         self.assertIsNotNone(compile_explicit_keyword_count_range(
             "Key Words: at least 3 groups, with a maximum of 8 groups."
         ))
+
+    def test_registered_manual_correction_and_keyword_source_checks_are_narrow(self) -> None:
+        correction_note = "The following English is not correct."
+        self.assertEqual(
+            compile_unresolved_manual_review_codes(correction_note),
+            ["source_correction_target_ambiguity"],
+        )
+        self.assertEqual(
+            compile_unresolved_manual_review_codes('The guide quotes: "The following English is not correct."'),
+            [],
+        )
+        self.assertEqual(
+            compile_unresolved_manual_review_codes("Please replace the following English with corrected text."),
+            [],
+        )
+
+        keyword_source = (
+            "关键词是为了便于做文献索引和检索工作而从论文中选取出来用以表示全文主题内容信息的"
+            "单词或术语，在论文中有明确出处"
+        )
+        self.assertEqual(
+            compile_source_content_verification_codes(keyword_source),
+            ["keyword_source_traceability_verification"],
+        )
+        self.assertEqual(
+            compile_source_content_verification_codes("关键词一般用分号分隔。"),
+            [],
+        )
+        self.assertEqual(
+            compile_source_content_verification_codes("例如，关键词应从论文中选取并有明确出处。"),
+            [],
+        )
+        self.assertEqual(
+            compile_source_content_verification_codes(
+                "The following example: Keywords must originate from the thesis, but have a clear source in the text."
+            ),
+            [],
+        )
+        self.assertEqual(
+            compile_source_content_verification_codes(
+                "The guide says, for example, keywords must originate from the thesis, but have a clear source in the text."
+            ),
+            [],
+        )
+        self.assertEqual(
+            compile_source_content_verification_codes(
+                "An example was discussed. Keywords must originate from the thesis, but have a clear source in the text."
+            ),
+            ["keyword_source_traceability_verification"],
+        )
+        self.assertEqual(
+            compile_source_content_verification_codes('指南引用：“关键词须源自论文。”'),
+            [],
+        )
+        self.assertEqual(
+            compile_source_content_verification_codes("关键词不必源自论文。"),
+            [],
+        )
+        self.assertEqual(
+            compile_source_content_verification_codes(
+                "关键词须源自论文，但应在论文中有明确出处。"
+            ),
+            ["keyword_source_traceability_verification"],
+        )
+        self.assertEqual(
+            compile_source_content_verification_codes(
+                "Keywords must originate from the thesis, but have a clear source in the text."
+            ),
+            ["keyword_source_traceability_verification"],
+        )
 
     def test_explicit_keyword_range_rejects_one_sided_or_different_units(self) -> None:
         self.assertIsNone(compile_explicit_keyword_count_range(

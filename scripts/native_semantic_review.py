@@ -30,6 +30,7 @@ from semantic_source_references import (
 )
 from source_obligation_compiler import (
     compile_known_source_obligation_ids,
+    compile_source_content_verification_codes,
     compile_unresolved_manual_review_codes,
     has_mixed_external_document_action_signal,
 )
@@ -402,6 +403,9 @@ def build_obligation_coverage_request(
                 },
                 "machine_obligation_ids": compile_known_source_obligation_ids(source_text),
                 "manual_review_codes": compile_unresolved_manual_review_codes(source_text),
+                "source_content_verification_codes": (
+                    compile_source_content_verification_codes(source_text)
+                ),
             },
         })
     provenance = chunk.get("provenance") if isinstance(chunk.get("provenance"), dict) else {}
@@ -422,6 +426,40 @@ def build_obligation_coverage_request(
         },
         "checks": checks,
     }
+
+
+def _project_registered_source_correction_to_manual_review(
+    result: dict[str, Any], check: dict[str, Any],
+) -> None:
+    """Keep an exact, registered correction notice human-reviewed, not fabricated."""
+    source_text = check.get("document_text")
+    context = check.get("review_context") if isinstance(check.get("review_context"), dict) else {}
+    if (
+        not isinstance(source_text, str)
+        or "source_correction_target_ambiguity"
+        not in compile_unresolved_manual_review_codes(source_text)
+        or context.get("classification") not in {"informational", "requires_source_content"}
+        or context.get("requires_requirement") is not False
+        or context.get("linked_requirements")
+        or context.get("primary_obligations")
+    ):
+        return
+    result["verdict"] = "manual_review_required"
+    result["rationale"] = (
+        "The source flags following English as incorrect but does not identify an approved "
+        "correction target or replacement; preserve it for human review."
+    )
+    result["identified_obligations"] = [{
+        "source_quote": source_text,
+        "disposition": "scope_unresolved",
+        "obligation_summary": (
+            "The source flags following English as incorrect, but the exact target and "
+            "approved replacement are not established by the source."
+        ),
+        "scope_dependency_codes": ["source_correction_target_ambiguity"],
+        "scope_dependency_dimensions": ["target"],
+        "requirement_refs": [],
+    }]
 
 
 def validate_obligation_coverage_response(
@@ -448,8 +486,9 @@ def validate_obligation_coverage_response(
             raise NativeSemanticReviewError(f"independent obligation review returned unknown clause: {check_id!r}")
         if check_id in by_id:
             raise NativeSemanticReviewError(f"independent obligation review duplicated clause: {check_id}")
-        by_id[check_id] = result
         check = expected[check_id]
+        _project_registered_source_correction_to_manual_review(result, check)
+        by_id[check_id] = result
         source_text = str(check.get("document_text") or "")
         evidence_quotes = result.get("evidence_quotes")
         if not isinstance(evidence_quotes, list) or not evidence_quotes or any(
@@ -484,6 +523,20 @@ def validate_obligation_coverage_response(
             raise NativeSemanticReviewError(
                 f"independent obligation review manual-review authorization is stale for {check_id}"
             )
+        live_source_verification_codes = compile_source_content_verification_codes(source_text)
+        declared_source_verification_codes = context.get("source_content_verification_codes") or []
+        if sorted(declared_source_verification_codes) != sorted(live_source_verification_codes):
+            raise NativeSemanticReviewError(
+                f"independent obligation review source-verification authorization is stale for {check_id}"
+            )
+        registered_correction_review = (
+            live_manual_codes == ["source_correction_target_ambiguity"]
+            and context.get("classification") in {"informational", "requires_source_content"}
+            and context.get("requires_requirement") is False
+            and not linked
+            and not context.get("primary_obligations")
+        )
+        manual_review_authorized = safely_unresolved or registered_correction_review
         allowed_refs = {
             item.get("requirement_ref") for item in linked
             if isinstance(item, dict) and isinstance(item.get("requirement_ref"), str)
@@ -537,7 +590,7 @@ def validate_obligation_coverage_response(
                 if (
                     not isinstance(obligation.get("obligation_summary"), str)
                     or not obligation["obligation_summary"].strip()
-                    or not safely_unresolved
+                    or not manual_review_authorized
                     or not dependency_codes
                     or not set(dependency_codes) <= set(live_manual_codes)
                     or not dimensions
@@ -749,7 +802,7 @@ def validate_obligation_coverage_response(
                 f"independent obligation review cannot defer unrepresented obligations as uncertainty for {check_id}"
             )
         if verdict == "manual_review_required" and (
-            not safely_unresolved
+            not manual_review_authorized
             or not live_manual_codes
             or not (ambiguous or scope_unresolved)
             or unrepresented
@@ -1028,6 +1081,12 @@ def _prompt(request: dict[str, Any]) -> str:
             "never represented or executable. Any readable "
             "obligation independent of that ambiguity remains unrepresented; never hide it under a manual "
             "deferral. Use ambiguous only when the source text itself cannot be interpreted reliably. "
+            "For the registered code source_correction_target_ambiguity, when the exact source only says "
+            "'The following English is not correct.' and does not identify an approved target or replacement, "
+            "do not invent an authoring instruction or English correction. Return manual_review_required with "
+            "one scope_unresolved target obligation, the registered code, and no requirement_refs. The code "
+            "validator may conservatively project a non-explicit authoring-pending claim for this exact source "
+            "to the same human-review state; this is never a pass. "
             "For external_compliance clauses, use external_compliance_pending only when each primary obligation "
             "is marked unverifiable and no DOCX requirement is linked; quote and list each real-world action with "
             "disposition external_action_pending and no requirement_refs. This records an outstanding external "
@@ -1043,8 +1102,13 @@ def _prompt(request: dict[str, Any]) -> str:
             "use verdict source_content_verification_pending and disposition source_content_verification_pending "
             "for each exact source passage, with no requirement_refs. This is a human check of existing content, "
             "not a request to write or invent content, and never compliance or release approval. The semantic decision "
-            "is yours; code only validates that the selected quote is an exact current-source span. Do not rely on "
-            "keyword-specific wording or a lexical allowlist. If the same clause has separately represented executable "
+            "is yours; code only validates that the selected quote is an exact current-source span. A non-empty "
+            "code-owned source_content_verification_codes list is an explicit human-only verification route: preserve "
+            "the exact source passage as an unlinked verification item even if the primary classification is "
+            "informational or the source obligation is otherwise not represented. It remains pending and blocks "
+            "submission. Do not rely on keyword-specific wording or a lexical allowlist outside those "
+            "code-owned codes. "
+            "If the same clause has separately represented executable "
             "obligations, list those as represented with exact valid refs and keep verification obligations unlinked. "
             "If the primary classification is informational, report the verification finding anyway; the bridge may "
             "authorize only a source-bound classification correction. If the primary classification is "

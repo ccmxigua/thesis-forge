@@ -61,6 +61,10 @@ from semantic_contract import (
 from evidence_context_guards import (
     sample_content_guard,
 )
+from fixed_declaration_source import (
+    is_fixed_declaration_boundary,
+    is_fixed_declaration_heading,
+)
 from source_obligation_compiler import (
     SOURCE_VERIFICATION_CLASSIFICATION_POLICY_VERSION,
     SOURCE_KEYWORD_CONSTRAINT_PROJECTION_POLICY_VERSION,
@@ -3154,7 +3158,7 @@ def _source_continuity_context(
 def _source_atomic_chunks(
     clauses: list[dict[str, Any]], chunk_size: int,
 ) -> tuple[list[list[dict[str, Any]]], list[tuple[int, int]]]:
-    """Chunk clauses without splitting one physical evidence occurrence."""
+    """Keep physical occurrences and bounded fixed declarations together."""
     groups: list[list[dict[str, Any]]] = []
     group_keys: list[tuple[Any, ...]] = []
     for clause in clauses:
@@ -3174,6 +3178,48 @@ def _source_atomic_chunks(
         else:
             groups.append([clause])
             group_keys.append(key)
+
+    # A fixed declaration's heading and final body paragraph can have distinct
+    # evidence IDs. A chunk boundary between them leaves the latter without a
+    # heading-backed candidate, so keep the contiguous source span atomic.
+    # This only changes packet boundaries: the model still decides whether the
+    # source is a declaration, and the exact evidence/candidate checks remain.
+    declaration_groups: list[list[dict[str, Any]]] = []
+    group_index = 0
+    while group_index < len(groups):
+        group = groups[group_index]
+        if not any(is_fixed_declaration_heading(item.get("text")) for item in group):
+            declaration_groups.append(group)
+            group_index += 1
+            continue
+        source_part = next(
+            (
+                item.get("location", {}).get("part")
+                for item in group
+                if isinstance(item.get("location"), dict)
+            ),
+            None,
+        )
+        joined = list(group)
+        group_index += 1
+        while group_index < len(groups):
+            following = groups[group_index]
+            next_part = next(
+                (
+                    item.get("location", {}).get("part")
+                    for item in following
+                    if isinstance(item.get("location"), dict)
+                ),
+                None,
+            )
+            if next_part != source_part or any(
+                is_fixed_declaration_boundary(item.get("text")) for item in following
+            ):
+                break
+            joined.extend(following)
+            group_index += 1
+        declaration_groups.append(joined)
+    groups = declaration_groups
 
     chunks: list[list[dict[str, Any]]] = []
     bounds: list[tuple[int, int]] = []

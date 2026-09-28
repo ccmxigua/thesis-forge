@@ -170,6 +170,10 @@ from existing_requirement_contract import (  # noqa: E402
     project_authoritative_existing_payloads,
 )
 from format_contract_guards import normalize_label  # noqa: E402
+from fixed_declaration_source import (  # noqa: E402
+    is_fixed_declaration_boundary,
+    is_fixed_declaration_heading,
+)
 
 from host_adapters import codex as codex_adapter  # noqa: E402
 from process_runner import run_process  # noqa: E402
@@ -404,20 +408,8 @@ def _fixed_declaration_candidates(
     if not isinstance(clauses, list) or not isinstance(evidence_context, dict):
         return []
 
-    def normalized(value: Any) -> str:
-        return re.sub(r"\s+", "", str(value or ""))
-
-    heading_pattern = re.compile(
-        r"(?:原创性|独创性|诚信|使用授权|版权授权|公开授权).{0,12}(?:声明|说明|书)$"
-        r"|^(?:非公开|不公开)学位论文标注说明$"
-        r"|^(?:声明|授权书)$"
-    )
-    boundary_pattern = re.compile(
-        r"^(?:摘\s*要|ABSTRACT|目\s*录|参考文献|第[一二三四五六七八九十\d]+章)$",
-        re.IGNORECASE,
-    )
     signature_pattern = re.compile(
-        r"(?:签名|签字)|日期.{0,12}年?.{0,6}月?.{0,6}日?"
+        r"(?:签名|签字)|日期.{0,12}年?.{0,6}月?.{0,6}日?|^\s*年\s*月\s*日\s*$"
     )
 
     candidates: list[dict[str, Any]] = []
@@ -425,15 +417,14 @@ def _fixed_declaration_candidates(
         if not isinstance(clause, dict):
             continue
         heading_text = str(clause.get("text") or "")
-        if len(normalized(heading_text)) > 50 or not heading_pattern.search(normalized(heading_text)):
+        if not is_fixed_declaration_heading(heading_text):
             continue
         body_clauses: list[dict[str, Any]] = []
         for following in clauses[start + 1:]:
             if not isinstance(following, dict):
                 continue
             text = str(following.get("text") or "")
-            compact = normalized(text)
-            if boundary_pattern.match(compact):
+            if is_fixed_declaration_boundary(text):
                 break
             evidence_ids = [str(value) for value in following.get("evidence_ids", [])]
             evidence_texts = [
@@ -442,7 +433,7 @@ def _fixed_declaration_candidates(
                 if isinstance(evidence_context.get(evidence_id), dict)
             ]
             source_text = evidence_texts[0] if evidence_texts else text
-            if compact and not signature_pattern.search(source_text):
+            if text.strip() and not signature_pattern.search(source_text):
                 body_clauses.append(following)
         if not body_clauses:
             continue

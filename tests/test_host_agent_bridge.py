@@ -1120,6 +1120,72 @@ class HostAgentBridgeTests(unittest.TestCase):
             self.assertEqual(chunks[1]["batch"]["clause_ids"], ["C3"])
             engine.validate_host_review_chunk_source_projection(request, chunks, manifest)
 
+    def test_fixed_declaration_heading_and_body_remain_in_one_source_bound_chunk(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            review_dir = Path(td) / "requirements"
+            texts = [
+                "封面格式", "学位论文使用授权书", "本人同意提交论文电子版。",
+                "本人承诺：论文已完成", "电子版与纸质版一致。",
+                "学位论文作者暨授权人签字", "年    月    日", "摘  要",
+            ]
+            evidence_ids = ["E0", "E1", "E2", "E3", "E3", "E4", "E5", "E6"]
+            clauses = [
+                {"id": f"C{index}", "text": text,
+                 "evidence_ids": [evidence_ids[index]], "source_kind": "paragraph",
+                 "location": {"part": "document", "order": index if index < 4 else index - 1}}
+                for index, text in enumerate(texts)
+            ]
+            evidence = {"evidence": [
+                {"id": f"E{index}", "text": source, "kind": "paragraph"}
+                for index, source in enumerate([
+                    "封面格式", "学位论文使用授权书", "本人同意提交论文电子版。",
+                    "本人承诺：论文已完成；电子版与纸质版一致。",
+                    "学位论文作者暨授权人签字", "年    月    日", "摘  要",
+                ])
+            ]}
+            request = engine.build_llm_request([], clauses, evidence, {}, "full")
+            request = attach_request_provenance(
+                request, source_sha256="a" * 64, evidence_doc=evidence,
+                clauses=clauses, run_id="run-cross-chunk-declaration",
+            )
+            manifest = engine.prepare_host_agent_review_packets(
+                request, clauses, evidence, "a" * 64, review_dir, chunk_size=3,
+            )
+            chunks = json.loads((review_dir / "llm-request-chunks.json").read_text())
+            self.assertEqual([chunk["batch"]["clause_ids"] for chunk in chunks], [
+                ["C0"], ["C1", "C2", "C3", "C4", "C5", "C6"], ["C7"],
+            ])
+            self.assertEqual(manifest["chunk_count"], 3)
+            candidate = bridge.compact_model_packet(chunks[1])["fixed_declaration_candidates"]
+            self.assertEqual(len(candidate), 1)
+            self.assertEqual(candidate[0]["clause_ids"], ["C1", "C2", "C3", "C4"])
+            self.assertEqual(candidate[0]["evidence_ids"], ["E1", "E2", "E3"])
+            self.assertEqual(candidate[0]["body_evidence_ids"], ["E2", "E3"])
+            engine.validate_host_review_chunk_source_projection(request, chunks, manifest)
+
+    def test_adjacent_fixed_declarations_do_not_absorb_each_other(self) -> None:
+        clauses = [
+            {"id": "C1", "text": "原创性声明", "evidence_ids": ["E1"]},
+            {"id": "C2", "text": "本人独立完成。", "evidence_ids": ["E2"]},
+            {"id": "C3", "text": "学位论文使用授权书", "evidence_ids": ["E3"]},
+            {"id": "C4", "text": "本人同意提交电子版。", "evidence_ids": ["E4"]},
+            {"id": "C5", "text": "摘要", "evidence_ids": ["E5"]},
+        ]
+        chunks, _ = engine._source_atomic_chunks(clauses, 1)
+        self.assertEqual([[item["id"] for item in chunk] for chunk in chunks], [
+            ["C1", "C2"], ["C3", "C4"], ["C5"],
+        ])
+        evidence = {
+            item["evidence_ids"][0]: {
+                "id": item["evidence_ids"][0], "text": item["text"],
+            }
+            for item in clauses
+        }
+        first = bridge._fixed_declaration_candidates(clauses, evidence, anchor="abstract_title_zh")
+        self.assertEqual([item["clause_ids"] for item in first], [
+            ["C1", "C2"], ["C3", "C4"],
+        ])
+
     def test_declaration_anchor_preference_is_bound_to_current_structure(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             directory = Path(td) / "requirements"

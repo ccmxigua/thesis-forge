@@ -179,6 +179,7 @@ from host_review_contract import (  # noqa: E402
     HOST_REVIEW_CONTRACT_V2,
     HOST_REVIEW_CONTRACT_V3,
     SUPPORTED_HOST_REVIEW_CONTRACTS,
+    _conflict_target_property_known,
     _resolve_contract_schema,
     contract_error_records,
     provenance_error_records,
@@ -6138,6 +6139,128 @@ def _project_source_bound_cover_security_marking(
     }
 
 
+def _project_unresolved_conflict_target_disjunction(
+    response: dict[str, Any], record: dict[str, Any], chunk: dict[str, Any],
+    *, baseline_response_sha256: str,
+) -> dict[str, Any] | None:
+    """Remove only a validated disjunction from an unresolved conflict target.
+
+    A conflict target names one registered property. Two registered possible
+    targets cannot be represented there; leaving target absent preserves the
+    unresolved conflict without choosing either property. The exact alternatives
+    remain in the reason and audit, and the full contract is revalidated later.
+    """
+    pointer = str(record.get("json_pointer") or "")
+    match = re.fullmatch(r"\$\.reported_conflicts\[(\d+)\]\.target", pointer)
+    if (
+        match is None
+        or record.get("code") != "contract_validation_error"
+        or record.get("raw_error") != f"{pointer}: unknown_registered_role_property"
+        or record.get("response_sha256") != baseline_response_sha256
+    ):
+        return None
+    conflicts = response.get("reported_conflicts")
+    reviews = response.get("clause_reviews")
+    clauses = chunk.get("clauses")
+    evidence_context = chunk.get("evidence_context")
+    contract = chunk.get("requirement_contract")
+    if not (
+        isinstance(conflicts, list) and int(match.group(1)) < len(conflicts)
+        and isinstance(reviews, list) and isinstance(clauses, list)
+        and isinstance(evidence_context, dict) and isinstance(contract, dict)
+    ):
+        return None
+    conflict = conflicts[int(match.group(1))]
+    if not isinstance(conflict, dict) or conflict.get("type") != "semantic_conflict":
+        return None
+    if conflict.get("status") not in {"unresolved", "requires_human_review"}:
+        return None
+    if not isinstance(conflict.get("reason"), str) or not conflict["reason"].strip():
+        return None
+    if conflict.get("candidates") not in (None, []) or conflict.get("conditions") not in (None, []):
+        return None
+    target = conflict.get("target")
+    if not isinstance(target, dict) or set(target) != {"role", "property"}:
+        return None
+    role, property_name = target.get("role"), target.get("property")
+    if not isinstance(role, str) or not isinstance(property_name, str):
+        return None
+    parts = property_name.split("_or_")
+    if len(parts) != 2 or not all(parts) or parts[0] == parts[1]:
+        return None
+    role_schemas = contract.get("role_properties_schema")
+    contract_root = {"$defs": contract.get("$defs", {})}
+    alternatives = [{"role": role, "property": part} for part in parts]
+    if (
+        _conflict_target_property_known(target, role_schemas, contract_root)
+        or not all(
+            _conflict_target_property_known(item, role_schemas, contract_root)
+            for item in alternatives
+        )
+    ):
+        return None
+
+    clause_ids = conflict.get("clause_ids")
+    evidence_ids = conflict.get("evidence_ids")
+    if (
+        not isinstance(clause_ids, list) or not clause_ids
+        or not all(isinstance(value, str) and value for value in clause_ids)
+        or len(clause_ids) != len(set(clause_ids))
+        or not isinstance(evidence_ids, list) or not evidence_ids
+        or not all(isinstance(value, str) and value for value in evidence_ids)
+        or len(evidence_ids) != len(set(evidence_ids))
+    ):
+        return None
+    clause_map = {
+        item["id"]: item for item in clauses
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    if len(clause_map) != len(clauses):
+        return None
+    review_map: dict[str, list[dict[str, Any]]] = {}
+    for review in reviews:
+        if isinstance(review, dict) and isinstance(review.get("clause_id"), str):
+            review_map.setdefault(review["clause_id"], []).append(review)
+    if any(
+        clause_id not in clause_map
+        or len(review_map.get(clause_id, [])) != 1
+        or review_map[clause_id][0].get("classification") != "unresolved"
+        for clause_id in clause_ids
+    ):
+        return None
+    bound_evidence: set[str] = set()
+    for clause_id in clause_ids:
+        linked_evidence = clause_map[clause_id].get("evidence_ids")
+        if not isinstance(linked_evidence, list) or not all(
+            isinstance(value, str) and value for value in linked_evidence
+        ):
+            return None
+        bound_evidence.update(linked_evidence)
+    if set(evidence_ids) != bound_evidence or not bound_evidence.issubset(evidence_context):
+        return None
+
+    original_target = copy.deepcopy(target)
+    conflict.pop("target")
+    suffix = " [unresolved target alternatives: " + " | ".join(
+        f"{item['role']}.{item['property']}" for item in alternatives
+    ) + "; neither selected]"
+    if suffix not in conflict["reason"]:
+        conflict["reason"] += suffix
+    provenance = chunk.get("provenance") if isinstance(chunk.get("provenance"), dict) else {}
+    return {
+        "code": "contract_validation_error",
+        "json_pointer": pointer,
+        "rule_id": "omit_unresolved_disjunctive_conflict_target_v1",
+        "original_target": original_target,
+        "unresolved_alternatives": alternatives,
+        "action": "omit_single_target_preserve_unresolved_conflict",
+        "clause_ids": list(clause_ids),
+        "evidence_ids": list(evidence_ids),
+        "source_sha256": provenance.get("source_sha256"),
+        "run_id": provenance.get("run_id"),
+    }
+
+
 def _apply_safe_mechanical_repairs_one_rule(
     response: Any, error_records: list[dict[str, Any]],
     *, chunk: dict[str, Any] | None = None,
@@ -7252,6 +7375,20 @@ def _apply_safe_mechanical_repairs_one_rule(
                         "value": exact_text,
                         "after_unknown_property_removal": True,
                     })
+        elif (
+            record.get("code") == "contract_validation_error"
+            and re.fullmatch(r"\$\.reported_conflicts\[\d+\]\.target", pointer)
+            and raw_error == f"{pointer}: unknown_registered_role_property"
+        ):
+            if not isinstance(chunk, dict):
+                return None, []
+            projection = _project_unresolved_conflict_target_disjunction(
+                repaired, record, chunk,
+                baseline_response_sha256=baseline_sha256,
+            )
+            if projection is None:
+                return None, []
+            repairs.append(projection)
         elif record.get("code") == "cover_institution_placeholder":
             match = re.fullmatch(
                 r"\$\.requirements\[(\d+)\]\.properties(?:\.institution)?",

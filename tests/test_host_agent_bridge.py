@@ -1628,6 +1628,119 @@ class HostAgentBridgeTests(unittest.TestCase):
         self.assertEqual(bridge.validate_host_agent_response(restored, chunk), [])
         self.assertEqual(len(split_audit["source_keyword_constraint_projections"]), 1)
 
+    def test_ambiguous_conflict_target_is_omitted_without_choosing_a_language(self) -> None:
+        sources = {
+            "E74": "The following English is not correct.",
+            "E76": "The Chinese abstract is usually 300 to 1,000 words.",
+        }
+        evidence = {"evidence": [
+            {"id": evidence_id, "kind": "paragraph", "text": source}
+            for evidence_id, source in sources.items()
+        ]}
+        clauses = self._bind_test_source_spans([
+            {"id": "C74", "text": sources["E74"], "evidence_ids": ["E74"]},
+            {"id": "C76", "text": sources["E76"], "evidence_ids": ["E76"]},
+        ], evidence)
+        chunk = engine.build_llm_request(
+            [], clauses, evidence, {}, "full", contract_version="3.0",
+            runtime_context={"code_fingerprint_sha256": "9" * 64},
+        )
+        chunk = attach_request_provenance(
+            chunk, source_sha256="a" * 64, evidence_doc=evidence,
+            clauses=chunk["clauses"], run_id="unresolved-target-test",
+        )
+        raw = {
+            "contract_version": "3.0",
+            "requirements": [],
+            "clause_reviews": [
+                {"clause_id": clause["id"], "classification": "unresolved",
+                 "normative_basis": "insufficient", "reason": "The target is ambiguous."}
+                for clause in clauses
+            ],
+            "unsupported_items": [],
+            "reported_conflicts": [{
+                "type": "semantic_conflict",
+                "reason": "The Chinese or English abstract target is unresolved.",
+                "clause_ids": ["C74", "C76"], "evidence_ids": ["E74", "E76"],
+                "target": {"role": "content_constraints",
+                           "property": "abstract_zh_or_abstract_en"},
+                "status": "unresolved",
+            }],
+        }
+        self.assertIn("unknown_registered_role_property", str(
+            bridge.validate_host_agent_response(raw, chunk)
+        ))
+
+        accepted, audit = bridge.prepare_native_response_candidate(raw, chunk)
+        conflict = accepted["reported_conflicts"][0]
+        self.assertNotIn("target", conflict)
+        self.assertIn("content_constraints.abstract_zh | content_constraints.abstract_en",
+                      conflict["reason"])
+        self.assertEqual(conflict["status"], "unresolved")
+        self.assertEqual(accepted["requirements"], [])
+        self.assertTrue(all(item["classification"] == "unresolved"
+                            for item in accepted["clause_reviews"]))
+        self.assertEqual(bridge.validate_host_agent_response(accepted, chunk), [])
+        repairs = audit["mechanical_repairs"]
+        self.assertEqual(len(repairs), 1)
+        self.assertEqual(repairs[0]["original_target"], raw["reported_conflicts"][0]["target"])
+        self.assertEqual(repairs[0]["run_id"], "unresolved-target-test")
+        self.assertEqual(repairs[0]["source_sha256"], "a" * 64)
+        merged, _, _ = engine.merge_llm_primary(
+            Path("synthetic-source"),
+            {"schema_version": "1.0", "source_document": "synthetic-source",
+             "roles": {}, "page": {}, "requirements": [], "content_instances": []},
+            clauses, accepted, set(sources),
+        )
+        self.assertEqual(merged["semantic_conflicts"], accepted["reported_conflicts"])
+        self.assertEqual(merged["status"], "needs_clarification")
+        self.assertTrue(any(item.get("type") == "llm_reported_conflict"
+                            for item in merged["blocking_errors"]))
+
+        narrowed = copy.deepcopy(raw)
+        narrowed["reported_conflicts"][0]["target"]["property"] = "abstract_en"
+        records = bridge.contract_error_records(
+            bridge.validate_host_agent_response(raw, chunk), response=raw, chunk=chunk,
+        )
+        drift_error, changed = bridge._retry_semantic_change_error(
+            raw, narrowed, records, contract_version="3.0", chunk=chunk,
+        )
+        self.assertIsNotNone(drift_error)
+        self.assertIn("$.top_level.reported_conflicts[0].target.property", changed)
+
+        for change in (
+            "unknown_alternative", "candidate_value", "covered_review",
+            "unbound_evidence", "stale_record",
+        ):
+            with self.subTest(change=change):
+                invalid = copy.deepcopy(raw)
+                if change == "unknown_alternative":
+                    invalid["reported_conflicts"][0]["target"]["property"] = (
+                        "abstract_zh_or_unknown"
+                    )
+                elif change == "candidate_value":
+                    invalid["reported_conflicts"][0]["candidates"] = [
+                        {"evidence_id": "E74", "value": "possibly Chinese"},
+                    ]
+                elif change == "covered_review":
+                    invalid["clause_reviews"][0]["classification"] = "executable"
+                elif change == "unbound_evidence":
+                    invalid["reported_conflicts"][0]["evidence_ids"] = ["E74"]
+                invalid_record = {
+                    "code": "contract_validation_error",
+                    "json_pointer": "$.reported_conflicts[0].target",
+                    "raw_error": (
+                        "$.reported_conflicts[0].target: unknown_registered_role_property"
+                    ),
+                    "response_sha256": bridge._response_sha256(invalid),
+                }
+                if change == "stale_record":
+                    invalid_record["response_sha256"] = "0" * 64
+                rejected, _ = bridge._apply_safe_mechanical_repairs(
+                    invalid, [invalid_record], chunk=chunk,
+                )
+                self.assertIsNone(rejected)
+
     def test_retry_guidance_targets_exact_requirement_clause_mapping(self) -> None:
         retry = bridge._contract_repair_guidance(
             "local response contract validation failed: "

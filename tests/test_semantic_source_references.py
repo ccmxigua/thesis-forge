@@ -140,6 +140,30 @@ class SemanticSourceReferenceTests(unittest.TestCase):
         )
         self.assertNotIn("machine_obligation_ids", wire_schema["properties"]["results"]["items"]["anyOf"][0]["properties"])
 
+    def test_external_action_mapping_uses_only_current_primary_ids(self) -> None:
+        request = {"protocol": "coverage", "run_id": "run-external-map", "checks": [{
+            "check_id": "C1", "document_text": "须经导师同意并由学院批准。",
+            "review_context": {
+                "classification": "external_compliance", "requires_requirement": False,
+                "primary_obligations": [
+                    {"id": "advisor_consent", "status": "unverifiable", "reason": "pending"},
+                    {"id": "college_approval", "status": "unverifiable", "reason": "pending"},
+                ],
+                "linked_requirements": [], "machine_obligation_ids": [],
+            },
+        }]}
+        packet = build_source_reference_packet(request)
+        wire = source_reference_schema(OBLIGATION_COVERAGE_SCHEMA, packet, coverage=True)
+        branch = wire["properties"]["results"]["items"]["anyOf"][0]
+        obligation = branch["properties"]["identified_obligations"]["items"]
+        normal = obligation.get("anyOf", [obligation])[0]
+        self.assertEqual(
+            normal["properties"]["primary_obligation_id"]["enum"],
+            ["advisor_consent", "college_approval"],
+        )
+        self.assertIn("primary_obligation_id", normal["required"])
+        self.assertEqual(native_schema_support_errors(native_output_schema(wire)), [])
+
     def test_registered_projection_keeps_provider_and_canonical_source_selections(self) -> None:
         source = "The following English is not correct."
         request = {

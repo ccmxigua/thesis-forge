@@ -951,7 +951,7 @@ class HostReviewV3Tests(unittest.TestCase):
         self.assertTrue(errors)
         self.assertIn("review_requires_non_empty_source_inventory", str(errors))
 
-    def test_v3_external_compliance_does_not_require_docx_obligation_inventory(self) -> None:
+    def test_v3_external_compliance_requires_pending_atomic_inventory_not_docx_edge(self) -> None:
         response = self._informational_response()
         review = response["clause_reviews"][0]
         review.update({
@@ -977,7 +977,19 @@ class HostReviewV3Tests(unittest.TestCase):
                 )
                 if obligations is None:
                     self.assertNotIn("obligations", normalized["clause_reviews"][0])
-                self.assertEqual(validate_response(normalized, self.request), [])
+                errors = validate_response(normalized, self.request)
+                if obligations:
+                    self.assertEqual(errors, [])
+                else:
+                    self.assertIn("external_compliance_review_requires_non_empty_inventory", str(errors))
+                    records = contract_error_records(errors, response=normalized, chunk=self.request)
+                    self.assertIn("external_action_obligations_missing", {item["code"] for item in records})
+
+        covered = copy.deepcopy(response)
+        covered["clause_reviews"][0]["obligations"] = [{
+            "id": "external-signature", "status": "covered", "reason": "Incorrectly claimed complete.",
+        }]
+        self.assertIn("external_action_must_remain_unverifiable", str(validate_response(covered, self.request)))
 
     def test_legacy_21_review_schema_keeps_legacy_contract_shape(self) -> None:
         legacy = build_llm_request(
@@ -1254,6 +1266,63 @@ class HostReviewV3Tests(unittest.TestCase):
         response["requirements"][0]["properties"]["items"][0]["body"] = source
         self.assertFalse(validate_response(response, request))
 
+    def test_render_only_external_paragraph_requires_exact_current_declaration_candidate(self) -> None:
+        clauses = [
+            {"id": "C1", "text": "学位论文使用授权书", "evidence_ids": ["E1"]},
+            {"id": "C2", "text": "须经作者本人同意", "evidence_ids": ["E2"]},
+            {"id": "C3", "text": "固定正文应当显示", "evidence_ids": ["E3"]},
+            {"id": "C4", "text": "摘要", "evidence_ids": ["E4"]},
+        ]
+        evidence = {"evidence": [
+            {"id": "E1", "text": "学位论文使用授权书", "kind": "paragraph"},
+            {"id": "E2", "text": "须经作者本人同意。", "kind": "paragraph"},
+            {"id": "E3", "text": "固定正文应当显示。", "kind": "paragraph"},
+            {"id": "E4", "text": "摘要", "kind": "paragraph"},
+        ]}
+        clauses = _with_test_source_spans(clauses, evidence)
+        request = build_llm_request(
+            [], clauses, evidence, {}, "full", contract_version=HOST_REVIEW_CONTRACT_V3,
+        )
+        request["declaration_anchor_preference"] = "abstract_title_zh"
+        request = attach_request_provenance(
+            request, source_sha256="c" * 64, evidence_doc=evidence,
+            clauses=clauses, run_id="render-only-declaration-evidence",
+        )
+        response = {
+            "contract_version": HOST_REVIEW_CONTRACT_V3,
+            "provenance": request["provenance"],
+            "requirements": [{
+                "role": "declarations", "clause_ids": ["C1", "C3"],
+                "evidence_ids": ["E1", "E3"], "confidence": 0.9,
+                "reason": "Current fixed declaration source text is printed.",
+                "properties": {"before_role": "abstract_title_zh", "items": [{
+                    "id": "authorization", "source_evidence_ids": ["E1", "E2", "E3"],
+                    "signature_placeholders": [], "heading": "学位论文使用授权书",
+                    "body_parts": ["须经作者本人同意。", "固定正文应当显示。"],
+                }]},
+            }],
+            "clause_reviews": [
+                {"clause_id": "C1", "classification": "executable", "reason": "Fixed heading.",
+                 "obligations": [{"id": "heading", "status": "covered", "reason": "Printed exactly."}]},
+                {"clause_id": "C2", "classification": "external_compliance", "reason": "Consent remains pending.",
+                 "obligations": [{"id": "consent", "status": "unverifiable", "reason": "DOCX cannot prove consent."}]},
+                {"clause_id": "C3", "classification": "executable", "reason": "Fixed text.",
+                 "obligations": [{"id": "body", "status": "covered", "reason": "Printed exactly."}]},
+                {"clause_id": "C4", "classification": "informational", "reason": "Section boundary."},
+            ],
+            "unsupported_items": [], "reported_conflicts": [],
+        }
+        errors = validate_response(response, request)
+        self.assertFalse(errors, errors)
+
+        unrelated = copy.deepcopy(response)
+        unrelated["requirements"][0]["properties"]["items"][0]["source_evidence_ids"] = ["E1", "E4", "E3"]
+        errors = validate_response(unrelated, request)
+        self.assertTrue(any(
+            "render_only_evidence_requires_one_exact_current_source_candidate" in error
+            for error in errors
+        ), errors)
+
     def test_missing_v3_requirement_relation_is_structured_as_relation_error(self) -> None:
         records = contract_error_records(
             [
@@ -1353,6 +1422,14 @@ class HostReviewV3Tests(unittest.TestCase):
             ],
         )
         self.assertIn("mixed_execution_classification_relation", {item["code"] for item in mixed_records})
+        dependent = next(
+            item for item in mixed_records
+            if item["code"] == "missing_derived_requirement" and item.get("clause_id") == "C1"
+        )
+        self.assertEqual(dependent["blocked_by_parent_relation"], {
+            "code": "mixed_execution_classification_relation",
+            "requirement_indexes": [0],
+        })
 
         _, missing_records = build_case(
             ["C1", "C2"],

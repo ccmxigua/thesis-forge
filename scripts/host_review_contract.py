@@ -11,6 +11,7 @@ from compliance import classification_requires_requirement
 from evidence_context_guards import sample_content_guard
 from format_spec_validation import schema_support_errors, validate_instance
 from format_contract_guards import cover_binding_errors
+from fixed_declaration_source import derive_fixed_declaration_candidates
 from semantic_contract import strict_json_loads
 from existing_requirement_contract import (
     existing_reference_errors, project_authoritative_existing_payloads,
@@ -463,6 +464,8 @@ def contract_error_records(
             and empty_cover_institution(pointer_match.group(1) if pointer_match else None)
         ):
             code = "cover_institution_placeholder"
+        elif "external_compliance_review_requires_non_empty_inventory" in lowered:
+            code = "external_action_obligations_missing"
         elif (
             "source_fragment_clause_ids" in lowered
             or "source_fragment_binding_required_for_cross_source_literal" in lowered
@@ -549,6 +552,22 @@ def contract_error_records(
                 if derived_clause_id else None
             ),
         )
+    mixed_parents = [
+        fact for fact in relation_analysis
+        if fact.get("category") == "mixed_execution_classification"
+    ]
+    for record in records:
+        if record.get("code") != "missing_derived_requirement":
+            continue
+        parent_indexes = [
+            fact["requirement_index"] for fact in mixed_parents
+            if record.get("clause_id") in fact.get("clause_ids", [])
+        ]
+        if parent_indexes:
+            record["blocked_by_parent_relation"] = {
+                "code": "mixed_execution_classification_relation",
+                "requirement_indexes": parent_indexes,
+            }
     return records
 
 
@@ -1133,13 +1152,16 @@ def _validate_obligations(
     require_semantic_decomposition: bool = False,
 ) -> list[str]:
     classification = str(review.get("classification"))
-    # Keep inventory requirements aligned with the shared classification
-    # contract: only classifications that create a DOCX requirement need a
-    # non-empty source-obligation inventory. External duties are reviewed in
-    # their separate semantic ledger and must not be forced into the DOCX set.
+    # Executable clauses need covered DOCX obligations; external clauses need
+    # distinct pending obligations, never a DOCX requirement edge.  The
+    # independent reviewer checks their source coverage separately.
     requires_inventory = classification_requires_requirement(classification)
     obligations = review.get("obligations")
     if obligations is None:
+        if require_semantic_decomposition and classification == "external_compliance":
+            return [
+                f"$.clause_reviews[{review_index}].obligations: external_compliance_review_requires_non_empty_inventory"
+            ]
         if require_semantic_decomposition and requires_inventory:
             return [
                 f"$.clause_reviews[{review_index}].obligations: review_requires_non_empty_source_inventory"
@@ -1151,6 +1173,10 @@ def _validate_obligations(
     if require_semantic_decomposition and requires_inventory and not obligations:
         errors.append(
             f"$.clause_reviews[{review_index}].obligations: review_requires_non_empty_source_inventory"
+        )
+    if require_semantic_decomposition and classification == "external_compliance" and not obligations:
+        errors.append(
+            f"$.clause_reviews[{review_index}].obligations: external_compliance_review_requires_non_empty_inventory"
         )
     seen: set[str] = set()
     for index, obligation in enumerate(obligations):
@@ -1164,6 +1190,10 @@ def _validate_obligations(
             errors.append(f"$.clause_reviews[{review_index}].obligations[{index}].id: duplicate")
         else:
             seen.add(identifier)
+        if classification == "external_compliance" and obligation.get("status") != "unverifiable":
+            errors.append(
+                f"$.clause_reviews[{review_index}].obligations[{index}].status: external_action_must_remain_unverifiable"
+            )
         if not isinstance(obligation.get("reason"), str) or not obligation["reason"].strip():
             errors.append(f"$.clause_reviews[{review_index}].obligations[{index}].reason: must_be_non_empty")
     if classification_requires_requirement(str(review.get("classification"))) and any(
@@ -1551,15 +1581,63 @@ def validate_response(response: Any, chunk: dict[str, Any]) -> list[str]:
                     f"the current target's declaration_anchor_preference {preferred_anchor!r}"
                 )
             if isinstance(properties, dict) and isinstance(properties.get("items"), list):
-                source_texts = {
-                    evidence_context.get(str(evidence_id), {}).get("text")
-                    for evidence_id in item.get("evidence_ids", [])
-                    if isinstance(evidence_context.get(str(evidence_id)), dict)
-                    and isinstance(evidence_context.get(str(evidence_id), {}).get("text"), str)
-                }
                 for item_index, declaration in enumerate(properties["items"]):
                     if not isinstance(declaration, dict):
                         continue
+                    source_ids = declaration.get("source_evidence_ids")
+                    if source_ids is None:
+                        # Compatibility declaration items may omit the nested
+                        # list when the requirement-level evidence fully
+                        # covers their fixed text.  External-only source
+                        # paragraphs require an explicit nested selection.
+                        source_ids = item.get("evidence_ids")
+                    if not isinstance(source_ids, list) or not source_ids:
+                        errors.append(
+                            f"$.requirements[{index}].properties.items[{item_index}].source_evidence_ids: must cite current source evidence"
+                        )
+                        source_ids = []
+                    elif len(source_ids) != len(set(map(str, source_ids))):
+                        errors.append(
+                            f"$.requirements[{index}].properties.items[{item_index}].source_evidence_ids: duplicate"
+                        )
+                    unknown_source_ids = [
+                        value for value in source_ids
+                        if not isinstance(value, str) or value not in evidence_context
+                    ]
+                    if unknown_source_ids:
+                        errors.append(
+                            f"$.requirements[{index}].properties.items[{item_index}].source_evidence_ids: not_in_current_chunk"
+                        )
+                    requirement_evidence = set(item.get("evidence_ids") or [])
+                    if (
+                        not unknown_source_ids
+                        and not set(source_ids) <= requirement_evidence
+                    ):
+                        candidates = derive_fixed_declaration_candidates(
+                            clauses, evidence_context,
+                            anchor=chunk.get("declaration_anchor_preference"),
+                        )
+                        bound_candidates = [
+                            candidate for candidate in candidates
+                            if candidate.get("evidence_ids") == source_ids
+                            and candidate.get("heading_clause_id") in (item.get("clause_ids") or [])
+                            and [
+                                clause_id for clause_id in candidate.get("clause_ids", [])
+                                if clause_id in (item.get("clause_ids") or [])
+                            ] == item.get("clause_ids")
+                        ]
+                        if len(bound_candidates) != 1:
+                            errors.append(
+                                f"$.requirements[{index}].properties.items[{item_index}].source_evidence_ids: "
+                                "render_only_evidence_requires_one_exact_current_source_candidate"
+                            )
+                    source_texts = {
+                        evidence_context[evidence_id].get("text")
+                        for evidence_id in source_ids
+                        if isinstance(evidence_id, str)
+                        and isinstance(evidence_context.get(evidence_id), dict)
+                        and isinstance(evidence_context[evidence_id].get("text"), str)
+                    }
                     fixed_text_atoms: list[tuple[str, str]] = []
                     for field in ("heading", "body"):
                         value = declaration.get(field)

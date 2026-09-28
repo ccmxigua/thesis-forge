@@ -86,6 +86,15 @@ class RunScopedResourceRegistryTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "not present verbatim"):
             materialize_declaration_resources(changed, "run-source", evidence=evidence)
 
+    def test_heading_repeated_as_all_body_text_cannot_masquerade_as_declaration(self) -> None:
+        spec = self._spec()
+        item = spec["declarations"]["items"][0]
+        item["body_parts"] = [item["heading"]]
+        item["source_evidence_ids"] = ["E-heading"]
+        evidence = {"evidence": [{"id": "E-heading", "text": item["heading"]}]}
+        with self.assertRaisesRegex(ValueError, "repeats its heading as the entire body"):
+            materialize_declaration_resources(spec, "run-title-only", evidence=evidence)
+
     def test_promotes_exact_formatted_source_heading_from_body_parts(self) -> None:
         spec = self._spec()
         item = spec["declarations"]["items"][0]

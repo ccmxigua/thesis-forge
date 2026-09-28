@@ -182,6 +182,8 @@ def _validate_existing_registry(
                 or not body_parts
                 or any(not isinstance(part, str) or not part.strip() for part in body_parts)):
             raise ValueError(f"resource {resource_id!r} has invalid body_parts")
+        if all(_normalized(part) == _normalized(heading) for part in body_parts):
+            raise ValueError(f"resource {resource_id!r} repeats its heading as the entire body")
         if resource.get("sha256") != _resource_sha256(heading.strip(), [part.strip() for part in body_parts]):
             raise ValueError(f"resource {resource_id!r} sha256 does not match its fixed text")
         source_evidence_ids = resource.get("source_evidence_ids")
@@ -359,6 +361,8 @@ def materialize_declaration_resources(
             raise ValueError(f"declaration {item_id!r} needs exact source-derived heading text")
         if not body_parts:
             raise ValueError(f"declaration {item_id!r} needs exact source-derived body text")
+        if all(_normalized(part) == _normalized(heading) for part in body_parts):
+            raise ValueError(f"declaration {item_id!r} repeats its heading as the entire body")
         if not source_evidence_ids:
             raise ValueError(f"declaration {item_id!r} needs source_evidence_ids")
         if evidence is not None:

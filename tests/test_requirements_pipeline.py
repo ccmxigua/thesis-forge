@@ -2574,6 +2574,36 @@ b&=2\notag
         self.assertEqual(records["C2"]["status"], "external_compliance")
         self.assertEqual(requirements_engine.validate_spec(spec, {"E1", "E2"}), [])
 
+    def test_v3_merge_rejects_external_clause_in_executable_edge(self) -> None:
+        clauses = [
+            {"id": "C1", "text": "独创性声明正文", "evidence_ids": ["E1"]},
+            {"id": "C2", "text": "作者须亲笔签名", "evidence_ids": ["E2"]},
+        ]
+        response = {
+            "contract_version": "3.0",
+            "requirements": [{
+                "role": "body_text", "properties": {"font": {"cjk": "SimSun", "size_pt": 12}},
+                "clause_ids": ["C1", "C2"], "evidence_ids": ["E1", "E2"],
+                "confidence": 0.9, "reason": "Incorrectly joins printing with signing.",
+            }],
+            "clause_reviews": [
+                {"clause_id": "C1", "classification": "executable", "reason": "Prints fixed text.",
+                 "obligations": [{"id": "fixed", "status": "covered", "reason": "In DOCX."}]},
+                {"clause_id": "C2", "classification": "external_compliance", "reason": "Real signature pending.",
+                 "obligations": [{"id": "sign", "status": "unverifiable", "reason": "Not in DOCX."}]},
+            ],
+            "unsupported_items": [], "reported_conflicts": [],
+        }
+        _spec, conflicts, _audit = requirements_engine.merge_llm_primary(
+            Path("synthetic-source"),
+            {"schema_version": "1.0", "roles": {}, "requirements": [], "content_instances": []},
+            clauses, response, {"E1", "E2"},
+        )
+        self.assertTrue(any(
+            "requirement_clause_not_covered" in str(item.get("reason"))
+            for item in conflicts
+        ), conflicts)
+
     def test_llm_primary_preserves_clause_scoped_top_level_requirements(self) -> None:
         clauses = [
             {"id": "C1", "text": "博士论文中文关键词应为5至8个。", "evidence_ids": ["E1"]},
@@ -2637,6 +2667,68 @@ b&=2\notag
         self.assertEqual(by_clause["C1"]["applicability"]["status"], "conditional")
         self.assertEqual(by_clause["C1"]["input_prerequisites"][0]["key"], "thesis_profile.degree_level")
         self.assertEqual(by_clause["C2"]["properties"]["ordered_roles"], ["cover", "body_text"])
+
+    def test_empty_declaration_blocks_merge_without_reclassifying_source(self) -> None:
+        clauses = [{"id": "C1", "text": "学位论文使用授权书", "evidence_ids": ["E1"]}]
+        response = {
+            "contract_version": "2.1",
+            "requirements": [{
+                "role": "declarations", "properties": {"before_role": "abstract_title_zh", "items": [{
+                    "id": "authorization", "heading": None, "body_parts": [],
+                    "signature_placeholders": [],
+                }]},
+                "clause_ids": ["C1"], "evidence_ids": ["E1"],
+                "confidence": 0.9, "reason": "Source declaration must be rendered.",
+            }],
+            "clause_reviews": [{
+                "clause_id": "C1", "classification": "executable",
+                "requirement_indexes": [0], "reason": "Fixed declaration heading.",
+            }],
+            "unsupported_items": [], "reported_conflicts": [],
+        }
+        _spec, conflicts, audit = requirements_engine.merge_llm_primary(
+            Path("synthetic-source"),
+            {"schema_version": "1.0", "roles": {}, "requirements": [], "content_instances": []},
+            clauses, response, {"E1"},
+        )
+        self.assertIn("declaration_source_text_not_materialized", {
+            item.get("reason") for item in conflicts if isinstance(item.get("reason"), str)
+        })
+        self.assertEqual(response["clause_reviews"][0]["classification"], "executable")
+        self.assertFalse(any(
+            item.get("type") == "declaration_placeholder_only_normalization"
+            for item in audit
+        ))
+        mixed = json.loads(json.dumps(response, ensure_ascii=False))
+        mixed["requirements"][0]["properties"]["items"].insert(0, {
+            "id": "originality", "heading": "独创性声明",
+            "body_parts": ["本人独立完成论文。"], "signature_placeholders": [],
+        })
+        _mixed_spec, mixed_conflicts, _mixed_audit = requirements_engine.merge_llm_primary(
+            Path("synthetic-source"),
+            {"schema_version": "1.0", "roles": {}, "requirements": [], "content_instances": []},
+            clauses, mixed, {"E1"},
+        )
+        self.assertIn("declaration_source_text_not_materialized", {
+            item.get("reason") for item in mixed_conflicts if isinstance(item.get("reason"), str)
+        })
+        for heading, body_parts in (
+            ("学位论文使用授权书", []),
+            (None, ["本人独立完成论文。"]),
+        ):
+            incomplete = json.loads(json.dumps(response, ensure_ascii=False))
+            item = incomplete["requirements"][0]["properties"]["items"][0]
+            item["heading"] = heading
+            item["body_parts"] = body_parts
+            _spec, incomplete_conflicts, _audit = requirements_engine.merge_llm_primary(
+                Path("synthetic-source"),
+                {"schema_version": "1.0", "roles": {}, "requirements": [], "content_instances": []},
+                clauses, incomplete, {"E1"},
+            )
+            self.assertIn("declaration_source_text_not_materialized", {
+                conflict.get("reason") for conflict in incomplete_conflicts
+                if isinstance(conflict.get("reason"), str)
+            })
 
     def test_llm_primary_unions_scoped_cover_object_and_order_fragments(self) -> None:
         clauses = [

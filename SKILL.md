@@ -81,6 +81,28 @@ clause is purely external. The independent source-first review remains required
 and must reject external-only status whenever its exact source packet contains
 code-known local DOCX obligations.
 
+Fixed-declaration candidates are source-text groupings, not executable-clause
+lists. A requirement may link only clauses independently classified as
+executable/covered/verify_existing and evidence backing those clauses; the
+nested `source_evidence_ids` selects the exact current source paragraphs to
+print. Printing an approval, signature, or seal instruction does not attest
+that the real-world action occurred. Administrative approval/marking regions
+remain conditional cover structures, not fixed declarations. A mixed
+executable/external edge is a semantic split failure: retain the raw response
+and source references, stop the mechanical retry, and require a fresh
+source-bound review. A missing edge caused by that mixed parent is diagnostic,
+not permission to add a title-only declaration. Empty declarations that cannot
+be materialized from current evidence block merge; they are never silently
+reclassified as informational. Draft markers may show pending actions but
+never make a document submission-ready.
+Each `external_compliance` review lists distinct source-grounded actions as
+`obligations[]` with `status=unverifiable`; the independent source-first review
+must keep each action pending and unlinked to a DOCX requirement, mapping each
+independently identified action to exactly one current primary obligation ID.
+The mapping is structural evidence, not deterministic proof of semantic
+correctness; disagreement remains a failed review. A blank
+inventory or a claimed covered external action is a contract error.
+
 ## Explicit semantic issue acknowledgements
 
 When a user confirms that an unresolved clause is a real semantic ambiguity but

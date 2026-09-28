@@ -177,6 +177,7 @@ _SCOPE_DEPENDENCY_DIMENSION_VALUES = tuple(sorted(set().union(*SCOPE_DEPENDENCY_
 _OBLIGATION_BASE_PROPERTIES: dict[str, Any] = {
     "source_quote": {"type": "string", "minLength": 1},
     "obligation_summary": {"type": "string", "minLength": 1},
+    "primary_obligation_id": {"type": "string", "minLength": 1},
     "requirement_refs": {
         "type": "array", "items": {"type": "string", "minLength": 1},
         "uniqueItems": True,
@@ -624,6 +625,25 @@ def validate_obligation_coverage_response(
                 raise NativeSemanticReviewError(
                     f"external_compliance clause must remain an unlinked, explicitly pending external action for {check_id}"
                 )
+            if primary_obligations:
+                primary_ids = [
+                    item.get("id") if isinstance(item, dict) else None
+                    for item in primary_obligations
+                ]
+                mapped_ids = [
+                    item.get("primary_obligation_id") if isinstance(item, dict) else None
+                    for item in identified_obligations
+                ]
+                if (
+                    any(not isinstance(value, str) or not value for value in primary_ids)
+                    or len(set(primary_ids)) != len(primary_ids)
+                    or any(not isinstance(value, str) or not value for value in mapped_ids)
+                    or len(mapped_ids) != len(primary_ids)
+                    or set(mapped_ids) != set(primary_ids)
+                ):
+                    raise NativeSemanticReviewError(
+                        f"external_compliance actions lack a one-to-one current primary obligation mapping for {check_id}"
+                    )
             # This records a real-world action that remains outstanding; it is
             # deliberately not a DOCX pass state.
             by_id[check_id] = result
@@ -1049,6 +1069,8 @@ def _prompt(request: dict[str, Any]) -> str:
             "to the same human-review state; this is never a pass. "
             "For external_compliance clauses, use external_compliance_pending only when each primary obligation "
             "is marked unverifiable and no DOCX requirement is linked; quote and list each real-world action with "
+            "its own actor/action entry, without merging consent, application, approval, signature, or seal into a generic item. "
+            "For every external_action_pending entry, set primary_obligation_id to the one current primary obligation id it independently matches; use each id exactly once. If a primary action is missing, duplicate, or semantically wrong, do not force a mapping or claim external_compliance_pending; report the mismatch. "
             "disposition external_action_pending and no requirement_refs. This records an outstanding external "
             "action, never DOCX satisfaction. Never use this verdict for executable DOCX work or to hide a missing "
             "requirement. For a clause classified requires_source_content, use source_content_pending only when "

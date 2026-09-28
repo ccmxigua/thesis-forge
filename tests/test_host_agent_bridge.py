@@ -1186,6 +1186,25 @@ class HostAgentBridgeTests(unittest.TestCase):
             ["C1", "C2"], ["C3", "C4"],
         ])
 
+    def test_fixed_declaration_stops_before_other_document_sections(self) -> None:
+        for section in ("致谢", "附录A", "后记", "在学期间发表的学术论文与研究成果"):
+            with self.subTest(section=section):
+                clauses = [
+                    {"id": "C1", "text": "学位论文使用授权书", "evidence_ids": ["E1"]},
+                    {"id": "C2", "text": "本人授权学校保存论文。", "evidence_ids": ["E2"]},
+                    {"id": "C3", "text": section, "evidence_ids": ["E3"]},
+                    {"id": "C4", "text": "本节正文与授权无关。", "evidence_ids": ["E4"]},
+                ]
+                evidence = {
+                    item["evidence_ids"][0]: {"text": item["text"]} for item in clauses
+                }
+                candidates = bridge._fixed_declaration_candidates(
+                    clauses, evidence, anchor="abstract_title_zh",
+                )
+                self.assertEqual([item["clause_ids"] for item in candidates], [["C1", "C2"]])
+                chunks, _ = engine._source_atomic_chunks(clauses, 1)
+                self.assertEqual([item["id"] for item in chunks[0]], ["C1", "C2"])
+
     def test_declaration_anchor_preference_is_bound_to_current_structure(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             directory = Path(td) / "requirements"
@@ -2054,10 +2073,11 @@ class HostAgentBridgeTests(unittest.TestCase):
         inventory_records = bridge._external_action_obligation_retry_records(
             parent, validator_records, chunk,
         )
-        self.assertEqual(len(inventory_records), 1)
-        self.assertEqual(inventory_records[0]["clause_id"], "C00049")
+        self.assertEqual(inventory_records, [])
         self.assertEqual(
-            inventory_records[0]["json_pointer"], "$.clause_reviews[0].obligations",
+            [(item["clause_id"], item["json_pointer"]) for item in validator_records
+             if item["code"] == "external_action_obligations_missing"],
+            [("C00049", "$.clause_reviews[0].obligations")],
         )
         with self.assertRaises(ValueError) as rejected:
             bridge.prepare_native_response_candidate(parent, chunk)
@@ -5481,7 +5501,10 @@ class HostAgentBridgeTests(unittest.TestCase):
                     "clause_id": "C1",
                     "classification": "external_compliance",
                     "reason": "An actual office stamp is an external duty.",
-                    "obligations": None,
+                    "obligations": [{
+                        "id": "office_stamp", "status": "unverifiable",
+                        "reason": "A real office stamp remains pending outside DOCX generation.",
+                    }],
                     "normative_basis": "external_duty",
                 }],
                 "unsupported_items": [],
@@ -6238,7 +6261,7 @@ class HostAgentBridgeTests(unittest.TestCase):
         self.assertEqual(unchanged, bad_citation)
         self.assertEqual(audits, [])
 
-    def test_non_public_declaration_heading_is_derived_from_exact_chunk_evidence(self) -> None:
+    def test_non_public_administrative_heading_is_not_a_fixed_declaration(self) -> None:
         packet = bridge.compact_model_packet({
             "contract_version": "3.0",
             "clauses": [
@@ -6254,9 +6277,113 @@ class HostAgentBridgeTests(unittest.TestCase):
             "declaration_anchor_preference": "abstract_title_zh",
             "requirement_contract": {},
         })
-        candidate = packet["fixed_declaration_candidates"][0]
-        self.assertEqual(candidate["clause_ids"], ["C1", "C2"])
-        self.assertEqual(candidate["heading_evidence_ids"], ["E1"])
+        self.assertEqual(packet["fixed_declaration_candidates"], [])
+        chunks, _ = engine._source_atomic_chunks(packet["clauses"], 1)
+        self.assertEqual([[item["id"] for item in chunk] for chunk in chunks], [
+            ["C1", "C2"], ["C3"],
+        ])
+
+    def test_fixed_declaration_candidate_stops_before_separate_table_and_seal(self) -> None:
+        clauses = [
+            {"id": "C1", "text": "学位论文使用授权书", "source_kind": "paragraph", "evidence_ids": ["E1"]},
+            {"id": "C2", "text": "固定授权正文", "source_kind": "paragraph", "evidence_ids": ["E2"]},
+            {"id": "C3", "text": "审批表编号", "source_kind": "table_cell", "evidence_ids": ["E3"]},
+            {"id": "C4", "text": "办公室盖章", "source_kind": "paragraph", "evidence_ids": ["E4"]},
+        ]
+        evidence = {
+            item["evidence_ids"][0]: {"text": item["text"]} for item in clauses
+        }
+        candidates = bridge._fixed_declaration_candidates(clauses, evidence, anchor="abstract_title_zh")
+        self.assertEqual([item["clause_ids"] for item in candidates], [["C1", "C2"]])
+
+    def test_bsu_admin_region_is_read_together_but_not_a_fixed_declaration(self) -> None:
+        clauses = [
+            {"id": "C00038", "text": "非公开学位论文标注说明", "evidence_ids": ["E00036"]},
+            {"id": "C00039", "text": "非公开学位论文须经指导教师同意、作者本人申请和相关部门批准方能标注", "evidence_ids": ["E00037"]},
+            {"id": "C00049", "text": "北京体育大学学位评定委员会办公室盖章(有效)", "evidence_ids": ["E00046"]},
+            {"id": "C00053", "text": "学位论文使用授权书", "evidence_ids": ["E00050"]},
+            {"id": "C00054", "text": "本论文的固定授权正文。", "evidence_ids": ["E00051"]},
+            {"id": "C00062", "text": "摘要", "evidence_ids": ["E00060"]},
+        ]
+        evidence = {
+            item["evidence_ids"][0]: {"id": item["evidence_ids"][0], "text": item["text"]}
+            for item in clauses
+        }
+        chunks, _ = engine._source_atomic_chunks(clauses, 1)
+        self.assertEqual([[item["id"] for item in chunk] for chunk in chunks], [
+            ["C00038", "C00039", "C00049"], ["C00053", "C00054"], ["C00062"],
+        ])
+        candidates = bridge._fixed_declaration_candidates(
+            clauses, evidence, anchor="abstract_title_zh",
+        )
+        self.assertEqual([candidate["clause_ids"] for candidate in candidates], [
+            ["C00053", "C00054"],
+        ])
+
+    def test_declaration_text_binding_keeps_external_clause_out_of_requirement_edge(self) -> None:
+        source = {
+            "clauses": [
+                {"id": "C1", "text": "学位论文使用授权书", "evidence_ids": ["E1"]},
+                {"id": "C2", "text": "须由作者本人签署", "evidence_ids": ["E2"]},
+                {"id": "C3", "text": "固定正文须完整展示", "evidence_ids": ["E3"]},
+                {"id": "C4", "text": "摘要", "evidence_ids": ["E4"]},
+            ],
+            "evidence_context": {
+                "E1": {"id": "E1", "text": "学位论文使用授权书"},
+                "E2": {"id": "E2", "text": "须由作者本人签署。"},
+                "E3": {"id": "E3", "text": "固定正文须完整展示。"},
+                "E4": {"id": "E4", "text": "摘要"},
+            },
+            "declaration_anchor_preference": "abstract_title_zh",
+        }
+        response = {
+            "requirements": [{
+                "role": "declarations", "clause_ids": ["C1", "C3"],
+                "evidence_ids": ["E1", "E3"], "existing_requirement_id": None,
+                "properties": {"before_role": "abstract_title_zh", "items": [{
+                    "id": "authorization", "source_evidence_ids": ["E1", "E2", "E3"],
+                    "signature_placeholders": [], "heading": None, "body_parts": None,
+                }]},
+            }],
+            "clause_reviews": [
+                {"clause_id": "C1", "classification": "executable"},
+                {"clause_id": "C2", "classification": "external_compliance"},
+                {"clause_id": "C3", "classification": "executable"},
+            ],
+        }
+        projected, audits = bridge._materialize_fixed_declaration_source_text(response, source)
+        item = projected["requirements"][0]["properties"]["items"][0]
+        self.assertEqual(item["heading"], "学位论文使用授权书")
+        self.assertEqual(item["body_parts"], ["须由作者本人签署。", "固定正文须完整展示。"])
+        self.assertEqual(projected["requirements"][0]["clause_ids"], ["C1", "C3"])
+        self.assertEqual(projected["clause_reviews"][1]["classification"], "external_compliance")
+        self.assertEqual(audits[0]["rendered_only_clause_ids"], ["C2"])
+        self.assertEqual(response["requirements"][0]["properties"]["items"][0]["body_parts"], None)
+
+        bad = copy.deepcopy(response)
+        bad["requirements"][0]["properties"]["items"][0]["source_evidence_ids"] = ["E1", "E4"]
+        unchanged, audits = bridge._materialize_fixed_declaration_source_text(bad, source)
+        self.assertEqual(unchanged, bad)
+        self.assertEqual(audits, [])
+
+    def test_mixed_relation_is_not_a_mechanical_retry_plan(self) -> None:
+        records = [
+            {"code": "mixed_execution_classification_relation", "json_pointer": "$.requirements[0]"},
+            {"code": "missing_derived_requirement", "json_pointer": "$.clause_reviews[0]",
+             "blocked_by_parent_relation": {"requirement_indexes": [0]}},
+        ]
+        self.assertTrue(bridge._requires_fresh_semantic_split(records))
+        guidance = bridge._structured_contract_repair_guidance(records, contract_version="3.0")
+        self.assertIn("do not add a second or title-only requirement", guidance)
+        previous = {"contract_version": "3.0", "requirements": [], "clause_reviews": []}
+        current = {**previous, "requirements": [{"role": "declarations"}]}
+        self.assertFalse(bridge._retry_changes_allowed(
+            records, ["$.requirements"], contract_version="3.0",
+            previous_response=previous, current_response=current, chunk={},
+        ))
+        self.assertEqual(bridge._v3_relation_completion_response(
+            previous, current, records, chunk={},
+        ), (None, None))
 
     def test_unknown_property_is_removed_deterministically_without_semantic_retry(self) -> None:
         response = {

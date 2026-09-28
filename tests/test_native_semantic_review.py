@@ -1097,6 +1097,7 @@ class NativeSemanticReviewTests(unittest.TestCase):
             "identified_obligations": [{
                 "source_quote": "办公室盖章(有效)",
                 "disposition": "external_action_pending",
+                "primary_obligation_id": "physical_stamp",
                 "requirement_refs": [],
             }],
         }]}
@@ -1123,6 +1124,57 @@ class NativeSemanticReviewTests(unittest.TestCase):
         forged["results"][0]["check_id"] = "C1"
         with self.assertRaisesRegex(NativeSemanticReviewError, "only valid for external_compliance"):
             validate_obligation_coverage_response(forged, [executable])
+
+    def test_three_distinct_external_actions_remain_three_pending_items(self) -> None:
+        source = "须经导师同意、作者申请和学院批准。"
+        check = {
+            "check_id": "C-approval", "document_text": source,
+            "review_context": {
+                "classification": "external_compliance", "requires_requirement": False,
+                "primary_obligations": [
+                    {"id": value, "status": "unverifiable", "reason": "Requires real-world action."}
+                    for value in ("teacher_consent", "author_application", "department_approval")
+                ],
+                "linked_requirements": [], "machine_obligation_ids": [],
+            },
+        }
+        pending = {"results": [{
+            "check_id": "C-approval", "verdict": "external_compliance_pending",
+            "rationale": "None of these real-world actions is proved by a DOCX.",
+            "evidence_quotes": [source], "machine_obligation_ids": [],
+            "identified_obligations": [
+                {"source_quote": quote, "disposition": "external_action_pending",
+                 "primary_obligation_id": identifier, "requirement_refs": []}
+                for quote, identifier in zip(
+                    ("导师同意", "作者申请", "学院批准"),
+                    ("teacher_consent", "author_application", "department_approval"),
+                )
+            ],
+        }]}
+        self.assertEqual(
+            validate_obligation_coverage_response(pending, [check])[0]["verdict"],
+            "external_compliance_pending",
+        )
+        collapsed = json.loads(json.dumps(pending, ensure_ascii=False))
+        collapsed["results"][0]["identified_obligations"] = [
+            {"source_quote": source, "disposition": "external_action_pending", "requirement_refs": []}
+        ]
+        with self.assertRaises(NativeSemanticReviewError):
+            validate_obligation_coverage_response(collapsed, [check])
+
+        for broken_ids in (
+            ("teacher_consent", "teacher_consent", "department_approval"),
+            ("teacher_consent", "unknown", "department_approval"),
+            ("teacher_consent", None, "department_approval"),
+        ):
+            broken = json.loads(json.dumps(pending, ensure_ascii=False))
+            for item, identifier in zip(broken["results"][0]["identified_obligations"], broken_ids):
+                if identifier is None:
+                    item.pop("primary_obligation_id")
+                else:
+                    item["primary_obligation_id"] = identifier
+            with self.subTest(broken_ids=broken_ids), self.assertRaises(NativeSemanticReviewError):
+                validate_obligation_coverage_response(broken, [check])
 
     def test_external_unrepresented_source_action_requests_only_a_bounded_re_review(self) -> None:
         source = "学位论文作者签名： 年 月 日"

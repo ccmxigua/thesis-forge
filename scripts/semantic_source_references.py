@@ -119,6 +119,20 @@ def source_reference_schema(
                 obligation_branches = [obligation_schema]
             review_context = check.get("review_context")
             review_context = review_context if isinstance(review_context, dict) else {}
+            primary_obligations = review_context.get("primary_obligations")
+            primary_ids: list[str] = []
+            if review_context.get("classification") == "external_compliance" and primary_obligations:
+                if not isinstance(primary_obligations, list):
+                    raise ValueError("external primary obligation inventory is malformed")
+                primary_ids = [
+                    item.get("id") if isinstance(item, dict) else None
+                    for item in primary_obligations
+                ]
+                if (
+                    any(not isinstance(value, str) or not value for value in primary_ids)
+                    or len(set(primary_ids)) != len(primary_ids)
+                ):
+                    raise ValueError("external primary obligation ids are not unique current ids")
             manual_codes = review_context.get("manual_review_codes")
             manual_codes = {
                 code for code in manual_codes
@@ -148,6 +162,11 @@ def source_reference_schema(
                     if not permitted_codes:
                         continue
                     code_schema["enum"] = permitted_codes
+                if primary_ids and not is_scope_branch:
+                    obligation_props["primary_obligation_id"] = {"enum": primary_ids}
+                    obligation["required"].append("primary_obligation_id")
+                else:
+                    obligation_props.pop("primary_obligation_id", None)
                 obligation_props.pop("source_quote")
                 obligation_props["source_ref"] = copy.deepcopy(refs)
                 obligation["required"] = [

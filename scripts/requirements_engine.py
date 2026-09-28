@@ -63,7 +63,7 @@ from evidence_context_guards import (
 )
 from fixed_declaration_source import (
     is_fixed_declaration_boundary,
-    is_fixed_declaration_heading,
+    is_source_region_heading,
 )
 from source_obligation_compiler import (
     SOURCE_VERIFICATION_CLASSIFICATION_POLICY_VERSION,
@@ -1891,7 +1891,7 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
                 "Treat every supplied clause as in scope for completeness review.",
                 "source_span is deterministic code-owned citation metadata bound to the exact evidence text; do not edit, regenerate, or emit it in your response. Use it only to locate source wording, and cite clause_id/evidence_id instead.",
                 "Return formatting requirements supported by cited clause_ids and evidence_ids.",
-                "For a literal spanning multiple extracted clauses, provide source_fragment_clause_ids in source order only when the requirement role supports a top-level properties.text field; code verifies every exact span and materializes that field. For registered fixed declarations, select the exact ordered candidate clause/evidence grouping; code materializes heading/body_parts from unique complete source evidence, including punctuation, and never adds properties.text. For other structural roles without a top-level text field, use only their declared role-native fields. Never concatenate across clauses unless their source locations prove adjacency; if the relation, destination, or separator is unclear, leave the requirement unresolved.",
+                "For a literal spanning multiple extracted clauses, provide source_fragment_clause_ids in source order only when the requirement role supports a top-level properties.text field; code verifies every exact span and materializes that field. For a genuine fixed declaration, use a current-source candidate only as a source-text grouping; code materializes heading/body_parts from unique complete source evidence, including punctuation, and never adds properties.text. The candidate is not an executable-clause list. For other structural roles without a top-level text field, use only their declared role-native fields. Never concatenate across clauses unless their source locations prove adjacency; if the relation, destination, or separator is unclear, leave the requirement unresolved.",
                 "existing_requirement_id selects an exact supplied current-input candidate; it is not a new output ID. Omit it for a new requirement (null in native structured output). Code assigns new IDs. Never increment IDs or borrow one from a neighboring chunk.",
                 "Every requirement object MUST include a non-empty reason explaining why its role and properties are supported by the cited clause/evidence.",
                 "When a clause exactly supports an existing deterministic requirement, set existing_requirement_id and preserve that requirement's role, properties, and evidence_ids exactly. Copy only the supplied candidate payload; do not expand it with shared role defaults, inherited body styles, or other properties from the surrounding schema.",
@@ -1903,9 +1903,10 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
                 "Legacy covered/ignored/unresolved/unsupported remain accepted for compatibility, but unsupported means an applicable DOCX backend gap and blocks full compliance.",
                 "Use not_applicable only when an explicit thesis condition makes a requirement inapplicable; never use it merely because the backend lacks support.",
                 "Use external_compliance only for real-world submission duties that cannot be represented by a DOCX artifact, such as physical cover stock, printing, binding, actual signatures, or administrative approval.",
+                "For external_compliance, list each independently pending actor/action in obligations[] with a distinct id, status unverifiable, and a source-grounded reason. A paragraph requiring teacher consent, author application, and departmental approval has three pending actions, not one generic approval; printing the words, a placeholder, or a seal label is never completion evidence.",
                 "A blank author/supervisor/date signature placeholder is DOCX structure, never proof of an actual signature. For mixed clauses, emit a declarations requirement only for fixed text/order/placeholders and preserve actual signing as an external clause review rather than claiming it generated_and_verified.",
-                "For a declarations requirement, select a fixed-text heading/body grouping using exact clause_ids and evidence_ids. The host deterministically materializes properties.items[].heading and body_parts from current source evidence, preserving punctuation and paragraph boundaries; do not copy normalized clause fragments or repeat an evidence paragraph when multiple clauses cite it. Use a semantic item id local to this run, such as originality or authorization, and include only source_evidence_ids and blank signature_placeholders. Do not invent resource_id, version, or sha256: the host materializes those fields from this run and the exact source text.",
-                "When the current packet exposes fixed_declaration_candidates, treat them as deterministic exact evidence groupings. If any candidate clause is classified executable/covered/verify_existing, emit one declarations requirement covering its exact ordered clause_ids and evidence_ids, select the cited heading/body grouping, and preserve the supplied declaration anchor; the host materializes each unique cited evidence paragraph once. Never leave an executable fixed-declaration clause without a derived declarations requirement.",
+                "For a declarations requirement, select a genuine fixed-text heading/body grouping. Link requirement.clause_ids only to clauses independently classified executable/covered/verify_existing, and requirement.evidence_ids only to evidence supporting those linked clauses. Use the candidate's source_evidence_ids for exact source text; the host deterministically materializes heading/body_parts from current source evidence. Do not copy normalized clause fragments or repeat an evidence paragraph when multiple clauses cite it. Use a semantic item id local to this run, and only blank signature_placeholders. Do not invent resource_id, version, or sha256.",
+                "fixed_declaration_candidates are physical source groupings, not an instruction to make every candidate clause executable. Never put an external_compliance, unresolved, informational, or not_applicable clause in a declarations requirement, even when its wording appears in the same paragraph that must be printed. Keep display of source text separate from proof of real consent, application, approval, signature, or seal. Administrative approval/marking regions belong to their declared cover role, not to declarations. If source text cannot be bound exactly to one genuine declaration, leave the requirement unresolved rather than creating a title-only or empty declaration.",
                 "Never identify a declaration by institution or school name in the execution contract. The current input evidence is the only source of fixed declaration text; if it is not available, classify the clause as unresolved or requires_source_content.",
                 "The source_continuity_context is orientation-only: do not emit clause_reviews or requirements for its clause IDs, and do not cite its evidence unless that evidence is also present in the current chunk. It shows adjacent source clauses so a fixed declaration split at a chunk boundary can retain one semantic item and one verified insertion anchor.",
                 "Declaration continuity rule: when the current clause is a continuation of a fixed declaration shown in source_continuity_context, keep the same semantic declaration item and before_role as the continuation. Never create competing declaration anchors merely because fragments arrived in different chunks. If identity or placement cannot be established from current evidence and continuity context, classify the clause as unresolved or external_compliance without emitting a requirement.",
@@ -2313,58 +2314,57 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
         # unrelated section (for example a biography or acknowledgments
         # sample) must not be turned into a new resource or attached to the
         # nearest declaration by first/last-wins merging.
-        placeholder_only_declaration_indexes = {
-            index for index, item in enumerate(requirements)
-            if isinstance(item, dict)
-            and item.get("role") == "declarations"
-            and isinstance(item.get("properties"), dict)
-            and isinstance(item["properties"].get("items"), list)
-            and item["properties"].get("items")
-            and not any(
-                isinstance(declaration, dict)
-                and (
-                    isinstance(declaration.get("heading"), str)
-                    and declaration.get("heading", "").strip()
-                    or _declaration_body_parts(declaration)
-                )
-                for declaration in item["properties"]["items"]
-            )
-        }
-        if placeholder_only_declaration_indexes:
-            changes: list[dict[str, Any]] = []
-            for review in reviews:
-                if not isinstance(review, dict) or not isinstance(review.get("requirement_indexes"), list):
+        declaration_fragments: dict[str, list[tuple[int, dict[str, Any]]]] = {}
+        placeholder_only_declaration_indexes: set[int] = set()
+        for index, item in enumerate(requirements):
+            if not isinstance(item, dict) or item.get("role") != "declarations":
+                continue
+            properties = item.get("properties")
+            declarations = properties.get("items") if isinstance(properties, dict) else None
+            if not isinstance(declarations, list) or not declarations:
+                placeholder_only_declaration_indexes.add(index)
+                continue
+            for declaration in declarations:
+                if not isinstance(declaration, dict) or not isinstance(declaration.get("id"), str) or not declaration["id"].strip():
+                    placeholder_only_declaration_indexes.add(index)
                     continue
-                original_indexes = list(review["requirement_indexes"])
-                review["requirement_indexes"] = [
-                    index for index in original_indexes
-                    if index not in placeholder_only_declaration_indexes
-                ]
-                if (len(review["requirement_indexes"]) != len(original_indexes)
-                        and not review["requirement_indexes"]
-                        and classification_requires_requirement(str(review.get("classification")))):
-                    before = review.get("classification")
-                    review["classification"] = "informational"
-                    review["normative_basis"] = "sample_content"
-                    review["reason"] = (
-                        str(review.get("reason") or "").strip()
-                        + " The isolated placeholder has no fixed declaration heading or body and is not materialized as a declaration resource."
-                    ).strip()
-                    changes.append({
-                        "clause_id": review.get("clause_id"),
-                        "before_classification": before,
-                        "after_classification": "informational",
-                        "before_requirement_indexes": original_indexes,
-                        "after_requirement_indexes": [],
-                    })
+                declaration_fragments.setdefault(declaration["id"], []).append((index, declaration))
+                if contract_version == HOST_REVIEW_CONTRACT_V3 and not (
+                    isinstance(declaration.get("heading"), str)
+                    and declaration["heading"].strip()
+                    and _declaration_body_parts(declaration)
+                ):
+                    placeholder_only_declaration_indexes.add(index)
+        if contract_version != HOST_REVIEW_CONTRACT_V3:
+            # Contract 2.1 permits a heading in one requirement fragment and
+            # its body in another. Only the combined semantic item is required
+            # to be complete; the keyed projection below performs the merge.
+            for fragments in declaration_fragments.values():
+                has_heading = any(
+                    isinstance(fragment.get("heading"), str) and fragment["heading"].strip()
+                    for _, fragment in fragments
+                )
+                has_body = any(_declaration_body_parts(fragment) for _, fragment in fragments)
+                if not (has_heading and has_body):
+                    placeholder_only_declaration_indexes.update(index for index, _ in fragments)
+        if placeholder_only_declaration_indexes:
+            # The absence of source text is not evidence that the source
+            # clause is informational.  The native bridge should have
+            # materialized a bound candidate before merge; any remaining
+            # empty declaration is a blocking contract failure.
+            for index in sorted(placeholder_only_declaration_indexes):
+                conflicts.append({
+                    "type": "llm_contract",
+                    "reason": "declaration_source_text_not_materialized",
+                    "response_index": index,
+                })
             audit.append({
-                "type": "declaration_placeholder_only_normalization",
+                "type": "declaration_source_text_gate",
                 "policy_version": MERGE_SEMANTIC_TRANSFORM_POLICY_VERSION,
                 "authorization": AUTHORIZED_MERGE_SEMANTIC_TRANSFORMS["declaration_placeholder_only_normalization"],
-                "semantic_inference": "deterministic_declaration_boundary",
+                "semantic_inference": "none",
                 "response_indexes": sorted(placeholder_only_declaration_indexes),
-                "changes": changes,
-                "action": "removed_from_execution_and_preserved_as_informational_source_content",
+                "action": "blocked_without_semantic_reclassification",
             })
         non_executable_indexes = manual_empty_indexes | placeholder_only_declaration_indexes
     for review in reviews:
@@ -2548,18 +2548,18 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
         if isinstance(confidence, bool) or not isinstance(confidence, (int, float)) or not 0 <= confidence <= 1: reasons.append("invalid_confidence")
         reason = item.get("reason")
         if not isinstance(reason, str) or not reason.strip(): reasons.append("missing_requirement_reason")
-        # A fixed-text DOCX requirement may legitimately cite a companion
-        # external-duty clause (for example, the signature/date line of a
-        # declaration) while the clause review keeps the actual act of
-        # signing external_compliance.  Such a clause is evidence for the
-        # placeholder structure, not an executable obligation.  Informational
-        # or sample-content clauses remain disallowed here.
-        external_clause_ids = {
+        # Contract 3 separates a printable source paragraph from the
+        # executable edge. Its declaration source_evidence_ids may select an
+        # external-duty paragraph, but clause_ids may not claim that real
+        # consent/signature/seal as a DOCX requirement. Retain the established
+        # compatibility behavior for 2.1 responses, which lack this nested
+        # source-only selection contract.
+        compatible_external_clauses = {
             cid for cid in clause_ids
             if cid in review_map
             and review_map[cid].get("classification") == "external_compliance"
-        }
-        if not clause_ids <= (covered | external_clause_ids):
+        } if contract_version != HOST_REVIEW_CONTRACT_V3 else set()
+        if not clause_ids <= (covered | compatible_external_clauses):
             reasons.append("requirement_clause_not_covered")
         schema_name = {"page": "pageSpec", "table": "tableSpec", "objects": "objectPaginationSpec",
                        "content_constraints": "contentConstraintSpec",
@@ -3188,7 +3188,7 @@ def _source_atomic_chunks(
     group_index = 0
     while group_index < len(groups):
         group = groups[group_index]
-        if not any(is_fixed_declaration_heading(item.get("text")) for item in group):
+        if not any(is_source_region_heading(item.get("text")) for item in group):
             declaration_groups.append(group)
             group_index += 1
             continue

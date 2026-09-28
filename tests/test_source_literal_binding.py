@@ -171,6 +171,148 @@ class SourceLiteralBindingTests(unittest.TestCase):
         self.assertTrue(any("source_fragment_literal_conflict" in error for error in errors))
         self.assertEqual(unchanged["requirements"][0]["properties"]["text"], "硕 士 学 位 论 文")
 
+    def test_declarations_bind_fragments_to_role_native_text_without_injecting_text(self) -> None:
+        clauses, evidence = _adjacent_paragraphs()
+        response = {"requirements": [{
+            "role": "declarations",
+            "properties": {
+                "before_role": "document_start",
+                "items": [{
+                    "id": "originality",
+                    "heading": "硕 士 学 位 论 文",
+                    "body_parts": ["（学术学位）"],
+                    "source_evidence_ids": ["E20", "E21"],
+                }],
+            },
+            "clause_ids": ["C19", "C20"],
+            "evidence_ids": ["E20", "E21"],
+            "source_fragment_clause_ids": ["C19", "C20"],
+        }]}
+
+        output, audits, errors = materialize_source_fragment_literals(
+            response, clauses, evidence,
+        )
+
+        self.assertEqual(errors, [])
+        self.assertNotIn("text", output["requirements"][0]["properties"])
+        self.assertEqual(
+            audits[0]["action"],
+            "verified_against_role_native_declaration_text",
+        )
+        self.assertNotIn("text", response["requirements"][0]["properties"])
+
+    def test_declarations_require_exact_role_native_source_text(self) -> None:
+        clauses, evidence = _adjacent_paragraphs()
+        response = {"requirements": [{
+            "role": "declarations",
+            "properties": {
+                "before_role": "document_start",
+                "items": [{
+                    "id": "originality",
+                    "heading": "硕 士 学 位 论 文",
+                    "body_parts": ["学术学位"],
+                    "source_evidence_ids": ["E20", "E21"],
+                }],
+            },
+            "clause_ids": ["C19", "C20"],
+            "evidence_ids": ["E20", "E21"],
+            "source_fragment_clause_ids": ["C19", "C20"],
+        }]}
+
+        output, audits, errors = materialize_source_fragment_literals(
+            response, clauses, evidence,
+        )
+
+        self.assertEqual(audits, [])
+        self.assertTrue(any(
+            "declaration_source_fragments_not_represented_in_role_native_text" in error
+            for error in errors
+        ))
+
+    def test_declarations_reject_selector_covering_only_part_of_source_evidence(self) -> None:
+        source = "硕士学位论文（学术学位）"
+        location = {"part": "document", "child_index": 31, "order": 27}
+        clause = _source_clause(
+            "C1", "E1", source, "硕士学位论文", 0, len("硕士学位论文"),
+            kind="paragraph", location=location,
+        )
+        response = {"requirements": [{
+            "role": "declarations",
+            "properties": {
+                "before_role": "document_start",
+                "items": [{"id": "originality", "heading": source}],
+            },
+            "clause_ids": ["C1"],
+            "evidence_ids": ["E1"],
+            "source_fragment_clause_ids": ["C1"],
+        }]}
+
+        output, audits, errors = materialize_source_fragment_literals(
+            response, [clause], {"E1": {
+                "id": "E1", "kind": "paragraph", "text": source,
+                "location": location,
+            }},
+        )
+
+        self.assertEqual(audits, [])
+        self.assertTrue(any(
+            "declaration_source_fragment_selector_omits_evidence_text:E1" in error
+            for error in errors
+        ))
+        self.assertNotIn("text", output["requirements"][0]["properties"])
+
+    def test_declarations_allow_only_boundary_punctuation_outside_selected_spans(self) -> None:
+        source = "标题；限定语"
+        location = {"part": "document", "child_index": 32, "order": 28}
+        clauses = [
+            _source_clause("C1", "E1", source, "标题", 0, 2,
+                           kind="paragraph", location=location),
+            _source_clause("C2", "E1", source, "限定语", 3, 6,
+                           kind="paragraph", location=location),
+        ]
+        response = {"requirements": [{
+            "role": "declarations",
+            "properties": {
+                "before_role": "document_start",
+                "items": [{"id": "originality", "heading": source}],
+            },
+            "clause_ids": ["C1", "C2"],
+            "evidence_ids": ["E1"],
+            "source_fragment_clause_ids": ["C1", "C2"],
+        }]}
+
+        output, audits, errors = materialize_source_fragment_literals(
+            response, clauses, {"E1": {
+                "id": "E1", "kind": "paragraph", "text": source,
+                "location": location,
+            }},
+        )
+
+        self.assertEqual(errors, [])
+        self.assertEqual(len(audits), 1)
+        self.assertNotIn("text", output["requirements"][0]["properties"])
+
+    def test_structural_non_text_role_never_receives_injected_text(self) -> None:
+        clauses, evidence = _adjacent_paragraphs()
+        response = {"requirements": [{
+            "role": "equations",
+            "properties": {"same_line": True},
+            "clause_ids": ["C19", "C20"],
+            "evidence_ids": ["E20", "E21"],
+            "source_fragment_clause_ids": ["C19", "C20"],
+        }]}
+
+        output, audits, errors = materialize_source_fragment_literals(
+            response, clauses, evidence,
+        )
+
+        self.assertEqual(audits, [])
+        self.assertTrue(any(
+            "role_has_no_top_level_text_target:equations" in error
+            for error in errors
+        ))
+        self.assertNotIn("text", output["requirements"][0]["properties"])
+
 
 if __name__ == "__main__":
     unittest.main()

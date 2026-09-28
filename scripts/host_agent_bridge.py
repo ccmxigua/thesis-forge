@@ -669,12 +669,15 @@ def _structured_contract_repair_guidance(
         if code == "source_fragment_binding_violation":
             rule = (
                 f"At {pointer}, select only the exact current clause IDs whose cited source spans "
-                "form this literal in source order. Add source_fragment_clause_ids to that same "
+                "form this literal in source order. Add or correct source_fragment_clause_ids on that same "
                 "requirement; the bridge will verify current source hashes, evidence links, and "
-                "provable boundaries, then materialize properties.text. If you provide text, it "
-                "must exactly equal that deterministic composition. Do not paraphrase, include "
+                "provable boundaries. Only roles whose schema supports top-level properties.text "
+                "receive that materialized field. For declarations, preserve exact wording in "
+                "properties.items[].heading/body/body_parts; the bridge verifies against those "
+                "role-native fields and must not add properties.text. Never put a text field on "
+                "another structural role that does not declare it. Do not paraphrase, include "
                 "unselected intervening source text, change requirement identity, or guess a "
-                "missing separator; if the fragments cannot be proven, preserve the response and fail closed."
+                "missing separator; if the fragments or destination cannot be proven, preserve the response and fail closed."
             )
         elif code.startswith("existing_requirement_") or code in {
             "unknown_existing_requirement_id", "invalid_existing_requirement_id",
@@ -1975,12 +1978,13 @@ def _source_fragment_binding_retry_allowed(
     *,
     chunk: dict[str, Any] | None,
 ) -> bool:
-    """Authorize only a source-verified fragment selector plus its exact literal.
+    """Authorize only a source-verified fragment selector and role-native literal.
 
     This retry rule cannot rewrite requirement identity or any other semantic
-    field. The candidate must add the current requirement's ordered clause
-    selector, and its text must be either null (for deterministic materializing)
-    or exactly the text computed from those current, cited source spans.
+    field. The candidate may add or correct the current requirement's ordered
+    clause selector. Text roles must use the exact materialized text; declaration
+    roles must bind to their existing role-native text atoms without a top-level
+    ``properties.text`` field.
     """
     if (
         chunk is None
@@ -2024,10 +2028,8 @@ def _source_fragment_binding_retry_allowed(
         if (
             not isinstance(previous, dict)
             or not isinstance(current, dict)
-            or "source_fragment_clause_ids" in previous
             or _retry_object_identity("requirements", previous)
             != _retry_object_identity("requirements", current)
-            or not _role_supports_exact_text(current, chunk)
         ):
             return False
         selector = current.get("source_fragment_clause_ids")
@@ -2051,6 +2053,21 @@ def _source_fragment_binding_retry_allowed(
             not isinstance(properties, dict)
             or properties.get("text") not in (None, binding["text"])
         ):
+            return False
+        if current.get("role") == "declarations":
+            _, declaration_audits, declaration_errors = materialize_source_fragment_literals(
+                {"requirements": [current]},
+                chunk.get("clauses", []) if isinstance(chunk.get("clauses"), list) else [],
+                chunk.get("evidence_context"),
+            )
+            if (
+                declaration_errors
+                or len(declaration_audits) != 1
+                or declaration_audits[0].get("action")
+                != "verified_against_role_native_declaration_text"
+            ):
+                return False
+        elif not _role_supports_exact_text(current, chunk):
             return False
 
     projected_current, _, projection_errors = materialize_source_fragment_literals(
@@ -2083,7 +2100,8 @@ def _source_fragment_binding_retry_allowed(
         previous_properties = previous.get("properties")
         if not isinstance(previous_properties, dict):
             return False
-        previous_properties["text"] = binding["text"]
+        if current.get("role") != "declarations":
+            previous_properties["text"] = binding["text"]
 
     if _semantic_retry_view(expected) != _semantic_retry_view(projected_current):
         return False
@@ -8103,7 +8121,7 @@ def _host_prompt(*, request_path: Path, chunk_path: Path,
             # closed if the retry changes unapproved semantic fields.
             retry_parent_inline = None
         requirement_change_rule = (
-            "For this retry, preserve every requirement and every clause review exactly except the validator-targeted literal binding: add source_fragment_clause_ids to the same requirement and set properties.text only to the exact current-source composition (or null for code materialization). Do not change requirement identity, include unselected source, paraphrase, or guess separators; the bridge verifies current source hashes, links, order, and boundaries."
+            "For this retry, preserve every requirement, every clause_ids/evidence_ids relation, and every clause review exactly except the validator-targeted source-fragment binding. Add or correct source_fragment_clause_ids only on that same requirement. For a role with top-level properties.text, set only that field to the exact current-source composition (or null for code materialization); for declarations, keep properties.items unchanged and use only its exact role-native heading/body fields. Never add properties.text to declarations or another structural role that does not declare it. Do not change requirement identity, links, classifications, include unselected source, paraphrase, or guess separators; the bridge verifies current source hashes, links, order, and boundaries."
             if v3_source_fragment_binding_retry else
             "For this retry, preserve every requirement and every clause review exactly except the specific obligations arrays named by external_action_obligations_missing records. Add only source-derived external duties with status unverifiable; do not remove or edit the invalid source-only requirement yourself. Afterward the bridge may project that requirement only if its exact source, evidence, and external-only relation pass the existing deterministic checks."
             if v3_external_action_inventory_retry else
@@ -8158,7 +8176,7 @@ minimum change. The embedded payload excludes bridge-owned provenance:
     if retry_parent_response_path is None:
         retry_invariant = ""
     elif v3_source_fragment_binding_retry:
-        retry_invariant = """\nFINAL RETRY INVARIANT: preserve the complete requirement graph, every clause review, and all existing fields. For each source_fragment_binding_violation record, add only source_fragment_clause_ids to the same requirement and set properties.text only to the exact current-source composition (or null for deterministic materialization). Use current cited clause IDs in source order; no guessed adjacency, paraphrase, unrelated clause, or other change is authorized. The bridge rechecks hashes, evidence, spans, order, and boundaries, then runs the full validator and both raw-to-raw and candidate-to-candidate drift checks. If no exact binding is provable, return unchanged and fail closed."""
+        retry_invariant = """\nFINAL RETRY INVARIANT: preserve the complete requirement graph, every clause_ids/evidence_ids relation, every clause review, and all existing role-native payloads. For each source_fragment_binding_violation record, add or correct only source_fragment_clause_ids on the same requirement. A role that declares top-level properties.text may set only that field to the exact current-source composition (or null for deterministic materialization). For declarations, preserve properties.items[].heading/body/body_parts exactly and never add properties.text; the bridge binds source fragments to those role-native fields. No requirement identity, clause/evidence links, classification, or other payload changes are authorized. Use current cited clause IDs in source order; no guessed adjacency, paraphrase, unrelated clause, or other change is authorized. The bridge rechecks hashes, evidence, spans, order, and boundaries, then runs the full validator and both raw-to-raw and candidate-to-candidate drift checks. If no exact binding or role-native destination is provable, return unchanged and fail closed."""
     elif v3_external_action_inventory_retry:
         retry_invariant = """\nFINAL RETRY INVARIANT: preserve every requirement and every clause review exactly except the exact obligations arrays named by external_action_obligations_missing. Add only distinct source-supported external duties with status unverifiable. Do not remove the invalid body_text requirement yourself; the bridge may project it only after current source/evidence checks and candidate validation. If the source cannot support a complete inventory, return the parent unchanged and let the bridge fail closed."""
     elif v3_non_requirement_projection_retry:

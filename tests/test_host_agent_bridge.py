@@ -7659,6 +7659,92 @@ class HostAgentBridgeTests(unittest.TestCase):
         )
         self.assertIsNotNone(stale_error)
 
+    def test_declaration_source_fragment_retry_corrects_selector_without_text_or_link_drift(self) -> None:
+        title = "声明标题"
+        body = "完整声明正文。"
+        left_location = {"part": "document", "child_index": 4, "order": 2}
+        right_location = {"part": "document", "child_index": 8, "order": 6}
+        clauses = [
+            {
+                "id": "C1", "text": title, "evidence_ids": ["E1"],
+                "location": left_location, "source_kind": "paragraph",
+                "source_evidence_text": title,
+                "source_span": {
+                    "evidence_id": "E1", "start_offset": 0, "end_offset": len(title),
+                    "text": title, "source_sha256": hashlib.sha256(title.encode()).hexdigest(),
+                    "location": left_location,
+                },
+            },
+            {
+                "id": "C2", "text": body, "evidence_ids": ["E2"],
+                "location": right_location, "source_kind": "paragraph",
+                "source_evidence_text": body,
+                "source_span": {
+                    "evidence_id": "E2", "start_offset": 0, "end_offset": len(body),
+                    "text": body, "source_sha256": hashlib.sha256(body.encode()).hexdigest(),
+                    "location": right_location,
+                },
+            },
+        ]
+        evidence_context = {
+            "E1": {"id": "E1", "kind": "paragraph", "text": title, "location": left_location},
+            "E2": {"id": "E2", "kind": "paragraph", "text": body, "location": right_location},
+        }
+        chunk = {
+            "provenance": {
+                "run_id": "run-declaration-fragment-retry", "case_id": "case-declaration-fragment-retry",
+                "source_sha256": "a" * 64, "clause_sha256": "b" * 64,
+                "evidence_sha256": "c" * 64, "request_sha256": "d" * 64,
+            },
+            "case_id": "case-declaration-fragment-retry", "batch": {"index": 2},
+            "runtime_context": {"code_fingerprint_sha256": "9" * 64},
+            "response_schema": {"type": "object", "title": "declaration source fragment retry"},
+            "requirement_contract": {
+                "role_properties_schema": {"declarations": {"$ref": "#/$defs/declarationsSpec"}},
+            },
+            "clauses": clauses, "evidence_context": evidence_context,
+        }
+        previous = {
+            "contract_version": "3.0", "provenance": chunk["provenance"],
+            "requirements": [{
+                "role": "declarations",
+                "properties": {
+                    "before_role": "document_start",
+                    "items": [{
+                        "id": "originality", "heading": title, "body_parts": [body],
+                        "source_evidence_ids": ["E1", "E2"],
+                    }],
+                },
+                "clause_ids": ["C1", "C2"], "evidence_ids": ["E1", "E2"],
+                "source_fragment_clause_ids": ["C1", "C2"],
+                "reason": "Both fixed declaration paragraphs are preserved exactly.",
+            }],
+            "clause_reviews": [], "unsupported_items": [], "reported_conflicts": [],
+        }
+        current = copy.deepcopy(previous)
+        current["requirements"][0]["source_fragment_clause_ids"] = ["C1"]
+        records = [{
+            "code": "source_fragment_binding_violation",
+            "json_pointer": "$.requirements[0].source_fragment_clause_ids",
+            "response_sha256": bridge._response_sha256(previous),
+            "raw_error": "cross_evidence_boundary_unproven",
+        }]
+
+        error, changed = bridge._retry_semantic_change_error(
+            previous, current, records, contract_version="3.0", chunk=chunk,
+        )
+
+        self.assertIsNone(error)
+        self.assertEqual(changed, ["$.requirements[0].source_fragment_clause_ids"])
+        self.assertNotIn("text", current["requirements"][0]["properties"])
+
+        dropped_clause_link = copy.deepcopy(current)
+        dropped_clause_link["requirements"][0]["clause_ids"] = ["C1"]
+        rejected, _ = bridge._retry_semantic_change_error(
+            previous, dropped_clause_link, records, contract_version="3.0", chunk=chunk,
+        )
+        self.assertIsNotNone(rejected)
+
     def test_retry_artifact_receipts_include_unaccepted_repair_base_without_promoting_it(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             review_dir, chunk = self._packet(Path(td) / "requirements")

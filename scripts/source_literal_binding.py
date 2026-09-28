@@ -16,6 +16,15 @@ _BOUNDARY_ONLY = re.compile(r"^[\s，,、：:;；。！？!?…“”‘’（�
 _NORMALIZE_CLAUSE = re.compile(r"\s+")
 _CLAUSE_EDGE_PUNCTUATION = " \t\r\n，,、：:;；。！？!?…“”‘’（）()【】[]{}"
 
+# These roles carry text through typed, role-native properties rather than a
+# top-level ``properties.text`` field. Keep this list shared with the contract
+# validator so deterministic source binding cannot inject a schema-invalid
+# property into one of them.
+TOP_LEVEL_NON_TEXT_ROLES = frozenset({
+    "page", "table", "objects", "content_constraints", "conditional_constraints",
+    "document_structure", "appendices", "equations", "cover", "declarations",
+})
+
 
 def normalize_clause_literal(value: str) -> str:
     """Normalize formatting whitespace and edge punctuation, not lexical text."""
@@ -134,6 +143,84 @@ def _structurally_adjacent(previous: dict[str, Any], current: dict[str, Any]) ->
             and right.get("paragraph") == left["paragraph"] + 1
         )
     return False
+
+
+def _declaration_fragment_payload_error(
+    requirement: dict[str, Any], binding: dict[str, Any],
+    evidence_map: dict[str, dict[str, Any]],
+) -> str | None:
+    """Bind declaration fragments to their existing role-native text atoms.
+
+    Declarations store fixed wording under ``items[].heading``, ``body``, or
+    ``body_parts``. They do not accept a top-level ``properties.text`` field.
+    Require every selected evidence span to cover its complete substantive
+    source text, and require the selected evidence texts to appear in order in
+    role-native fields. Other declaration atoms remain independently checked
+    by the full declaration contract and are immutable across this retry.
+    """
+    properties = requirement.get("properties")
+    declaration_items = properties.get("items") if isinstance(properties, dict) else None
+    if not isinstance(declaration_items, list):
+        return "declaration_role_native_items_missing"
+
+    atoms_by_item: list[list[str]] = []
+    for declaration in declaration_items:
+        if not isinstance(declaration, dict):
+            continue
+        atoms: list[str] = []
+        for field in ("heading", "body"):
+            value = declaration.get(field)
+            if isinstance(value, str) and value:
+                atoms.append(value)
+        body_parts = declaration.get("body_parts")
+        if isinstance(body_parts, list):
+            atoms.extend(value for value in body_parts if isinstance(value, str) and value)
+        if atoms:
+            atoms_by_item.append(atoms)
+
+    selected_evidence_ids: list[str] = []
+    spans_by_evidence: dict[str, list[tuple[int, int]]] = {}
+    for fragment in binding.get("source_fragments", []):
+        evidence_id = fragment.get("evidence_id") if isinstance(fragment, dict) else None
+        if not isinstance(evidence_id, str) or not evidence_id:
+            return "declaration_source_fragment_evidence_missing"
+        start = fragment.get("start_offset")
+        end = fragment.get("end_offset")
+        if (
+            isinstance(start, bool) or not isinstance(start, int)
+            or isinstance(end, bool) or not isinstance(end, int)
+            or start < 0 or end <= start
+        ):
+            return f"declaration_source_fragment_span_invalid:{evidence_id}"
+        spans_by_evidence.setdefault(evidence_id, []).append((start, end))
+        if not selected_evidence_ids or selected_evidence_ids[-1] != evidence_id:
+            selected_evidence_ids.append(evidence_id)
+
+    expected_texts: list[str] = []
+    for evidence_id in selected_evidence_ids:
+        evidence = evidence_map.get(evidence_id)
+        source_text = evidence.get("text") if isinstance(evidence, dict) else None
+        if not isinstance(source_text, str) or not source_text:
+            return f"declaration_source_fragment_text_missing:{evidence_id}"
+        cursor = 0
+        for start, end in spans_by_evidence.get(evidence_id, []):
+            if end > len(source_text) or start < cursor:
+                return f"declaration_source_fragment_span_invalid:{evidence_id}"
+            if not _BOUNDARY_ONLY.fullmatch(source_text[cursor:start]):
+                return f"declaration_source_fragment_selector_omits_evidence_text:{evidence_id}"
+            cursor = end
+        if not _BOUNDARY_ONLY.fullmatch(source_text[cursor:]):
+            return f"declaration_source_fragment_selector_omits_evidence_text:{evidence_id}"
+        expected_texts.append(source_text)
+
+    if not expected_texts:
+        return "declaration_source_fragment_evidence_missing"
+
+    ordered_atoms = [atom for atoms in atoms_by_item for atom in atoms]
+    for start in range(len(ordered_atoms) - len(expected_texts) + 1):
+        if ordered_atoms[start:start + len(expected_texts)] == expected_texts:
+            return None
+    return "declaration_source_fragments_not_represented_in_role_native_text"
 
 
 def compose_source_fragments(
@@ -268,6 +355,10 @@ def materialize_source_fragment_literals(
     }
     audits: list[dict[str, Any]] = []
     errors: list[str] = []
+    try:
+        evidence_map = evidence_map_for_clauses(clauses, evidence_context)
+    except SourceFragmentBindingError as exc:
+        return output, [], [f"source_fragment_evidence_map:{exc}"]
     for index, item in enumerate(output["requirements"]):
         if not isinstance(item, dict) or "source_fragment_clause_ids" not in item:
             continue
@@ -284,6 +375,31 @@ def materialize_source_fragment_literals(
         properties = item.get("properties")
         if not isinstance(properties, dict):
             errors.append(f"{pointer}.properties:must_be_object_for_source_fragments")
+            continue
+        role = item.get("role")
+        if role == "declarations":
+            declaration_error = _declaration_fragment_payload_error(
+                item, binding, evidence_map,
+            )
+            if declaration_error:
+                errors.append(
+                    f"{pointer}.source_fragment_clause_ids:{declaration_error}"
+                )
+                continue
+            audits.append({
+                "requirement_index": index,
+                "clause_ids": copy.deepcopy(item["source_fragment_clause_ids"]),
+                "source_fragments": copy.deepcopy(binding["source_fragments"]),
+                "materialized_text_sha256": hashlib.sha256(
+                    binding["text"].encode("utf-8")
+                ).hexdigest(),
+                "action": "verified_against_role_native_declaration_text",
+            })
+            continue
+        if role in TOP_LEVEL_NON_TEXT_ROLES:
+            errors.append(
+                f"{pointer}.source_fragment_clause_ids:role_has_no_top_level_text_target:{role}"
+            )
             continue
         supplied_text = properties.get("text")
         if supplied_text is not None and supplied_text != binding["text"]:

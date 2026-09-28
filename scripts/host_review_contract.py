@@ -28,7 +28,11 @@ from source_obligation_compiler import (
     materialize_soft_keyword_count_guidance,
     materialize_known_source_verification,
 )
-from source_literal_binding import materialize_source_fragment_literals, normalize_clause_literal
+from source_literal_binding import (
+    TOP_LEVEL_NON_TEXT_ROLES as _TOP_LEVEL_NON_TEXT_ROLES,
+    materialize_source_fragment_literals,
+    normalize_clause_literal,
+)
 
 
 _GENERIC_SIGNATURE_LINE_PATTERNS = (
@@ -881,12 +885,6 @@ def validate_clause_source_spans(
         if isinstance(exact_context, str) and exact_context != source_text:
             errors.append(f"$.clauses[{index}].source_evidence_text: does_not_match_current_evidence")
     return errors
-
-
-_TOP_LEVEL_NON_TEXT_ROLES = {
-    "page", "table", "objects", "content_constraints", "conditional_constraints",
-    "document_structure", "appendices", "equations", "cover", "declarations",
-}
 
 
 def _resolve_contract_schema(schema: Any, contract_root: dict[str, Any]) -> dict[str, Any] | None:

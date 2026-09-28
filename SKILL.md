@@ -66,10 +66,17 @@ must preserve the clause reviews and obligations unchanged. Native structured
 output may encode a new requirement's absent `existing_requirement_id` as
 `null`, and an absent/null `verification` is treated as no verification claim
 for this removal check. Any non-null existing ID or non-null verification mode
-other than `external` remains ineligible. The only removable payload is a
+other than `external` remains ineligible. A removable edge must be either a
 single `body_text` source echo whose text exactly equals one linked clause's
-verified source span; role-specific properties, field keys, applicability,
-input prerequisites, altered text, and mixed/local payloads are not removable.
+verified source span, or a role-schema-declared all-null/empty properties shell
+with a matching `empty_requirement_properties` validator record and an
+explicitly external verification mode. The latter has no DOCX operation; its
+raw response remains in the original sidecar and the removed object in the
+repair audit. Non-null
+role-specific properties, field keys, conditional applicability, input
+prerequisites, altered text, and mixed/local payloads are not removable.
+After projection the complete contract and independent source-first obligation
+review must pass; the external actions stay pending and block submission.
 Mixed executable/external edges, empty/orphan clause/evidence relations, stale
 records, or failed source/evidence binding must fail closed; the bridge must
 never guess or attach an orphan to a clause. A source clause is also ineligible

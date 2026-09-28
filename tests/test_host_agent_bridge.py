@@ -5295,6 +5295,114 @@ class HostAgentBridgeTests(unittest.TestCase):
             missing_obligations, relation_only, chunk,
         )[0])
 
+    def test_null_only_external_shells_are_removed_without_losing_pending_reviews(self) -> None:
+        sources = [
+            "非公开材料须经导师同意、作者申请和主管部门批准",
+            "纸质审批页须由主管办公室盖章方有效",
+        ]
+        evidence_doc = {"evidence": [
+            {"id": f"E{index}", "text": source, "kind": "paragraph"}
+            for index, source in enumerate(sources, 1)
+        ]}
+        clauses = self._bind_test_source_spans([
+            exact_source_clause(f"C{index}", source, f"E{index}")
+            for index, source in enumerate(sources, 1)
+        ], evidence_doc)
+        chunk = engine.build_llm_request(
+            [], clauses, evidence_doc, {}, "full", contract_version="3.0",
+        )
+        chunk = attach_request_provenance(
+            chunk, source_sha256="c" * 64, evidence_doc=evidence_doc,
+            clauses=clauses, run_id="null-external-shell-test",
+        )
+        response = {
+            "contract_version": "3.0", "provenance": chunk["provenance"],
+            "requirements": [{
+                "existing_requirement_id": None, "field_key": None,
+                "clause_ids": [f"C{index}"], "evidence_ids": [f"E{index}"],
+                "role": "content_constraints", "properties": {
+                    "abstract_zh": None, "abstract_en": None,
+                    "keywords_zh": None, "keywords_en": None,
+                    "acknowledgments": None,
+                },
+                "reason": "The source requires a real-world action.",
+                "confidence": 1,
+                "verification": {"mode": "external", "checks": [
+                    "Verify the actual consent or stamp."
+                ], "checker_ids": None},
+            } for index in (1, 2)],
+            "clause_reviews": [{
+                "clause_id": f"C{index}", "classification": "external_compliance",
+                "normative_basis": "external_duty",
+                "reason": "The real-world action remains pending.",
+                "obligations": [{
+                    "id": f"external_action_{index}", "status": "unverifiable",
+                    "reason": "The real-world action cannot be completed in DOCX.",
+                }],
+            } for index in (1, 2)],
+            "unsupported_items": [], "reported_conflicts": [],
+        }
+        normalized = bridge.normalize_native_response(response, chunk["response_schema"])
+        records = bridge.contract_error_records(
+            bridge.validate_host_agent_response(normalized, chunk),
+            response=normalized, chunk=chunk,
+        )
+        self.assertEqual(
+            [record["code"] for record in records].count("empty_requirement_properties"), 2,
+        )
+        self.assertEqual(
+            [record["code"] for record in records].count("non_requirement_classification_relation"), 2,
+        )
+        projected, repairs = bridge._apply_safe_mechanical_repairs(
+            normalized, records, chunk=chunk,
+        )
+        self.assertIsNotNone(projected)
+        self.assertEqual(projected["requirements"], [])
+        self.assertEqual(projected["clause_reviews"], normalized["clause_reviews"])
+        self.assertEqual(bridge.validate_host_agent_response(projected, chunk), [])
+        self.assertEqual(repairs[0]["projection_kinds"], {
+            "0": "null_external_shell", "1": "null_external_shell",
+        })
+        self.assertEqual(repairs[0]["removed_requirements"], normalized["requirements"])
+        accepted, audit = bridge.prepare_native_response_candidate(response, chunk)
+        self.assertEqual(accepted["requirements"], [])
+        self.assertEqual(len(audit["mechanical_repairs"]), 1)
+
+        for label, mutate in (
+            ("existing_identity", lambda item: item.update(existing_requirement_id="R-old")),
+            ("conditional", lambda item: item.update(applicability={
+                "status": "conditional", "conditions": [{"fact": "security_level"}],
+            })),
+            ("local_verification", lambda item: item["verification"].update(mode="static_docx")),
+            ("checker_binding", lambda item: item["verification"].update(checker_ids=["checker"])),
+            ("non_null_payload", lambda item: item["properties"].update(abstract_zh={"required": True})),
+            ("cross_evidence", lambda item: item.update(evidence_ids=["E2"])),
+        ):
+            changed = copy.deepcopy(normalized)
+            mutate(changed["requirements"][0])
+            changed_records = bridge.contract_error_records(
+                bridge.validate_host_agent_response(changed, chunk),
+                response=changed, chunk=chunk,
+            )
+            with self.subTest(label=label):
+                self.assertIsNone(bridge._project_external_action_requirements(
+                    changed, changed_records, chunk,
+                )[0])
+        stale_records = copy.deepcopy(records)
+        stale_records[0]["response_sha256"] = "0" * 64
+        self.assertIsNone(bridge._project_external_action_requirements(
+            normalized, stale_records, chunk,
+        )[0])
+        missing_inventory = copy.deepcopy(normalized)
+        missing_inventory["clause_reviews"][0]["obligations"] = []
+        missing_records = bridge.contract_error_records(
+            bridge.validate_host_agent_response(missing_inventory, chunk),
+            response=missing_inventory, chunk=chunk,
+        )
+        self.assertIsNone(bridge._project_external_action_requirements(
+            missing_inventory, missing_records, chunk,
+        )[0])
+
     def test_external_projection_refuses_a_clause_with_a_local_field_action_cue(self) -> None:
         source = "封面须写明学号，并由导师签字盖章"
         clauses = [{

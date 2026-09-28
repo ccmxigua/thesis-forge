@@ -5838,15 +5838,83 @@ def _is_source_only_external_requirement(
     return all(name == "text" or value is None for name, value in properties.items())
 
 
+def _is_null_payload_external_requirement(
+    requirement: Any, chunk: dict[str, Any] | None,
+) -> bool:
+    """Recognize an external-only edge with no DOCX operation to preserve.
+
+    An all-null role payload is not executable.  Its free-text reason and
+    external checks are retained in the repair audit, not promoted into a
+    format requirement.  The source-bound external review must still pass the
+    independent obligation check before the candidate can be accepted.
+    """
+    if not isinstance(requirement, dict) or not isinstance(chunk, dict):
+        return False
+    if (
+        requirement.get("existing_requirement_id") is not None
+        or requirement.get("field_key") is not None
+        or requirement.get("source_fragment_clause_ids") not in (None, [])
+        or requirement.get("input_prerequisites") not in (None, [])
+    ):
+        return False
+    applicability = requirement.get("applicability")
+    if applicability not in (None, {}) and not (
+        isinstance(applicability, dict)
+        and set(applicability) <= {"status", "conditions", "exceptions"}
+        and applicability.get("status") == "always"
+        and applicability.get("conditions") in (None, [])
+        and applicability.get("exceptions") in (None, [])
+    ):
+        return False
+    verification = requirement.get("verification")
+    if (
+        not isinstance(verification, dict)
+        or set(verification) - {"mode", "checks", "checker_ids"}
+        or verification.get("mode") != "external"
+        or verification.get("checker_ids") not in (None, [])
+        or not isinstance(verification.get("checks"), list)
+        or not verification["checks"]
+        or any(not isinstance(check, str) or not check.strip()
+               for check in verification["checks"])
+    ):
+        return False
+    contract = chunk.get("requirement_contract")
+    role = requirement.get("role")
+    role_schemas = (
+        contract.get("role_properties_schema") if isinstance(contract, dict) else None
+    )
+    role_schema = (
+        role_schemas.get(role)
+        if isinstance(role_schemas, dict) and isinstance(role, str) else None
+    )
+    resolved_schema = (
+        _resolve_contract_schema(role_schema, contract)
+        if role_schema is not None else None
+    )
+    declared_properties = (
+        resolved_schema.get("properties")
+        if isinstance(resolved_schema, dict) else None
+    )
+    properties = requirement.get("properties")
+    return bool(
+        isinstance(declared_properties, dict)
+        and isinstance(properties, dict)
+        and set(properties) <= set(declared_properties)
+        and all(value is None for value in properties.values())
+    )
+
+
 def _project_external_action_requirements(
     response: dict[str, Any], records: list[dict[str, Any]], chunk: dict[str, Any] | None,
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
     """Drop only redundant DOCX edges for explicitly external, pending duties.
 
-    No classifier is changed. Existing requirement identities, invalid
-    payloads, mixed relations, absent evidence and stale error records are not
-    deletion authorizations. Native structured output represents a new
-    requirement selector as ``existing_requirement_id: null``; that is the
+    No classifier is changed. Existing requirement identities, meaningful
+    DOCX payloads, mixed relations, absent evidence and stale error records are
+    not deletion authorizations. A paired empty-payload validator record can
+    authorize an all-null external-only shell, but no other invalid payload.
+    Native structured output represents a new requirement selector as
+    ``existing_requirement_id: null``; that is the
     same no-identity state as omitting the optional field. A null/absent
     verification object likewise carries no contradictory local verification
     claim; any non-null verification must explicitly be external. The
@@ -5855,11 +5923,10 @@ def _project_external_action_requirements(
     if (
         not isinstance(chunk, dict) or response.get("contract_version") != "3.0"
         or not records or any(not isinstance(record, dict) for record in records)
-        or any(
-            record.get("code") != "non_requirement_classification_relation"
-            or record.get("response_sha256") != _response_sha256(response)
-            for record in records
-        )
+        or any(record.get("code") not in {
+            "non_requirement_classification_relation", "empty_requirement_properties",
+        } or record.get("response_sha256") != _response_sha256(response)
+            for record in records)
     ):
         return None, []
     requirements = response.get("requirements")
@@ -5880,22 +5947,23 @@ def _project_external_action_requirements(
         if isinstance(item, dict)
         and item.get("code") == "non_requirement_classification_relation"
     ]
-    # A relation-only projection must not hide an independent validator
-    # failure (for example, an external review with no obligation inventory).
+    # This projection must not hide an independent validator failure (for
+    # example, an external review with no obligation inventory). The sole
+    # permitted companion error identifies exactly the null-only payload.
     # Bind the complete supplied record set to the validator's exact output,
     # not merely to a matching index and selected metadata fields.
     if (
         not actual_external_records
-        or len(actual_external_records) != len(records)
-        or any(
-            not isinstance(item, dict)
-            or item.get("code") != "non_requirement_classification_relation"
-            for item in actual_records
-        )
+        or sorted(_response_sha256(item) for item in actual_records)
+        != sorted(_response_sha256(item) for item in records)
+        or any(item.get("code") not in {
+            "non_requirement_classification_relation", "empty_requirement_properties",
+        } for item in actual_records)
     ):
         return None, []
     targets: set[int] = set()
-    for record in records:
+    projection_kinds: dict[int, str] = {}
+    for record in actual_external_records:
         index = record.get("requirement_index")
         if (
             type(index) is not int or not 0 <= index < len(requirements)
@@ -5916,24 +5984,33 @@ def _project_external_action_requirements(
         actual_record = matching_actual[0]
         if record != actual_record:
             return None, []
-        # Do not erase a second error on the object by deleting its container.
-        if any(
-            (str(item.get("json_pointer") or "") == pointer
-             or str(item.get("json_pointer") or "").startswith(pointer + "."))
-            and item.get("code") != "non_requirement_classification_relation"
-            for item in actual_records
-        ):
-            return None, []
         requirement = requirements[index]
         if (
             not isinstance(requirement, dict)
             or requirement.get("existing_requirement_id") is not None
         ):
             return None, []
+        source_echo = _is_source_only_external_requirement(requirement, chunk)
+        null_shell = _is_null_payload_external_requirement(requirement, chunk)
+        empty_records = [
+            item for item in actual_records
+            if item.get("code") == "empty_requirement_properties"
+            and item.get("json_pointer") == pointer + ".properties"
+        ]
+        if not (
+            (source_echo and not empty_records)
+            or (null_shell and len(empty_records) == 1)
+        ):
+            return None, []
+        if any(
+            str(item.get("json_pointer") or "").startswith(pointer + ".")
+            and item not in empty_records
+            for item in actual_records
+        ):
+            return None, []
         ids, evidence_ids = requirement.get("clause_ids"), requirement.get("evidence_ids")
         if (
-            not _is_source_only_external_requirement(requirement, chunk)
-            or not isinstance(ids, list) or not ids or any(not isinstance(cid, str) for cid in ids)
+            not isinstance(ids, list) or not ids or any(not isinstance(cid, str) for cid in ids)
             or len(set(ids)) != len(ids)
             or len(ids) != 1
             or not isinstance(evidence_ids, list) or not evidence_ids
@@ -5996,9 +6073,16 @@ def _project_external_action_requirements(
             for eid in evidence_ids
         ):
             return None, []
-        if requirement["properties"].get("text") not in exact_clause_sources:
+        if source_echo and requirement["properties"].get("text") not in exact_clause_sources:
+            return None, []
+        if null_shell and set(evidence_ids) != allowed_evidence:
             return None, []
         targets.add(index)
+        projection_kinds[index] = "source_echo" if source_echo else "null_external_shell"
+    if len(actual_external_records) != len(targets) or len(actual_records) != (
+        len(targets) + sum(kind == "null_external_shell" for kind in projection_kinds.values())
+    ):
+        return None, []
     projected = copy.deepcopy(response)
     projected["requirements"] = [item for index, item in enumerate(projected["requirements"]) if index not in targets]
     # The source-bound checks above authorize this one external-action rule.
@@ -6017,6 +6101,7 @@ def _project_external_action_requirements(
         "rule_id": "external_action_relation_projection_v3",
         "json_pointer": "$.requirements", "removed_indexes": sorted(targets),
         "removed_requirements": [copy.deepcopy(requirements[index]) for index in sorted(targets)],
+        "projection_kinds": {str(index): projection_kinds[index] for index in sorted(targets)},
         "source_response_sha256": _response_sha256(response),
         "repaired_response_sha256": _response_sha256(projected),
         "source_chunk_sha256": _response_sha256(chunk),
@@ -6344,19 +6429,24 @@ def _apply_safe_mechanical_repairs_one_rule(
     """
     if not isinstance(response, dict) or not error_records:
         return None, []
-    if all(
+    if any(
+        isinstance(record, dict)
+        and record.get("code") == "non_requirement_classification_relation"
+        for record in error_records
+    ) and all(
         isinstance(record, dict)
         and record.get("code") in {
             "non_requirement_classification_relation",
             "external_action_obligations_missing",
+            "empty_requirement_properties",
         }
         for record in error_records
     ):
-        relation_records = [
+        projection_records = [
             record for record in error_records
-            if record.get("code") == "non_requirement_classification_relation"
+            if record.get("code") != "external_action_obligations_missing"
         ]
-        return _project_external_action_requirements(response, relation_records, chunk)
+        return _project_external_action_requirements(response, projection_records, chunk)
     allowed_codes = {
         "unknown_property", "evidence_relation_mismatch",
         "empty_requirement_properties", "informational_requirement_forbidden",

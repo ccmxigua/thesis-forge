@@ -3052,6 +3052,115 @@ class HostAgentBridgeTests(unittest.TestCase):
                     )
                     self.assertIsNone(result)
 
+    def test_source_verification_retry_uses_source_materialized_candidate_identity(self) -> None:
+        keyword_source = "关键词须在论文中有明确出处"
+        provenance = {
+            "run_id": "run-source-projection", "case_id": "case-source-projection",
+            "source_sha256": "a" * 64, "evidence_sha256": "b" * 64,
+            "clause_sha256": "c" * 64, "request_sha256": "d" * 64,
+            "chunk_sha256": "e" * 64,
+        }
+        chunk = {
+            "provenance": provenance, "batch": {"index": 1},
+            "case_id": "case-source-projection",
+            "response_schema": {"type": "object"},
+            "runtime_context": {"code_fingerprint_sha256": "9" * 64},
+            "clauses": [
+                {"id": "C1", "text": "学位论文使用授权书", "evidence_ids": ["E1"]},
+                {"id": "C2", "text": "固定正文", "evidence_ids": ["E2"]},
+                {"id": "C3", "text": "摘要", "evidence_ids": ["E3"]},
+                exact_source_clause("C4", keyword_source, "E4"),
+            ],
+            "evidence_context": {
+                "E1": {"id": "E1", "text": "学位论文使用授权书"},
+                "E2": {"id": "E2", "text": "固定正文。"},
+                "E3": {"id": "E3", "text": "摘要"},
+                "E4": {"id": "E4", "text": keyword_source},
+            },
+            "declaration_anchor_preference": "abstract_title_zh",
+        }
+        parent_raw = {
+            "contract_version": "3.0",
+            "requirements": [{
+                "role": "declarations", "existing_requirement_id": None,
+                "clause_ids": ["C1", "C2"], "evidence_ids": ["E1", "E2"],
+                "properties": {"before_role": "abstract_title_zh", "items": [{
+                    "id": "authorization", "heading": "学位论文使用授权书",
+                    "body": None, "body_parts": ["固定正文"],
+                    "source_evidence_ids": ["E1", "E2"],
+                    "signature_placeholders": [],
+                }]},
+            }],
+            "clause_reviews": [
+                {"clause_id": "C1", "classification": "executable"},
+                {"clause_id": "C2", "classification": "executable"},
+                {"clause_id": "C3", "classification": "informational"},
+                {"clause_id": "C4", "classification": "informational",
+                 "reason": "Existing keyword origin needs human verification."},
+            ],
+            "unsupported_items": [], "reported_conflicts": [],
+        }
+        retry_raw = copy.deepcopy(parent_raw)
+        retry_raw["clause_reviews"][3]["classification"] = "requires_source_verification"
+        parent_candidate, parent_projection = bridge._materialize_fixed_declaration_source_text(
+            parent_raw, chunk,
+        )
+        retry_candidate, retry_projection = bridge._materialize_fixed_declaration_source_text(
+            retry_raw, chunk,
+        )
+        self.assertTrue(parent_projection)
+        self.assertTrue(retry_projection)
+        self.assertNotEqual(parent_raw, parent_candidate)
+        record = {
+            "code": "independent_obligation_review_incomplete", "clause_id": "C4",
+            "json_pointer": "$.clause_reviews[3].classification",
+            "baseline_classification": "informational", "evidence_ids": ["E4"],
+            "missing_source_quotes": [keyword_source],
+            "candidate_response_sha256": bridge._response_sha256(
+                bridge._bind_current_invocation_provenance(parent_candidate, provenance)
+            ),
+            "candidate_semantic_sha256": bridge._response_sha256(
+                bridge._semantic_retry_view(parent_candidate)
+            ),
+            "review_request_sha256": "1" * 64,
+            "review_response_sha256": "2" * 64,
+            "source_reference_compilation_sha256": "3" * 64,
+            "primary_retry_authorization": (
+                "source_bound_existing_content_verification_reclassification_v1"
+            ),
+        }
+        with patch.object(bridge, "validate_host_agent_response", return_value=[]):
+            direct_candidate, direct_audit = bridge._v3_source_verification_reclassification_response(
+                parent_candidate, retry_candidate, [record], chunk=chunk,
+            )
+            self.assertIsNotNone(direct_candidate, direct_audit)
+            rejected_without_projection, _ = bridge._retry_semantic_change_error(
+                parent_raw, retry_raw, [record], contract_version="3.0", chunk=chunk,
+            )
+            accepted, changed = bridge._retry_semantic_change_error(
+                parent_raw, retry_raw, [record], contract_version="3.0", chunk=chunk,
+                comparison_previous_response=parent_candidate,
+                comparison_current_response=retry_candidate,
+            )
+            tampered = copy.deepcopy(parent_candidate)
+            tampered["requirements"][0]["properties"]["items"][0]["body_parts"] = ["伪造正文"]
+            rejected_tampered, _ = bridge._retry_semantic_change_error(
+                parent_raw, retry_raw, [record], contract_version="3.0", chunk=chunk,
+                comparison_previous_response=tampered,
+                comparison_current_response=retry_candidate,
+            )
+            stale_record = {**record, "candidate_semantic_sha256": "0" * 64}
+            rejected_stale, _ = bridge._retry_semantic_change_error(
+                parent_raw, retry_raw, [stale_record], contract_version="3.0", chunk=chunk,
+                comparison_previous_response=parent_candidate,
+                comparison_current_response=retry_candidate,
+            )
+        self.assertIsNotNone(rejected_without_projection)
+        self.assertIsNone(accepted)
+        self.assertEqual(changed, ["$.clause_reviews[3].classification"])
+        self.assertIsNotNone(rejected_tampered)
+        self.assertIsNotNone(rejected_stale)
+
     def test_source_verification_retry_fails_closed_when_prevalidation_compilation_is_tampered(self) -> None:
         self._independent_review_patch.stop()
         source = "关键词须源自论文，人工核验现有关键词是否可追溯至正文。"
@@ -6384,6 +6493,87 @@ class HostAgentBridgeTests(unittest.TestCase):
         self.assertEqual(bridge._v3_relation_completion_response(
             previous, current, records, chunk={},
         ), (None, None))
+
+    def test_external_pending_and_unbound_orphan_never_form_relation_addition_retry(self) -> None:
+        """The two simultaneous BSU failures must not yield conflicting retry advice."""
+        previous = {
+            "contract_version": "3.0",
+            "requirements": [
+                {"role": "cover", "properties": {"non_public_administration": {"fields": [{"id": "approval_number"}]}},
+                 "clause_ids": ["C1"], "evidence_ids": ["E1"], "reason": "cover"},
+                {"role": "content_constraints", "properties": {"abstract_zh": {"required": None}},
+                 "clause_ids": ["C2"], "evidence_ids": ["E1"], "reason": "external approval",
+                 "applicability": {"status": "conditional"},
+                 "verification": {"mode": "external"}},
+                {"role": "cover", "properties": {"institution": "——", "fields": [],
+                 "missing_value_policy": "placeholder"}, "clause_ids": [], "evidence_ids": [],
+                 "reason": "placeholder"},
+            ],
+            "clause_reviews": [
+                {"clause_id": "C1", "classification": "executable"},
+                {"clause_id": "C2", "classification": "external_compliance",
+                 "obligations": [{"id": "approval", "status": "unverifiable"}]},
+            ],
+            "unsupported_items": [], "reported_conflicts": [],
+        }
+        current = copy.deepcopy(previous)
+        current["requirements"] = [copy.deepcopy(previous["requirements"][0])]
+        parent_sha = bridge._response_sha256(previous)
+        records = [
+            {"code": "cover_binding_violation", "json_pointer": "$.requirements[2].properties.fields",
+             "response_sha256": parent_sha},
+            {"code": "schema_contract_violation", "json_pointer": "$.requirements[2].clause_ids",
+             "response_sha256": parent_sha},
+            {"code": "schema_contract_violation", "json_pointer": "$.requirements[2].evidence_ids",
+             "response_sha256": parent_sha},
+            {"code": "non_requirement_classification_relation",
+             "json_pointer": "$.requirements[1]", "requirement_index": 1,
+             "relation_category": "non_requirement_classification", "mechanically_removable": False,
+             "clause_classifications": {"C2": ["external_compliance"]},
+             "response_sha256": parent_sha},
+            {"code": "requirement_relation_mismatch", "json_pointer": "$.requirements[2]",
+             "requirement_index": 2, "relation_category": "missing_clause_relation",
+             "mechanically_removable": True, "mechanical_removal_basis": "no_clause_or_evidence_binding",
+             "clause_ids": [], "response_sha256": parent_sha},
+        ]
+        self.assertEqual(
+            bridge._fresh_semantic_split_reason(records),
+            "external_pending_requirement_plus_unbound_orphan",
+        )
+        guidance = bridge._structured_contract_repair_guidance(records, contract_version="3.0")
+        self.assertIn("not a missing executable clause", guidance)
+        self.assertIn("Never assign it a guessed clause/evidence", guidance)
+        changed = bridge._retry_change_paths(previous, current)
+        self.assertEqual(changed, ["$.requirements"])
+        error, _ = bridge._retry_semantic_change_error(
+            previous, current, records, contract_version="3.0",
+        )
+        self.assertIsNotNone(error)
+        self.assertEqual(error.error_records[0]["code"], "semantic_retry_change")
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            packet_path = root / "chunk.json"
+            packet_path.write_text('{"contract_version":"3.0"}', encoding="utf-8")
+            parent_path = root / "parent.json"
+            parent_path.write_text(json.dumps(previous), encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "incompatible semantic errors"):
+                bridge._host_prompt(
+                    request_path=root / "request.json", chunk_path=packet_path,
+                    response_path=root / "response.json", run_id="run", chunk_index=1,
+                    chunk_count=1, attempt=2, retry_hint="contract failed",
+                    retry_parent_response_path=parent_path,
+                    retry_parent_response_sha256=bridge.sha256_file(parent_path),
+                    retry_error_records=records,
+                )
+
+        stale = copy.deepcopy(records)
+        stale[-1]["response_sha256"] = "0" * 64
+        self.assertIsNone(bridge._fresh_semantic_split_reason(stale))
+        without_orphan = records[:-1]
+        self.assertIsNone(bridge._fresh_semantic_split_reason(without_orphan))
+        non_external = copy.deepcopy(records)
+        non_external[-2]["clause_classifications"] = {"C2": ["unresolved"]}
+        self.assertIsNone(bridge._fresh_semantic_split_reason(non_external))
 
     def test_unknown_property_is_removed_deterministically_without_semantic_retry(self) -> None:
         response = {

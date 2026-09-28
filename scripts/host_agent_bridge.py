@@ -814,13 +814,59 @@ def _contract_repair_guidance(
     return "\n".join(f"- {rule}" for rule in rules) or "- Re-read the current chunk contract and regenerate the complete JSON object."
 
 
-def _requires_fresh_semantic_split(records: Any) -> bool:
-    """A mixed executable/external edge cannot be repaired mechanically."""
-    return isinstance(records, list) and any(
+def _fresh_semantic_split_reason(records: Any) -> str | None:
+    """Identify incompatible errors before offering a bounded parent retry.
+
+    An external-only requirement may carry applicability or other meaning that
+    the source-only mechanical projector cannot discard.  An unrelated orphan
+    cannot be assigned evidence to make the same parent valid.  Offering a
+    relation-addition retry for that pair gives contradictory instructions and
+    cannot authorize the resulting two-object deletion.
+    """
+    if not isinstance(records, list):
+        return None
+    if any(
         isinstance(record, dict)
         and record.get("code") == "mixed_execution_classification_relation"
         for record in records
-    )
+    ):
+        return "mixed_executable_external_relation"
+    external_records = [
+        record for record in records
+        if isinstance(record, dict)
+        and record.get("code") == "non_requirement_classification_relation"
+        and record.get("mechanically_removable") is False
+        and record.get("relation_category") == "non_requirement_classification"
+        and isinstance(record.get("requirement_index"), int)
+        and isinstance(record.get("clause_classifications"), dict)
+        and record["clause_classifications"]
+        and all(
+            values == ["external_compliance"]
+            for values in record["clause_classifications"].values()
+        )
+    ]
+    orphan_records = [
+        record for record in records
+        if isinstance(record, dict)
+        and record.get("code") == "requirement_relation_mismatch"
+        and record.get("relation_category") == "missing_clause_relation"
+        and record.get("mechanically_removable") is True
+        and record.get("mechanical_removal_basis") == "no_clause_or_evidence_binding"
+        and record.get("clause_ids") == []
+        and isinstance(record.get("requirement_index"), int)
+    ]
+    if any(
+        external.get("requirement_index") != orphan.get("requirement_index")
+        and isinstance(external.get("response_sha256"), str)
+        and external["response_sha256"] == orphan.get("response_sha256")
+        for external in external_records for orphan in orphan_records
+    ):
+        return "external_pending_requirement_plus_unbound_orphan"
+    return None
+
+
+def _requires_fresh_semantic_split(records: Any) -> bool:
+    return _fresh_semantic_split_reason(records) is not None
 
 
 def _structured_contract_repair_guidance(
@@ -909,11 +955,22 @@ def _structured_contract_repair_guidance(
                 )
         elif code == "requirement_relation_mismatch":
             if contract_version == HOST_REVIEW_CONTRACT_V3:
-                rule = (
-                    f"At {pointer}, regenerate the authoritative requirements[].clause_ids relation from the current chunk. "
-                    "Do not emit or maintain a reverse index in clause_reviews. If an executable clause truly has no "
-                    "evidence-backed requirement, add only that requirement and preserve every existing review and requirement."
-                )
+                if (
+                    record.get("relation_category") == "missing_clause_relation"
+                    and record.get("mechanical_removal_basis") == "no_clause_or_evidence_binding"
+                ):
+                    rule = (
+                        f"At {pointer}, this is an unbound requirement with no clause or evidence relation, "
+                        "not a missing executable clause. Never assign it a guessed clause/evidence or add a "
+                        "replacement requirement. It may be discarded only by an exact code-owned, fully "
+                        "revalidated projection; otherwise stop for a fresh source-bound semantic review."
+                    )
+                else:
+                    rule = (
+                        f"At {pointer}, regenerate the authoritative requirements[].clause_ids relation from the current chunk. "
+                        "Do not emit or maintain a reverse index in clause_reviews. If an executable clause truly has no "
+                        "evidence-backed requirement, add only that requirement and preserve every existing review and requirement."
+                    )
             else:
                 rule = (
                     f"At {pointer}, do not copy or repair a neighboring relation. The deterministic matching requirement indexes are "
@@ -5090,6 +5147,36 @@ def _retry_semantic_change_error(
         if comparison_current_response is not None else current_response
     )
     changed_paths = _retry_change_paths(comparison_previous, comparison_current)
+    authorization_previous = previous_response
+    authorization_current = current_response
+    # An independent source-first correction is bound to the persisted
+    # validated candidate, not the provider's pre-materialization raw JSON.
+    # Fixed declaration literals may be restored from current evidence before
+    # that candidate is recorded. Recompute that exact code-owned projection
+    # from BOTH raw attempts before using its hashes for authorization; a
+    # caller-supplied comparison or a stale candidate hash grants nothing.
+    if (
+        isinstance(chunk, dict)
+        and records
+        and all(
+            isinstance(record, dict)
+            and record.get("primary_retry_authorization")
+            == "source_bound_existing_content_verification_reclassification_v1"
+            for record in records
+        )
+    ):
+        projected_previous, _ = _materialize_fixed_declaration_source_text(
+            previous_response, chunk,
+        )
+        projected_current, _ = _materialize_fixed_declaration_source_text(
+            current_response, chunk,
+        )
+        if (
+            projected_previous == comparison_previous
+            and projected_current == comparison_current
+        ):
+            authorization_previous = projected_previous
+            authorization_current = projected_current
     authorization_ledger: list[dict[str, Any]] = []
     order_changed_with_edit = bool(changed_paths) and _retry_arrays_reordered(
         comparison_previous, comparison_current,
@@ -5099,15 +5186,15 @@ def _retry_semantic_change_error(
         records,
         changed_paths,
         contract_version=contract_version,
-        previous_response=previous_response,
-        current_response=current_response,
+        previous_response=authorization_previous,
+        current_response=authorization_current,
         chunk=chunk,
         )
     )
     if changes_allowed and changed_paths:
         authorization_ledger = _retry_authorization_ledger(
-            previous_response,
-            current_response,
+            authorization_previous,
+            authorization_current,
             records,
             changed_paths,
             contract_version=contract_version,
@@ -8459,6 +8546,13 @@ def _host_prompt(*, request_path: Path, chunk_path: Path,
             contract_version = str(packet["contract_version"])
     except (OSError, ValueError, json.JSONDecodeError):
         pass
+    if retry_parent_response_path is not None:
+        split_reason = _fresh_semantic_split_reason(retry_error_records)
+        if split_reason is not None:
+            raise ValueError(
+                "cannot build a bounded parent retry for incompatible semantic errors: "
+                + split_reason
+            )
     repair_guidance = _contract_repair_guidance("")
     retry_text = ""
     if contract_version == HOST_REVIEW_CONTRACT_V3:
@@ -11913,11 +12007,11 @@ def run_bridge(
                             copy.deepcopy(error_records)
                         )
                     retry_error_records = copy.deepcopy(error_records)
-                if _requires_fresh_semantic_split(error_records):
-                    # This root error requires changing a semantic relation.
-                    # The bounded mechanical retry cannot authorize that
-                    # change; a dependent missing edge is not a request for
-                    # a second empty/title-only requirement.
+                split_reason = _fresh_semantic_split_reason(error_records)
+                if split_reason is not None:
+                    # These errors cannot be reconciled by one bounded parent
+                    # edit. Preserve the original validator evidence and stop
+                    # before a contradictory model retry is dispatched.
                     with lifecycle_lock:
                         if chunk_lifecycle[index].get("attempts"):
                             chunk_lifecycle[index]["attempts"][-1].update(
@@ -11927,6 +12021,7 @@ def run_bridge(
                                 error=str(exc),
                                 error_records=copy.deepcopy(error_records),
                                 retry_disposition="fresh_semantic_split_required",
+                                semantic_split_reason=split_reason,
                             )
                         chunk_lifecycle[index].update(
                             status="failed",
@@ -11934,10 +12029,12 @@ def run_bridge(
                             remote_operation_state="unknown",
                             error=str(exc),
                             retry_disposition="fresh_semantic_split_required",
+                            semantic_split_reason=split_reason,
                         )
                     raise ValueError(
-                        "Host Agent response has mixed executable/external requirement edges; "
-                        "mechanical retry stopped, fresh source-bound semantic split required: "
+                        "Host Agent response has incompatible semantic/relation errors "
+                        f"({split_reason}); bounded retry stopped, fresh source-bound "
+                        "semantic review required: "
                         + str(exc)
                     ) from exc
                 no_progress_event: dict[str, Any] | None = None

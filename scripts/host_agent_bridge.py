@@ -191,6 +191,11 @@ from host_review_schema import (  # noqa: E402
     normalize_native_response,
     require_native_schema,
 )
+from source_literal_binding import (  # noqa: E402
+    SourceFragmentBindingError,
+    compose_source_fragments,
+    materialize_source_fragment_literals,
+)
 from host_runtime import (  # noqa: E402
     HostAdapterUnavailable,
     HostRuntimeError,
@@ -661,7 +666,17 @@ def _structured_contract_repair_guidance(
         code = str(record.get("code") or "contract_validation_error")
         pointer = str(record.get("json_pointer") or "the indicated field")
         matching = record.get("matching_requirement_indexes")
-        if code.startswith("existing_requirement_") or code in {
+        if code == "source_fragment_binding_violation":
+            rule = (
+                f"At {pointer}, select only the exact current clause IDs whose cited source spans "
+                "form this literal in source order. Add source_fragment_clause_ids to that same "
+                "requirement; the bridge will verify current source hashes, evidence links, and "
+                "provable boundaries, then materialize properties.text. If you provide text, it "
+                "must exactly equal that deterministic composition. Do not paraphrase, include "
+                "unselected intervening source text, change requirement identity, or guess a "
+                "missing separator; if the fragments cannot be proven, preserve the response and fail closed."
+            )
+        elif code.startswith("existing_requirement_") or code in {
             "unknown_existing_requirement_id", "invalid_existing_requirement_id",
         }:
             rule = (
@@ -919,6 +934,7 @@ def _semantic_retry_view(response: Any) -> dict[str, Any] | None:
 def _attempt_stage_snapshot(
     stage: str, response: Any, *, path: Path | None, chunk: dict[str, Any],
     projection_audit: dict[str, Any] | None = None,
+    accepted: bool | None = None,
 ) -> dict[str, Any]:
     """Bind a retry artifact to its representation stage and current inputs."""
     retry_inputs = _retry_input_fingerprints(chunk)
@@ -932,7 +948,7 @@ def _attempt_stage_snapshot(
         "code_fingerprint_sha256": runtime_context.get("code_fingerprint_sha256"),
         "projection_audit": projection_audit or {},
     })
-    return {
+    snapshot = {
         "stage": stage,
         "path": str(path.resolve()) if path is not None else None,
         "file_bytes_sha256": file_sha,
@@ -950,6 +966,9 @@ def _attempt_stage_snapshot(
         "code_fingerprint_sha256": runtime_context.get("code_fingerprint_sha256"),
         "projection_fingerprint_sha256": projection_fingerprint,
     }
+    if accepted is not None:
+        snapshot["accepted"] = accepted
+    return snapshot
 
 
 def _retry_input_fingerprints(chunk: dict[str, Any]) -> dict[str, Any]:
@@ -1015,6 +1034,10 @@ def _verified_attempt_stage_path(
         expected_path = response_path.with_name(
             f"{response_path.stem}.attempt-{attempt_number:02d}{response_path.suffix}"
         )
+    elif stage == "repair_base":
+        expected_path = response_path.with_name(
+            f"{response_path.stem}.attempt-{attempt_number:02d}.repair-base{response_path.suffix}"
+        )
     else:
         return None
     snapshots = attempt_record.get("stage_snapshots")
@@ -1023,6 +1046,8 @@ def _verified_attempt_stage_path(
         if isinstance(item, dict) and item.get("stage") == stage
     ), None) if isinstance(snapshots, list) else None
     if not isinstance(snapshot, dict):
+        return None
+    if stage == "repair_base" and snapshot.get("accepted") is not False:
         return None
     expected_sha = snapshot.get("file_bytes_sha256")
     if (
@@ -1057,6 +1082,13 @@ def _validate_retry_attempt_artifact(
         if isinstance(item, dict) and item.get("stage") == "decoded_raw"
     ]
     decoded_snapshot = decoded_snapshots[-1] if decoded_snapshots else None
+    repair_base_snapshots = [
+        item for item in stage_snapshots
+        if isinstance(item, dict) and item.get("stage") == "repair_base"
+    ]
+    repair_base_path = response_path.with_name(
+        f"{response_path.stem}.attempt-{attempt_number:02d}.repair-base{response_path.suffix}"
+    )
     retry_inputs = attempt_record.get("retry_input_fingerprints")
 
     def fail(code: str, stage: str, path: str, reason: str) -> None:
@@ -1090,6 +1122,71 @@ def _validate_retry_attempt_artifact(
                 str(snapshot.get("path") or ""),
                 "stage receipt does not match the attempt invocation fingerprints",
             )
+
+    def validate_unaccepted_repair_base() -> dict[str, Any] | None:
+        repair_base_path_text = str(repair_base_path.resolve())
+        if len(repair_base_snapshots) > 1:
+            fail(
+                "retry_repair_base_receipt_ambiguous", "repair_base",
+                repair_base_path_text, "attempt has multiple repair-base receipts",
+            )
+        if not repair_base_snapshots:
+            if repair_base_path.exists():
+                fail(
+                    "retry_repair_base_receipt_missing", "repair_base",
+                    repair_base_path_text,
+                    "unaccepted repair-base artifact exists without a stage receipt",
+                )
+            return None
+        snapshot = repair_base_snapshots[0]
+        expected_sha = snapshot.get("file_bytes_sha256")
+        if snapshot.get("path") != repair_base_path_text or snapshot.get("accepted") is not False:
+            fail(
+                "retry_repair_base_receipt_mismatch", "repair_base",
+                repair_base_path_text,
+                "repair base must be bound to its expected path and explicitly marked unaccepted",
+            )
+        if (
+            not isinstance(expected_sha, str)
+            or re.fullmatch(r"[0-9a-f]{64}", expected_sha) is None
+            or not repair_base_path.is_file()
+            or sha256_file(repair_base_path) != expected_sha
+        ):
+            fail(
+                "retry_repair_base_receipt_mismatch", "repair_base",
+                repair_base_path_text,
+                "repair-base file is missing or its bytes differ from the receipt",
+            )
+        validate_snapshot_binding(snapshot, "repair_base")
+        try:
+            value = _read_json(repair_base_path, label="receipt-verified unaccepted repair base")
+        except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
+            fail(
+                "retry_repair_base_unreadable", "repair_base",
+                repair_base_path_text, f"repair-base JSON is unreadable: {exc}",
+            )
+        if (
+            not isinstance(value, dict)
+            or snapshot.get("canonical_json_sha256") != _response_sha256(value)
+            or snapshot.get("semantic_view_sha256")
+            != _response_sha256(_semantic_retry_view(value))
+        ):
+            fail(
+                "retry_repair_base_receipt_mismatch", "repair_base",
+                repair_base_path_text,
+                "repair-base canonical or semantic digest differs from its receipt",
+            )
+        return {
+            "kind": "unaccepted_repair_base",
+            "attempt": attempt_number,
+            "path": repair_base_path_text,
+            "sha256": expected_sha,
+            "accepted": False,
+            "canonical_json_sha256": snapshot["canonical_json_sha256"],
+            "semantic_view_sha256": snapshot["semantic_view_sha256"],
+        }
+
+    repair_base_receipt = validate_unaccepted_repair_base()
 
     if isinstance(decoded_snapshot, dict):
         expected_sha = decoded_snapshot.get("file_bytes_sha256")
@@ -1199,6 +1296,7 @@ def _validate_retry_attempt_artifact(
                 "path": expected_raw_path,
                 "sha256": expected_sha,
                 "validated_candidate_receipt": candidate_receipt,
+                "unaccepted_repair_base_receipt": repair_base_receipt,
             }
         error_code = "retry_raw_artifact_receipt_mismatch"
         bad_path = expected_raw_path
@@ -1868,6 +1966,142 @@ def _v3_source_inventory_completion_allowed(
     return not _retry_change_paths(previous_response, restored)
 
 
+def _source_fragment_binding_retry_allowed(
+    previous_response: Any,
+    current_response: Any,
+    records: list[dict[str, Any]],
+    changed_paths: list[str],
+    *,
+    chunk: dict[str, Any] | None,
+) -> bool:
+    """Authorize only a source-verified fragment selector plus its exact literal.
+
+    This retry rule cannot rewrite requirement identity or any other semantic
+    field. The candidate must add the current requirement's ordered clause
+    selector, and its text must be either null (for deterministic materializing)
+    or exactly the text computed from those current, cited source spans.
+    """
+    if (
+        chunk is None
+        or not isinstance(previous_response, dict)
+        or not isinstance(current_response, dict)
+        or not isinstance(changed_paths, list)
+        or _retry_arrays_reordered(previous_response, current_response)
+    ):
+        return False
+    matching_records: dict[int, list[dict[str, Any]]] = {}
+    for record in records:
+        if not isinstance(record, dict) or record.get("code") != "source_fragment_binding_violation":
+            continue
+        pointer = str(record.get("json_pointer") or "")
+        match = re.fullmatch(
+            r"\$\.requirements\[(\d+)\](?:\.properties\.text|\.source_fragment_clause_ids)?",
+            pointer,
+        )
+        if (
+            match is None
+            or record.get("response_sha256") != _response_sha256(previous_response)
+        ):
+            return False
+        matching_records.setdefault(int(match.group(1)), []).append(record)
+    if not matching_records:
+        return False
+
+    previous_requirements = previous_response.get("requirements")
+    current_requirements = current_response.get("requirements")
+    if (
+        not isinstance(previous_requirements, list)
+        or not isinstance(current_requirements, list)
+        or len(previous_requirements) != len(current_requirements)
+    ):
+        return False
+    for index in matching_records:
+        if index >= len(previous_requirements):
+            return False
+        previous = previous_requirements[index]
+        current = current_requirements[index]
+        if (
+            not isinstance(previous, dict)
+            or not isinstance(current, dict)
+            or "source_fragment_clause_ids" in previous
+            or _retry_object_identity("requirements", previous)
+            != _retry_object_identity("requirements", current)
+            or not _role_supports_exact_text(current, chunk)
+        ):
+            return False
+        selector = current.get("source_fragment_clause_ids")
+        clause_map = {
+            str(item.get("id")): item
+            for item in chunk.get("clauses", [])
+            if isinstance(item, dict) and isinstance(item.get("id"), str)
+        }
+        try:
+            binding = compose_source_fragments(
+                selector,
+                clause_map,
+                chunk.get("evidence_context"),
+                requirement_clause_ids=current.get("clause_ids"),
+                requirement_evidence_ids=current.get("evidence_ids"),
+            )
+        except SourceFragmentBindingError:
+            return False
+        properties = current.get("properties")
+        if (
+            not isinstance(properties, dict)
+            or properties.get("text") not in (None, binding["text"])
+        ):
+            return False
+
+    projected_current, _, projection_errors = materialize_source_fragment_literals(
+        current_response,
+        chunk.get("clauses", []) if isinstance(chunk.get("clauses"), list) else [],
+        chunk.get("evidence_context"),
+    )
+    if projection_errors or not isinstance(projected_current, dict):
+        return False
+    expected = copy.deepcopy(previous_response)
+    for index in matching_records:
+        previous = expected["requirements"][index]
+        current = current_requirements[index]
+        if not isinstance(previous, dict) or not isinstance(current, dict):
+            return False
+        binding = compose_source_fragments(
+            current.get("source_fragment_clause_ids"),
+            {
+                str(item.get("id")): item
+                for item in chunk.get("clauses", [])
+                if isinstance(item, dict) and isinstance(item.get("id"), str)
+            },
+            chunk.get("evidence_context"),
+            requirement_clause_ids=current.get("clause_ids"),
+            requirement_evidence_ids=current.get("evidence_ids"),
+        )
+        previous["source_fragment_clause_ids"] = copy.deepcopy(
+            current["source_fragment_clause_ids"]
+        )
+        previous_properties = previous.get("properties")
+        if not isinstance(previous_properties, dict):
+            return False
+        previous_properties["text"] = binding["text"]
+
+    if _semantic_retry_view(expected) != _semantic_retry_view(projected_current):
+        return False
+    actual_changed_paths = _retry_change_paths(previous_response, current_response)
+    if actual_changed_paths != changed_paths:
+        return False
+    allowed_paths = {
+        f"$.requirements[{index}].source_fragment_clause_ids"
+        for index in matching_records
+    } | {
+        f"$.requirements[{index}].properties.text"
+        for index in matching_records
+    }
+    return bool(actual_changed_paths) and set(actual_changed_paths) <= allowed_paths and all(
+        f"$.requirements[{index}].source_fragment_clause_ids" in actual_changed_paths
+        for index in matching_records
+    )
+
+
 def _retry_changes_allowed(
     records: list[dict[str, Any]], changed_paths: list[str], *, contract_version: str,
     previous_response: Any = None, current_response: Any = None,
@@ -1877,6 +2111,16 @@ def _retry_changes_allowed(
     if not changed_paths:
         return True
     codes = {str(item.get("code")) for item in records if isinstance(item, dict)}
+    if contract_version == HOST_REVIEW_CONTRACT_V3 and (
+        "source_fragment_binding_violation" in codes
+    ) and _source_fragment_binding_retry_allowed(
+        previous_response, current_response, records, changed_paths, chunk=chunk,
+    ):
+        return True
+    if "source_fragment_binding_violation" in codes and _source_fragment_binding_retry_allowed(
+        previous_response, current_response, records, changed_paths, chunk=chunk,
+    ):
+        return True
     if (
         contract_version == HOST_REVIEW_CONTRACT_V3
         and _v3_source_inventory_completion_allowed(
@@ -4905,8 +5149,12 @@ def _retry_authorization_ledger(
     """Explain each authorized retry path with validator evidence and hashes."""
     codes = {str(record.get("code") or "") for record in records if isinstance(record, dict)}
     special_rule: str | None = None
+    if contract_version == HOST_REVIEW_CONTRACT_V3 and _source_fragment_binding_retry_allowed(
+        previous_response, current_response, records, changed_paths, chunk=chunk,
+    ):
+        special_rule = "v3_source_fragment_binding_selection"
     if contract_version == HOST_REVIEW_CONTRACT_V3:
-        if _v3_source_inventory_completion_allowed(
+        if special_rule is None and _v3_source_inventory_completion_allowed(
             previous_response, current_response, records, changed_paths, chunk=chunk,
         ):
             special_rule = "v3_source_inventory_completion"
@@ -4973,7 +5221,18 @@ def _retry_authorization_ledger(
                 nested_array_path = re.match(
                     r"^\$\.(requirements|clause_reviews)\[\d+\]", path,
                 )
-                if nested_array_path is not None:
+                if special_rule == "v3_source_fragment_binding_selection":
+                    record_match = re.match(r"^\$\.requirements\[(\d+)\]", pointer)
+                    path_match = re.match(r"^\$\.requirements\[(\d+)\]", path)
+                    related = (
+                        record_match is not None
+                        and path_match is not None
+                        and record_match.group(1) == path_match.group(1)
+                        and _retry_record_binds_current_object(
+                            record, path, previous_response, current_response,
+                        )
+                    )
+                elif nested_array_path is not None:
                     related = pointer == path and _retry_record_binds_current_object(
                         record, path, previous_response, current_response,
                     )
@@ -7451,6 +7710,11 @@ def prepare_native_response_candidate(
     if not isinstance(response_schema, dict):
         raise ValueError("current Host Agent chunk has no local response schema")
     response = normalize_native_response(raw_response, response_schema)
+    response, source_fragment_projections, source_fragment_projection_errors = (
+        materialize_source_fragment_literals(
+            response, chunk.get("clauses", []), chunk.get("evidence_context"),
+        )
+    )
     rule_spec = chunk.get("rule_spec")
     existing_requirements = (
         rule_spec.get("requirements", [])
@@ -7511,6 +7775,16 @@ def prepare_native_response_candidate(
                 + _summarize_contract_errors(contract_errors)
             )
             error.error_records = retry_error_records  # type: ignore[attr-defined]
+            error.initial_error_records = copy.deepcopy(  # type: ignore[attr-defined]
+                original_error_records
+            )
+            error.resolved_error_records = []  # type: ignore[attr-defined]
+            error.residual_error_records = copy.deepcopy(  # type: ignore[attr-defined]
+                retry_error_records
+            )
+            error.retry_authorizing_error_records = copy.deepcopy(  # type: ignore[attr-defined]
+                retry_error_records
+            )
             error.mechanical_repair_audit = {  # type: ignore[attr-defined]
                 "status": "not_applied",
                 "repairs": [],
@@ -7526,37 +7800,58 @@ def prepare_native_response_candidate(
             raise error
 
         remaining_errors = validate_host_agent_response(repaired_response, chunk)
+        remaining_error_records = contract_error_records(
+            remaining_errors, response=repaired_response, chunk=chunk,
+        ) if remaining_errors else []
+        error_record_key = lambda record: (
+            str(record.get("code") or ""),
+            str(record.get("json_pointer") or ""),
+            str(record.get("raw_error") or ""),
+        )
+        residual_keys = {
+            error_record_key(record) for record in remaining_error_records
+            if isinstance(record, dict)
+        }
+        resolved_error_records = [
+            record for record in original_error_records
+            if isinstance(record, dict) and error_record_key(record) not in residual_keys
+        ]
+        residual_retry_inventory_records = _external_action_obligation_retry_records(
+            repaired_response, remaining_error_records, chunk,
+        )
+        residual_retry_records = [
+            *remaining_error_records, *residual_retry_inventory_records,
+        ]
         mechanical_revalidation = {
             "status": "failed" if remaining_errors else "passed",
             "remaining_error_count": len(remaining_errors),
             "remaining_error_codes": sorted({
                 str(item.get("code") or "unknown")
-                for item in remaining_errors if isinstance(item, dict)
+                for item in remaining_error_records if isinstance(item, dict)
             }),
+            "initial_error_records": copy.deepcopy(original_error_records),
+            "resolved_error_records": copy.deepcopy(resolved_error_records),
+            "residual_error_records": copy.deepcopy(remaining_error_records),
         }
         if remaining_errors:
-            remaining_error_records = contract_error_records(
-                remaining_errors, response=repaired_response, chunk=chunk,
-            )
-            combined_error_records: list[dict[str, Any]] = []
-            seen_error_record_keys: set[tuple[str, str, str]] = set()
-            for record in [*retry_error_records, *remaining_error_records]:
-                if not isinstance(record, dict):
-                    continue
-                record_key = (
-                    str(record.get("code") or ""),
-                    str(record.get("json_pointer") or ""),
-                    str(record.get("raw_error") or ""),
-                )
-                if record_key in seen_error_record_keys:
-                    continue
-                seen_error_record_keys.add(record_key)
-                combined_error_records.append(record)
             error = ValueError(
                 "local response contract validation failed before provenance binding: "
                 + _summarize_contract_errors(remaining_errors)
             )
-            error.error_records = combined_error_records  # type: ignore[attr-defined]
+            error.error_records = copy.deepcopy(residual_retry_records)  # type: ignore[attr-defined]
+            error.initial_error_records = copy.deepcopy(  # type: ignore[attr-defined]
+                original_error_records
+            )
+            error.resolved_error_records = copy.deepcopy(  # type: ignore[attr-defined]
+                resolved_error_records
+            )
+            error.residual_error_records = copy.deepcopy(  # type: ignore[attr-defined]
+                remaining_error_records
+            )
+            error.retry_authorizing_error_records = copy.deepcopy(  # type: ignore[attr-defined]
+                residual_retry_records
+            )
+            error.repair_base_candidate = copy.deepcopy(repaired_response)  # type: ignore[attr-defined]
             error.mechanical_repair_audit = {  # type: ignore[attr-defined]
                 "status": "failed",
                 "repairs": copy.deepcopy(mechanical_repairs),
@@ -7565,6 +7860,10 @@ def prepare_native_response_candidate(
                     str(item.get("code") or "unknown")
                     for item in original_error_records if isinstance(item, dict)
                 }),
+                "initial_error_records": copy.deepcopy(original_error_records),
+                "resolved_error_records": copy.deepcopy(resolved_error_records),
+                "residual_error_records": copy.deepcopy(remaining_error_records),
+                "repair_base_sha256": _response_sha256(repaired_response),
                 **mechanical_revalidation,
             }
             error.source_literal_whitespace_projections = copy.deepcopy(  # type: ignore[attr-defined]
@@ -7578,6 +7877,8 @@ def prepare_native_response_candidate(
         "complete_abstract_source_projections": abstract_source_projections,
         "soft_keyword_count_guidance_projections": soft_keyword_guidance_projections,
         "source_obligation_verification_projections": source_verification_projections,
+        "source_fragment_projections": source_fragment_projections,
+        "source_fragment_projection_errors": source_fragment_projection_errors,
         "source_literal_whitespace_projections": source_literal_whitespace_projections,
         "mechanical_repairs": mechanical_repairs,
         "mechanical_repair_revalidation": mechanical_revalidation,
@@ -7759,6 +8060,10 @@ def _host_prompt(*, request_path: Path, chunk_path: Path,
         contract_version == HOST_REVIEW_CONTRACT_V3
         and "external_action_obligations_missing" in retry_codes
     )
+    v3_source_fragment_binding_retry = (
+        contract_version == HOST_REVIEW_CONTRACT_V3
+        and "source_fragment_binding_violation" in retry_codes
+    )
     if retry_parent_response_path is not None:
         if retry_parent_response_sha256 is not None:
             observed_parent_sha256 = sha256_file(retry_parent_response_path)
@@ -7787,6 +8092,8 @@ def _host_prompt(*, request_path: Path, chunk_path: Path,
             # closed if the retry changes unapproved semantic fields.
             retry_parent_inline = None
         requirement_change_rule = (
+            "For this retry, preserve every requirement and every clause review exactly except the validator-targeted literal binding: add source_fragment_clause_ids to the same requirement and set properties.text only to the exact current-source composition (or null for code materialization). Do not change requirement identity, include unselected source, paraphrase, or guess separators; the bridge verifies current source hashes, links, order, and boundaries."
+            if v3_source_fragment_binding_retry else
             "For this retry, preserve every requirement and every clause review exactly except the specific obligations arrays named by external_action_obligations_missing records. Add only source-derived external duties with status unverifiable; do not remove or edit the invalid source-only requirement yourself. Afterward the bridge may project that requirement only if its exact source, evidence, and external-only relation pass the existing deterministic checks."
             if v3_external_action_inventory_retry else
             "For every distinct executable clause explicitly identified by the validator as missing an authoritative requirement edge, "
@@ -7839,6 +8146,8 @@ minimum change. The embedded payload excludes bridge-owned provenance:
         )
     if retry_parent_response_path is None:
         retry_invariant = ""
+    elif v3_source_fragment_binding_retry:
+        retry_invariant = """\nFINAL RETRY INVARIANT: preserve the complete requirement graph, every clause review, and all existing fields. For each source_fragment_binding_violation record, add only source_fragment_clause_ids to the same requirement and set properties.text only to the exact current-source composition (or null for deterministic materialization). Use current cited clause IDs in source order; no guessed adjacency, paraphrase, unrelated clause, or other change is authorized. The bridge rechecks hashes, evidence, spans, order, and boundaries, then runs the full validator and both raw-to-raw and candidate-to-candidate drift checks. If no exact binding is provable, return unchanged and fail closed."""
     elif v3_external_action_inventory_retry:
         retry_invariant = """\nFINAL RETRY INVARIANT: preserve every requirement and every clause review exactly except the exact obligations arrays named by external_action_obligations_missing. Add only distinct source-supported external duties with status unverifiable. Do not remove the invalid body_text requirement yourself; the bridge may project it only after current source/evidence checks and candidate validation. If the source cannot support a complete inventory, return the parent unchanged and let the bridge fail closed."""
     elif v3_non_requirement_projection_retry:
@@ -8300,7 +8609,44 @@ def run_host_agent_chunk(
             source_projection_validation_sha256=source_projection_validation_sha256,
         )
     except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
-        exc.retry_stage_snapshots = [decoded_raw_snapshot]  # type: ignore[attr-defined]
+        retry_stage_snapshots = [decoded_raw_snapshot]
+        repair_base = getattr(exc, "repair_base_candidate", None)
+        if isinstance(repair_base, dict):
+            repair_base_path = response_path.with_name(
+                f"{response_path.stem}.repair-base{response_path.suffix}"
+            )
+            if repair_base_path.exists():
+                raise RetryRawArtifactIntegrityError(
+                    "refusing to overwrite an existing unaccepted repair-base artifact: "
+                    f"{repair_base_path}"
+                ) from exc
+            atomic_write_text(
+                repair_base_path,
+                strict_json_dumps(repair_base, ensure_ascii=False, indent=2) + "\n",
+            )
+            repair_base_snapshot = _attempt_stage_snapshot(
+                "repair_base", repair_base, path=repair_base_path, chunk=chunk,
+                projection_audit={
+                    "accepted": False,
+                    "initial_error_records_sha256": _response_sha256(
+                        getattr(exc, "initial_error_records", [])
+                    ),
+                    "resolved_error_records_sha256": _response_sha256(
+                        getattr(exc, "resolved_error_records", [])
+                    ),
+                    "residual_error_records_sha256": _response_sha256(
+                        getattr(exc, "residual_error_records", [])
+                    ),
+                    "repair_authorization_error_records_sha256": _response_sha256(
+                        getattr(exc, "retry_authorizing_error_records", [])
+                    ),
+                },
+                accepted=False,
+            )
+            retry_stage_snapshots.append(repair_base_snapshot)
+            exc.repair_base_path = str(repair_base_path.resolve())  # type: ignore[attr-defined]
+            exc.repair_base_snapshot = copy.deepcopy(repair_base_snapshot)  # type: ignore[attr-defined]
+        exc.retry_stage_snapshots = retry_stage_snapshots  # type: ignore[attr-defined]
         raise
     attempt_stage_snapshots = [
         decoded_raw_snapshot,
@@ -8392,6 +8738,9 @@ def run_host_agent_chunk(
             "soft_keyword_count_guidance_projections"
         ],
         "source_obligation_verification_projections": source_verification_projections,
+        "source_fragment_projections": candidate_audit[
+            "source_fragment_projections"
+        ],
         "source_literal_whitespace_projections": source_literal_whitespace_projections,
         "mechanical_repair_policy": (
             "bounded-source-bound-projections-v3"
@@ -8405,6 +8754,9 @@ def run_host_agent_chunk(
                 "soft_keyword_count_guidance_projections"
             ]),
             "source_obligation_verification": len(source_verification_projections),
+            "source_fragment_literals": len(candidate_audit[
+                "source_fragment_projections"
+            ]),
             "source_literal_whitespace": len(source_literal_whitespace_projections),
             "mechanical_repairs": len(mechanical_repairs),
         },
@@ -11049,6 +11401,16 @@ def run_bridge(
                         pass
                 if no_progress_event is not None:
                     failures.append(str(exc))
+                    attempt_error_state = {
+                        field: copy.deepcopy(getattr(exc, attribute))
+                        for field, attribute in (
+                            ("initial_error_records", "initial_error_records"),
+                            ("resolved_error_records", "resolved_error_records"),
+                            ("residual_error_records", "residual_error_records"),
+                        )
+                        if isinstance(getattr(exc, attribute, None), list)
+                    }
+                    repair_base_snapshot = getattr(exc, "repair_base_snapshot", None)
                     with lifecycle_lock:
                         chunk_lifecycle[index].setdefault("no_progress_events", []).append(
                             no_progress_event
@@ -11063,10 +11425,15 @@ def run_bridge(
                                     error_records if isinstance(error_records, list) else []
                                 ),
                                 retry_authorizing_error_records=copy.deepcopy(
-                                    getattr(exc, "primary_error_records", [])
+                                    getattr(
+                                        exc, "retry_authorizing_error_records",
+                                        getattr(exc, "primary_error_records", []),
+                                    )
                                 ),
                                 retry_input_fingerprints=_retry_input_fingerprints(chunk),
                                 no_progress=no_progress_event,
+                                **attempt_error_state,
+                                repair_base_snapshot=copy.deepcopy(repair_base_snapshot),
                             )
                         chunk_lifecycle[index].update(
                             status="failed",
@@ -11081,6 +11448,16 @@ def run_bridge(
                 with lifecycle_lock:
                     if chunk_lifecycle[index].get("attempts"):
                         repair_audit = getattr(exc, "mechanical_repair_audit", None)
+                        attempt_error_state = {
+                            field: copy.deepcopy(getattr(exc, attribute))
+                            for field, attribute in (
+                                ("initial_error_records", "initial_error_records"),
+                                ("resolved_error_records", "resolved_error_records"),
+                                ("residual_error_records", "residual_error_records"),
+                            )
+                            if isinstance(getattr(exc, attribute, None), list)
+                        }
+                        repair_base_snapshot = getattr(exc, "repair_base_snapshot", None)
                         chunk_lifecycle[index]["attempts"][-1].update(
                             status="failed" if attempt >= max_attempts else "retrying",
                             finished_at=datetime.now(timezone.utc).isoformat(),
@@ -11088,9 +11465,14 @@ def run_bridge(
                             error=str(exc),
                             error_records=copy.deepcopy(error_records) if isinstance(error_records, list) else [],
                             retry_authorizing_error_records=copy.deepcopy(
-                                getattr(exc, "primary_error_records", [])
+                                getattr(
+                                    exc, "retry_authorizing_error_records",
+                                    getattr(exc, "primary_error_records", []),
+                                )
                             ),
                             retry_input_fingerprints=_retry_input_fingerprints(chunk),
+                            **attempt_error_state,
+                            repair_base_snapshot=copy.deepcopy(repair_base_snapshot),
                             mechanical_repair_audit=(
                                 copy.deepcopy(repair_audit)
                                 if isinstance(repair_audit, dict) else None

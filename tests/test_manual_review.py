@@ -25,10 +25,13 @@ from format_spec_validation import load_and_validate  # noqa: E402
 from manual_review import (  # noqa: E402
     MANUAL_REVIEW_LEDGER_SCHEMA_VERSION,
     MANUAL_REVIEW_OBLIGATION_ID_PROTOCOL,
+    OBLIGATION_ANALYSIS_LEDGER_PROTOCOL,
     add_manual_review_items,
+    build_manual_review_crosswalk,
     build_manual_review_ledger as _build_manual_review_ledger,
     filter_manual_marker_ledger,
     manual_obligation_id_for_item,
+    refresh_manual_review_crosswalk,
     validate_manual_review_ledger_ingress,
 )
 import requirements_engine as engine  # noqa: E402
@@ -87,6 +90,13 @@ class ManualReviewTests(unittest.TestCase):
             item["manual_obligation_id"] = manual_obligation_id_for_item(
                 ledger["binding"], item,
             )
+        ledger["obligation_crosswalk"] = build_manual_review_crosswalk(
+            ledger["items"], ledger["binding"],
+            semantic_review_ledger_sha256=(
+                ledger.get("obligation_crosswalk", {}).get("semantic_review_ledger_sha256")
+                if isinstance(ledger.get("obligation_crosswalk"), dict) else None
+            ),
+        )
         return ledger
 
     @staticmethod
@@ -95,6 +105,31 @@ class ManualReviewTests(unittest.TestCase):
             "items": items,
             "binding": binding or ManualReviewTests._binding(),
         })
+
+    @staticmethod
+    def _analysis_identity(*, run_id="test-run", case_id="test-case", check_id="C1",
+                           source_ref="Q-one", source_text="人工核对来源。"):
+        source_sha256 = hashlib.sha256(source_text.encode("utf-8")).hexdigest()
+        identity = {
+            "protocol": OBLIGATION_ANALYSIS_LEDGER_PROTOCOL,
+            "run_id": run_id,
+            "case_id": case_id,
+            "chunk_index": 1,
+            "attempt": 1,
+            "candidate_response_sha256": "a" * 64,
+            "review_request_sha256": "b" * 64,
+            "review_response_sha256": "c" * 64,
+            "check_id": check_id,
+            "obligation_index": 0,
+            "source_ref": source_ref,
+            "source_sha256": source_sha256,
+            "start": 0,
+            "end": len(source_text),
+        }
+        analysis_id = "AO-" + hashlib.sha256(
+            json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()[:24]
+        return analysis_id, identity, source_sha256
 
     def test_technical_findings_do_not_become_human_red_markers(self) -> None:
         ledger = build_manual_review_ledger({
@@ -238,6 +273,159 @@ class ManualReviewTests(unittest.TestCase):
         )
         self.assertIn("manual_review_obligation_ids_not_unique", duplicate_obligation_errors)
 
+    def test_crosswalk_preserves_ao_mo_mr_and_explicit_source_references(self) -> None:
+        source_text = "人工核对来源"
+        analysis_id, ao_identity, source_sha256 = self._analysis_identity(
+            run_id="run-1", source_text=source_text,
+        )
+        binding = self._binding(run_id="run-1")
+        ledger = build_manual_review_ledger(
+            {}, [], binding=binding, semantic_review_ledger_sha256="a" * 64,
+            release_gates=[{
+                "source_code": "verify_source", "category": "semantic_content_review",
+                "analysis_obligation_id": analysis_id,
+                "analysis_obligation_identity": ao_identity,
+                "obligation_summary": "人工核对现有来源。",
+                "work_type": "existing_content_verification",
+                "source_ref": "Q-one", "source_start": 0, "source_end": len(source_text),
+                "source_text_sha256": source_sha256,
+                "source_location": {
+                    "evidence_id": "E1", "start_offset": 0, "end_offset": len(source_text),
+                    "source_sha256": "c" * 64,
+                },
+                "execution_authorized": False,
+                "clause_ids": ["C1"], "requirement_ids": ["R12345"],
+                "question_ids": ["Q1"], "evidence_ids": ["E1"],
+                "source_text": source_text, "reason": "需要人工核验。",
+                "action": "核对来源。", "placeholder_text": "【待核验来源】",
+            }],
+        )
+        crosswalk = ledger["obligation_crosswalk"]
+        self.assertEqual(crosswalk["semantic_review_ledger_sha256"], "a" * 64)
+        self.assertFalse(crosswalk["submission_ready"])
+        self.assertEqual(len(crosswalk["entries"]), 1)
+        entry = crosswalk["entries"][0]
+        item = ledger["items"][0]
+        self.assertEqual(entry["analysis_obligation_id"], analysis_id)
+        self.assertEqual(entry["manual_obligation_id"], item["manual_obligation_id"])
+        self.assertEqual(entry["marker_id"], "MR-0001")
+        self.assertEqual(entry["clause_ids"], ["C1"])
+        self.assertEqual(entry["requirement_ids"], ["R12345"])
+        self.assertEqual(entry["question_ids"], ["Q1"])
+        self.assertEqual(entry["evidence_ids"], ["E1"])
+        self.assertEqual(load_and_validate(
+            ledger, ROOT / "schema" / "manual-review-ledger.schema.json",
+        ), [])
+        payload = json.dumps(ledger, sort_keys=True).encode()
+        digest = hashlib.sha256(payload).hexdigest()
+        self.assertIn(
+            "manual_review_crosswalk_semantic_ledger_hash_mismatch",
+            validate_manual_review_ledger_ingress(
+                ledger, expected_binding=binding,
+                expected_ledger_sha256=digest, actual_ledger_sha256=digest,
+            ),
+        )
+
+        tampered = copy.deepcopy(ledger)
+        tampered["obligation_crosswalk"]["entries"][0]["clause_ids"] = ["C999"]
+        payload = json.dumps(tampered, sort_keys=True).encode()
+        digest = hashlib.sha256(payload).hexdigest()
+        self.assertIn(
+            "manual_review_obligation_crosswalk_mismatch",
+            validate_manual_review_ledger_ingress(
+                tampered, expected_binding=binding,
+                expected_ledger_sha256=digest, actual_ledger_sha256=digest,
+                expected_semantic_review_ledger_sha256="a" * 64,
+            ),
+        )
+
+    def test_crosswalk_rejects_missing_or_stale_analysis_identity(self) -> None:
+        source_text = "原文片段"
+        binding = self._binding(case_id="current-case", run_id="current-run")
+        analysis_id, identity, source_sha256 = self._analysis_identity(
+            case_id="current-case", run_id="current-run", source_text=source_text,
+        )
+        item = {
+            "analysis_obligation_id": analysis_id,
+            "analysis_obligation_identity": identity,
+            "clause_ids": ["C1"],
+            "source_ref": "Q-one",
+            "source_start": 0,
+            "source_end": len(source_text),
+            "source_text_sha256": source_sha256,
+        }
+        self.assertEqual(len(build_manual_review_crosswalk([item], binding)["entries"]), 1)
+        with self.assertRaisesRegex(ValueError, "requires both ID and identity"):
+            build_manual_review_crosswalk(
+                [{**item, "analysis_obligation_identity": None}], binding,
+            )
+
+        stale_id, stale_identity, _ = self._analysis_identity(
+            case_id="current-case", run_id="old-run", source_text=source_text,
+        )
+        stale_run = {
+            **item, "analysis_obligation_id": stale_id,
+            "analysis_obligation_identity": stale_identity,
+        }
+        with self.assertRaisesRegex(ValueError, "run_id is not bound to this ledger run"):
+            build_manual_review_crosswalk([stale_run], binding)
+
+        wrong_case_id, wrong_case_identity, _ = self._analysis_identity(
+            case_id="old-case", run_id="current-run", source_text=source_text,
+        )
+        wrong_case = {
+            **item, "analysis_obligation_id": wrong_case_id,
+            "analysis_obligation_identity": wrong_case_identity,
+        }
+        with self.assertRaisesRegex(ValueError, "case_id is not bound to this ledger run"):
+            build_manual_review_crosswalk([wrong_case], binding)
+
+        wrong_range = {**item, "source_end": len(source_text) + 1}
+        with self.assertRaisesRegex(ValueError, "source_end does not match"):
+            build_manual_review_crosswalk([wrong_range], binding)
+
+    def test_crosswalk_ingress_rejects_rehashed_old_run_analysis_identity(self) -> None:
+        source_text = "原文片段"
+        binding = self._binding(case_id="current-case", run_id="current-run")
+        analysis_id, identity, source_sha256 = self._analysis_identity(
+            case_id="current-case", run_id="current-run", source_text=source_text,
+        )
+        ledger = build_manual_review_ledger(
+            {}, [], binding=binding, release_gates=[{
+                "source_code": "verify_source", "category": "semantic_content_review",
+                "analysis_obligation_id": analysis_id,
+                "analysis_obligation_identity": identity,
+                "obligation_summary": "人工核对现有来源。",
+                "work_type": "existing_content_verification",
+                "source_ref": "Q-one", "source_start": 0, "source_end": len(source_text),
+                "source_text_sha256": source_sha256,
+                "source_location": {
+                    "evidence_id": "E1", "start_offset": 0,
+                    "end_offset": len(source_text), "source_sha256": "d" * 64,
+                },
+                "execution_authorized": False,
+                "clause_ids": ["C1"], "evidence_ids": ["E1"],
+                "source_text": source_text, "reason": "需要人工核验。",
+                "action": "核对来源。", "placeholder_text": "【待核验来源】",
+            }],
+        )
+        stale_id, stale_identity, _ = self._analysis_identity(
+            case_id="current-case", run_id="old-run", source_text=source_text,
+        )
+        item = ledger["items"][0]
+        item["analysis_obligation_id"] = stale_id
+        item["analysis_obligation_identity"] = stale_identity
+        item["manual_obligation_id"] = manual_obligation_id_for_item(binding, item)
+        payload = json.dumps(ledger, sort_keys=True).encode("utf-8")
+        digest = hashlib.sha256(payload).hexdigest()
+        errors = validate_manual_review_ledger_ingress(
+            ledger, expected_binding=binding,
+            expected_ledger_sha256=digest, actual_ledger_sha256=digest,
+            expected_semantic_review_ledger_sha256=None,
+        )
+        self.assertTrue(any("analysis obligation identity run_id" in error for error in errors), errors)
+        self.assertTrue(any("manual_review_obligation_crosswalk_invalid" in error for error in errors), errors)
+
     def test_producer_question_shape_preserves_id_and_all_evidence_ids(self) -> None:
         ledger = build_manual_review_ledger({}, [{
             "id": "Q-PRODUCER-1",
@@ -342,7 +530,8 @@ class ManualReviewTests(unittest.TestCase):
                     add_manual_review_items(ledger, [])
                 with self.assertRaisesRegex(ValueError, "unsupported manual-review ledger schema version"):
                     filter_manual_marker_ledger(copy.deepcopy(ledger))
-        unbound = self._current_ledger({"items": [], "binding": {}})
+        unbound = self._current_ledger({"items": []})
+        unbound["binding"] = {}
         with self.assertRaisesRegex(ValueError, "binding"):
             add_manual_review_items(unbound, [])
         with self.assertRaisesRegex(ValueError, "binding"):
@@ -413,7 +602,6 @@ class ManualReviewTests(unittest.TestCase):
                 "clause_ids": ["C1"], "evidence_ids": ["E1"],
                 "source_text": "关键词须源自论文", "reason": "需要人工核验出处。",
                 "action": "核对论文中的关键词来源。", "placeholder_text": "【待人工核验】",
-                "analysis_obligation_id": "AO-0123456789abcdef01234567",
                 "obligation_summary": "核验现有关键词是否源自论文。",
                 "work_type": "existing_content_verification",
                 "source_ref": "Q0123456789abcdef", "source_start": 0, "source_end": 8,
@@ -450,6 +638,39 @@ class ManualReviewTests(unittest.TestCase):
             "scope_dependency_dimensions": ["target", "metric"],
         })
         self.assertEqual(load_and_validate(valid_scope, schema_path), [])
+
+    def test_schema_rejects_analysis_obligation_without_full_identity(self) -> None:
+        source_text = "需核验现有内容"
+        ledger = self._display_ledger([self._item(
+            category="semantic_content_review",
+            clause_ids=["C1"], evidence_ids=["E1"],
+            source_text=source_text, obligation_summary="核验现有内容。",
+            work_type="existing_content_verification",
+            source_ref="Q-one", source_start=0, source_end=len(source_text),
+            source_text_sha256=hashlib.sha256(source_text.encode("utf-8")).hexdigest(),
+            source_location={
+                "evidence_id": "E1", "start_offset": 0,
+                "end_offset": len(source_text),
+                "source_sha256": hashlib.sha256(source_text.encode("utf-8")).hexdigest(),
+            },
+            execution_authorized=False,
+        )])
+        item = ledger["items"][0]
+        item["analysis_obligation_id"] = "AO-" + "a" * 24
+        item["manual_obligation_id"] = manual_obligation_id_for_item(
+            ledger["binding"], item,
+        )
+        crosswalk_entry = ledger["obligation_crosswalk"]["entries"][0]
+        crosswalk_entry["analysis_obligation_id"] = item["analysis_obligation_id"]
+        crosswalk_entry["analysis_obligation_identity_sha256"] = "b" * 64
+        crosswalk_entry["item_sha256"] = hashlib.sha256(
+            json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+        ).hexdigest()
+
+        errors = load_and_validate(
+            ledger, ROOT / "schema" / "manual-review-ledger.schema.json",
+        )
+        self.assertTrue(any("analysis_obligation_identity" in error for error in errors), errors)
 
     def test_requirements_producer_to_ledger_to_serialized_marker_keeps_source_binding(self) -> None:
         clauses = [{
@@ -700,6 +921,36 @@ class ManualReviewTests(unittest.TestCase):
         self.assertIn("3cm左右", document.paragraphs[2].text)
         self.assertEqual(ledger, before)
 
+    def test_analysis_obligation_id_is_visible_and_verified_in_docx_marker(self) -> None:
+        source_text = "适用对象需要确认"
+        analysis_id, identity, source_sha256 = self._analysis_identity(source_text=source_text)
+        document = Document()
+        ledger = self._display_ledger([self._item(
+            analysis_obligation_id=analysis_id,
+            analysis_obligation_identity=identity,
+            clause_ids=["C1"], source_ref="Q-one", source_start=0,
+            source_end=len(source_text), source_text_sha256=source_sha256,
+            work_type="scope_clarification", obligation_summary="确认适用对象。",
+            source_location={
+                "evidence_id": "E1", "start_offset": 0, "end_offset": len(source_text),
+                "source_sha256": "d" * 64,
+            },
+            execution_authorized=False,
+            scope_dependency_codes=["abstract_target_metric_ambiguity"],
+            scope_dependency_dimensions=["target"],
+        )])
+        receipts = append_manual_review_markers(document, ledger)
+        marker = next(p for p in document.paragraphs if p.text.startswith("【MR-0001"))
+        self.assertIn(f"分析义务编号：{analysis_id}", marker.text)
+        self.assertIn(analysis_id, receipts[0]["paragraph_text"])
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "marked.docx"
+            document.save(path)
+            audit = audit_manual_review_markers(path, ledger)
+        self.assertTrue(audit["valid"], audit)
+        self.assertEqual(audit["analysis_obligation_binding_errors"], [])
+        self.assertEqual(audit["marker_bindings"][0]["analysis_obligation_id"], analysis_id)
+
     def test_only_human_decision_categories_can_be_serialized_as_markers(self) -> None:
         document = Document()
         document.add_paragraph("源文档内容不应被改写")
@@ -751,6 +1002,7 @@ class ManualReviewTests(unittest.TestCase):
             stale_ledger["items"][0]["manual_obligation_id"] = manual_obligation_id_for_item(
                 stale_ledger["binding"], stale_ledger["items"][0],
             )
+            refresh_manual_review_crosswalk(stale_ledger)
             stale = audit_manual_review_markers(path, stale_ledger)
             self.assertFalse(stale["valid"])
             self.assertEqual(stale["source_binding_errors"], ["MR-0001"])

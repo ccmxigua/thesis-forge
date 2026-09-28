@@ -932,6 +932,7 @@ class HostAgentBridgeTests(unittest.TestCase):
                 [], clauses, evidence, {}, "full", contract_version=contract_version,
                 runtime_context={"code_fingerprint_sha256": "f" * 64},
             )
+        request["case_id"] = "standalone"
         request = attach_request_provenance(
             request, source_sha256="a" * 64, evidence_doc=evidence, clauses=clauses,
             run_id="run-bridge-test",
@@ -2646,7 +2647,7 @@ class HostAgentBridgeTests(unittest.TestCase):
             manual_ledger = build_manual_review_ledger(
                 {}, [], release_gates=gates,
                 binding={
-                    "case_id": "standalone",
+                    "case_id": pending[0]["analysis_obligation_identity"]["case_id"],
                     "run_id": extraction_manifest["run_id"],
                     "source_sha256": provenance["source_sha256"],
                     "clause_sha256": provenance["clause_sha256"],
@@ -7508,6 +7509,154 @@ class HostAgentBridgeTests(unittest.TestCase):
             contract_version="3.0", previous_response=previous,
             current_response=current,
         ))
+
+    def test_source_fragment_retry_authorizes_only_exact_current_source_composition(self) -> None:
+        title = "硕 士 学 位 论 文"
+        degree = "（学术学位）"
+        left_location = {"part": "document", "child_index": 4, "order": 2}
+        right_location = {"part": "document", "child_index": 5, "order": 3}
+        clauses = [
+            {
+                "id": "C1", "text": title, "evidence_ids": ["E1"],
+                "location": left_location, "source_kind": "paragraph",
+                "source_evidence_text": title,
+                "source_span": {
+                    "evidence_id": "E1", "start_offset": 0, "end_offset": len(title),
+                    "text": title, "source_sha256": hashlib.sha256(title.encode()).hexdigest(),
+                    "location": left_location,
+                },
+            },
+            {
+                "id": "C2", "text": degree, "evidence_ids": ["E2"],
+                "location": right_location, "source_kind": "paragraph",
+                "source_evidence_text": degree,
+                "source_span": {
+                    "evidence_id": "E2", "start_offset": 0, "end_offset": len(degree),
+                    "text": degree, "source_sha256": hashlib.sha256(degree.encode()).hexdigest(),
+                    "location": right_location,
+                },
+            },
+        ]
+        evidence_context = {
+            "E1": {"id": "E1", "kind": "paragraph", "text": title, "location": left_location},
+            "E2": {"id": "E2", "kind": "paragraph", "text": degree, "location": right_location},
+        }
+        chunk = {
+            "provenance": {
+                "run_id": "run-fragment-retry", "case_id": "case-fragment-retry",
+                "source_sha256": "a" * 64, "clause_sha256": "b" * 64,
+                "evidence_sha256": "c" * 64, "request_sha256": "d" * 64,
+            },
+            "case_id": "case-fragment-retry", "batch": {"index": 2},
+            "runtime_context": {"code_fingerprint_sha256": "9" * 64},
+            "response_schema": {"type": "object", "title": "source fragment retry"},
+            "requirement_contract": {
+                "role_properties_schema": {"title": {"$ref": "#/$defs/roleSpec"}},
+            },
+            "clauses": clauses, "evidence_context": evidence_context,
+        }
+        previous = {
+            "contract_version": "3.0", "provenance": chunk["provenance"],
+            "requirements": [{
+                "role": "title", "properties": {"text": title + degree},
+                "clause_ids": ["C1", "C2"], "evidence_ids": ["E1", "E2"],
+                "reason": "The two adjacent source paragraphs form the title.",
+            }],
+            "clause_reviews": [], "unsupported_items": [], "reported_conflicts": [],
+        }
+        current = copy.deepcopy(previous)
+        current["requirements"][0]["source_fragment_clause_ids"] = ["C1", "C2"]
+        current["requirements"][0]["properties"]["text"] = title + "\n" + degree
+        records = [{
+            "code": "source_fragment_binding_violation",
+            "json_pointer": "$.requirements[0].properties.text",
+            "response_sha256": bridge._response_sha256(previous),
+            "raw_error": "source_fragment_binding_required_for_cross_source_literal",
+        }]
+        authorization: list[dict] = []
+        error, changed = bridge._retry_semantic_change_error(
+            previous, current, records, contract_version="3.0", chunk=chunk,
+            authorization_out=authorization,
+        )
+        self.assertIsNone(error)
+        self.assertEqual(set(changed), {
+            "$.requirements[0].source_fragment_clause_ids",
+            "$.requirements[0].properties.text",
+        })
+        self.assertEqual(len(authorization), 2)
+        self.assertTrue(all(
+            item["rule_id"] == "v3_source_fragment_binding_selection"
+            and item["source_binding_complete"]
+            for item in authorization
+        ))
+
+        unsafe = []
+        bad_text = copy.deepcopy(current)
+        bad_text["requirements"][0]["properties"]["text"] = title + degree + "猜测"
+        unsafe.append(bad_text)
+        wrong_order = copy.deepcopy(current)
+        wrong_order["requirements"][0]["source_fragment_clause_ids"] = ["C2", "C1"]
+        unsafe.append(wrong_order)
+        extra_reason = copy.deepcopy(current)
+        extra_reason["requirements"][0]["reason"] = "rewritten reason"
+        unsafe.append(extra_reason)
+        for candidate in unsafe:
+            with self.subTest(candidate=candidate):
+                rejected, _ = bridge._retry_semantic_change_error(
+                    previous, candidate, records, contract_version="3.0", chunk=chunk,
+                )
+                self.assertIsNotNone(rejected)
+        stale_records = copy.deepcopy(records)
+        stale_records[0]["response_sha256"] = "0" * 64
+        stale_error, _ = bridge._retry_semantic_change_error(
+            previous, current, stale_records, contract_version="3.0", chunk=chunk,
+        )
+        self.assertIsNotNone(stale_error)
+
+    def test_retry_artifact_receipts_include_unaccepted_repair_base_without_promoting_it(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            review_dir, chunk = self._packet(Path(td) / "requirements")
+            response_path = review_dir / "llm-response-chunk-0001.json"
+            raw_path = response_path.with_name(
+                f"{response_path.stem}.attempt-01.raw{response_path.suffix}"
+            )
+            repair_base_path = response_path.with_name(
+                f"{response_path.stem}.attempt-01.repair-base{response_path.suffix}"
+            )
+            raw = {"contract_version": "3.0", "requirements": [], "clause_reviews": []}
+            repair_base = copy.deepcopy(raw)
+            repair_base["requirements"] = [{
+                "role": "title", "properties": {"text": "source-backed partial candidate"},
+                "clause_ids": ["C1"], "evidence_ids": ["E1"],
+            }]
+            raw_path.write_text(json.dumps(raw), encoding="utf-8")
+            repair_base_path.write_text(json.dumps(repair_base), encoding="utf-8")
+            snapshots = [
+                bridge._attempt_stage_snapshot("decoded_raw", raw, path=raw_path, chunk=chunk),
+                bridge._attempt_stage_snapshot(
+                    "repair_base", repair_base, path=repair_base_path, chunk=chunk,
+                    projection_audit={"accepted": False}, accepted=False,
+                ),
+            ]
+            attempt = {
+                "retry_input_fingerprints": bridge._retry_input_fingerprints(chunk),
+                "stage_snapshots": snapshots,
+                "error_records": [{"code": "schema_contract_violation"}],
+            }
+            receipt = bridge._validate_retry_attempt_artifact(response_path, 1, attempt)
+            repair_receipt = receipt["unaccepted_repair_base_receipt"]
+            self.assertFalse(repair_receipt["accepted"])
+            self.assertEqual(repair_receipt["kind"], "unaccepted_repair_base")
+            self.assertEqual(receipt["kind"], "decoded_raw")
+            self.assertNotEqual(receipt["path"], repair_receipt["path"])
+
+            tampered = copy.deepcopy(attempt)
+            tampered["stage_snapshots"][1]["accepted"] = True
+            with self.assertRaisesRegex(
+                bridge.RetryRawArtifactIntegrityError,
+                "explicitly marked unaccepted",
+            ):
+                bridge._validate_retry_attempt_artifact(response_path, 1, tampered)
 
     def test_completed_chunk_set_rejects_non_integer_and_duplicate_indexes(self) -> None:
         with tempfile.TemporaryDirectory() as td:

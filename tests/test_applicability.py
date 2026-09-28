@@ -97,6 +97,48 @@ class ApplicabilityTests(unittest.TestCase):
         self.assertEqual(result["result"], "false")
         self.assertEqual(result["evaluated"][0]["actual"], "openclaw")
 
+    def test_false_dominates_unknown_independent_of_condition_order(self) -> None:
+        unknown = {"fact": "source_inventory.figures", "operator": "present"}
+        false = {
+            "fact": "runtime.host", "operator": "equals", "value": "codex",
+        }
+        for conditions in ([unknown, false], [false, unknown]):
+            with self.subTest(conditions=conditions):
+                result = evaluate_applicability(
+                    {"status": "conditional", "conditions": conditions},
+                    runtime={"host": "openclaw"},
+                    source_inventory={},
+                )
+                self.assertEqual(result["result"], "false")
+                self.assertEqual(len(result["evaluated"]), 2)
+
+    def test_boolean_and_number_values_do_not_compare_as_equal(self) -> None:
+        bool_as_number = evaluate_applicability(
+            {"status": "conditional", "conditions": [{
+                "fact": "thesis_profile.value", "operator": "equals", "value": 1,
+            }]},
+            thesis_profile={"value": True},
+        )
+        number_in_bool_list = evaluate_applicability(
+            {"status": "conditional", "conditions": [{
+                "fact": "thesis_profile.value", "operator": "in", "value": [True],
+            }]},
+            thesis_profile={"value": 1},
+        )
+        self.assertEqual(bool_as_number["result"], "false")
+        self.assertEqual(number_in_bool_list["result"], "false")
+
+    def test_invalid_later_condition_is_not_hidden_by_false(self) -> None:
+        result = evaluate_applicability(
+            {"status": "conditional", "conditions": [
+                {"fact": "runtime.host", "operator": "equals", "value": "codex"},
+                {"fact": "runtime.host", "operator": "contains", "value": "codex"},
+            ]},
+            runtime={"host": "openclaw"},
+        )
+        self.assertEqual(result["result"], "unknown")
+        self.assertEqual(result["reason"], "condition_1_operator_unknown")
+
     def test_unknown_status_or_operator_fails_closed(self) -> None:
         status = evaluate_applicability({"status": "maybe"})
         operator = evaluate_applicability({

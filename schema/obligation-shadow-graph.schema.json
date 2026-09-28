@@ -1,0 +1,133 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://thesis-forge.local/schema/obligation-shadow-graph.schema.json",
+  "type": "object",
+  "required": [
+    "protocol", "schema_version", "status", "submission_ready",
+    "inventory_completeness", "binding", "metrics", "nodes", "edges",
+    "equivalence_candidates", "equivalence_policy", "manual_review_crosswalk"
+  ],
+  "properties": {
+    "protocol": {"const": "obligation_shadow_graph_v1"},
+    "schema_version": {"const": "1.0"},
+    "status": {"const": "analysis_only"},
+    "submission_ready": {"const": false},
+    "inventory_completeness": {"const": "incomplete_by_design"},
+    "binding": {
+      "type": "object",
+      "required": [
+        "run_id", "source_sha256", "clause_sha256", "evidence_sha256",
+        "request_sha256", "case_id", "school_id", "response_sha256"
+      ],
+      "properties": {
+        "run_id": {"type": ["string", "null"]},
+        "source_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+        "clause_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+        "evidence_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+        "request_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+        "case_id": {"type": ["string", "null"]},
+        "school_id": {"type": ["string", "null"]},
+        "response_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      },
+      "additionalProperties": false
+    },
+    "metrics": {
+      "type": "object",
+      "required": [
+        "source_clause_count", "reviewed_clause_count", "unreviewed_clause_count",
+        "requirement_count", "explicit_requirement_clause_edge_count",
+        "model_declared_obligation_count", "compiled_source_fact_count",
+        "node_count_by_type", "source_obligation_inventory_complete",
+        "model_obligation_inventory_complete", "importance_assessment_complete",
+        "final_applicable_requirement_count", "manual_marker_count"
+      ],
+      "properties": {
+        "source_clause_count": {"type": "integer", "minimum": 0},
+        "reviewed_clause_count": {"type": "integer", "minimum": 0},
+        "unreviewed_clause_count": {"type": "integer", "minimum": 0},
+        "requirement_count": {"type": "integer", "minimum": 0},
+        "explicit_requirement_clause_edge_count": {"type": "integer", "minimum": 0},
+        "model_declared_obligation_count": {"type": "integer", "minimum": 0},
+        "compiled_source_fact_count": {"type": "integer", "minimum": 0},
+        "node_count_by_type": {
+          "type": "object",
+          "additionalProperties": {"type": "integer", "minimum": 0}
+        },
+        "source_obligation_inventory_complete": {"const": false},
+        "model_obligation_inventory_complete": {"const": false},
+        "importance_assessment_complete": {"const": false},
+        "final_applicable_requirement_count": {"type": ["integer", "null"], "minimum": 0},
+        "manual_marker_count": {"type": ["integer", "null"], "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "nodes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["node_id", "node_type", "source_ref", "dimensions", "record"],
+        "properties": {
+          "node_id": {"type": "string", "pattern": "^SG-[a-z-]+-[0-9a-f]{24}$"},
+          "node_type": {"enum": ["source_clause", "model_declared_obligation", "compiled_source_fact", "requirement"]},
+          "source_ref": {"type": "object"},
+          "dimensions": {
+            "type": "object",
+            "required": ["source_kind", "force", "applicability", "execution_method", "execution_status", "verification_status", "importance"],
+            "properties": {
+              "source_kind": {"type": "string", "minLength": 1},
+              "force": {"type": "string", "minLength": 1},
+              "applicability": {"type": ["string", "object"]},
+              "execution_method": {"type": "string", "minLength": 1},
+              "execution_status": {"type": "string", "minLength": 1},
+              "verification_status": {"type": "string", "minLength": 1},
+              "importance": {"enum": ["not_assessed", "critical", "high", "normal", "low"]}
+            },
+            "additionalProperties": false
+          },
+          "record": {"type": "object"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "edges": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["from_node_id", "to_node_id", "relation", "authority", "status"],
+        "properties": {
+          "from_node_id": {"type": "string"},
+          "to_node_id": {"type": "string"},
+          "relation": {"type": "string", "minLength": 1},
+          "authority": {"type": "string", "minLength": 1},
+          "status": {"type": "string", "minLength": 1}
+        },
+        "additionalProperties": false
+      }
+    },
+    "equivalence_candidates": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["requirement_id", "response_indexes", "comparison", "disposition"],
+        "properties": {
+          "requirement_id": {"type": "string", "minLength": 1},
+          "response_indexes": {"type": "array", "items": {"type": "integer", "minimum": 0}},
+          "comparison": {"const": "exact_canonical_requirement_only"},
+          "disposition": {"const": "recorded_not_merged_by_shadow_graph"}
+        },
+        "additionalProperties": false
+      }
+    },
+    "equivalence_policy": {"const": "no_semantic_equivalence_inference_or_pruning"},
+    "manual_review_crosswalk": {
+      "type": "object",
+      "required": ["status", "entries"],
+      "properties": {
+        "status": {"const": "pending_pipeline_manual_review_projection"},
+        "entries": {"type": "array", "maxItems": 0}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

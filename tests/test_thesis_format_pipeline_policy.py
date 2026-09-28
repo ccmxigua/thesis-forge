@@ -128,6 +128,30 @@ class ThesisFormatPipelinePolicyTests(unittest.TestCase):
         }
         return [clause], {"evidence": [{"id": "E1", "text": raw_source}]}, item_base
 
+    @staticmethod
+    def _scope_identity(item_base: dict, *, source_ref: str, obligation_index: int = 0):
+        identity = {
+            "protocol": OBLIGATION_ANALYSIS_LEDGER_PROTOCOL,
+            "run_id": "run-1", "case_id": "bsu", "chunk_index": 1, "attempt": 1,
+            "candidate_response_sha256": "a" * 64,
+            "review_request_sha256": "b" * 64,
+            "review_response_sha256": "c" * 64,
+            "check_id": "C1", "obligation_index": obligation_index,
+            "source_ref": source_ref,
+            "source_sha256": item_base["source_text_sha256"],
+            "start": item_base["source_start"], "end": item_base["source_end"],
+        }
+        return "AO-" + sha256_json(identity)[:24], identity
+
+    @staticmethod
+    def _scope_review_context():
+        return {
+            "run_id": "run-1", "case_id": "bsu", "chunk_index": 1, "attempt": 1,
+            "candidate_response_sha256": "a" * 64,
+            "review_request_sha256": "b" * 64,
+            "review_response_sha256": "c" * 64,
+        }
+
     def test_irreducible_ambiguity_is_allowed_only_in_review_draft(self) -> None:
         results = [{"check_id": "C00076", "verdict": "manual_review_required"}]
 
@@ -173,6 +197,11 @@ class ThesisFormatPipelinePolicyTests(unittest.TestCase):
         self.assertIn("本人真实研究内容", gates[0]["action"])
         self.assertIn(item["analysis_obligation_id"], gates[0]["placeholder_text"])
         self.assertNotIn("generated content", gates[0]["action"])
+        with self.assertRaisesRegex(ValueError, "current-source-bound"):
+            _source_content_pending_release_gates(
+                [{**review, "case_id": None}], clauses=[clause],
+                evidence_doc=evidence_doc, expected_run_id="run-1",
+            )
 
     def test_source_content_pending_keeps_multiple_atomic_obligations_for_one_clause(self) -> None:
         text = "请作者补写研究背景；请作者补写研究方法。"
@@ -260,6 +289,11 @@ class ThesisFormatPipelinePolicyTests(unittest.TestCase):
             expected_run_id="run-1",
         )
         self.assertEqual(len(gates), 1)
+        with self.assertRaisesRegex(ValueError, "current review run"):
+            _source_content_verification_release_gates(
+                [{**reviews[0], "case_id": None}], clauses=[clause],
+                evidence_doc=evidence_doc, expected_run_id="run-1",
+            )
         gate = gates[0]
         self.assertEqual(gate["category"], "semantic_content_review")
         self.assertEqual(gate["clause_ids"], ["C00068"])
@@ -410,10 +444,18 @@ class ThesisFormatPipelinePolicyTests(unittest.TestCase):
 
     def test_each_scope_unresolved_obligation_gets_a_distinct_non_executable_marker(self) -> None:
         clauses, evidence_doc, item_base = self._canonical_scope_source()
+        first_id, first_identity = self._scope_identity(
+            item_base, source_ref="Q-source-1", obligation_index=0,
+        )
+        second_id, second_identity = self._scope_identity(
+            item_base, source_ref="Q-source-2", obligation_index=1,
+        )
         review = {
+            **self._scope_review_context(),
             "scope_unresolved_items": [
                 {
-                    "analysis_obligation_id": "AO-" + "1" * 24,
+                    "analysis_obligation_id": first_id,
+                    "analysis_obligation_identity": first_identity,
                     "work_type": "scope_clarification",
                     "clause_id": "C1", "source_ref": "Q-source-1",
                     **item_base,
@@ -422,7 +464,8 @@ class ThesisFormatPipelinePolicyTests(unittest.TestCase):
                     "scope_dependency_dimensions": ["metric"],
                 },
                 {
-                    "analysis_obligation_id": "AO-" + "2" * 24,
+                    "analysis_obligation_id": second_id,
+                    "analysis_obligation_identity": second_identity,
                     "work_type": "scope_clarification",
                     "clause_id": "C1", "source_ref": "Q-source-2",
                     **item_base,
@@ -451,7 +494,7 @@ class ThesisFormatPipelinePolicyTests(unittest.TestCase):
         self.assertFalse(ledger["submission_ready"])
         self.assertEqual(
             {item["analysis_obligation_id"] for item in ledger["items"]},
-            {"AO-" + "1" * 24, "AO-" + "2" * 24},
+            {first_id, second_id},
         )
         self.assertTrue(all(
             item["marker_required"] and "待确认适用范围" in item["placeholder_text"]
@@ -460,8 +503,12 @@ class ThesisFormatPipelinePolicyTests(unittest.TestCase):
 
     def test_scope_unresolved_release_gate_rejects_authorized_or_duplicate_records(self) -> None:
         clauses, evidence_doc, item_base = self._canonical_scope_source()
+        obligation_id, identity = self._scope_identity(
+            item_base, source_ref="Q-source-1",
+        )
         item = {
-            "analysis_obligation_id": "AO-" + "1" * 24,
+            "analysis_obligation_id": obligation_id,
+            "analysis_obligation_identity": identity,
             "work_type": "scope_clarification",
             "clause_id": "C1", "source_ref": "Q-source-1",
             **item_base,
@@ -472,20 +519,24 @@ class ThesisFormatPipelinePolicyTests(unittest.TestCase):
         }
         with self.assertRaisesRegex(ValueError, "malformed.*executable"):
             _scope_unresolved_release_gates(
-                [{"scope_unresolved_items": [item]}], clauses=clauses,
+                [{**self._scope_review_context(), "scope_unresolved_items": [item]}], clauses=clauses,
                 evidence_doc=evidence_doc,
             )
         item["execution_authorized"] = False
         with self.assertRaisesRegex(ValueError, "duplicate scope-unresolved obligation"):
             _scope_unresolved_release_gates(
-                [{"scope_unresolved_items": [item, item]}], clauses=clauses,
+                [{**self._scope_review_context(), "scope_unresolved_items": [item, item]}], clauses=clauses,
                 evidence_doc=evidence_doc,
             )
 
     def test_scope_unresolved_gate_rejects_unbound_quote_range_hash_or_location(self) -> None:
         clauses, evidence_doc, item_base = self._canonical_scope_source()
+        obligation_id, identity = self._scope_identity(
+            item_base, source_ref="Q-source-1",
+        )
         base = {
-            "analysis_obligation_id": "AO-" + "1" * 24,
+            "analysis_obligation_id": obligation_id,
+            "analysis_obligation_identity": identity,
             "work_type": "scope_clarification",
             "clause_id": "C1", "source_ref": "Q-source-1", **item_base,
             "obligation_summary": "scope unclear",
@@ -503,7 +554,7 @@ class ThesisFormatPipelinePolicyTests(unittest.TestCase):
                 item = {**base, **mutation}
                 with self.assertRaisesRegex(ValueError, "unbound to exact source"):
                     _scope_unresolved_release_gates(
-                        [{"scope_unresolved_items": [item]}], clauses=clauses,
+                        [{**self._scope_review_context(), "scope_unresolved_items": [item]}], clauses=clauses,
                         evidence_doc=evidence_doc,
                     )
 

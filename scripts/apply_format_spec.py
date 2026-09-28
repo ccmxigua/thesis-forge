@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from docx import Document
+from docx.table import Table, _Cell
 from docx.enum.section import WD_ORIENT
 from docx.enum.style import WD_STYLE_TYPE
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_BREAK, WD_LINE_SPACING
@@ -40,6 +41,11 @@ from docx_semantics import (
 )
 from format_spec_validation import load_and_validate
 from semantic_contract import evidence_payload, sha256_json, strict_json_loads, strict_json_read
+from source_literal_binding import (
+    SourceFragmentBindingError,
+    compose_source_fragments,
+    normalize_clause_literal,
+)
 from manual_review import (
     add_manual_review_items,
     filter_manual_marker_ledger,
@@ -1774,6 +1780,37 @@ def validate_content_instance_source_bindings(
         expected_evidence_ids: set[str] = set()
         text_is_source_backed = False
         expected_source_texts: list[str] = []
+        expected_fragment_binding: dict[str, Any] | None = None
+        source_fragment_clause_ids = instance.get("source_fragment_clause_ids")
+        stored_source_fragments = instance.get("source_fragments")
+        if source_fragment_clause_ids is not None:
+            try:
+                expected_fragment_binding = compose_source_fragments(
+                    source_fragment_clause_ids,
+                    clauses_by_id,
+                    evidence_by_id,
+                    requirement_clause_ids=clause_ids,
+                    requirement_evidence_ids=evidence_ids,
+                )
+            except SourceFragmentBindingError as exc:
+                errors.append(f"{label}:source_fragment_binding_invalid:{exc}")
+            else:
+                if expected_fragment_binding["text"] != text:
+                    errors.append(f"{label}:source_fragment_literal_mismatch")
+                if stored_source_fragments != expected_fragment_binding["source_fragments"]:
+                    errors.append(f"{label}:source_fragment_receipt_mismatch")
+                text_is_source_backed = True
+                instance_bindings.extend({
+                    "clause_id": item["clause_id"],
+                    "evidence_id": item["evidence_id"],
+                    "start_offset": item["start_offset"],
+                    "end_offset": item["end_offset"],
+                    "source_sha256": item["source_sha256"],
+                    "text": item["text"],
+                    "source_kind": item["source_kind"],
+                    "location": copy.deepcopy(item["location"]),
+                    "separator_before": item["separator_before"],
+                } for item in expected_fragment_binding["source_fragments"])
         for clause_id in clause_ids:
             clause = clauses_by_id.get(clause_id)
             span = clause.get("source_span") if isinstance(clause, dict) else None
@@ -1802,7 +1839,7 @@ def validate_content_instance_source_bindings(
                 or len(set(clause_evidence_ids)) != len(clause_evidence_ids)
                 or span_evidence_id not in clause_evidence_ids
                 or not isinstance(clause_text, str)
-                or re.sub(r"\s+", " ", span_text).strip() != clause_text
+                or normalize_clause_literal(span_text) != normalize_clause_literal(clause_text)
             ):
                 errors.append(f"{label}:clause_source_binding_invalid:{clause_id}")
                 continue
@@ -1821,8 +1858,9 @@ def validate_content_instance_source_bindings(
             expected_source_texts.append(
                 full_source if isinstance(full_source, str) else span_text
             )
-            literal_matches_span = _literal_text_matches_source_span(
-                text, raw_source, start, end,
+            literal_matches_span = (
+                expected_fragment_binding is None
+                and _literal_text_matches_source_span(text, raw_source, start, end)
             )
             if literal_matches_span and span_evidence_id in evidence_ids:
                 text_is_source_backed = True
@@ -1832,6 +1870,13 @@ def validate_content_instance_source_bindings(
                     "start_offset": start,
                     "end_offset": end,
                     "source_sha256": span["source_sha256"],
+                    "text": span_text,
+                    "source_kind": evidence.get("kind") if isinstance(evidence, dict) else clause.get("source_kind"),
+                    "location": copy.deepcopy(
+                        span.get("location")
+                        or (evidence.get("location") if isinstance(evidence, dict) else None)
+                        or clause.get("location")
+                    ),
                 })
         if not set(evidence_ids) <= expected_evidence_ids:
             errors.append(f"{label}:evidence_ids_not_supported_by_clause_sources")
@@ -1849,6 +1894,7 @@ def validate_content_instance_source_bindings(
             and requirement["properties"].get("text") == text
             and set(clause_ids) == set(requirement.get("clause_ids") or [])
             and set(evidence_ids) == set(requirement.get("evidence_ids") or [])
+            and source_fragment_clause_ids == requirement.get("source_fragment_clause_ids")
             for requirement in requirements
         )
         if not compatible_requirement:
@@ -1882,14 +1928,124 @@ def _content_instance_paragraphs(doc: Document) -> list[Paragraph]:
     return paragraphs
 
 
+def _paragraph_at_source_location(doc: Document, binding: dict[str, Any]) -> Paragraph | None:
+    """Resolve an extracted source locator to one current DOCX paragraph."""
+    location = binding.get("location")
+    if not isinstance(location, dict):
+        return None
+    source_kind = binding.get("source_kind")
+    part = location.get("part")
+    body = doc._body
+
+    if source_kind == "paragraph" and part == "document":
+        child_index = location.get("child_index")
+        children = list(body._element.iterchildren())
+        if (isinstance(child_index, int) and not isinstance(child_index, bool)
+                and 0 <= child_index < len(children)
+                and children[child_index].tag == qn("w:p")):
+            return Paragraph(children[child_index], body)
+        return None
+
+    if source_kind == "table_cell" and part == "document":
+        indexes = tuple(location.get(key) for key in (
+            "table_child_index", "row", "column", "paragraph",
+        ))
+        if any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in indexes):
+            return None
+        table_index, row_index, column_index, paragraph_index = indexes
+        children = list(body._element.iterchildren())
+        if table_index >= len(children) or children[table_index].tag != qn("w:tbl"):
+            return None
+        table = Table(children[table_index], body)
+        rows = children[table_index].findall(qn("w:tr"))
+        if row_index >= len(rows):
+            return None
+        cells = rows[row_index].findall(qn("w:tc"))
+        if column_index >= len(cells):
+            return None
+        paragraphs = cells[column_index].findall(qn("w:p"))
+        if paragraph_index >= len(paragraphs):
+            return None
+        return Paragraph(paragraphs[paragraph_index], _Cell(cells[column_index], table))
+
+    if source_kind == "header_footer" and isinstance(part, str):
+        paragraph_index = location.get("paragraph")
+        if isinstance(paragraph_index, bool) or not isinstance(paragraph_index, int) or paragraph_index < 0:
+            return None
+        for section in doc.sections:
+            for story in (
+                section.header, section.first_page_header, section.even_page_header,
+                section.footer, section.first_page_footer, section.even_page_footer,
+            ):
+                if str(story.part.partname).lstrip("/") != part.lstrip("/"):
+                    continue
+                paragraphs = story._element.xpath(".//w:p")
+                if paragraph_index < len(paragraphs):
+                    return Paragraph(paragraphs[paragraph_index], story)
+        return None
+
+    if source_kind == "textbox" and part == "document":
+        textbox_index = location.get("textbox")
+        paragraph_index = location.get("paragraph")
+        textboxes = doc._element.xpath(".//w:txbxContent")
+        if (isinstance(textbox_index, bool) or not isinstance(textbox_index, int)
+                or textbox_index < 0 or textbox_index >= len(textboxes)
+                or isinstance(paragraph_index, bool) or not isinstance(paragraph_index, int)
+                or paragraph_index < 0):
+            return None
+        paragraphs = textboxes[textbox_index].xpath(".//w:p")
+        if paragraph_index < len(paragraphs):
+            return Paragraph(paragraphs[paragraph_index], body)
+    return None
+
+
+def _validate_source_binding_paragraph(paragraph: Paragraph, binding: dict[str, Any]) -> None:
+    """Require a source locator to identify one exact, unique span in its paragraph.
+
+    Extraction offsets are relative to the trimmed paragraph text emitted by
+    ``extract_document_evidence``. Paragraph-level style overrides must not
+    proceed when the current target paragraph no longer matches that source or
+    when the exact source literal occurs more than once in it.
+    """
+    source_text = paragraph.text.strip()
+    source_sha256 = binding.get("source_sha256")
+    start = binding.get("start_offset")
+    end = binding.get("end_offset")
+    literal = binding.get("text")
+    if (
+        not isinstance(source_sha256, str)
+        or hashlib.sha256(source_text.encode("utf-8")).hexdigest() != source_sha256
+    ):
+        raise ValueError("source location paragraph does not match its bound evidence hash")
+    if (
+        not isinstance(literal, str) or not literal
+        or isinstance(start, bool) or not isinstance(start, int)
+        or isinstance(end, bool) or not isinstance(end, int)
+        or not 0 <= start < end <= len(source_text)
+        or source_text[start:end] != literal
+    ):
+        raise ValueError("source location offsets do not select the exact bound literal")
+    occurrences: list[int] = []
+    search_from = 0
+    while True:
+        position = source_text.find(literal, search_from)
+        if position < 0:
+            break
+        occurrences.append(position)
+        search_from = position + 1
+    if occurrences != [start]:
+        raise ValueError("source location literal is not unique within its target paragraph")
+
+
 def apply_content_instance_overrides(
     doc: Document, spec: dict[str, Any], mappings: dict[str, Any],
     source_bindings: dict[str, list[dict[str, Any]]],
 ) -> list[dict[str, Any]]:
     """Apply per-instance style overrides without merging literal text into roles.
 
-    ``roles`` supplies the shared/default style.  A content instance may add a
-    narrower font/paragraph override for the exact literal text it identifies.
+    ``roles`` supplies the shared/default style. A content instance may add a
+    narrower override to paragraphs proven by source locations. Legacy source
+    records without a locator are accepted only when their literal is unique.
     Missing literals are reported as an auditable input/content gap, but are
     not synthesized: arbitrary labels and values must remain school-specific
     cover data rather than guessed DOCX content.
@@ -1913,8 +2069,42 @@ def apply_content_instance_overrides(
         style_properties = instance.get("style_properties")
         if not isinstance(style_properties, dict):
             style_properties = {}
-        matches = [paragraph for paragraph in paragraphs
-                   if text and paragraph.text == text]
+        bindings = source_bindings.get(instance_id, [])
+        matches: list[Paragraph] = []
+        seen_paragraphs: set[Any] = set()
+        for binding in bindings:
+            if not isinstance(binding, dict):
+                raise ValueError(f"content instance {instance_id!r} has malformed source binding")
+            fragment_text = binding.get("text")
+            if not isinstance(fragment_text, str) or not fragment_text:
+                raise ValueError(f"content instance {instance_id!r} source binding lacks exact text")
+            if isinstance(binding.get("location"), dict):
+                paragraph = _paragraph_at_source_location(doc, binding)
+                if paragraph is None:
+                    raise ValueError(
+                        f"content instance {instance_id!r} source location does not resolve to its literal"
+                    )
+                try:
+                    _validate_source_binding_paragraph(paragraph, binding)
+                except ValueError as exc:
+                    raise ValueError(
+                        f"content instance {instance_id!r} source location is not exact: {exc}"
+                    ) from exc
+            else:
+                candidates = [paragraph for paragraph in paragraphs if paragraph.text == fragment_text]
+                if len(candidates) > 1:
+                    raise ValueError(
+                        f"content instance {instance_id!r} has ambiguous unlocated source literal"
+                    )
+                paragraph = candidates[0] if candidates else None
+            if paragraph is not None and paragraph._p not in seen_paragraphs:
+                seen_paragraphs.add(paragraph._p)
+                matches.append(paragraph)
+        if not bindings:
+            candidates = [paragraph for paragraph in paragraphs if paragraph.text == text]
+            if len(candidates) > 1:
+                raise ValueError(f"content instance {instance_id!r} has ambiguous unbound literal")
+            matches = candidates
         applied = 0
         for paragraph in matches:
             if mapping and mapping.get("style_name") and paragraph.style.name != mapping["style_name"]:
@@ -1937,6 +2127,7 @@ def apply_content_instance_overrides(
             "source_bindings": copy.deepcopy(source_bindings.get(instance_id, [])),
             "match_count": len(matches),
             "applied_count": applied,
+            "binding_policy": "exact_source_location_or_unique_legacy_literal",
             "status": status,
             "reason": ("literal content was matched and its instance style was applied"
                        if status == "applied" else
@@ -3656,11 +3847,21 @@ def main(argv: list[str]) -> int:
             args, spec, pipeline_manifest,
         )
         input_sha256 = hashlib.sha256(ledger_bytes).hexdigest()
+        host_receipts = pipeline_manifest.get("host_review_receipts")
+        semantic_ledger_receipt = (
+            host_receipts.get("semantic_review_ledger")
+            if isinstance(host_receipts, dict) else None
+        )
+        expected_semantic_ledger_sha256 = (
+            semantic_ledger_receipt.get("sha256")
+            if isinstance(semantic_ledger_receipt, dict) else None
+        )
         ingress_errors = current_binding_errors + validate_manual_review_ledger_ingress(
             manual_review_ledger,
             expected_binding=expected_binding,
             expected_ledger_sha256=pipeline_manifest.get("manual_review_ledger_input_sha256"),
             actual_ledger_sha256=input_sha256,
+            expected_semantic_review_ledger_sha256=expected_semantic_ledger_sha256,
         )
         if ingress_errors:
             raise SystemExit(

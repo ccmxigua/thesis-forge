@@ -1428,6 +1428,13 @@
         "source_text": {
           "type": "string"
         },
+        "source_fragment_clause_ids": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "minItems": 1,
+          "uniqueItems": true,
+          "description": "Ordered code-bound clause references from which literal text is materialized."
+        },
         "clause_ids": {
           "type": "array",
           "items": {
@@ -1516,6 +1523,17 @@
         "source_text": {
           "type": "string"
         },
+        "source_fragment_clause_ids": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "minItems": 1,
+          "uniqueItems": true
+        },
+        "source_fragments": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/sourceFragment"},
+          "minItems": 1
+        },
         "style_properties": {
           "$ref": "#/$defs/roleSpec"
         },
@@ -1523,6 +1541,25 @@
           "type": "string",
           "minLength": 1
         }
+      },
+      "additionalProperties": false
+    },
+    "sourceFragment": {
+      "type": "object",
+      "required": [
+        "clause_id", "evidence_id", "start_offset", "end_offset",
+        "source_sha256", "text", "source_kind", "separator_before", "location"
+      ],
+      "properties": {
+        "clause_id": {"type": "string", "minLength": 1},
+        "evidence_id": {"type": "string", "minLength": 1},
+        "start_offset": {"type": "integer", "minimum": 0},
+        "end_offset": {"type": "integer", "minimum": 1},
+        "source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "text": {"type": "string", "minLength": 1},
+        "source_kind": {"enum": ["paragraph", "table_cell", "header_footer", "textbox"]},
+        "separator_before": {"type": "string"},
+        "location": {"type": "object"}
       },
       "additionalProperties": false
     },

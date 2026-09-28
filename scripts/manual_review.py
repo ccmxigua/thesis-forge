@@ -18,6 +18,7 @@ from typing import Any
 from question_contract import bind_question_records, normalize_question_records
 from semantic_contract import strict_json_dumps, strict_json_loads
 from format_spec_validation import validate_instance
+from obligation_workflow import OBLIGATION_ANALYSIS_LEDGER_PROTOCOL
 
 from artifact_io import atomic_write_text
 
@@ -31,8 +32,9 @@ CATEGORY_ACTIONS = {
     "semantic_content_review": "对照权威条款人工核实；系统不会改写论文正文。",
 }
 
-MANUAL_REVIEW_LEDGER_SCHEMA_VERSION = "1.2"
+MANUAL_REVIEW_LEDGER_SCHEMA_VERSION = "1.3"
 MANUAL_REVIEW_OBLIGATION_ID_PROTOCOL = "manual_review_obligation_v1"
+MANUAL_REVIEW_CROSSWALK_PROTOCOL = "manual_review_obligation_crosswalk_v1"
 MANUAL_OBLIGATION_ID_RE = re.compile(r"^MO-[0-9a-f]{64}$")
 _GENERATED_ITEM_FIELDS = frozenset({
     "marker_id", "manual_obligation_id", "status", "marker_required",
@@ -196,6 +198,153 @@ def manual_obligation_id_for_item(binding: Any, item: dict[str, Any]) -> str:
     return "MO-" + hashlib.sha256(_canonical_json(identity).encode("utf-8")).hexdigest()
 
 
+def _crosswalk_refs(item: dict[str, Any], field: str) -> list[str]:
+    return sorted(set(_string_list(item.get(field))))
+
+
+def _validate_analysis_obligation_identity(
+    item: dict[str, Any], binding: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Require every AO link to be fully identified and bound to this run."""
+    analysis_id = item.get("analysis_obligation_id")
+    identity = item.get("analysis_obligation_identity")
+    if analysis_id is None and identity is None:
+        return None
+    if (
+        not isinstance(analysis_id, str)
+        or re.fullmatch(r"AO-[0-9a-f]{24}", analysis_id) is None
+        or not isinstance(identity, dict)
+    ):
+        raise ValueError("analysis obligation link requires both ID and identity")
+
+    expected_id = "AO-" + hashlib.sha256(_canonical_json(identity).encode("utf-8")).hexdigest()[:24]
+    if analysis_id != expected_id:
+        raise ValueError("analysis obligation ID does not match its identity")
+
+    required_identity_fields = {
+        "protocol", "run_id", "case_id", "chunk_index", "attempt",
+        "candidate_response_sha256", "review_request_sha256", "review_response_sha256",
+        "check_id", "obligation_index", "source_ref", "source_sha256", "start", "end",
+    }
+    if set(identity) != required_identity_fields:
+        raise ValueError("analysis obligation identity fields are incomplete or unknown")
+    if identity.get("protocol") != OBLIGATION_ANALYSIS_LEDGER_PROTOCOL:
+        raise ValueError("analysis obligation identity protocol is not recognized")
+    for field in ("run_id", "case_id"):
+        if (
+            not isinstance(identity.get(field), str)
+            or identity[field] != binding.get(field)
+        ):
+            raise ValueError(f"analysis obligation identity {field} is not bound to this ledger run")
+    for field in ("candidate_response_sha256", "review_request_sha256", "review_response_sha256", "source_sha256"):
+        if (
+            not isinstance(identity.get(field), str)
+            or re.fullmatch(r"[0-9a-f]{64}", identity[field]) is None
+        ):
+            raise ValueError(f"analysis obligation identity {field} is invalid")
+    for field, minimum in (("chunk_index", 1), ("attempt", 1), ("obligation_index", 0), ("start", 0)):
+        value = identity.get(field)
+        if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
+            raise ValueError(f"analysis obligation identity {field} is invalid")
+    end = identity.get("end")
+    if isinstance(end, bool) or not isinstance(end, int) or end <= identity["start"]:
+        raise ValueError("analysis obligation identity end is invalid")
+    for field in ("check_id", "source_ref"):
+        if not isinstance(identity.get(field), str) or not identity[field]:
+            raise ValueError(f"analysis obligation identity {field} is missing")
+
+    if identity.get("source_ref") != item.get("source_ref"):
+        raise ValueError("analysis obligation source reference does not match the manual item")
+    if identity.get("check_id") not in _string_list(item.get("clause_ids")):
+        raise ValueError("analysis obligation clause does not match the manual item")
+    item_source_sha256 = item.get("source_text_sha256")
+    if (
+        not isinstance(item_source_sha256, str)
+        or item_source_sha256 != identity.get("source_sha256")
+    ):
+        raise ValueError("analysis obligation source hash does not match the manual item")
+    for item_field, identity_field in (("source_start", "start"), ("source_end", "end")):
+        value = item.get(item_field)
+        if (
+            isinstance(value, bool) or not isinstance(value, int)
+            or value != identity.get(identity_field)
+        ):
+            raise ValueError(f"analysis obligation {item_field} does not match the manual item")
+
+    producer_context = item.get("producer_context")
+    if producer_context is not None:
+        if not isinstance(producer_context, dict):
+            raise ValueError("analysis obligation producer context must be an object")
+        for field in (
+            "run_id", "case_id", "chunk_index", "attempt", "candidate_response_sha256",
+            "review_request_sha256", "review_response_sha256",
+        ):
+            if producer_context.get(field) != identity.get(field):
+                raise ValueError(f"analysis obligation producer context {field} mismatch")
+    return identity
+
+
+def build_manual_review_crosswalk(
+    items: Any, binding: Any, *, semantic_review_ledger_sha256: Any = None,
+) -> dict[str, Any]:
+    """Create an exact identifier crosswalk without inferring semantic links."""
+    if not isinstance(items, list) or not isinstance(binding, dict):
+        raise ValueError("manual-review crosswalk requires item and binding objects")
+    binding_errors = _manual_review_binding_errors(binding)
+    if binding_errors:
+        raise ValueError(
+            "manual-review crosswalk requires a complete current-run binding: "
+            + ", ".join(binding_errors)
+        )
+    if semantic_review_ledger_sha256 is not None and (
+        not isinstance(semantic_review_ledger_sha256, str)
+        or not re.fullmatch(r"[0-9a-f]{64}", semantic_review_ledger_sha256)
+    ):
+        raise ValueError("semantic review ledger hash for crosswalk is invalid")
+    entries: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            raise ValueError("manual-review crosswalk contains a non-object item")
+        analysis_identity = _validate_analysis_obligation_identity(item, binding)
+        analysis_id = item.get("analysis_obligation_id")
+        entries.append({
+            "marker_id": item.get("marker_id"),
+            "manual_obligation_id": item.get("manual_obligation_id"),
+            "analysis_obligation_id": analysis_id,
+            "analysis_obligation_identity_sha256": (
+                hashlib.sha256(_canonical_json(analysis_identity).encode("utf-8")).hexdigest()
+                if isinstance(analysis_identity, dict) else None
+            ),
+            "clause_ids": _crosswalk_refs(item, "clause_ids"),
+            "requirement_ids": _crosswalk_refs(item, "requirement_ids"),
+            "question_ids": _crosswalk_refs(item, "question_ids"),
+            "evidence_ids": _crosswalk_refs(item, "evidence_ids"),
+            "item_sha256": hashlib.sha256(_canonical_json(item).encode("utf-8")).hexdigest(),
+            "link_basis": "explicit_identifiers_from_same_ledger_item",
+            "status": "pending_manual_review",
+        })
+    return {
+        "protocol": MANUAL_REVIEW_CROSSWALK_PROTOCOL,
+        "schema_version": "1.0",
+        "status": "analysis_only",
+        "submission_ready": False,
+        "binding_sha256": hashlib.sha256(_canonical_json(binding).encode("utf-8")).hexdigest(),
+        "semantic_review_ledger_sha256": semantic_review_ledger_sha256,
+        "entries": entries,
+    }
+
+
+def refresh_manual_review_crosswalk(ledger: dict[str, Any]) -> None:
+    semantic_hash = None
+    existing = ledger.get("obligation_crosswalk")
+    if isinstance(existing, dict):
+        semantic_hash = existing.get("semantic_review_ledger_sha256")
+    ledger["obligation_crosswalk"] = build_manual_review_crosswalk(
+        ledger.get("items"), ledger.get("binding"),
+        semantic_review_ledger_sha256=semantic_hash,
+    )
+
+
 def validate_manual_obligation_ids(ledger: Any) -> list[str]:
     """Verify presence, uniqueness, and recomputation of every MO identity."""
     if not isinstance(ledger, dict):
@@ -231,6 +380,20 @@ def validate_manual_obligation_ids(ledger: Any) -> list[str]:
         expected = manual_obligation_id_for_item(binding, item)
         if item.get("manual_obligation_id") != expected:
             errors.append(f"manual_review_obligation_id_mismatch:{index}")
+    try:
+        expected_crosswalk = build_manual_review_crosswalk(
+            items, binding,
+            semantic_review_ledger_sha256=(
+                ledger.get("obligation_crosswalk", {}).get("semantic_review_ledger_sha256")
+                if isinstance(ledger.get("obligation_crosswalk"), dict) else None
+            ),
+        )
+        if ledger.get("obligation_crosswalk") != expected_crosswalk:
+            errors.append("manual_review_obligation_crosswalk_mismatch")
+    except (TypeError, ValueError) as exc:
+        errors.append(
+            f"manual_review_obligation_crosswalk_invalid:{type(exc).__name__}:{exc}"
+        )
     return errors
 
 
@@ -358,6 +521,7 @@ def build_manual_review_ledger(
     release_gates: list[dict[str, Any]] | None = None,
     clauses: list[dict[str, Any]] | None = None,
     evidence_doc: dict[str, Any] | None = None,
+    semantic_review_ledger_sha256: str | None = None,
 ) -> dict[str, Any]:
     """Return a stable list of draft-only review items.
 
@@ -512,7 +676,7 @@ def build_manual_review_ledger(
     for item in items:
         category = str(item["category"])
         categories[category] = categories.get(category, 0) + 1
-    return {
+    ledger = {
         "schema_version": MANUAL_REVIEW_LEDGER_SCHEMA_VERSION,
         "obligation_identity_protocol": MANUAL_REVIEW_OBLIGATION_ID_PROTOCOL,
         "policy": "review_draft_only",
@@ -526,6 +690,11 @@ def build_manual_review_ledger(
             "original_blocking_count": sum(bool(item["original_blocking"]) for item in items),
         },
     }
+    ledger["obligation_crosswalk"] = build_manual_review_crosswalk(
+        items, binding or {},
+        semantic_review_ledger_sha256=semantic_review_ledger_sha256,
+    )
+    return ledger
 
 
 def add_manual_review_items(
@@ -612,6 +781,7 @@ def add_manual_review_items(
         "original_blocking_count": sum(bool(item.get("original_blocking")) for item in existing),
     }
     ledger["submission_ready"] = False
+    refresh_manual_review_crosswalk(ledger)
     return ledger
 
 
@@ -674,12 +844,14 @@ def filter_manual_marker_ledger(ledger: dict[str, Any]) -> dict[str, Any]:
         "original_blocking_count": sum(bool(item.get("original_blocking")) for item in items),
     }
     ledger["submission_ready"] = False
+    refresh_manual_review_crosswalk(ledger)
     return ledger
 
 
 def validate_manual_review_ledger_ingress(
     ledger: Any, *, expected_binding: Any, expected_ledger_sha256: Any,
     actual_ledger_sha256: str,
+    expected_semantic_review_ledger_sha256: str | None = None,
 ) -> list[str]:
     """Reject stale, changed, or ambiguously identified review sidecars.
 
@@ -708,6 +880,13 @@ def validate_manual_review_ledger_ingress(
         or actual_ledger_sha256 != expected_ledger_sha256
     ):
         errors.append("manual_review_ledger_input_sha256_mismatch")
+    crosswalk = ledger.get("obligation_crosswalk")
+    if (
+        not isinstance(crosswalk, dict)
+        or crosswalk.get("semantic_review_ledger_sha256")
+        != expected_semantic_review_ledger_sha256
+    ):
+        errors.append("manual_review_crosswalk_semantic_ledger_hash_mismatch")
     items = ledger.get("items")
     if not isinstance(items, list):
         errors.append("manual_review_ledger_items_must_be_array")

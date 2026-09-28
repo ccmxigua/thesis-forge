@@ -6,6 +6,28 @@ from typing import Any
 from input_resolver import value_present
 
 
+_OPERATORS = {"present", "absent", "equals", "not_equals", "in"}
+
+
+def _typed_equal(left: Any, right: Any) -> bool:
+    """Compare JSON values without Python's bool-as-int equivalence."""
+    if isinstance(left, bool) or isinstance(right, bool):
+        return isinstance(left, bool) and isinstance(right, bool) and left is right
+    if isinstance(left, (int, float)) and isinstance(right, (int, float)):
+        return left == right
+    if type(left) is not type(right):
+        return False
+    if isinstance(left, list):
+        return len(left) == len(right) and all(
+            _typed_equal(a, b) for a, b in zip(left, right)
+        )
+    if isinstance(left, dict):
+        return left.keys() == right.keys() and all(
+            _typed_equal(left[key], right[key]) for key in left
+        )
+    return left == right
+
+
 def _resolve(container: Any, dotted: str) -> tuple[bool, Any]:
     current = container
     for part in dotted.split(".") if dotted else []:
@@ -49,22 +71,41 @@ def evaluate_applicability(
         "template_profile": template_profile,
         "runtime": runtime,
     }
-    evaluated: list[dict[str, Any]] = []
+    # Validate the whole declaration before evaluating any facts.  A malformed
+    # later condition must not be hidden by an earlier false condition.
+    prepared: list[tuple[int, dict[str, Any], str, str, str]] = []
     for index, condition in enumerate(conditions):
         if not isinstance(condition, dict):
-            return {"status": "conditional", "result": "unknown", "evaluated": evaluated,
+            return {"status": "conditional", "result": "unknown", "evaluated": [],
                     "reason": f"condition_{index}_not_object"}
         fact = condition.get("fact")
         operator = condition.get("operator")
         if not isinstance(fact, str) or "." not in fact or fact.split(".", 1)[0] not in roots:
-            return {"status": "conditional", "result": "unknown", "evaluated": evaluated,
+            return {"status": "conditional", "result": "unknown", "evaluated": [],
                     "reason": f"condition_{index}_fact_unavailable"}
+        if operator not in _OPERATORS:
+            return {"status": "conditional", "result": "unknown", "evaluated": [],
+                    "reason": f"condition_{index}_operator_unknown"}
+        if operator in {"equals", "not_equals", "in"} and "value" not in condition:
+            return {"status": "conditional", "result": "unknown", "evaluated": [],
+                    "reason": f"condition_{index}_value_missing"}
+        if set(condition) - {"fact", "operator", "value"}:
+            return {"status": "conditional", "result": "unknown", "evaluated": [],
+                    "reason": f"condition_{index}_has_unknown_fields"}
         root_name, dotted = fact.split(".", 1)
+        prepared.append((index, condition, root_name, dotted, operator))
+
+    evaluated: list[dict[str, Any]] = []
+    unknown_reasons: list[str] = []
+    has_false = False
+    for index, condition, root_name, dotted, operator in prepared:
         exists, actual = _resolve(roots[root_name], dotted)
         if operator in {"present", "absent"}:
             if not exists:
-                return {"status": "conditional", "result": "unknown", "evaluated": evaluated,
-                        "reason": f"condition_{index}_fact_missing"}
+                evaluated.append({"fact": condition["fact"], "operator": operator,
+                                  "actual": None, "result": "unknown"})
+                unknown_reasons.append(f"condition_{index}_fact_missing")
+                continue
             # Presence is about an explicitly supplied typed value, not
             # Python truthiness: False and 0 are valid observed values. An
             # empty string/container remains absent by the shared input
@@ -73,19 +114,26 @@ def evaluate_applicability(
             if operator == "absent":
                 result = not result
         elif not exists:
-            return {"status": "conditional", "result": "unknown", "evaluated": evaluated,
-                    "reason": f"condition_{index}_fact_missing"}
+            evaluated.append({"fact": condition["fact"], "operator": operator,
+                              "actual": None, "result": "unknown"})
+            unknown_reasons.append(f"condition_{index}_fact_missing")
+            continue
         elif operator == "equals":
-            result = actual == condition.get("value")
+            result = _typed_equal(actual, condition["value"])
         elif operator == "not_equals":
-            result = actual != condition.get("value")
+            result = not _typed_equal(actual, condition["value"])
         elif operator == "in":
-            values = condition.get("value")
-            result = isinstance(values, list) and actual in values
-        else:
-            return {"status": "conditional", "result": "unknown", "evaluated": evaluated,
-                    "reason": f"condition_{index}_operator_unknown"}
-        evaluated.append({"fact": fact, "operator": operator, "actual": actual, "result": bool(result)})
-        if not result:
-            return {"status": "conditional", "result": "false", "evaluated": evaluated}
+            values = condition["value"]
+            if not isinstance(values, list):
+                return {"status": "conditional", "result": "unknown", "evaluated": evaluated,
+                        "reason": f"condition_{index}_in_value_not_array"}
+            result = any(_typed_equal(actual, value) for value in values)
+        evaluated.append({"fact": condition["fact"], "operator": operator,
+                          "actual": actual, "result": bool(result)})
+        has_false = has_false or not result
+    if has_false:
+        return {"status": "conditional", "result": "false", "evaluated": evaluated}
+    if unknown_reasons:
+        return {"status": "conditional", "result": "unknown", "evaluated": evaluated,
+                "reason": unknown_reasons[0]}
     return {"status": "conditional", "result": "true", "evaluated": evaluated}

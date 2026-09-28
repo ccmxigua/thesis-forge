@@ -378,6 +378,11 @@ def build_host_review_response_schema(
         "existing_requirement_id": {"type": "string", "minLength": 1},
         "field_key": {"type": "string", "minLength": 1},
         "clause_ids": {"type": "array", "items": {"type": "string"}},
+        "source_fragment_clause_ids": {
+            "type": "array", "items": {"type": "string", "minLength": 1},
+            "minItems": 1, "uniqueItems": True,
+            "description": "Ordered references to source clauses whose exact literal fragments are materialized by code.",
+        },
         "evidence_ids": {"type": "array", "items": {"type": "string"}},
         "confidence": {"type": "number"},
         "reason": {"type": "string", "minLength": 1},

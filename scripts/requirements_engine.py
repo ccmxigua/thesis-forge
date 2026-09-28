@@ -74,6 +74,11 @@ from semantic_review_ledger import (
 )
 from host_review_schema import build_host_review_response_schema
 from source_obligation_compiler import compile_known_source_obligation_ids
+from source_literal_binding import (
+    SourceFragmentBindingError,
+    compose_source_fragments,
+    materialize_source_fragment_literals,
+)
 from template_reconciliation import (
     extract_template_evidence,
     not_supplied_report,
@@ -335,48 +340,67 @@ def _register_content_instance(
         return None, {"reason": "content_instance_text_must_be_nonempty"}
     has_bound_source = False
     matching_source_occurrences: set[tuple[str, int, int, str]] = set()
-    for clause_id in sorted(clause_ids):
-        clause = clause_map.get(clause_id)
-        if not isinstance(clause, dict):
-            continue
-        span = clause.get("source_span")
-        if not isinstance(span, dict):
-            continue
+    source_fragment_ids = item.get("source_fragment_clause_ids")
+    source_fragments: list[dict[str, Any]] | None = None
+    if source_fragment_ids is not None:
+        try:
+            fragment_binding = compose_source_fragments(
+                source_fragment_ids, clause_map,
+                requirement_clause_ids=sorted(clause_ids),
+                requirement_evidence_ids=sorted(cited_evidence),
+            )
+        except SourceFragmentBindingError as exc:
+            return None, {"reason": "source_fragment_binding_invalid", "detail": str(exc)}
+        if fragment_binding["text"] != text:
+            return None, {"reason": "content_instance_text_not_exactly_backed_by_source_fragments"}
+        source_fragments = fragment_binding["source_fragments"]
         has_bound_source = True
-        span_evidence_id = span.get("evidence_id")
-        clause_evidence_ids = {str(value) for value in clause.get("evidence_ids", [])}
-        if (
-            not isinstance(span_evidence_id, str)
-            or span_evidence_id not in cited_evidence
-            or span_evidence_id not in clause_evidence_ids
-        ):
-            continue
-        # The span may intentionally omit boundary punctuation during clause
-        # segmentation. The full source paragraph is retained separately and
-        # is the only authority for exact literal matching.
-        exact_evidence_text = clause.get("source_evidence_text")
-        literal_matches = (
-            isinstance(exact_evidence_text, str)
-            and _literal_text_matches_bound_clause(text, clause)
-        ) or (isinstance(span.get("text"), str) and text in span["text"])
-        if literal_matches:
-            start = span.get("start_offset")
-            end = span.get("end_offset")
-            source_sha256 = span.get("source_sha256")
+        for fragment in source_fragments:
+            matching_source_occurrences.add((
+                fragment["evidence_id"], fragment["start_offset"],
+                fragment["end_offset"], fragment["source_sha256"],
+            ))
+    else:
+        for clause_id in sorted(clause_ids):
+            clause = clause_map.get(clause_id)
+            if not isinstance(clause, dict):
+                continue
+            span = clause.get("source_span")
+            if not isinstance(span, dict):
+                continue
+            has_bound_source = True
+            span_evidence_id = span.get("evidence_id")
+            clause_evidence_ids = {str(value) for value in clause.get("evidence_ids", [])}
             if (
-                isinstance(start, int) and not isinstance(start, bool)
-                and isinstance(end, int) and not isinstance(end, bool)
-                and isinstance(source_sha256, str)
+                not isinstance(span_evidence_id, str)
+                or span_evidence_id not in cited_evidence
+                or span_evidence_id not in clause_evidence_ids
             ):
-                matching_source_occurrences.add(
-                    (span_evidence_id, start, end, source_sha256)
-                )
-            else:
-                # Missing offsets cannot establish occurrence identity. Keep
-                # this candidate isolated by clause rather than merging it.
-                matching_source_occurrences.add(
-                    (span_evidence_id, -1, -1, str(clause_id))
-                )
+                continue
+            # The span may intentionally omit boundary punctuation during clause
+            # segmentation. The full source paragraph is retained separately and
+            # is the only authority for exact literal matching.
+            exact_evidence_text = clause.get("source_evidence_text")
+            literal_matches = (
+                isinstance(exact_evidence_text, str)
+                and _literal_text_matches_bound_clause(text, clause)
+            ) or (isinstance(span.get("text"), str) and text in span["text"])
+            if literal_matches:
+                start = span.get("start_offset")
+                end = span.get("end_offset")
+                source_sha256 = span.get("source_sha256")
+                if (
+                    isinstance(start, int) and not isinstance(start, bool)
+                    and isinstance(end, int) and not isinstance(end, bool)
+                    and isinstance(source_sha256, str)
+                ):
+                    matching_source_occurrences.add(
+                        (span_evidence_id, start, end, source_sha256)
+                    )
+                else:
+                    matching_source_occurrences.add(
+                        (span_evidence_id, -1, -1, str(clause_id))
+                    )
     if has_bound_source and not matching_source_occurrences:
         return None, {"reason": "content_instance_text_not_exactly_backed_by_source"}
     explicit_key = item.get("field_key")
@@ -402,6 +426,14 @@ def _register_content_instance(
             matched = True
             existing_text = str(instance.get("text") or "")
             if existing_text == text:
+                if (
+                    source_fragments is not None
+                    and instance.get("source_fragments") != source_fragments
+                ):
+                    return None, {
+                        "reason": "content_instance_source_fragment_conflict",
+                        "field_key": field_key,
+                    }
                 if style_properties:
                     style_conflicts = _deep_merge(
                         instance.setdefault("style_properties", {}), style_properties
@@ -456,6 +488,9 @@ def _register_content_instance(
         "source_text": source_text,
         "reason": reason.strip(),
     }
+    if source_fragments is not None:
+        instance["source_fragment_clause_ids"] = list(source_fragment_ids)
+        instance["source_fragments"] = copy.deepcopy(source_fragments)
     if style_properties:
         instance["style_properties"] = style_properties
     instances.append(instance)
@@ -1846,6 +1881,7 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
                 "Treat every supplied clause as in scope for completeness review.",
                 "source_span is deterministic code-owned citation metadata bound to the exact evidence text; do not edit, regenerate, or emit it in your response. Use it only to locate source wording, and cite clause_id/evidence_id instead.",
                 "Return formatting requirements supported by cited clause_ids and evidence_ids.",
+                "For a literal spanning multiple extracted clauses, provide source_fragment_clause_ids in source order; code verifies every exact span and materializes properties.text. Never concatenate across clauses unless their source locations prove adjacency. If the relation or separator is unclear, leave the requirement unresolved.",
                 "existing_requirement_id selects an exact supplied current-input candidate; it is not a new output ID. Omit it for a new requirement (null in native structured output). Code assigns new IDs. Never increment IDs or borrow one from a neighboring chunk.",
                 "Every requirement object MUST include a non-empty reason explaining why its role and properties are supported by the cited clause/evidence.",
                 "When a clause exactly supports an existing deterministic requirement, set existing_requirement_id and preserve that requirement's role, properties, and evidence_ids exactly. Copy only the supplied candidate payload; do not expand it with shared role defaults, inherited body styles, or other properties from the surrounding schema.",
@@ -2089,6 +2125,20 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
             "semantic_inference": "none",
             "authorization": "exact_compiled_source_obligation_checker_binding",
             "repairs": source_verification_repairs,
+        })
+    projected_response, source_fragment_repairs, source_fragment_errors = (
+        materialize_source_fragment_literals(projected_response, clauses)
+    )
+    conflicts.extend({"type": "llm_contract", "reason": error}
+                     for error in source_fragment_errors)
+    if source_fragment_repairs or source_fragment_errors:
+        audit.append({
+            "type": "source_fragment_literal_projection",
+            "rule_id": "current_source_bound_literal_fragments_v1",
+            "semantic_inference": "none",
+            "authorization": "ordered_clause_refs_plus_exact_source_and_boundary_proof",
+            "projections": source_fragment_repairs,
+            "errors": source_fragment_errors,
         })
     reviews = copy.deepcopy(projected_response.get("clause_reviews") or []) if isinstance(projected_response, dict) else []
     requirements = projected_response.get("requirements") or [] if isinstance(projected_response, dict) else []
@@ -2516,6 +2566,10 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
             req["reason"] = reason.strip()
             if field_instance_ids:
                 req["field_instance_ids"] = field_instance_ids
+            if "source_fragment_clause_ids" in item:
+                req["source_fragment_clause_ids"] = copy.deepcopy(
+                    item["source_fragment_clause_ids"]
+                )
             for field in ("applicability", "input_prerequisites", "verification"):
                 if field in item:
                     req[field] = copy.deepcopy(item[field])
@@ -2720,6 +2774,10 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
                    "reason": reason.strip()}
             if field_instance_ids:
                 req["field_instance_ids"] = list(field_instance_ids)
+            if "source_fragment_clause_ids" in item:
+                req["source_fragment_clause_ids"] = copy.deepcopy(
+                    item["source_fragment_clause_ids"]
+                )
             for field in ("applicability", "input_prerequisites", "verification"):
                 if field in item:
                     req[field] = copy.deepcopy(item[field])
@@ -3127,6 +3185,11 @@ def _build_host_review_chunks(
         )
         if isinstance(full_request.get("runtime_context"), dict):
             chunk_request["runtime_context"] = copy.deepcopy(full_request["runtime_context"])
+        case_id = full_request.get("case_id")
+        if case_id is None and isinstance(full_request.get("runtime_context"), dict):
+            case_id = full_request["runtime_context"].get("case_id")
+        if case_id is not None:
+            chunk_request["case_id"] = copy.deepcopy(case_id)
         chunk_request["source_continuity_context"] = _source_continuity_context(
             clauses, start, end,
         )

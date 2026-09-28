@@ -8,9 +8,11 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+from pathlib import Path
 from typing import Any
 
 from compliance import classification_requires_requirement
+from format_spec_validation import load_and_validate
 from host_review_contract import derived_requirement_indexes
 from semantic_contract import sha256_json
 from source_obligation_compiler import compile_known_source_obligations
@@ -43,6 +45,271 @@ def _stable_requirement_id(requirement: dict[str, Any]) -> str:
 def _canonical_requirement(requirement: dict[str, Any]) -> str:
     """Return the exact code-owned identity used for duplicate detection."""
     return json.dumps(requirement, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
+def _shadow_node_id(kind: str, response_sha256: str, identity: Any) -> str:
+    digest = sha256_json({
+        "protocol": "obligation_shadow_graph_v1",
+        "response_sha256": response_sha256,
+        "kind": kind,
+        "identity": identity,
+    })
+    return f"SG-{kind}-{digest[:24]}"
+
+
+def _obligation_shadow_graph(
+    response: dict[str, Any], clauses: list[dict[str, Any]],
+    clause_records: list[dict[str, Any]], requirements: list[Any],
+    requirement_ids: dict[int, str],
+    duplicate_groups: dict[str, list[int]],
+) -> dict[str, Any]:
+    """Build a run-bound analysis graph without changing requirements or gates.
+
+    Source facts, model-declared obligations, and executable requirements are
+    separate node types.  Cross-links are only emitted from explicit IDs or
+    code-owned compiler bindings; the graph never infers that two nodes are
+    semantically equivalent or that a declared checker actually ran.
+    """
+    response_sha256 = sha256_json(response)
+    provenance = response.get("provenance") if isinstance(response.get("provenance"), dict) else {}
+    binding = {
+        key: copy.deepcopy(provenance.get(key))
+        for key in ("run_id", "source_sha256", "clause_sha256", "evidence_sha256", "request_sha256")
+    }
+    binding.update({
+        "case_id": copy.deepcopy(response.get("case_id", provenance.get("case_id"))),
+        "school_id": copy.deepcopy(response.get("school_id", provenance.get("school_id"))),
+        "response_sha256": response_sha256,
+    })
+    clause_record_by_id = {
+        str(item.get("clause_id")): item for item in clause_records
+        if isinstance(item, dict) and isinstance(item.get("clause_id"), str)
+    }
+    clause_node_ids: dict[str, str] = {}
+    requirement_node_ids: dict[int, str] = {}
+    nodes: list[dict[str, Any]] = []
+    graph_edges: list[dict[str, Any]] = []
+    review_count = 0
+    model_obligation_count = 0
+    compiled_fact_count = 0
+
+    for clause in clauses:
+        if not isinstance(clause, dict) or not isinstance(clause.get("id"), str):
+            continue
+        clause_id = clause["id"]
+        record = clause_record_by_id.get(clause_id, {})
+        node_id = _shadow_node_id("clause", response_sha256, {
+            "clause_id": clause_id,
+            "source_text_sha256": record.get("source_text_sha256"),
+            "evidence_ids": clause.get("evidence_ids") or [],
+        })
+        clause_node_ids[clause_id] = node_id
+        reviewed = isinstance(record.get("classification"), str)
+        review_count += int(reviewed)
+        nodes.append({
+            "node_id": node_id,
+            "node_type": "source_clause",
+            "source_ref": {
+                "clause_id": clause_id,
+                "source_text_sha256": record.get("source_text_sha256"),
+                "evidence_ids": copy.deepcopy(clause.get("evidence_ids") or []),
+            },
+            "dimensions": {
+                "source_kind": clause.get("source_kind") or "not_declared",
+                "force": "not_assessed",
+                "applicability": "not_declared",
+                "execution_method": "not_declared",
+                # Review classification is not evidence that the operation
+                # ran. Keep execution separate from the review disposition.
+                "execution_status": "not_executed_here",
+                "verification_status": "not_assessed",
+                "importance": "not_assessed",
+            },
+            "record": {
+                "review_classification": record.get("classification"),
+                "source_obligation_inventory_complete": False,
+                "obligation_decomposition": record.get("obligation_decomposition", "not_supplied"),
+            },
+        })
+
+    for clause_record in clause_records:
+        clause_id = clause_record.get("clause_id")
+        clause_node_id = clause_node_ids.get(str(clause_id))
+        if not clause_node_id:
+            continue
+        for index, obligation in enumerate(clause_record.get("obligations") or []):
+            model_obligation_count += 1
+            node_id = _shadow_node_id("model-obligation", response_sha256, {
+                "clause_id": clause_id, "index": index, "record": obligation,
+            })
+            nodes.append({
+                "node_id": node_id,
+                "node_type": "model_declared_obligation",
+                "source_ref": {"clause_id": clause_id},
+                "dimensions": {
+                    "source_kind": "model_decomposition",
+                    "force": "not_assessed",
+                    "applicability": "not_declared",
+                    "execution_method": "not_declared",
+                    "execution_status": "not_executed_here",
+                    "verification_status": "not_assessed",
+                    "importance": "not_assessed",
+                },
+                "record": copy.deepcopy(obligation) if isinstance(obligation, dict) else {"value": obligation},
+            })
+            graph_edges.append({
+                "from_node_id": node_id,
+                "to_node_id": clause_node_id,
+                "relation": "model_declares_obligation_for_clause",
+                "authority": "accepted_clause_reviews_obligations",
+                "status": "source_attribution_only",
+            })
+        for fact_index, fact in enumerate(clause_record.get("source_obligation_inventory") or []):
+            compiled_fact_count += 1
+            node_id = _shadow_node_id("compiled-fact", response_sha256, {
+                "clause_id": clause_id, "index": fact_index,
+                "fact_id": fact.get("id") if isinstance(fact, dict) else fact,
+            })
+            nodes.append({
+                "node_id": node_id,
+                "node_type": "compiled_source_fact",
+                "source_ref": {"clause_id": clause_id},
+                "dimensions": {
+                    "source_kind": "code_compiler",
+                    "force": "not_assessed",
+                    "applicability": "not_declared",
+                    "execution_method": "not_declared",
+                    "execution_status": "candidate_only",
+                    "verification_status": "declared_only",
+                    "importance": "not_assessed",
+                },
+                "record": copy.deepcopy(fact) if isinstance(fact, dict) else {"value": fact},
+            })
+            graph_edges.append({
+                "from_node_id": node_id,
+                "to_node_id": clause_node_id,
+                "relation": "compiler_fact_compiled_from_clause",
+                "authority": "source_obligation_compiler",
+                "status": "code_recognized_fact_not_complete_inventory",
+            })
+
+    for index, requirement in enumerate(requirements):
+        if not isinstance(requirement, dict):
+            continue
+        requirement_id = requirement_ids.get(index)
+        node_id = _shadow_node_id("requirement", response_sha256, {
+            "response_index": index, "requirement_id": requirement_id,
+        })
+        requirement_node_ids[index] = node_id
+        applicability = requirement.get("applicability")
+        verification = requirement.get("verification")
+        declared_mode = verification.get("mode") if isinstance(verification, dict) else None
+        nodes.append({
+            "node_id": node_id,
+            "node_type": "requirement",
+            "source_ref": {
+                "requirement_id": requirement_id,
+                "response_index": index,
+                "clause_ids": copy.deepcopy(requirement.get("clause_ids") or []),
+                "evidence_ids": copy.deepcopy(requirement.get("evidence_ids") or []),
+            },
+            "dimensions": {
+                "source_kind": "accepted_host_requirement",
+                "force": "not_assessed",
+                "applicability": copy.deepcopy(applicability) if isinstance(applicability, dict) else "not_declared",
+                "execution_method": declared_mode or "not_declared",
+                "execution_status": "not_executed_here",
+                "verification_status": "declared_only" if isinstance(verification, dict) else "not_declared",
+                "importance": "not_assessed",
+            },
+            "record": {
+                "role": requirement.get("role"),
+                "field_key": requirement.get("field_key"),
+                "canonical_requirement_sha256": hashlib.sha256(
+                    _canonical_requirement(requirement).encode("utf-8")
+                ).hexdigest(),
+            },
+        })
+        for clause_id in requirement.get("clause_ids") or []:
+            clause_node_id = clause_node_ids.get(str(clause_id))
+            if clause_node_id:
+                graph_edges.append({
+                    "from_node_id": node_id,
+                    "to_node_id": clause_node_id,
+                    "relation": "requirement_explicitly_cites_clause",
+                    "authority": "requirements[].clause_ids",
+                    "status": "explicit_reference_not_semantic_equivalence",
+                })
+
+    # Compiler candidate bindings are intentionally labelled as candidates;
+    # they are not promoted into model-obligation coverage or execution proof.
+    fact_nodes_by_clause_and_id = {
+        (str(node.get("source_ref", {}).get("clause_id")), str(node.get("record", {}).get("id"))): node["node_id"]
+        for node in nodes if node.get("node_type") == "compiled_source_fact"
+    }
+    for clause_record in clause_records:
+        clause_id = str(clause_record.get("clause_id"))
+        for fact in clause_record.get("source_obligation_inventory") or []:
+            if not isinstance(fact, dict):
+                continue
+            fact_node_id = fact_nodes_by_clause_and_id.get((clause_id, str(fact.get("id"))))
+            for candidate in fact.get("candidate_requirement_bindings") or []:
+                requirement_index = candidate.get("requirement_index") if isinstance(candidate, dict) else None
+                requirement_node_id = requirement_node_ids.get(requirement_index) if isinstance(requirement_index, int) and not isinstance(requirement_index, bool) else None
+                if fact_node_id and requirement_node_id:
+                    graph_edges.append({
+                        "from_node_id": fact_node_id,
+                        "to_node_id": requirement_node_id,
+                        "relation": "compiler_candidate_requirement_binding",
+                        "authority": "compiler_role_and_property_path_match",
+                        "status": "candidate_requires_property_and_receipt_validation",
+                    })
+
+    count_by_type: dict[str, int] = {}
+    for node in nodes:
+        node_type = str(node.get("node_type"))
+        count_by_type[node_type] = count_by_type.get(node_type, 0) + 1
+    return {
+        "protocol": "obligation_shadow_graph_v1",
+        "schema_version": "1.0",
+        "status": "analysis_only",
+        "submission_ready": False,
+        "inventory_completeness": "incomplete_by_design",
+        "binding": binding,
+        "metrics": {
+            "source_clause_count": len(clause_node_ids),
+            "reviewed_clause_count": review_count,
+            "unreviewed_clause_count": max(0, len(clause_node_ids) - review_count),
+            "requirement_count": sum(isinstance(item, dict) for item in requirements),
+            "explicit_requirement_clause_edge_count": sum(
+                item.get("relation") == "requirement_explicitly_cites_clause" for item in graph_edges
+            ),
+            "model_declared_obligation_count": model_obligation_count,
+            "compiled_source_fact_count": compiled_fact_count,
+            "node_count_by_type": count_by_type,
+            "source_obligation_inventory_complete": False,
+            "model_obligation_inventory_complete": False,
+            "importance_assessment_complete": False,
+            "final_applicable_requirement_count": None,
+            "manual_marker_count": None,
+        },
+        "nodes": nodes,
+        "edges": graph_edges,
+        "equivalence_candidates": [
+            {
+                "requirement_id": requirement_id,
+                "response_indexes": list(indexes),
+                "comparison": "exact_canonical_requirement_only",
+                "disposition": "recorded_not_merged_by_shadow_graph",
+            }
+            for requirement_id, indexes in sorted(duplicate_groups.items()) if len(indexes) > 1
+        ],
+        "equivalence_policy": "no_semantic_equivalence_inference_or_pruning",
+        "manual_review_crosswalk": {
+            "status": "pending_pipeline_manual_review_projection",
+            "entries": [],
+        },
+    }
 
 
 def deduplicate_exact_requirements(
@@ -233,8 +500,29 @@ def build_semantic_review_ledger(
         clause_records.append(record)
 
     provenance = response.get("provenance") if isinstance(response.get("provenance"), dict) else None
+    ledger_response_sha256 = sha256_json(response)
+    shadow_graph = _obligation_shadow_graph(
+        response, clauses, clause_records, requirements, requirement_ids,
+        duplicate_groups,
+    )
+    schema_path = Path(__file__).resolve().parents[1] / "schema" / "obligation-shadow-graph.schema.json"
+    graph_errors = load_and_validate(shadow_graph, schema_path)
+    if graph_errors:
+        raise ValueError(
+            "generated obligation shadow graph failed schema validation: "
+            + "; ".join(graph_errors[:8])
+        )
+    node_ids = [item["node_id"] for item in shadow_graph["nodes"]]
+    if len(node_ids) != len(set(node_ids)):
+        raise ValueError("generated obligation shadow graph contains duplicate node IDs")
+    node_id_set = set(node_ids)
+    if any(
+        edge["from_node_id"] not in node_id_set or edge["to_node_id"] not in node_id_set
+        for edge in shadow_graph["edges"]
+    ):
+        raise ValueError("generated obligation shadow graph contains a dangling edge")
     return {
-        "schema_version": "1.2",
+        "schema_version": "1.3",
         "contract_version": response.get("contract_version"),
         "source_obligation_inventory_scope": "partial_machine_recognized_supplement",
         "source": "accepted_host_review_response",
@@ -281,5 +569,6 @@ def build_semantic_review_ledger(
             }
             for item in clause_records
         ],
-        "response_sha256": sha256_json(response),
+        "response_sha256": ledger_response_sha256,
+        "obligation_shadow_graph": shadow_graph,
     }

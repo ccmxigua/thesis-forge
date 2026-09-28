@@ -28,6 +28,7 @@ from source_obligation_compiler import (
     materialize_soft_keyword_count_guidance,
     materialize_known_source_verification,
 )
+from source_literal_binding import materialize_source_fragment_literals, normalize_clause_literal
 
 
 _GENERIC_SIGNATURE_LINE_PATTERNS = (
@@ -456,6 +457,12 @@ def contract_error_records(
             and empty_cover_institution(pointer_match.group(1) if pointer_match else None)
         ):
             code = "cover_institution_placeholder"
+        elif (
+            "source_fragment_clause_ids" in lowered
+            or "source_fragment_binding_required_for_cross_source_literal" in lowered
+            or "source_fragment_literal_conflict" in lowered
+        ):
+            code = "source_fragment_binding_violation"
         elif "normative_basis" in lowered:
             code = "normative_basis_invalid"
         elif "requirement_index_not_backed_by_clause" in lowered:
@@ -863,11 +870,8 @@ def validate_clause_source_spans(
         ):
             errors.append(f"{prefix}.source_sha256: does_not_match_current_evidence")
         clause_text = clause.get("text")
-        normalized_span = re.sub(r"\s+", " ", span_text).strip(" ，,、：:;；。和及")
-        normalized_clause = (
-            re.sub(r"\s+", " ", clause_text).strip(" ，,、：:;；。和及")
-            if isinstance(clause_text, str) else None
-        )
+        normalized_span = normalize_clause_literal(span_text)
+        normalized_clause = normalize_clause_literal(clause_text) if isinstance(clause_text, str) else None
         if normalized_clause != normalized_span:
             errors.append(f"{prefix}.text: does_not_match_clause_text")
         full_context = clause.get("source_text_full")
@@ -972,6 +976,11 @@ def _literal_text_source_binding_error(
             # the primary evidence for every linked clause has already been
             # checked above.
             return None
+    if len({evidence_id for _, evidence_id, _, _ in source_spans}) > 1:
+        return (
+            f"$.requirements[{index}].properties.text: "
+            "source_fragment_binding_required_for_cross_source_literal"
+        )
     return f"$.requirements[{index}].properties.text: must_be_exact_substring_of_cited_source_span"
 
 
@@ -1405,7 +1414,11 @@ def validate_response(response: Any, chunk: dict[str, Any]) -> list[str]:
     response, _ = materialize_soft_keyword_count_guidance(
         response, chunk.get("clauses"),
     )
+    response, _, source_fragment_errors = materialize_source_fragment_literals(
+        response, clauses, evidence_context,
+    )
     errors: list[str] = []
+    errors.extend(source_fragment_errors)
     errors.extend(_security_marking_qualifier_binding_errors(
         response, chunk.get("clauses"),
     ))
@@ -1603,6 +1616,7 @@ def validate_response(response: Any, chunk: dict[str, Any]) -> list[str]:
             text_schema = role_properties.get("text") if isinstance(role_properties, dict) else None
             if (
                 role not in _TOP_LEVEL_NON_TEXT_ROLES
+                and "source_fragment_clause_ids" not in item
                 and isinstance(text_schema, dict)
                 and text_schema.get("type") == "string"
                 and isinstance(item.get("properties"), dict)

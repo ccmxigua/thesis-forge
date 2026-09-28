@@ -34,6 +34,7 @@ PY = sys.executable
 PANDOC_BIN = os.environ.get("PANDOC") or shutil.which("pandoc") or "pandoc"
 sys.path.insert(0, str(ROOT / "scripts"))
 import apply_format_spec
+from manual_review import build_manual_review_ledger
 import format_contract_guards
 import requirements_engine
 from resource_registry import materialize_declaration_resources
@@ -1763,6 +1764,7 @@ b&=2\notag
             result = run_raw(
                 "scripts/thesis_format_pipeline.py", str(req), str(target), str(td / "output.docx"),
                 "--work-dir", str(td / "work"), "--prepare-host-review", "--host-review-chunk-size", "2",
+                "--case-id", "case-test",
             )
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
             manifest = json.loads((td / "work" / "pipeline-manifest.json").read_text())
@@ -1772,6 +1774,11 @@ b&=2\notag
             )
             self.assertEqual(review_manifest["protocol"], "host_agent_semantic_review")
             self.assertGreaterEqual(review_manifest["chunk_count"], 1)
+            chunks = json.loads(
+                (td / "work" / "requirements" / "llm-request-chunks.json").read_text()
+            )
+            self.assertTrue(chunks)
+            self.assertTrue(all(chunk["case_id"] == "case-test" for chunk in chunks))
             self.assertFalse((td / "output.docx").exists())
 
     def test_full_pipeline_rejects_rule_modes_before_work(self) -> None:
@@ -3212,6 +3219,118 @@ b&=2\notag
             report = json.loads((audit / "validation-report.json").read_text())
             self.assertEqual(report["content_instance_source_binding"]["status"], "validated")
 
+    def test_content_instance_style_override_uses_unique_source_location_for_duplicate_text(self) -> None:
+        from docx.enum.style import WD_STYLE_TYPE
+
+        doc = Document()
+        first = doc.add_paragraph("硕 士 学 位 论 文")
+        second = doc.add_paragraph("硕 士 学 位 论 文")
+        doc.styles.add_style("Targeted Cover Literal", WD_STYLE_TYPE.PARAGRAPH)
+        spec = {
+            "content_instances": [{
+                "id": "CFI-duplicate-title",
+                "field_key": "thesis_degree_label",
+                "role": "cover_field_label",
+                "text": "硕 士 学 位 论 文",
+                "style_properties": {},
+            }],
+        }
+        bindings = {
+            "CFI-duplicate-title": [{
+                "clause_id": "C2",
+                "evidence_id": "E2",
+                "start_offset": 0,
+                "end_offset": len("硕 士 学 位 论 文"),
+                "source_sha256": hashlib.sha256(
+                    "硕 士 学 位 论 文".encode("utf-8")
+                ).hexdigest(),
+                "text": "硕 士 学 位 论 文",
+                "source_kind": "paragraph",
+                "location": {"part": "document", "child_index": 1, "order": 1},
+            }],
+        }
+        audit = apply_format_spec.apply_content_instance_overrides(
+            doc, spec, {"cover_field_label": {"style_name": "Targeted Cover Literal"}}, bindings,
+        )
+        self.assertEqual(first.style.name, "Normal")
+        self.assertEqual(second.style.name, "Targeted Cover Literal")
+        self.assertEqual(audit[0]["match_count"], 1)
+        self.assertEqual(audit[0]["binding_policy"], "exact_source_location_or_unique_legacy_literal")
+
+    def test_content_instance_style_override_rejects_repeated_literal_in_target_paragraph(self) -> None:
+        doc = Document()
+        doc.add_paragraph("前文 A 中间 A")
+        source_text = "前文 A 中间 A"
+        second_occurrence = source_text.rfind("A")
+        spec = {"content_instances": [{
+            "id": "CFI-repeated-in-paragraph",
+            "field_key": "repeated_literal",
+            "role": "cover_field_label",
+            "text": "A",
+            "style_properties": {},
+        }]}
+        bindings = {"CFI-repeated-in-paragraph": [{
+            "clause_id": "C1",
+            "evidence_id": "E1",
+            "start_offset": second_occurrence,
+            "end_offset": second_occurrence + 1,
+            "source_sha256": hashlib.sha256(source_text.encode("utf-8")).hexdigest(),
+            "text": "A",
+            "source_kind": "paragraph",
+            "location": {"part": "document", "child_index": 0, "order": 0},
+        }]}
+
+        with self.assertRaisesRegex(ValueError, "not unique within its target paragraph"):
+            apply_format_spec.apply_content_instance_overrides(
+                doc, spec, {}, bindings,
+            )
+
+    def test_content_instance_style_override_rejects_stale_source_offset_or_paragraph(self) -> None:
+        doc = Document()
+        doc.add_paragraph("来源标题")
+        source_text = "来源标题"
+        spec = {"content_instances": [{
+            "id": "CFI-stale-source",
+            "field_key": "source_title",
+            "role": "cover_field_label",
+            "text": "标题",
+            "style_properties": {},
+        }]}
+        base_binding = {
+            "clause_id": "C1",
+            "evidence_id": "E1",
+            "start_offset": 2,
+            "end_offset": 4,
+            "source_sha256": hashlib.sha256(source_text.encode("utf-8")).hexdigest(),
+            "text": "标题",
+            "source_kind": "paragraph",
+            "location": {"part": "document", "child_index": 0, "order": 0},
+        }
+
+        bad_offset = {"CFI-stale-source": [{**base_binding, "start_offset": 1, "end_offset": 3}]}
+        with self.assertRaisesRegex(ValueError, "do not select the exact bound literal"):
+            apply_format_spec.apply_content_instance_overrides(
+                doc, spec, {}, bad_offset,
+            )
+
+        stale_source = {"CFI-stale-source": [{
+            **base_binding, "source_sha256": "0" * 64,
+        }]}
+        with self.assertRaisesRegex(ValueError, "does not match its bound evidence hash"):
+            apply_format_spec.apply_content_instance_overrides(
+                doc, spec, {}, stale_source,
+            )
+
+    def test_content_instance_style_override_rejects_duplicate_unlocated_literal(self) -> None:
+        doc = Document()
+        doc.add_paragraph("重复文本")
+        doc.add_paragraph("重复文本")
+        spec = {"content_instances": [{
+            "id": "CFI-unlocated", "role": "cover_field_label", "text": "重复文本",
+        }]}
+        with self.assertRaisesRegex(ValueError, "ambiguous unbound literal"):
+            apply_format_spec.apply_content_instance_overrides(doc, spec, {}, {})
+
     def test_content_instance_override_rejects_unbacked_manual_spec_literal(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             td = Path(td); source = td / "source.docx"; output = td / "output.docx"
@@ -3531,6 +3650,55 @@ b&=2\notag
         )
         self.assertEqual(preserved["text"], source)
 
+    def test_content_instance_registration_materializes_ordered_adjacent_source_fragments(self) -> None:
+        left = "硕 士 学 位 论 文"
+        right = "（学术学位）"
+        left_location = {"part": "document", "child_index": 4, "order": 3}
+        right_location = {"part": "document", "child_index": 5, "order": 4}
+        clause_map = {
+            "C1": {
+                "text": left, "source_evidence_text": left, "source_kind": "paragraph",
+                "location": left_location, "evidence_ids": ["E1"],
+                "source_span": {
+                    "evidence_id": "E1", "start_offset": 0, "end_offset": len(left),
+                    "text": left, "source_sha256": hashlib.sha256(left.encode()).hexdigest(),
+                    "location": left_location,
+                },
+            },
+            "C2": {
+                "text": right, "source_evidence_text": right, "source_kind": "paragraph",
+                "location": right_location, "evidence_ids": ["E2"],
+                "source_span": {
+                    "evidence_id": "E2", "start_offset": 0, "end_offset": len(right),
+                    "text": right, "source_sha256": hashlib.sha256(right.encode()).hexdigest(),
+                    "location": right_location,
+                },
+            },
+        }
+        instances = []
+        instance_id, error = requirements_engine._register_content_instance(
+            instances, {"field_key": "degree_label", "source_fragment_clause_ids": ["C1", "C2"]},
+            "cover_field_label", {"text": left + "\n" + right},
+            {"C1", "C2"}, {"E1", "E2"}, clause_map, "source-split degree label",
+        )
+        self.assertIsNone(error)
+        self.assertIsNotNone(instance_id)
+        self.assertEqual(instances[0]["source_fragment_clause_ids"], ["C1", "C2"])
+        self.assertEqual(
+            [item["location"] for item in instances[0]["source_fragments"]],
+            [left_location, right_location],
+        )
+        self.assertEqual(instances[0]["source_fragments"][1]["separator_before"], "\n")
+
+        clause_map["C2"]["location"]["child_index"] = 9
+        clause_map["C2"]["source_span"]["location"]["child_index"] = 9
+        _, invalid_error = requirements_engine._register_content_instance(
+            [], {"field_key": "degree_label", "source_fragment_clause_ids": ["C1", "C2"]},
+            "cover_field_label", {"text": left + "\n" + right},
+            {"C1", "C2"}, {"E1", "E2"}, clause_map, "unproven non-adjacent source label",
+        )
+        self.assertEqual(invalid_error["reason"], "source_fragment_binding_invalid")
+
     def test_same_literal_at_distinct_source_occurrences_stays_separately_bound(self) -> None:
         source = "分类号；分类号"
         source_sha = hashlib.sha256(source.encode("utf-8")).hexdigest()
@@ -3793,13 +3961,7 @@ b&=2\notag
                 "official_template_sha256": None,
                 "official_template_source": "not_supplied",
             }
-            ledger_value = {
-                "schema_version": "1.2",
-                "obligation_identity_protocol": "manual_review_obligation_v1",
-                "policy": "review_draft_only",
-                "binding": manual_binding,
-                "submission_ready": False, "items": [], "summary": {},
-            }
+            ledger_value = build_manual_review_ledger({}, [], binding=manual_binding)
             ledger_path.write_text(json.dumps(ledger_value, ensure_ascii=False), encoding="utf-8")
             pipeline_manifest_path = td / "pipeline-manifest.json"
             pipeline_manifest_path.write_text(json.dumps({

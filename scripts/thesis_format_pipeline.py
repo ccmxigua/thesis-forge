@@ -897,8 +897,15 @@ def _validate_independent_obligation_receipts(
                 )
             ):
                 raise ValueError("scope-unresolved receipt has no exact clause and cited evidence")
+            obligation_id = obligation.get("analysis_obligation_id")
+            analysis_identity = expected_identity_by_obligation_id.get(obligation_id)
+            if not isinstance(analysis_identity, dict):
+                raise ValueError(
+                    "scope-unresolved receipt has no reconstructed current-run obligation identity"
+                )
             scope_unresolved_items.append({
-                "analysis_obligation_id": obligation.get("analysis_obligation_id"),
+                "analysis_obligation_id": obligation_id,
+                "analysis_obligation_identity": copy.deepcopy(analysis_identity),
                 "work_type": obligation.get("work_type"),
                 "clause_id": check_id,
                 "source_ref": obligation.get("source_ref"),
@@ -1151,6 +1158,8 @@ def _source_content_pending_release_gates(
                 or not isinstance(analysis_identity, dict)
                 or analysis_identity != expected_identity
                 or independent_review.get("run_id") != expected_run_id
+                or not isinstance(identity_metadata["case_id"], str)
+                or not identity_metadata["case_id"].strip()
                 or isinstance(identity_metadata["chunk_index"], bool)
                 or not isinstance(identity_metadata["chunk_index"], int)
                 or identity_metadata["chunk_index"] <= 0
@@ -1337,6 +1346,8 @@ def _source_content_verification_release_gates(
                 not isinstance(expected_run_id, str) or not expected_run_id
                 or not isinstance(analysis_identity, dict)
                 or independent_review.get("run_id") != expected_run_id
+                or not isinstance(identity_metadata["case_id"], str)
+                or not identity_metadata["case_id"].strip()
                 or analysis_identity != identity_metadata
                 or isinstance(identity_metadata["chunk_index"], bool)
                 or not isinstance(identity_metadata["chunk_index"], int)
@@ -1385,6 +1396,7 @@ def _source_content_verification_release_gates(
                 "clause_ids": [clause_id],
                 "evidence_ids": [span_evidence_id],
                 "analysis_obligation_id": obligation_id,
+                "analysis_obligation_identity": copy.deepcopy(analysis_identity),
                 "work_type": "existing_content_verification",
                 "obligation_summary": summary,
                 "source_ref": source_ref,
@@ -1438,6 +1450,7 @@ def _scope_unresolved_release_gates(
             source_sha = item.get("source_text_sha256")
             source_ref = item.get("source_ref")
             source_location = item.get("source_location")
+            analysis_identity = item.get("analysis_obligation_identity")
             if isinstance(obligation_id, str) and obligation_id in seen_obligation_ids:
                 raise ValueError("duplicate scope-unresolved obligation")
             source_clause = clauses_by_id.get(clause_id) if isinstance(clause_id, str) else None
@@ -1471,6 +1484,25 @@ def _scope_unresolved_release_gates(
                     "end_offset": span_start + end,
                     "source_sha256": source_span["source_sha256"],
                 }
+            identity_metadata = {
+                "protocol": OBLIGATION_ANALYSIS_LEDGER_PROTOCOL,
+                "run_id": independent_review.get("run_id"),
+                "case_id": independent_review.get("case_id"),
+                "chunk_index": independent_review.get("chunk_index"),
+                "attempt": independent_review.get("attempt"),
+                "candidate_response_sha256": independent_review.get("candidate_response_sha256"),
+                "review_request_sha256": independent_review.get("review_request_sha256"),
+                "review_response_sha256": independent_review.get("review_response_sha256"),
+                "check_id": clause_id,
+                "obligation_index": (
+                    analysis_identity.get("obligation_index")
+                    if isinstance(analysis_identity, dict) else None
+                ),
+                "source_ref": source_ref,
+                "source_sha256": source_sha,
+                "start": start,
+                "end": end,
+            }
             if (
                 not isinstance(clause_id, str) or not clause_id
                 or not isinstance(obligation_id, str) or not re.fullmatch(r"AO-[0-9a-f]{24}", obligation_id)
@@ -1494,6 +1526,30 @@ def _scope_unresolved_release_gates(
                 or expected_location is None
                 or source_location != expected_location
                 or item.get("execution_authorized") is not False
+                or not isinstance(analysis_identity, dict)
+                or analysis_identity != identity_metadata
+                or not isinstance(identity_metadata["run_id"], str)
+                or not identity_metadata["run_id"]
+                or not isinstance(identity_metadata["case_id"], str)
+                or not identity_metadata["case_id"]
+                or isinstance(identity_metadata["chunk_index"], bool)
+                or not isinstance(identity_metadata["chunk_index"], int)
+                or identity_metadata["chunk_index"] <= 0
+                or isinstance(identity_metadata["attempt"], bool)
+                or not isinstance(identity_metadata["attempt"], int)
+                or identity_metadata["attempt"] <= 0
+                or isinstance(identity_metadata["obligation_index"], bool)
+                or not isinstance(identity_metadata["obligation_index"], int)
+                or identity_metadata["obligation_index"] < 0
+                or any(
+                    not isinstance(identity_metadata[field], str)
+                    or not re.fullmatch(r"[0-9a-f]{64}", identity_metadata[field])
+                    for field in (
+                        "candidate_response_sha256", "review_request_sha256",
+                        "review_response_sha256",
+                    )
+                )
+                or "AO-" + sha256_json(analysis_identity)[:24] != obligation_id
             ):
                 raise ValueError(
                     "validated scope-unresolved item is malformed, unbound to exact source, or executable"
@@ -1513,6 +1569,7 @@ def _scope_unresolved_release_gates(
                 "clause_ids": [clause_id],
                 "evidence_ids": sorted(set(evidence_ids)),
                 "analysis_obligation_id": obligation_id,
+                "analysis_obligation_identity": copy.deepcopy(analysis_identity),
                 "obligation_summary": summary,
                 "scope_dependency_codes": sorted(set(codes)),
                 "scope_dependency_dimensions": sorted(set(dimensions)),
@@ -2718,6 +2775,14 @@ def _main(argv: list[str]) -> int:
                 "placeholder_text": "【待提供：官方版式模板】",
             })
         host_review_receipts = manifest.get("host_review_receipts")
+        semantic_ledger_receipt = (
+            host_review_receipts.get("semantic_review_ledger")
+            if isinstance(host_review_receipts, dict) else None
+        )
+        semantic_review_ledger_sha256 = (
+            semantic_ledger_receipt.get("sha256")
+            if isinstance(semantic_ledger_receipt, dict) else None
+        )
         independent_reviews = (
             host_review_receipts.get("independent_obligation_reviews", [])
             if isinstance(host_review_receipts, dict) else []
@@ -2770,6 +2835,7 @@ def _main(argv: list[str]) -> int:
                 ),
                 "official_template_source": manifest["inputs"].get("official_template_source"),
             },
+            semantic_review_ledger_sha256=semantic_review_ledger_sha256,
         )
         # The ledger is a run product, but validate it against the checked-in
         # schema before exposing it to the DOCX stage.  A malformed sidecar
@@ -2789,6 +2855,9 @@ def _main(argv: list[str]) -> int:
         write_manual_review_ledger(manual_review_items_path, manual_review_ledger)
         manifest["manual_review_items"] = str(manual_review_items_path)
         manifest["manual_review_summary"] = manual_review_ledger.get("summary", {})
+        manifest["manual_review_crosswalk_sha256"] = sha256_json(
+            manual_review_ledger.get("obligation_crosswalk")
+        )
     satisfied_clause_ids = {
         str(item.get("clause_id")) for item in (capability_report or {}).get("clauses", [])
         if item.get("category") == "supported"
@@ -2938,6 +3007,9 @@ def _main(argv: list[str]) -> int:
             return 13
         write_manual_review_ledger(manual_review_items_path, manual_review_ledger)
         manifest["manual_review_summary"] = manual_review_ledger.get("summary", {})
+        manifest["manual_review_crosswalk_sha256"] = sha256_json(
+            manual_review_ledger.get("obligation_crosswalk")
+        )
     if (
         style_result.get("status") == "needs_clarification"
         and not args.allow_unresolved

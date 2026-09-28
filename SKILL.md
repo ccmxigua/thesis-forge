@@ -287,7 +287,7 @@ explicit East Asian font (`Noto Sans SC`); make that font available to the targe
 renderer and verify actual glyph rendering, not merely text extraction.
 The renderer must not replace Chinese explanations with English-only labels.
 
-The current sidecar contract is `manual-review-ledger.schema.json` 1.2 with
+The current sidecar contract is `manual-review-ledger.schema.json` 1.3 with
 `manual_review_obligation_v1`. Each atomic manual obligation receives a
 full-length `MO-<sha256>` identity derived from the current ledger binding and
 the complete canonical semantic obligation payload. Append-only `producer_records`
@@ -309,6 +309,26 @@ ledger and freshly audited DOCX, not merely item counts. None of these checks
 asserts that the upstream semantic source-obligation inventory is complete:
 when its producer says inventory is incomplete, preserve that fact and do not
 infer missing obligations downstream.
+
+Contract 3.0 also writes `obligation-shadow-graph_v1` inside the semantic
+review ledger. It is an analysis-only, current-response-bound projection of
+source clauses, model-declared obligation records, code-compiled source facts,
+and requirements. It preserves explicit clause links and compiler candidates
+without claiming semantic coverage, execution, or successful verification.
+Importance and force remain `not_assessed` unless a separately validated
+source supplies them; no requirement is removed or demoted from this graph.
+The graph is validated against `obligation-shadow-graph.schema.json` before it
+is persisted. The manual-review ledger separately records an AO→MO→MR
+crosswalk plus clause/requirement/question/evidence IDs copied from each same
+ledger item, binds it to the current manual-review binding and semantic-ledger
+digest, and keeps `submission_ready=false`. The DOCX marker must visibly retain
+any AO identity it references; this is identifier traceability, not proof that
+the human review has been completed.
+Every AO link must include its full obligation-analysis identity; the AO digest,
+run ID, case ID, clause, source reference, source hash, and selected range are
+recomputed and matched against the current manual item before the crosswalk is
+accepted. An unbound or stale AO is rejected rather than rendered as a current
+review obligation.
 
 Only code-owned role/property paths may anchor a marker beside source content.
 Table-related notes go outside the table. Free-text questions, measurements

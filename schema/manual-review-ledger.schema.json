@@ -2,9 +2,9 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://thesis-forge.local/schema/manual-review-ledger.schema.json",
   "type": "object",
-  "required": ["schema_version", "obligation_identity_protocol", "policy", "binding", "submission_ready", "items", "summary"],
+  "required": ["schema_version", "obligation_identity_protocol", "policy", "binding", "submission_ready", "items", "summary", "obligation_crosswalk"],
   "properties": {
-    "schema_version": {"const": "1.2"},
+    "schema_version": {"const": "1.3"},
     "obligation_identity_protocol": {"const": "manual_review_obligation_v1"},
     "policy": {"const": "review_draft_only"},
     "visual_policy": {
@@ -43,6 +43,50 @@
       "additionalProperties": false
     },
     "submission_ready": {"const": false},
+    "obligation_crosswalk": {
+      "type": "object",
+      "required": ["protocol", "schema_version", "status", "submission_ready", "binding_sha256", "semantic_review_ledger_sha256", "entries"],
+      "properties": {
+        "protocol": {"const": "manual_review_obligation_crosswalk_v1"},
+        "schema_version": {"const": "1.0"},
+        "status": {"const": "analysis_only"},
+        "submission_ready": {"const": false},
+        "binding_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "semantic_review_ledger_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+        "entries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["marker_id", "manual_obligation_id", "analysis_obligation_id", "analysis_obligation_identity_sha256", "clause_ids", "requirement_ids", "question_ids", "evidence_ids", "item_sha256", "link_basis", "status"],
+            "properties": {
+              "marker_id": {"type": "string", "pattern": "^MR-[0-9]{4}$"},
+              "manual_obligation_id": {"type": "string", "pattern": "^MO-[0-9a-f]{64}$"},
+              "analysis_obligation_id": {"type": ["string", "null"], "pattern": "^AO-[0-9a-f]{24}$"},
+              "analysis_obligation_identity_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+              "clause_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+              "requirement_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+              "question_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+              "evidence_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+              "item_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "link_basis": {"const": "explicit_identifiers_from_same_ledger_item"},
+              "status": {"const": "pending_manual_review"}
+            },
+            "additionalProperties": false,
+            "allOf": [
+              {
+                "if": {"properties": {"analysis_obligation_id": {"type": "string"}}, "required": ["analysis_obligation_id"]},
+                "then": {"properties": {"analysis_obligation_identity_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}}}
+              },
+              {
+                "if": {"properties": {"analysis_obligation_id": {"type": "null"}}, "required": ["analysis_obligation_id"]},
+                "then": {"properties": {"analysis_obligation_identity_sha256": {"type": "null"}}}
+              }
+            ]
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "items": {
       "type": "array",
       "items": {
@@ -86,6 +130,31 @@
           "release_gate": {"type": "boolean"},
           "original_blocking": {"type": "boolean"},
           "analysis_obligation_id": {"type": "string", "pattern": "^AO-[0-9a-f]{24}$"},
+          "analysis_obligation_identity": {
+            "type": "object",
+            "required": [
+              "protocol", "run_id", "case_id", "chunk_index", "attempt",
+              "candidate_response_sha256", "review_request_sha256", "review_response_sha256",
+              "check_id", "obligation_index", "source_ref", "source_sha256", "start", "end"
+            ],
+            "properties": {
+              "protocol": {"const": "obligation_analysis_ledger_v2"},
+              "run_id": {"type": "string", "minLength": 1},
+              "case_id": {"type": "string", "minLength": 1},
+              "chunk_index": {"type": "integer", "minimum": 1},
+              "attempt": {"type": "integer", "minimum": 1},
+              "candidate_response_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "review_request_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "review_response_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "check_id": {"type": "string", "minLength": 1},
+              "obligation_index": {"type": "integer", "minimum": 0},
+              "source_ref": {"type": "string", "minLength": 1},
+              "source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "start": {"type": "integer", "minimum": 0},
+              "end": {"type": "integer", "minimum": 1}
+            },
+            "additionalProperties": false
+          },
           "work_type": {
             "enum": [
               "format_execution",
@@ -142,9 +211,13 @@
               "required": [
                 "obligation_summary", "work_type", "source_ref", "source_start",
                 "source_end", "source_text_sha256", "source_location",
-                "execution_authorized"
+                "execution_authorized", "analysis_obligation_identity"
               ]
             }
+          },
+          {
+            "if": {"required": ["analysis_obligation_identity"]},
+            "then": {"required": ["analysis_obligation_id"]}
           },
           {
             "if": {"properties": {"work_type": {"const": "scope_clarification"}}, "required": ["work_type"]},

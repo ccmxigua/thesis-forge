@@ -56,6 +56,7 @@ class HostReviewCommitMarkerTests(unittest.TestCase):
             "id": "E1", "text": source_text, "kind": "paragraph",
         }]}
         request = engine.build_llm_request([], clauses, evidence, {}, "full")
+        request["case_id"] = "bsu"
         request = attach_request_provenance(
             request, source_sha256="a" * 64, evidence_doc=evidence,
             clauses=clauses, run_id="commit-marker-test-run",

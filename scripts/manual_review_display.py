@@ -34,6 +34,7 @@ MANUAL_REVIEW_RED = RGBColor(0xC0, 0x00, 0x00)
 MANUAL_REVIEW_CJK_FONT = "Noto Sans SC"
 MARKER_START = re.compile(r"^【(MR-\d{4})｜人工待审】")
 OBLIGATION_ID = re.compile(r"MO-[0-9a-f]{64}")
+ANALYSIS_OBLIGATION_ID = re.compile(r"AO-[0-9a-f]{24}")
 DISPLAY_STYLES = {MANUAL_REVIEW_STYLE, MANUAL_REVIEW_PLACEHOLDER_STYLE}
 _W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 
@@ -143,12 +144,19 @@ def _text(item: dict[str, Any]) -> str:
         return value if len(value) <= limit else value[:limit] + "…（完整内容见审查记录）"
 
     placeholder = str(item.get("placeholder_text") or "【待人工处理：请核对本项】")
+    analysis_obligation_id = item.get("analysis_obligation_id")
+    analysis_ref = (
+        f"\n分析义务编号：{analysis_obligation_id}"
+        if isinstance(analysis_obligation_id, str) and analysis_obligation_id not in placeholder
+        else ""
+    )
     clauses = ", ".join(str(v) for v in item.get("clause_ids", []))
     questions = ", ".join(str(v) for v in item.get("question_ids", []))
     evidence = ", ".join(str(v) for v in item.get("evidence_ids", []))
     return (
         f"【{item['marker_id']}｜人工待审】{placeholder}"
         + f"\n义务编号：{item['manual_obligation_id']}"
+        + analysis_ref
         + (f"\n条款：{clauses}" if clauses else "")
         + (f"\n问题编号：{questions}" if questions else "")
         + (f"\n证据编号：{evidence}" if evidence else "")
@@ -372,6 +380,7 @@ def audit_manual_review_markers(path: Path, ledger: dict[str, Any]) -> dict[str,
     source_binding_errors = []
     payload_errors = []
     obligation_binding_errors = []
+    analysis_obligation_binding_errors = []
     marker_text: dict[str, str] = {}
     marker_locations: dict[str, str] = {}
     doc = Document(path)
@@ -411,6 +420,10 @@ def audit_manual_review_markers(path: Path, ledger: dict[str, Any]) -> dict[str,
         obligation_ids_in_marker = OBLIGATION_ID.findall(paragraph_text)
         if obligation_ids_in_marker != [item["manual_obligation_id"]]:
             obligation_binding_errors.append(marker_id)
+        analysis_obligation_id = item.get("analysis_obligation_id")
+        expected_analysis_ids = [analysis_obligation_id] if isinstance(analysis_obligation_id, str) else []
+        if ANALYSIS_OBLIGATION_ID.findall(paragraph_text) != expected_analysis_ids:
+            analysis_obligation_binding_errors.append(marker_id)
         question_ids = sorted(str(value) for value in item.get("question_ids", []) if value)
         evidence_ids = sorted(str(value) for value in item.get("evidence_ids", []) if value)
         expected_refs = (
@@ -422,6 +435,7 @@ def audit_manual_review_markers(path: Path, ledger: dict[str, Any]) -> dict[str,
         marker_bindings.append({
             "marker_id": marker_id,
             "manual_obligation_id": item["manual_obligation_id"],
+            "analysis_obligation_id": analysis_obligation_id,
             "category": item.get("category"),
             "question_ids": question_ids,
             "evidence_ids": evidence_ids,
@@ -444,6 +458,7 @@ def audit_manual_review_markers(path: Path, ledger: dict[str, Any]) -> dict[str,
         "valid": not (
             missing or extra or duplicate or style_errors or source_binding_errors
             or payload_errors or obligation_binding_errors or missing_obligation_ids
+            or analysis_obligation_binding_errors
             or unexpected_obligation_ids or duplicate_obligation_ids or obligation_scan_errors
         ),
         "expected_count": len(expected), "visible_marker_count": sum(counts.values()),
@@ -452,6 +467,7 @@ def audit_manual_review_markers(path: Path, ledger: dict[str, Any]) -> dict[str,
         "source_binding_errors": sorted(set(source_binding_errors)),
         "payload_errors": sorted(set(payload_errors)),
         "obligation_binding_errors": sorted(set(obligation_binding_errors)),
+        "analysis_obligation_binding_errors": sorted(set(analysis_obligation_binding_errors)),
         "missing_obligation_ids": missing_obligation_ids,
         "unexpected_obligation_ids": unexpected_obligation_ids,
         "duplicate_obligation_ids": duplicate_obligation_ids,

@@ -12,7 +12,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import host_agent_bridge as bridge  # noqa: E402
-from format_spec_validation import schema_support_errors, validate_instance  # noqa: E402
+from format_spec_validation import load_and_validate, schema_support_errors, validate_instance  # noqa: E402
 from host_review_contract import (  # noqa: E402
     HOST_REVIEW_CONTRACT_V3,
     _abstract_obligation_gaps,
@@ -210,6 +210,7 @@ class HostReviewV3Tests(unittest.TestCase):
             "bad_offset": lambda clause: clause["source_span"].update(end_offset=999),
             "bad_hash": lambda clause: clause["source_span"].update(source_sha256="0" * 64),
             "changed_span_text": lambda clause: clause["source_span"].update(text="伪造来源"),
+            "lexical_conjunction_added_to_clause": lambda clause: clause.update(text=clause["text"] + "和"),
         }
         for label, mutate in mutations.items():
             with self.subTest(label=label):
@@ -311,7 +312,7 @@ class HostReviewV3Tests(unittest.TestCase):
             optionality["candidate_requirement_bindings"][0]["requirement_id"],
             ledger["requirements"][0]["requirement_id"],
         )
-        self.assertEqual(ledger["schema_version"], "1.2")
+        self.assertEqual(ledger["schema_version"], "1.3")
 
         invalid = json.loads(json.dumps(response))
         invalid["requirements"][0]["properties"]["continuation"][
@@ -1044,6 +1045,56 @@ class HostReviewV3Tests(unittest.TestCase):
         self.assertEqual(
             ledger["response_sha256"],
             build_semantic_review_ledger(response, self.clauses)["response_sha256"],
+        )
+
+    def test_obligation_shadow_graph_is_bound_analysis_only_and_keeps_dimensions_separate(self) -> None:
+        response = self._executable_response()
+        ledger = build_semantic_review_ledger(response, self.clauses)
+        graph = ledger["obligation_shadow_graph"]
+        self.assertEqual(load_and_validate(
+            graph, ROOT / "schema" / "obligation-shadow-graph.schema.json",
+        ), [])
+        self.assertFalse(graph["submission_ready"])
+        self.assertEqual(graph["status"], "analysis_only")
+        self.assertEqual(graph["inventory_completeness"], "incomplete_by_design")
+        self.assertEqual(graph["binding"]["response_sha256"], ledger["response_sha256"])
+        self.assertEqual(graph["binding"]["run_id"], "run-v3-test")
+        self.assertEqual(graph["manual_review_crosswalk"]["entries"], [])
+        self.assertTrue(all(
+            node["dimensions"]["importance"] == "not_assessed"
+            for node in graph["nodes"]
+        ))
+        clause_node = next(node for node in graph["nodes"] if node["node_type"] == "source_clause")
+        self.assertEqual(clause_node["dimensions"]["execution_status"], "not_executed_here")
+        self.assertEqual(clause_node["record"]["review_classification"], "executable")
+        requirement_node = next(node for node in graph["nodes"] if node["node_type"] == "requirement")
+        self.assertEqual(requirement_node["dimensions"]["execution_method"], "word_render")
+        self.assertEqual(requirement_node["dimensions"]["execution_status"], "not_executed_here")
+        explicit_edges = [
+            edge for edge in graph["edges"]
+            if edge["relation"] == "requirement_explicitly_cites_clause"
+        ]
+        self.assertEqual(len(explicit_edges), 1)
+        self.assertTrue(any(
+            edge["relation"] == "model_declares_obligation_for_clause"
+            for edge in graph["edges"]
+        ))
+        graph_nodes = {node["node_id"]: node for node in graph["nodes"]}
+        self.assertFalse(any(
+            graph_nodes[edge["from_node_id"]]["node_type"] == "model_declared_obligation"
+            and graph_nodes[edge["to_node_id"]]["node_type"] == "requirement"
+            for edge in graph["edges"]
+        ))
+        self.assertEqual(graph["metrics"]["requirement_count"], 1)
+        self.assertEqual(graph["metrics"]["explicit_requirement_clause_edge_count"], 1)
+
+        changed = copy.deepcopy(response)
+        changed["clause_reviews"][0]["reason"] += " changed"
+        changed_graph = build_semantic_review_ledger(changed, self.clauses)["obligation_shadow_graph"]
+        self.assertNotEqual(graph["binding"]["response_sha256"], changed_graph["binding"]["response_sha256"])
+        self.assertNotEqual(
+            {node["node_id"] for node in graph["nodes"]},
+            {node["node_id"] for node in changed_graph["nodes"]},
         )
 
     def test_ledger_requirement_ids_survive_response_reordering(self) -> None:

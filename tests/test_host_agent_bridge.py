@@ -1284,6 +1284,8 @@ class HostAgentBridgeTests(unittest.TestCase):
         self.assertIn("require_after_role", prompt)
         self.assertIn("A single clause may support multiple requirements", prompt)
         self.assertIn("Role boundary for equations", prompt)
+        self.assertIn("The bridge materializes heading/body_parts", prompt)
+        self.assertIn("do not copy normalized clause fragments or repeat an evidence paragraph", prompt)
         self.assertIn("partial_clause_coverage error never authorizes changing classification", prompt)
         retry = bridge._host_prompt(
             request_path=Path("request.json"),
@@ -5491,6 +5493,150 @@ class HostAgentBridgeTests(unittest.TestCase):
         })
         self.assertEqual(packet["fixed_declaration_candidates"][0]["clause_ids"], ["C1", "C2"])
         self.assertEqual(packet["fixed_declaration_candidates"][0]["before_role"], "abstract_title_zh")
+
+    def test_fixed_declaration_materialization_restores_source_paragraphs_and_deduplicates_split_evidence(self) -> None:
+        source = {
+            "clauses": [
+                {
+                    "id": "C1", "text": "学位论文使用授权书",
+                    "source_text_full": "学位论文使用授权书",
+                    "evidence_ids": ["E1"],
+                },
+                {
+                    "id": "C2", "text": "第一段正文",
+                    "source_text_full": "第一段正文。",
+                    "evidence_ids": ["E2"],
+                },
+                {
+                    "id": "C3", "text": "第二段前半部分",
+                    "source_text_full": "第二段前半部分；第二段后半部分；",
+                    "evidence_ids": ["E3"],
+                },
+                {
+                    "id": "C4", "text": "第二段后半部分",
+                    "source_text_full": "第二段前半部分；第二段后半部分；",
+                    "evidence_ids": ["E3"],
+                },
+                {
+                    "id": "C5", "text": "摘要", "evidence_ids": ["E4"],
+                },
+            ],
+            "evidence_context": {
+                "E1": {"id": "E1", "text": "学位论文使用授权书"},
+                "E2": {"id": "E2", "text": "第一段正文。"},
+                "E3": {"id": "E3", "text": "第二段前半部分；第二段后半部分；"},
+                "E4": {"id": "E4", "text": "摘要"},
+            },
+            "declaration_anchor_preference": "abstract_title_zh",
+            "provenance": {
+                "run_id": "run-declaration-materialization",
+                "case_id": "case-declaration-materialization",
+                "source_sha256": "a" * 64,
+                "clause_sha256": "b" * 64,
+                "evidence_sha256": "c" * 64,
+                "request_sha256": "d" * 64,
+                "chunk_sha256": "e" * 64,
+            },
+        }
+        candidate = bridge._fixed_declaration_candidates(
+            source["clauses"], source["evidence_context"],
+            anchor=source["declaration_anchor_preference"],
+        )[0]
+        self.assertEqual(candidate["clause_ids"], ["C1", "C2", "C3", "C4"])
+        self.assertEqual(candidate["body_evidence_ids"], ["E2", "E3"])
+
+        response = {
+            "requirements": [{
+                "role": "declarations",
+                "existing_requirement_id": None,
+                "clause_ids": ["C1", "C2", "C3", "C4"],
+                "evidence_ids": ["E1", "E2", "E3"],
+                "properties": {
+                    "before_role": "abstract_title_zh",
+                    "items": [{
+                        "id": "authorization",
+                        "heading": "学位论文使用授权书",
+                        "body": None,
+                        "body_parts": ["第一段正文", "第二段前半部分", "第二段后半部分"],
+                        "source_evidence_ids": ["E1", "E2", "E3"],
+                        "signature_placeholders": [],
+                    }],
+                },
+            }],
+            "clause_reviews": [
+                {"clause_id": clause_id, "classification": "executable"}
+                for clause_id in ("C1", "C2", "C3", "C4")
+            ],
+        }
+        projected, audits = bridge._materialize_fixed_declaration_source_text(response, source)
+        item = projected["requirements"][0]["properties"]["items"][0]
+        self.assertEqual(item["heading"], "学位论文使用授权书")
+        self.assertEqual(item["body_parts"], ["第一段正文。", "第二段前半部分；第二段后半部分；"])
+        self.assertEqual(len(audits), 1)
+        self.assertEqual(audits[0]["rule_id"], "fixed_declaration_source_text_materialization_v1")
+        self.assertEqual(audits[0]["run_id"], "run-declaration-materialization")
+        self.assertEqual(audits[0]["body_evidence_ids"], ["E2", "E3"])
+        self.assertEqual(
+            response["requirements"][0]["properties"]["items"][0]["body_parts"],
+            ["第一段正文", "第二段前半部分", "第二段后半部分"],
+        )
+
+        retried_raw = json.loads(json.dumps(response))
+        retried_raw["requirements"][0]["properties"]["items"][0]["body_parts"] = [
+            "第一段正文。", "第二段前半部分；第二段后半部分；",
+            "第二段前半部分；第二段后半部分；",
+        ]
+        parent_comparison, _ = bridge._materialize_fixed_declaration_source_text(response, source)
+        retry_comparison, _ = bridge._materialize_fixed_declaration_source_text(retried_raw, source)
+        error, changed_paths = bridge._retry_semantic_change_error(
+            response, retried_raw, [],
+            contract_version=bridge.HOST_REVIEW_CONTRACT_V3,
+            chunk=source,
+            comparison_previous_response=parent_comparison,
+            comparison_current_response=retry_comparison,
+        )
+        self.assertIsNone(error)
+        self.assertEqual(changed_paths, [])
+
+    def test_fixed_declaration_materialization_refuses_unbound_model_text_or_citations(self) -> None:
+        source = {
+            "clauses": [
+                {"id": "C1", "text": "学位论文使用授权书", "evidence_ids": ["E1"]},
+                {"id": "C2", "text": "固定正文", "evidence_ids": ["E2"]},
+                {"id": "C3", "text": "摘要", "evidence_ids": ["E3"]},
+            ],
+            "evidence_context": {
+                "E1": {"id": "E1", "text": "学位论文使用授权书"},
+                "E2": {"id": "E2", "text": "固定正文。"},
+                "E3": {"id": "E3", "text": "摘要"},
+            },
+            "declaration_anchor_preference": "abstract_title_zh",
+        }
+        response = {
+            "requirements": [{
+                "role": "declarations", "existing_requirement_id": None,
+                "clause_ids": ["C1", "C2"], "evidence_ids": ["E1", "E2"],
+                "properties": {"before_role": "abstract_title_zh", "items": [{
+                    "id": "authorization", "heading": "学位论文使用授权书",
+                    "body": None, "body_parts": ["模型编造正文"],
+                    "source_evidence_ids": ["E1", "E2"],
+                    "signature_placeholders": [],
+                }]},
+            }],
+            "clause_reviews": [
+                {"clause_id": "C1", "classification": "executable"},
+                {"clause_id": "C2", "classification": "executable"},
+            ],
+        }
+        unchanged, audits = bridge._materialize_fixed_declaration_source_text(response, source)
+        self.assertEqual(unchanged, response)
+        self.assertEqual(audits, [])
+
+        bad_citation = json.loads(json.dumps(response))
+        bad_citation["requirements"][0]["evidence_ids"] = ["E1"]
+        unchanged, audits = bridge._materialize_fixed_declaration_source_text(bad_citation, source)
+        self.assertEqual(unchanged, bad_citation)
+        self.assertEqual(audits, [])
 
     def test_non_public_declaration_heading_is_derived_from_exact_chunk_evidence(self) -> None:
         packet = bridge.compact_model_packet({

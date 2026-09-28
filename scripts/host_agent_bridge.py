@@ -388,10 +388,10 @@ def _fixed_declaration_candidates(
 ) -> list[dict[str, Any]]:
     """Derive exact fixed-declaration groups from the current evidence.
 
-    This is only an evidence grouping hint for the host model.  It never
-    invents declaration text, assigns a semantic role to arbitrary prose, or
-    changes a clause classification.  The final response validator still
-    requires the emitted declaration text to equal the cited evidence.
+    This derives the current source grouping only; it never invents
+    declaration text, assigns a semantic role to arbitrary prose, or changes
+    a clause classification.  After the model selects a matching grouping,
+    the bridge materializes fixed text from these exact evidence records.
     """
     if not isinstance(clauses, list) or not isinstance(evidence_context, dict):
         return []
@@ -450,16 +450,199 @@ def _fixed_declaration_candidates(
             "body_clause_ids": [item.get("id") for item in body_clauses],
             "clause_ids": [item.get("id") for item in clauses_in_group],
             "heading_evidence_ids": [str(value) for value in clause.get("evidence_ids", [])],
-            "body_evidence_ids": [
+            # A source paragraph may be split into multiple normalized
+            # clauses.  Keep the clause IDs for semantic coverage, but expose
+            # each exact evidence paragraph only once for fixed-text
+            # materialization.
+            "body_evidence_ids": list(dict.fromkeys(
                 str(value)
                 for item in body_clauses
                 for value in item.get("evidence_ids", [])
-            ],
+            )),
             "evidence_ids": list(dict.fromkeys(evidence_ids)),
             "before_role": anchor,
-            "policy": "copy exact cited heading/body text; do not paraphrase",
+            "policy": "select exact clause/evidence grouping; host materializes each unique cited source paragraph once",
         })
     return candidates
+
+
+def _materialize_fixed_declaration_source_text(
+    response: Any, chunk: dict[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Project fixed declaration literals from exact current-run evidence.
+
+    The provider selects the declaration candidate through its exact ordered
+    clause/evidence binding.  Text in a declaration is then code-owned: one
+    source paragraph can back multiple normalized clauses, so asking the
+    model to copy per-clause fragments can drop punctuation or duplicate a
+    paragraph on retry.  This projection accepts only source-backed candidate
+    literals and never changes the selected role, item identity, links,
+    insertion anchor, placeholders, or clause dispositions.
+    """
+    if (
+        not isinstance(response, dict)
+        or not isinstance(response.get("requirements"), list)
+        or not isinstance(chunk.get("clauses"), list)
+        or not isinstance(chunk.get("evidence_context"), dict)
+    ):
+        return response, []
+
+    clauses = chunk["clauses"]
+    evidence_context = chunk["evidence_context"]
+    candidates = _fixed_declaration_candidates(
+        clauses, evidence_context,
+        anchor=chunk.get("declaration_anchor_preference"),
+    )
+    if not candidates:
+        return response, []
+    candidate_by_clause_ids = {
+        tuple(str(value) for value in candidate.get("clause_ids", [])): candidate
+        for candidate in candidates
+    }
+    clause_by_id = {
+        str(item.get("id")): item
+        for item in clauses
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    reviews_by_id = {
+        str(item.get("clause_id")): item
+        for item in response.get("clause_reviews", [])
+        if isinstance(item, dict) and isinstance(item.get("clause_id"), str)
+    }
+    projected = copy.deepcopy(response)
+    audits: list[dict[str, Any]] = []
+    provenance = chunk.get("provenance")
+    provenance = provenance if isinstance(provenance, dict) else {}
+
+    for requirement_index, requirement in enumerate(projected["requirements"]):
+        if not isinstance(requirement, dict) or requirement.get("role") != "declarations":
+            continue
+        raw_clause_ids = requirement.get("clause_ids")
+        if not isinstance(raw_clause_ids, list) or not all(
+            isinstance(value, str) for value in raw_clause_ids
+        ):
+            continue
+        candidate = candidate_by_clause_ids.get(tuple(raw_clause_ids))
+        if candidate is None:
+            continue
+        candidate_clause_ids = list(candidate.get("clause_ids", []))
+        if any(
+            reviews_by_id.get(clause_id, {}).get("classification")
+            not in {"covered", "executable", "verify_existing"}
+            for clause_id in candidate_clause_ids
+        ):
+            continue
+        if requirement.get("evidence_ids") != candidate.get("evidence_ids"):
+            continue
+        properties = requirement.get("properties")
+        if (
+            not isinstance(properties, dict)
+            or properties.get("before_role") != candidate.get("before_role")
+            or requirement.get("existing_requirement_id") not in (None, "")
+        ):
+            continue
+        items = properties.get("items")
+        if not isinstance(items, list) or len(items) != 1 or not isinstance(items[0], dict):
+            continue
+        item = items[0]
+        if (
+            item.get("source_evidence_ids") != candidate.get("evidence_ids")
+            or item.get("body") not in (None, "")
+            or not isinstance(item.get("heading"), str)
+            or not isinstance(item.get("body_parts"), list)
+            or not all(isinstance(value, str) for value in item.get("body_parts", []))
+        ):
+            continue
+
+        heading_evidence_ids = list(candidate.get("heading_evidence_ids", []))
+        body_evidence_ids = list(candidate.get("body_evidence_ids", []))
+        if len(heading_evidence_ids) != 1 or not body_evidence_ids:
+            continue
+        heading_evidence = evidence_context.get(heading_evidence_ids[0])
+        if not isinstance(heading_evidence, dict):
+            continue
+        expected_heading = heading_evidence.get("text")
+        if not isinstance(expected_heading, str) or not expected_heading.strip():
+            continue
+
+        expected_body_parts: list[str] = []
+        evidence_text_hashes: list[dict[str, str]] = []
+        body_evidence_ids = list(dict.fromkeys(str(value) for value in body_evidence_ids))
+        for evidence_id in body_evidence_ids:
+            evidence = evidence_context.get(evidence_id)
+            if not isinstance(evidence, dict):
+                expected_body_parts = []
+                break
+            evidence_text = evidence.get("text")
+            if not isinstance(evidence_text, str) or not evidence_text.strip():
+                expected_body_parts = []
+                break
+            expected_body_parts.append(evidence_text)
+            evidence_text_hashes.append({
+                "evidence_id": evidence_id,
+                "text_sha256": hashlib.sha256(evidence_text.encode("utf-8")).hexdigest(),
+            })
+        if not expected_body_parts:
+            continue
+
+        # Do not turn this into a general text-repair path.  Every supplied
+        # literal must already be an exact source clause fragment or an exact
+        # current evidence paragraph; only the deterministic grouping and
+        # punctuation/fragment restoration are code-owned.
+        allowed_heading_literals = {expected_heading}
+        for clause_id in candidate_clause_ids[:1]:
+            source_clause = clause_by_id.get(clause_id, {})
+            for field in ("text", "source_text_full", "source_evidence_text"):
+                value = source_clause.get(field)
+                if isinstance(value, str) and value.strip():
+                    allowed_heading_literals.add(value)
+        allowed_body_literals = set(expected_body_parts)
+        body_clause_ids = set(str(value) for value in candidate.get("body_clause_ids", []))
+        for clause_id in body_clause_ids:
+            source_clause = clause_by_id.get(clause_id, {})
+            for field in ("text", "source_text_full", "source_evidence_text"):
+                value = source_clause.get(field)
+                if isinstance(value, str) and value.strip():
+                    allowed_body_literals.add(value)
+        if (
+            item.get("heading") not in allowed_heading_literals
+            or not item.get("body_parts")
+            or any(value not in allowed_body_literals for value in item["body_parts"])
+        ):
+            continue
+
+        before_heading = item["heading"]
+        before_body_parts = copy.deepcopy(item["body_parts"])
+        if before_heading == expected_heading and before_body_parts == expected_body_parts:
+            continue
+        before_sha256 = _response_sha256(projected)
+        item["heading"] = expected_heading
+        item["body_parts"] = expected_body_parts
+        after_sha256 = _response_sha256(projected)
+        audits.append({
+            "rule_id": "fixed_declaration_source_text_materialization_v1",
+            "rule_version": 1,
+            "requirement_index": requirement_index,
+            "run_id": provenance.get("run_id"),
+            "case_id": provenance.get("case_id"),
+            "source_sha256": provenance.get("source_sha256"),
+            "clause_sha256": provenance.get("clause_sha256"),
+            "evidence_sha256": provenance.get("evidence_sha256"),
+            "request_sha256": provenance.get("request_sha256"),
+            "chunk_sha256": provenance.get("chunk_sha256"),
+            "clause_ids": candidate_clause_ids,
+            "heading_evidence_ids": heading_evidence_ids,
+            "body_evidence_ids": body_evidence_ids,
+            "evidence_text_sha256": evidence_text_hashes,
+            "input_heading_sha256": hashlib.sha256(before_heading.encode("utf-8")).hexdigest(),
+            "input_body_parts_sha256": _response_sha256(before_body_parts),
+            "materialized_heading_sha256": hashlib.sha256(expected_heading.encode("utf-8")).hexdigest(),
+            "materialized_body_parts_sha256": _response_sha256(expected_body_parts),
+            "response_before_sha256": before_sha256,
+            "response_after_sha256": after_sha256,
+            "change_kind": "exact_source_evidence_grouping_and_deduplication",
+        })
+    return projected, audits
 
 
 def _compact_runtime_context(value: Any) -> dict[str, Any] | None:
@@ -505,7 +688,7 @@ _BASE_CONTRACT_REPAIR_RULES = (
     "For a cover requirement with an empty required institution string and the declared neutral placeholder policy, preserve the cover structure and use '——'; never copy a school name or infer an institution identity from nearby evidence.",
     "Do not fabricate evidence or guess a semantic classification. Make only the mechanical schema corrections required by the supplied error, then regenerate the complete response from the current chunk.",
     "Administrative approval/marking tables belong under cover.non_public_administration, must be conditional on thesis_profile.security_level with an equals or in condition selecting restricted/classified theses, and must be blank for public theses. If the current chunk contains only this administrative region, cover.fields may be an empty array; never duplicate administrative fields into ordinary cover.fields. Do not use not_equals as the executable binding. Bind approval-number and approval-date labels to approval_number and approval_date; never substitute classification_number or completion_date. When one visible 保密期限 label describes an explicit two-ended date range, preserve two distinct fields in source order: first embargo_start, then embargo_until; do not collapse both endpoints into embargo_until.",
-    "When the packet contains fixed_declaration_candidates, treat each candidate as an exact evidence grouping. If any candidate clause is classified executable/covered/verify_existing, emit one declarations requirement covering the candidate clause_ids, copy the cited heading/body text exactly, and preserve the supplied declaration anchor; never leave an executable declaration clause without a derived declarations requirement.",
+    "When the packet contains fixed_declaration_candidates, treat each candidate as an exact evidence grouping. If any candidate clause is classified executable/covered/verify_existing, emit one declarations requirement covering the exact ordered candidate clause_ids and evidence_ids, select the supplied declaration anchor, and preserve that grouping. The bridge materializes heading/body_parts from each unique cited source paragraph once; do not copy normalized clause fragments or duplicate evidence paragraphs. Never leave an executable declaration clause without a derived declarations requirement.",
     "Input prerequisite keys are namespace-bound by kind: metadata uses thesis_profile., source_content uses source_inventory., template_resource uses template_profile., and runtime uses runtime.; never emit runtime_context.* or invent an unregistered path.",
     "A clause can be executable only when every independently verifiable obligation is represented. Preserve language targets, units, limits, exceptions, and prohibited-content requirements; a partial requirement must be classified non-executable with requirement_indexes: [] rather than promoted to full coverage.",
     "A single clause may support multiple requirements when it contains obligations for different roles. Repeat the exact clause_id and cited evidence_ids in each semantically matching requirement; a continuation-table clause may therefore bind both table continuation and table_caption position/alignment. Do not hide one role's obligation inside another role or change classification merely because one role is incomplete.",
@@ -608,7 +791,7 @@ def _contract_repair_guidance(
         )
     if "complete cited source" in text or "shorten a source paragraph" in text or "paraphrase" in text:
         targeted.append(
-            "Every declaration heading and body_parts entry must equal a complete cited source-evidence text. Do not paraphrase or shorten fixed prose; omit heading for a continuation and preserve the complete source paragraph in body_parts."
+            "For a registered fixed-declaration candidate, preserve its exact clause/evidence grouping and anchor; the bridge materializes heading/body_parts from current evidence. Do not paraphrase, supply clause fragments, duplicate shared evidence, or edit fixed prose. For a declaration continuation without a current candidate, omit heading rather than guessing and preserve only source text whose exact role-native binding is provable."
         )
     unknown_property = re.search(r"unknown property ['\"]([^'\"]+)['\"]", text)
     if unknown_property:
@@ -4868,6 +5051,8 @@ def _retry_semantic_change_error(
     contract_version: str,
     chunk: dict[str, Any] | None = None,
     authorization_out: list[dict[str, Any]] | None = None,
+    comparison_previous_response: Any | None = None,
+    comparison_current_response: Any | None = None,
 ) -> tuple[ValueError | None, list[str]]:
     """Reject semantic drift even when the retry response is still invalid.
 
@@ -4878,10 +5063,18 @@ def _retry_semantic_change_error(
     another retry decision, while still allowing the narrow empty-payload
     completion rule handled by ``_retry_changes_allowed``.
     """
-    changed_paths = _retry_change_paths(previous_response, current_response)
+    comparison_previous = (
+        comparison_previous_response
+        if comparison_previous_response is not None else previous_response
+    )
+    comparison_current = (
+        comparison_current_response
+        if comparison_current_response is not None else current_response
+    )
+    changed_paths = _retry_change_paths(comparison_previous, comparison_current)
     authorization_ledger: list[dict[str, Any]] = []
     order_changed_with_edit = bool(changed_paths) and _retry_arrays_reordered(
-        previous_response, current_response,
+        comparison_previous, comparison_current,
     )
     changes_allowed = not changed_paths or (
         not order_changed_with_edit and _retry_changes_allowed(
@@ -7744,6 +7937,9 @@ def prepare_native_response_candidate(
             response, chunk.get("clauses", []), chunk.get("evidence_context"),
         )
     )
+    response, declaration_source_text_projections = _materialize_fixed_declaration_source_text(
+        response, chunk,
+    )
     rule_spec = chunk.get("rule_spec")
     existing_requirements = (
         rule_spec.get("requirements", [])
@@ -7906,6 +8102,7 @@ def prepare_native_response_candidate(
         "complete_abstract_source_projections": abstract_source_projections,
         "soft_keyword_count_guidance_projections": soft_keyword_guidance_projections,
         "source_obligation_verification_projections": source_verification_projections,
+        "declaration_source_text_projections": declaration_source_text_projections,
         "source_fragment_projections": source_fragment_projections,
         "source_fragment_projection_errors": source_fragment_projection_errors,
         "source_literal_whitespace_projections": source_literal_whitespace_projections,
@@ -8219,8 +8416,12 @@ the bridge will bind it only after the semantic contract passes.
 If the packet contains fixed_declaration_candidates, they are deterministic
 groupings of exact cited evidence. Any candidate clause classified executable,
 covered, or verify_existing must have one declarations requirement covering its
-candidate clause_ids; copy its heading/body text exactly and preserve the
-supplied declaration anchor.
+candidate clause_ids and preserve the supplied declaration anchor. Keep the
+candidate clause_ids/evidence_ids in exact source order. The bridge
+materializes heading/body_parts from the unique cited evidence paragraphs;
+do not copy normalized clause fragments or repeat an evidence paragraph when
+multiple clauses point to it. All other requirement semantics and placeholders
+remain your responsibility.
 The requirement_contract and response_schema are authoritative. Follow their
 role-specific properties and nested schemas exactly; do not invent aliases or
 free-form replacements for fields such as applicability, input_prerequisites,
@@ -8240,9 +8441,12 @@ Use an ID only from eligible_existing_requirements and only for the exact suppli
 role, clause_ids, evidence_ids and source occurrence. For a NEW requirement,
 omit this field (use null in native structured output); deterministic code assigns
 its final ID. Never increment, infer or copy an ID from another chunk.
-For declaration clauses, copy fixed headings/body paragraphs exactly from the
-cited evidence, use a run-local semantic item id, and use blank signature
-placeholders only; never invent resource_id, version, or sha256.
+For declaration clauses, select the exact fixed-declaration candidate and use
+a run-local semantic item id. The bridge materializes heading/body_parts from
+the candidate's unique current evidence paragraphs, including punctuation and
+paragraph boundaries; do not copy clause.text fragments or duplicate shared
+evidence IDs. Use blank signature placeholders only; never invent resource_id,
+version, or sha256.
 
 Do not consult, copy, or repair any previous response, build directory,
 school-specific resource, or conversation memory, except for the explicit
@@ -8693,6 +8897,9 @@ def run_host_agent_chunk(
     source_verification_projections = candidate_audit[
         "source_obligation_verification_projections"
     ]
+    declaration_source_text_projections = candidate_audit[
+        "declaration_source_text_projections"
+    ]
     source_literal_whitespace_projections = candidate_audit[
         "source_literal_whitespace_projections"
     ]
@@ -8767,6 +8974,7 @@ def run_host_agent_chunk(
             "soft_keyword_count_guidance_projections"
         ],
         "source_obligation_verification_projections": source_verification_projections,
+        "declaration_source_text_projections": declaration_source_text_projections,
         "source_fragment_projections": candidate_audit[
             "source_fragment_projections"
         ],
@@ -8783,6 +8991,7 @@ def run_host_agent_chunk(
                 "soft_keyword_count_guidance_projections"
             ]),
             "source_obligation_verification": len(source_verification_projections),
+            "fixed_declaration_source_text": len(declaration_source_text_projections),
             "source_fragment_literals": len(candidate_audit[
                 "source_fragment_projections"
             ]),
@@ -10711,6 +10920,12 @@ def run_bridge(
                         )
                         retry_parent_response = previous_raw
                         retry_candidate_response = current_raw
+                        previous_retry_comparison, previous_declaration_projection = (
+                            _materialize_fixed_declaration_source_text(previous_raw, chunk)
+                        )
+                        current_retry_comparison, current_declaration_projection = (
+                            _materialize_fixed_declaration_source_text(current_raw, chunk)
+                        )
                         change_error, semantic_changes = _retry_semantic_change_error(
                             previous_raw,
                             current_raw,
@@ -10718,6 +10933,8 @@ def run_bridge(
                             contract_version=contract_version,
                             chunk=chunk,
                             authorization_out=pending_retry_authorizations,
+                            comparison_previous_response=previous_retry_comparison,
+                            comparison_current_response=current_retry_comparison,
                         )
                         model_semantic_changes = list(semantic_changes)
                         retry_field_projection: dict[str, Any] | None = None
@@ -10739,6 +10956,9 @@ def run_bridge(
                             )
                             if projected_raw is not None and obligation_projection_records:
                                 projected_authorizations: list[dict[str, Any]] = []
+                                projected_retry_comparison, projected_declaration_projection = (
+                                    _materialize_fixed_declaration_source_text(projected_raw, chunk)
+                                )
                                 projected_error, projected_changes = _retry_semantic_change_error(
                                     previous_raw,
                                     projected_raw,
@@ -10746,6 +10966,8 @@ def run_bridge(
                                     contract_version=contract_version,
                                     chunk=chunk,
                                     authorization_out=projected_authorizations,
+                                    comparison_previous_response=previous_retry_comparison,
+                                    comparison_current_response=projected_retry_comparison,
                                 )
                                 if projected_error is None:
                                     change_error = None
@@ -10753,6 +10975,7 @@ def run_bridge(
                                     retry_candidate_response = projected_raw
                                     pending_retry_authorizations = projected_authorizations
                                     retry_field_projection = projection_audit
+                                    current_declaration_projection = projected_declaration_projection
                                 else:
                                     projection_audit.update({
                                         "status": "blocked_by_retry_authorization",
@@ -10779,6 +11002,16 @@ def run_bridge(
                             "authorization_error_records_sha256": _response_sha256(
                                 semantic_parent_error_records
                             ),
+                            "code_owned_declaration_text_projection": {
+                                "rule_id": "fixed_declaration_source_text_materialization_v1",
+                                "parent_projection_audit_sha256": _response_sha256(
+                                    previous_declaration_projection
+                                ),
+                                "candidate_projection_audit_sha256": _response_sha256(
+                                    current_declaration_projection
+                                ),
+                                "comparison_basis": "source-bound-canonical-candidate_text",
+                            },
                             "candidate_comparison_status": "not_attempted",
                         }
                         if retry_field_projection is not None:
@@ -10891,6 +11124,7 @@ def run_bridge(
                                 "complete_abstract_source_projections",
                                 "soft_keyword_count_guidance_projections",
                                 "source_obligation_verification_projections",
+                                "declaration_source_text_projections",
                                 "source_literal_whitespace_projections",
                                 "mechanical_repairs",
                                 "mechanical_repair_revalidation",

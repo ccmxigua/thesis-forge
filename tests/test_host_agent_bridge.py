@@ -1606,6 +1606,28 @@ class HostAgentBridgeTests(unittest.TestCase):
         self.assertNotIn("min_count", en)
         self.assertNotIn("max_count", en)
 
+        # Reproduce the observed BSU topology: the top-level keyword style
+        # cites only C00069, while one existing content constraint cites the
+        # split C00071/C00072 source clauses and initially omits hard bounds.
+        split_response = copy.deepcopy(accepted)
+        zh_style = next(item for item in split_response["requirements"]
+                        if item["role"] == "keywords_zh")
+        zh_style["clause_ids"] = ["C00069"]
+        zh_style["evidence_ids"] = ["E1"]
+        zh_constraint = next(item for item in split_response["requirements"]
+                             if item["role"] == "content_constraints"
+                             and isinstance(item["properties"].get("keywords_zh"), dict))
+        zh_constraint["properties"]["keywords_zh"]["min_count"] = None
+        zh_constraint["properties"]["keywords_zh"]["max_count"] = None
+
+        restored, split_audit = bridge.prepare_native_response_candidate(split_response, chunk)
+        restored_zh = next(item["properties"]["keywords_zh"] for item in restored["requirements"]
+                           if item["role"] == "content_constraints"
+                           and isinstance(item["properties"].get("keywords_zh"), dict))
+        self.assertEqual((restored_zh["min_count"], restored_zh["max_count"]), (3, 8))
+        self.assertEqual(bridge.validate_host_agent_response(restored, chunk), [])
+        self.assertEqual(len(split_audit["source_keyword_constraint_projections"]), 1)
+
     def test_retry_guidance_targets_exact_requirement_clause_mapping(self) -> None:
         retry = bridge._contract_repair_guidance(
             "local response contract validation failed: "

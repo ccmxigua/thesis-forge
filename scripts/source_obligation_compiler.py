@@ -14,7 +14,7 @@ from typing import Any
 
 
 SOURCE_VERIFICATION_CLASSIFICATION_POLICY_VERSION = "source-verification-classification-v1"
-SOURCE_KEYWORD_CONSTRAINT_PROJECTION_POLICY_VERSION = "source-keyword-constraints-v1"
+SOURCE_KEYWORD_CONSTRAINT_PROJECTION_POLICY_VERSION = "source-keyword-constraints-v2"
 
 
 _OPTIONAL_CAPTION = re.compile(
@@ -850,13 +850,13 @@ def compile_keyword_source_constraints(clause: Any) -> dict[str, Any] | None:
 def materialize_source_keyword_constraints(
     response: Any, clauses: Any,
 ) -> tuple[Any, list[dict[str, Any]]]:
-    """Add source-derived nested keyword constraints beside linked style roles.
+    """Add source-derived keyword constraints to an exactly linked requirement.
 
     This does not reinterpret an unlinked source clause: projection requires a
-    current, exact-evidence ``keywords_zh``/``keywords_en`` requirement and an
-    executable review for each clause. It never changes review classifications
-    or obligation statuses. Existing conflicting values are preserved so the
-    ordinary validator can reject them rather than silently overwriting them.
+    current, exact-evidence keyword role or an existing nonempty nested keyword
+    content constraint, plus an executable review for each clause. It never
+    changes review classifications or obligation statuses. Existing conflicting
+    values are preserved so the ordinary validator can reject them.
     """
     if not isinstance(response, dict) or not isinstance(clauses, list):
         return copy.deepcopy(response), []
@@ -895,12 +895,33 @@ def materialize_source_keyword_constraints(
             index for index, requirement in enumerate(requirements)
             if isinstance(requirement, dict)
             and requirement.get("role") == compiled["language_key"]
-            and clause_id in (requirement.get("clause_ids") or [])
-            and set(clause_evidence_ids).issubset({
-                value for value in (requirement.get("evidence_ids") or [])
-                if isinstance(value, str)
-            })
+            and isinstance(requirement.get("clause_ids"), list)
+            and clause_id in requirement["clause_ids"]
+            and isinstance(requirement.get("evidence_ids"), list)
+            and all(isinstance(value, str) for value in requirement["evidence_ids"])
+            and set(clause_evidence_ids).issubset(set(requirement["evidence_ids"]))
         ]
+        if not parent_indexes:
+            # A model may put the hard rule directly into content_constraints
+            # while using a separate keyword-style role for a neighboring
+            # clause. This is authorized only by an already present, nonempty
+            # nested payload citing this exact clause and all its evidence.
+            parent_indexes = [
+                index for index, requirement in enumerate(requirements)
+                if isinstance(requirement, dict)
+                and requirement.get("role") == "content_constraints"
+                and isinstance(requirement.get("properties"), dict)
+                and isinstance(requirement["properties"].get(compiled["language_key"]), dict)
+                and any(
+                    value is not None
+                    for value in requirement["properties"][compiled["language_key"]].values()
+                )
+                and isinstance(requirement.get("clause_ids"), list)
+                and clause_id in requirement["clause_ids"]
+                and isinstance(requirement.get("evidence_ids"), list)
+                and all(isinstance(value, str) for value in requirement["evidence_ids"])
+                and set(clause_evidence_ids).issubset(set(requirement["evidence_ids"]))
+            ]
         if len(parent_indexes) != 1:
             continue
         parent = requirements[parent_indexes[0]]
@@ -914,6 +935,7 @@ def materialize_source_keyword_constraints(
             "clause_id": clause_id,
             "evidence_ids": clause_evidence_ids,
             "parent_index": parent_indexes[0],
+            "parent_role": parent["role"],
             "confidence": float(confidence),
             "compiled": compiled,
         })
@@ -1017,13 +1039,14 @@ def materialize_source_keyword_constraints(
         if before_bytes != after_bytes:
             audits.append({
                 "projection_policy_version": SOURCE_KEYWORD_CONSTRAINT_PROJECTION_POLICY_VERSION,
-                "rule_id": "source_bound_keyword_constraint_projection_v1",
-                "authorization": "exact_current_source_and_linked_keyword_role_v1",
+                "rule_id": "source_bound_keyword_constraint_projection_v2",
+                "authorization": "exact_current_source_and_linked_keyword_requirement_v2",
                 "semantic_inference": "none",
                 "language_key": language_key,
                 "action": "complete_existing_content_constraint" if overlapping_constraints else "add_content_constraint",
                 "requirement_index": requirement_index,
                 "parent_requirement_indexes": sorted({entry["parent_index"] for entry in entries}),
+                "parent_binding_roles": sorted({entry["parent_role"] for entry in entries}),
                 "clause_ids": clause_ids,
                 "evidence_ids": evidence_ids,
                 "source_bindings": [

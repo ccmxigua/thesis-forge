@@ -2124,10 +2124,10 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
     if source_keyword_constraint_repairs:
         audit.append({
             "type": "source_keyword_constraint_projection",
-            "rule_id": "source_bound_keyword_constraint_projection_v1",
+            "rule_id": "source_bound_keyword_constraint_projection_v2",
             "projection_policy_version": SOURCE_KEYWORD_CONSTRAINT_PROJECTION_POLICY_VERSION,
             "semantic_inference": "none",
-            "authorization": "exact_current_source_and_linked_keyword_role_v1",
+            "authorization": "exact_current_source_and_linked_keyword_requirement_v2",
             "repairs": source_keyword_constraint_repairs,
         })
     projected_response, soft_keyword_repairs = materialize_soft_keyword_count_guidance(

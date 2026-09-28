@@ -185,6 +185,85 @@ class SourceObligationCompilerTests(unittest.TestCase):
         self.assertEqual(projected["requirements"][1]["properties"]["keywords_zh"]["max_item_chars"], 99)
         self.assertIn("max_item_chars", audit[0]["unprojected_conflicting_fields"])
 
+    def test_source_keyword_projection_uses_directly_bound_content_constraint(self) -> None:
+        sources = {
+            "E0": "关键词在摘要内容后另起一行，一般3～8个，之间用分号分开",
+            "E1": "关键词：术语；最多7个汉字；最少3组，最多8组",
+        }
+
+        def clause(clause_id: str, evidence_id: str, quote: str) -> dict:
+            source = sources[evidence_id]
+            start = source.index(quote)
+            return {
+                "id": clause_id, "text": quote, "source_text_full": source,
+                "evidence_ids": [evidence_id],
+                "source_span": {
+                    "evidence_id": evidence_id, "start_offset": start,
+                    "end_offset": start + len(quote), "text": quote,
+                    "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
+                },
+            }
+
+        clauses = [
+            clause("C69", "E0", sources["E0"]),
+            clause("C71", "E1", "最多7个汉字"),
+            clause("C72", "E1", "最少3组，最多8组"),
+        ]
+        response = {
+            "contract_version": "3.0",
+            "requirements": [
+                {"role": "keywords_zh", "properties": {}, "clause_ids": ["C69"],
+                 "evidence_ids": ["E0"], "confidence": 0.97},
+                {"role": "content_constraints", "properties": {"keywords_zh": {
+                    "min_count": None, "max_count": None,
+                    "count_guidance": {"min_count": 3, "max_count": 8,
+                                       "strength": "general_guidance"},
+                }}, "clause_ids": ["C69", "C71", "C72"],
+                 "evidence_ids": ["E0", "E1"], "confidence": 0.97},
+            ],
+            "clause_reviews": [
+                {"clause_id": item["id"], "classification": "executable"}
+                for item in clauses
+            ],
+        }
+
+        projected, audits = materialize_source_keyword_constraints(response, clauses)
+        self.assertEqual(len(projected["requirements"]), 2)
+        nested = projected["requirements"][1]["properties"]["keywords_zh"]
+        self.assertEqual((nested["min_count"], nested["max_count"]), (3, 8))
+        self.assertEqual((nested["max_item_chars"], nested["item_length_metric"]),
+                         (7, "cjk_characters"))
+        self.assertEqual(audits[0]["parent_requirement_indexes"], [0, 1])
+        again, second_audit = materialize_source_keyword_constraints(projected, clauses)
+        self.assertEqual(again, projected)
+        self.assertEqual(second_audit, [])
+
+    def test_source_keyword_projection_rejects_unbound_content_constraint(self) -> None:
+        source = "关键词：最少3组，最多8组"
+        clause = {
+            "id": "C72", "text": "最少3组，最多8组", "source_text_full": source,
+            "evidence_ids": ["E1"],
+            "source_span": {
+                "evidence_id": "E1", "start_offset": source.index("最少"),
+                "end_offset": len(source), "text": "最少3组，最多8组",
+                "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
+            },
+        }
+        response = {
+            "contract_version": "3.0",
+            "requirements": [{
+                "role": "content_constraints", "properties": {"keywords_zh": {
+                    "count_guidance": {"min_count": 3, "max_count": 8,
+                                       "strength": "general_guidance"},
+                }}, "clause_ids": ["C72"], "evidence_ids": ["E_OTHER"],
+                "confidence": 0.97,
+            }],
+            "clause_reviews": [{"clause_id": "C72", "classification": "executable"}],
+        }
+        projected, audits = materialize_source_keyword_constraints(response, [clause])
+        self.assertEqual(projected, response)
+        self.assertEqual(audits, [])
+
     def test_registered_keyword_source_verification_corrects_only_misclassified_human_check(self) -> None:
         source = (
             "关键词是为了便于做文献索引和检索工作而从论文中选取出来用以表示全文主题内容信息的"

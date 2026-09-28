@@ -673,13 +673,18 @@ def validate_obligation_coverage_response(
                 and no_requirement_refs_for_verification
             )
             if (
-                classification == "informational"
+                classification in {"informational", "requires_source_content"}
                 and context.get("requires_requirement") is False
                 and not linked
                 and pending_only
+                and (
+                    classification != "requires_source_content"
+                    or context.get("primary_obligations") == []
+                )
             ):
                 source_verification_classification_corrections.append({
                     "check_id": check_id,
+                    "baseline_classification": classification,
                     "source_quotes": [item.get("source_quote") for item in obligations],
                     "evidence_ids": sorted(
                         str(value) for value in (context.get("cited_evidence") or {})
@@ -1042,7 +1047,11 @@ def _prompt(request: dict[str, Any]) -> str:
             "keyword-specific wording or a lexical allowlist. If the same clause has separately represented executable "
             "obligations, list those as represented with exact valid refs and keep verification obligations unlinked. "
             "If the primary classification is informational, report the verification finding anyway; the bridge may "
-            "authorize only a source-bound classification correction. The request metadata distinguishes content not "
+            "authorize only a source-bound classification correction. If the primary classification is "
+            "requires_source_content but the exact source duties identified here are exclusively human verification "
+            "of existing content (with no primary authoring obligation), report that same verification finding; "
+            "the bridge may authorize only the exact classification correction to requires_source_verification. "
+            "Never use this correction to erase an authoring-content obligation. The request metadata distinguishes content not "
             "included in this review from content the user did not provide. "
             "For a clause classified unsupported_backend, use verdict backend_unsupported only when the source is "
             "readable, every identified obligation is explicitly enumerated with disposition backend_unsupported, "

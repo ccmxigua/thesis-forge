@@ -2440,6 +2440,51 @@ class HostAgentBridgeTests(unittest.TestCase):
         self.assertIsNone(change_error)
         self.assertEqual(authorized_paths, changed_paths)
 
+        source_content_parent = copy.deepcopy(parent)
+        source_content_parent["clause_reviews"][0]["classification"] = "requires_source_content"
+        source_content_candidate = copy.deepcopy(source_content_parent)
+        source_content_candidate["clause_reviews"][0]["classification"] = "requires_source_verification"
+        source_content_record = {
+            **record,
+            "baseline_classification": "requires_source_content",
+            "candidate_response_sha256": bridge._response_sha256(
+                bridge._bind_current_invocation_provenance(source_content_parent, provenance)
+            ),
+            "candidate_semantic_sha256": bridge._response_sha256(
+                bridge._semantic_retry_view(source_content_parent)
+            ),
+        }
+        with patch.object(bridge, "validate_host_agent_response", return_value=[]):
+            source_content_repair, source_content_audit = (
+                bridge._v3_source_verification_reclassification_response(
+                    source_content_parent, source_content_candidate,
+                    [source_content_record], chunk=chunk,
+                )
+            )
+        self.assertEqual(source_content_repair, source_content_candidate)
+        self.assertEqual(source_content_audit["from"], "requires_source_content")
+
+        authoring_parent = copy.deepcopy(source_content_parent)
+        authoring_parent["clause_reviews"][0]["obligations"] = [{
+            "id": "O1", "status": "unverifiable", "reason": "The author must provide content.",
+        }]
+        authoring_candidate = copy.deepcopy(authoring_parent)
+        authoring_candidate["clause_reviews"][0]["classification"] = "requires_source_verification"
+        authoring_record = {
+            **source_content_record,
+            "candidate_response_sha256": bridge._response_sha256(
+                bridge._bind_current_invocation_provenance(authoring_parent, provenance)
+            ),
+            "candidate_semantic_sha256": bridge._response_sha256(
+                bridge._semantic_retry_view(authoring_parent)
+            ),
+        }
+        with patch.object(bridge, "validate_host_agent_response", return_value=[]):
+            unsafe_repair, _ = bridge._v3_source_verification_reclassification_response(
+                authoring_parent, authoring_candidate, [authoring_record], chunk=chunk,
+            )
+        self.assertIsNone(unsafe_repair)
+
         changed_reason = copy.deepcopy(candidate)
         changed_reason["clause_reviews"][0]["reason"] = "A second semantic edit."
         bad_evidence = {**record, "evidence_ids": ["E2"]}
@@ -2473,22 +2518,22 @@ class HostAgentBridgeTests(unittest.TestCase):
             review_dir, chunk = self._packet(
                 root / "requirements", contract_version="3.0", source=source,
             )
-            informational = {
+            misclassified_as_author_input = {
                 "contract_version": "3.0",
                 "provenance": chunk["provenance"],
                 "requirements": [],
                 "clause_reviews": [{
-                    "clause_id": "C1", "classification": "informational",
-                    "reason": "该内容被误判为单纯说明。",
+                    "clause_id": "C1", "classification": "requires_source_content",
+                    "reason": "现有论文正文未包含在该审查请求中，关键词出处需人工核验。",
                 }],
                 "unsupported_items": [], "reported_conflicts": [],
             }
-            corrected = copy.deepcopy(informational)
+            corrected = copy.deepcopy(misclassified_as_author_input)
             corrected["clause_reviews"][0]["classification"] = "requires_source_verification"
             envelopes = [
                 {"runId": "offline-source-verification-1", "status": "ok",
                  "provider": "openai", "model": "gpt-5.6-luna",
-                 "result": {"payloads": [{"text": json.dumps(informational, ensure_ascii=False)}]}},
+                 "result": {"payloads": [{"text": json.dumps(misclassified_as_author_input, ensure_ascii=False)}]}},
                 {"runId": "offline-source-verification-2", "status": "ok",
                  "provider": "openai", "model": "gpt-5.6-luna",
                  "result": {"payloads": [{"text": json.dumps(corrected, ensure_ascii=False)}]}},
@@ -2519,6 +2564,7 @@ class HostAgentBridgeTests(unittest.TestCase):
                     })
                     raise bridge.SourceVerificationClassificationCorrectionRequiredError([{
                         "check_id": "C1",
+                        "baseline_classification": "requires_source_content",
                         "source_quotes": [source],
                         "evidence_ids": ["E1"],
                     }])
@@ -2605,7 +2651,7 @@ class HostAgentBridgeTests(unittest.TestCase):
             )
             merged = json.loads(response_path.read_text(encoding="utf-8"))
             self.assertEqual(merged["clause_reviews"][0]["classification"], "requires_source_verification")
-            self.assertEqual(merged["requirements"], informational["requirements"])
+            self.assertEqual(merged["requirements"], misclassified_as_author_input["requirements"])
 
             request_path = review_dir / "llm-request.json"
             full_request = json.loads(request_path.read_text(encoding="utf-8"))

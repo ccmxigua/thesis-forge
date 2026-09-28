@@ -495,6 +495,11 @@ class NativeSemanticReviewTests(unittest.TestCase):
         })
         self.assertIn("not a request to write or invent content", prompt)
         self.assertIn("Do not rely on keyword-specific wording or a lexical allowlist", prompt)
+        self.assertIn(
+            "requires_source_content but the exact source duties identified here are exclusively human verification",
+            prompt,
+        )
+        self.assertIn("Never use this correction to erase an authoring-content obligation", prompt)
 
         informational = json.loads(json.dumps(pending, ensure_ascii=False))
         informational_check = {
@@ -504,8 +509,40 @@ class NativeSemanticReviewTests(unittest.TestCase):
         with self.assertRaises(native_review.SourceVerificationClassificationCorrectionRequiredError) as caught:
             validate_obligation_coverage_response(informational, [informational_check])
         self.assertEqual(caught.exception.corrections[0]["check_id"], "C00068")
+        self.assertEqual(
+            caught.exception.corrections[0]["baseline_classification"], "informational",
+        )
         self.assertEqual(caught.exception.corrections[0]["source_quotes"], [source])
         self.assertEqual(caught.exception.corrections[0]["evidence_ids"], ["E1"])
+
+        misclassified_as_author_input = {
+            **check,
+            "review_context": {
+                **check["review_context"],
+                "classification": "requires_source_content",
+                "primary_obligations": [],
+            },
+        }
+        with self.assertRaises(
+            native_review.SourceVerificationClassificationCorrectionRequiredError,
+        ) as source_content_caught:
+            validate_obligation_coverage_response(pending, [misclassified_as_author_input])
+        self.assertEqual(
+            source_content_caught.exception.corrections[0]["baseline_classification"],
+            "requires_source_content",
+        )
+
+        actual_authoring_obligation = {
+            **misclassified_as_author_input,
+            "review_context": {
+                **misclassified_as_author_input["review_context"],
+                "primary_obligations": [{"status": "unverifiable"}],
+            },
+        }
+        with self.assertRaisesRegex(
+            NativeSemanticReviewError, "existing-content verification must be an unlinked human work item",
+        ):
+            validate_obligation_coverage_response(pending, [actual_authoring_obligation])
 
         unsafe_checks = [
             {**check, "review_context": {

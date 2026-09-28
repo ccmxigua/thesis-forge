@@ -471,6 +471,13 @@ decoded raw sidecar. If an undecodable attempt intervenes, semantic change
 authorization comes from the most recent earlier decoded attempt that actually
 failed review; the parse failure remains separate retry feedback and cannot
 replace that semantic blocker.
+When source-first review identifies only a human verification duty for existing
+content, a bounded primary retry may change `informational` or an unsubstantiated
+`requires_source_content` classification to `requires_source_verification` only
+when exact current-source quotes, evidence, run bindings, and an unchanged
+requirement graph authorize that single-field correction. A `requires_source_content`
+classification with any explicit authoring obligation is never eligible; the
+verification remains pending and blocks submission.
 For a text property rejected only because its literal differs from the uniquely
 bound current source span by Unicode whitespace, the native bridge may copy the
 exact source text into that candidate field. It must validate current

@@ -14,6 +14,7 @@ from typing import Any
 
 
 SOURCE_VERIFICATION_CLASSIFICATION_POLICY_VERSION = "source-verification-classification-v1"
+SOURCE_KEYWORD_CONSTRAINT_PROJECTION_POLICY_VERSION = "source-keyword-constraints-v1"
 
 
 _OPTIONAL_CAPTION = re.compile(
@@ -727,6 +728,322 @@ def has_explicit_keyword_count_signal(source_text: Any) -> bool:
     # in the same source passage (for example, "最多7个汉字；最少3组，最多8组").
     count_text = _KEYWORD_COUNT_CHARACTER_MEASURE.sub(" ", source_text)
     return _KEYWORD_COUNT_MANDATORY_SIGNAL.search(count_text) is not None
+
+
+def _keyword_language_for_clause(clause: Any) -> str | None:
+    """Resolve a keyword language only from one exact source/context target."""
+    candidates = source_text_candidates(clause)
+    if not candidates:
+        return None
+
+    def languages_in(text: str) -> set[str]:
+        languages: set[str] = set()
+        # "英文关键词/英文关键字" names the English-keyword field; do not
+        # also classify the embedded Chinese word "关键词" as a Chinese target.
+        if re.search(r"(?<!英文)(?:关键词|关键字)", text):
+            languages.add("keywords_zh")
+        if re.search(r"\bkey\s*words?\b|英文关键词", text, re.I):
+            languages.add("keywords_en")
+        return languages
+
+    exact_languages = languages_in(candidates[0])
+    if len(exact_languages) == 1:
+        return next(iter(exact_languages))
+    if exact_languages:
+        return None
+    context_languages = {
+        language
+        for value in candidates[1:]
+        for language in languages_in(value)
+    }
+    return next(iter(context_languages)) if len(context_languages) == 1 else None
+
+
+def compile_keyword_source_constraints(clause: Any) -> dict[str, Any] | None:
+    """Compile only explicit, source-local keyword properties.
+
+    ``source_text_full`` may identify the target language for a split clause,
+    but numeric values and property cues are parsed only from the exact span.
+    A model-authored top-level keyword role is not treated as proof that these
+    nested content-constraint properties were represented.
+    """
+    if not isinstance(clause, dict):
+        return None
+    candidates = source_text_candidates(clause)
+    if not candidates:
+        return None
+    exact_text = candidates[0]
+    language_key = _keyword_language_for_clause(clause)
+    if language_key is None or _CONTEXT_UNSAFE.search(exact_text):
+        return None
+    keyword_subject = re.compile(r"关键词|关键字|\bkey\s*words?\b", re.I)
+    parse_text = exact_text
+    if not keyword_subject.search(parse_text):
+        parse_text = f"{'Key Words' if language_key == 'keywords_en' else '关键词'} {parse_text}"
+
+    properties: dict[str, Any] = {}
+    guidance = compile_soft_keyword_count_guidance(parse_text)
+    if guidance is not None and guidance["language_key"] == language_key:
+        properties["count_guidance"] = {
+            "min_count": guidance["min_count"],
+            "max_count": guidance["max_count"],
+            "strength": "general_guidance",
+        }
+
+    hard_range = compile_explicit_keyword_count_range(parse_text)
+    if hard_range is not None:
+        properties.update(hard_range)
+
+    character_limits = list(re.finditer(
+        r"(?:最多|至多|不超过|不得超过|上限|maximum(?:\s+of)?|at\s+most|"
+        r"no\s+more\s+than|up\s+to)\s*(?P<value>\d+)\s*(?:个\s*)?"
+        r"(?P<metric>汉字|中文字符|Chinese\s+characters?|CJK\s+characters?)",
+        parse_text,
+        re.I,
+    ))
+    if len(character_limits) == 1:
+        properties["max_item_chars"] = int(character_limits[0].group("value"))
+        properties["item_length_metric"] = "cjk_characters"
+
+    compact = re.sub(r"\s+", "", exact_text)
+    if (
+        language_key == "keywords_zh"
+        and re.search(
+            r"(?:关键词|关键字).{0,20}摘要(?:内容|正文).{0,8}(?:后|之后).{0,8}"
+            r"(?:另起一行|另起一段|另行)",
+            compact,
+        )
+    ):
+        properties["require_after_role"] = "abstract_body_zh"
+    elif (
+        language_key == "keywords_en"
+        and re.search(
+            r"\bkey\s*words?\b.{0,80}(?:after\s+the\s+abstract|"
+            r"in\s+the\s+abstract\s+content\s+after\s+another\s+line)",
+            exact_text,
+            re.I,
+        )
+    ):
+        properties["require_after_role"] = "abstract_body_en"
+
+    if (
+        re.search(
+            r"(?:之间\s*)?(?:用|以|采用)?\s*分号\s*(?:分开|分隔|隔开)|"
+            r"separated\s+by\s+semi[- ]?colons?|semi[- ]?colon[- ]separated",
+            exact_text,
+            re.I,
+        )
+    ):
+        properties["separator"] = "semicolon"
+
+    if not properties:
+        return None
+    span = clause.get("source_span")
+    return {
+        "language_key": language_key,
+        "properties": properties,
+        "source_quote": exact_text,
+        "source_sha256": span.get("source_sha256") if isinstance(span, dict) else None,
+    }
+
+
+def materialize_source_keyword_constraints(
+    response: Any, clauses: Any,
+) -> tuple[Any, list[dict[str, Any]]]:
+    """Add source-derived nested keyword constraints beside linked style roles.
+
+    This does not reinterpret an unlinked source clause: projection requires a
+    current, exact-evidence ``keywords_zh``/``keywords_en`` requirement and an
+    executable review for each clause. It never changes review classifications
+    or obligation statuses. Existing conflicting values are preserved so the
+    ordinary validator can reject them rather than silently overwriting them.
+    """
+    if not isinstance(response, dict) or not isinstance(clauses, list):
+        return copy.deepcopy(response), []
+    projected = copy.deepcopy(response)
+    requirements = projected.get("requirements")
+    reviews = projected.get("clause_reviews")
+    if not isinstance(requirements, list) or not isinstance(reviews, list):
+        return projected, []
+
+    review_map: dict[str, list[dict[str, Any]]] = {}
+    for review in reviews:
+        if isinstance(review, dict) and isinstance(review.get("clause_id"), str):
+            review_map.setdefault(review["clause_id"], []).append(review)
+
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for clause in clauses:
+        if not isinstance(clause, dict) or not isinstance(clause.get("id"), str):
+            continue
+        clause_id = clause["id"]
+        matching_reviews = review_map.get(clause_id, [])
+        if len(matching_reviews) != 1 or matching_reviews[0].get("classification") not in {
+            "covered", "executable", "verify_existing",
+        }:
+            continue
+        compiled = compile_keyword_source_constraints(clause)
+        if compiled is None:
+            continue
+        raw_clause_evidence = clause.get("evidence_ids")
+        clause_evidence_ids = list(dict.fromkeys(
+            value for value in raw_clause_evidence
+            if isinstance(value, str) and value
+        )) if isinstance(raw_clause_evidence, list) else []
+        if not clause_evidence_ids:
+            continue
+        parent_indexes = [
+            index for index, requirement in enumerate(requirements)
+            if isinstance(requirement, dict)
+            and requirement.get("role") == compiled["language_key"]
+            and clause_id in (requirement.get("clause_ids") or [])
+            and set(clause_evidence_ids).issubset({
+                value for value in (requirement.get("evidence_ids") or [])
+                if isinstance(value, str)
+            })
+        ]
+        if len(parent_indexes) != 1:
+            continue
+        parent = requirements[parent_indexes[0]]
+        confidence = parent.get("confidence")
+        if (
+            isinstance(confidence, bool) or not isinstance(confidence, (int, float))
+            or not 0 <= confidence <= 1
+        ):
+            continue
+        groups.setdefault(compiled["language_key"], []).append({
+            "clause_id": clause_id,
+            "evidence_ids": clause_evidence_ids,
+            "parent_index": parent_indexes[0],
+            "confidence": float(confidence),
+            "compiled": compiled,
+        })
+
+    audits: list[dict[str, Any]] = []
+    for language_key, entries in groups.items():
+        desired: dict[str, Any] = {}
+        conflicted_fields: set[str] = set()
+        for entry in entries:
+            for field, value in entry["compiled"]["properties"].items():
+                if field in conflicted_fields:
+                    continue
+                if field in desired and desired[field] != value:
+                    desired.pop(field)
+                    conflicted_fields.add(field)
+                    continue
+                desired[field] = copy.deepcopy(value)
+        if not desired:
+            continue
+
+        clause_ids = [entry["clause_id"] for entry in entries]
+        evidence_ids = list(dict.fromkeys(
+            evidence_id for entry in entries for evidence_id in entry["evidence_ids"]
+        ))
+        clause_set = set(clause_ids)
+        overlapping_constraints = [
+            (index, requirement)
+            for index, requirement in enumerate(requirements)
+            if isinstance(requirement, dict)
+            and requirement.get("role") == "content_constraints"
+            and clause_set.intersection(requirement.get("clause_ids") or [])
+        ]
+        if len(overlapping_constraints) > 1:
+            continue
+
+        before = copy.deepcopy(projected)
+        if overlapping_constraints:
+            requirement_index, target = overlapping_constraints[0]
+            target_clause_ids = target.get("clause_ids")
+            target_evidence_ids = target.get("evidence_ids")
+            if (
+                not isinstance(target_clause_ids, list)
+                or any(not isinstance(value, str) for value in target_clause_ids)
+                or not set(target_clause_ids).issubset(clause_set)
+                or not isinstance(target_evidence_ids, list)
+                or any(not isinstance(value, str) for value in target_evidence_ids)
+                or not set(target_evidence_ids).issubset(set(evidence_ids))
+            ):
+                continue
+            properties = target.get("properties")
+            if not isinstance(properties, dict):
+                continue
+            nested = properties.get(language_key)
+            if nested is None:
+                nested = {}
+                properties[language_key] = nested
+            if not isinstance(nested, dict):
+                continue
+            existing_conflicts: set[str] = set()
+            for field, value in desired.items():
+                current = nested.get(field)
+                if current is None:
+                    nested[field] = copy.deepcopy(value)
+                elif current != value:
+                    existing_conflicts.add(field)
+            target["clause_ids"] = list(dict.fromkeys([*target_clause_ids, *clause_ids]))
+            target["evidence_ids"] = list(dict.fromkeys([*target_evidence_ids, *evidence_ids]))
+        else:
+            new_requirement = {
+                "role": "content_constraints",
+                "properties": {language_key: copy.deepcopy(desired)},
+                "clause_ids": clause_ids,
+                "evidence_ids": evidence_ids,
+                "confidence": min(entry["confidence"] for entry in entries),
+                "reason": (
+                    "Source-bound keyword constraints were projected deterministically; "
+                    "qualified count ranges remain guidance and only explicit mandatory "
+                    "ranges become hard bounds."
+                ),
+            }
+            requirements.append(new_requirement)
+            requirement_index = len(requirements) - 1
+
+        if projected.get("contract_version") == "2.1":
+            for review in reviews:
+                if (
+                    isinstance(review, dict)
+                    and review.get("clause_id") in clause_set
+                    and review.get("classification") in {"covered", "executable", "verify_existing"}
+                    and isinstance(review.get("requirement_indexes"), list)
+                    and requirement_index not in review["requirement_indexes"]
+                ):
+                    review["requirement_indexes"].append(requirement_index)
+
+        before_bytes = json.dumps(
+            before, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")
+        after_bytes = json.dumps(
+            projected, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")
+        if before_bytes != after_bytes:
+            audits.append({
+                "projection_policy_version": SOURCE_KEYWORD_CONSTRAINT_PROJECTION_POLICY_VERSION,
+                "rule_id": "source_bound_keyword_constraint_projection_v1",
+                "authorization": "exact_current_source_and_linked_keyword_role_v1",
+                "semantic_inference": "none",
+                "language_key": language_key,
+                "action": "complete_existing_content_constraint" if overlapping_constraints else "add_content_constraint",
+                "requirement_index": requirement_index,
+                "parent_requirement_indexes": sorted({entry["parent_index"] for entry in entries}),
+                "clause_ids": clause_ids,
+                "evidence_ids": evidence_ids,
+                "source_bindings": [
+                    {
+                        "clause_id": entry["clause_id"],
+                        "evidence_ids": entry["evidence_ids"],
+                        "source_quote": entry["compiled"]["source_quote"],
+                        "source_sha256": entry["compiled"]["source_sha256"],
+                        "projected_fields": sorted(entry["compiled"]["properties"]),
+                    }
+                    for entry in entries
+                ],
+                "properties": copy.deepcopy(desired),
+                "unprojected_conflicting_fields": sorted(
+                    conflicted_fields | (existing_conflicts if overlapping_constraints else set())
+                ),
+                "before_sha256": hashlib.sha256(before_bytes).hexdigest(),
+                "after_sha256": hashlib.sha256(after_bytes).hexdigest(),
+            })
+    return projected, audits
 
 
 def compile_abstract_source_constraints(

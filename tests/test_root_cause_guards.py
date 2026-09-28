@@ -233,6 +233,30 @@ class RootCauseGuardTests(unittest.TestCase):
         errors = validate_response(response, request)
         self.assertTrue(any("item_length_metric:cjk_characters" in error for error in errors), errors)
 
+    def test_chinese_wording_for_english_keyword_cjk_cap_is_source_resolved(self) -> None:
+        request = _request("英文关键词最多7个汉字")
+        response = {
+            "contract_version": "2.1",
+            "requirements": [{
+                "role": "content_constraints",
+                "properties": {"keywords_en": {
+                    "max_item_chars": 7,
+                    "item_length_metric": "cjk_characters",
+                }},
+                "clause_ids": ["C1"], "evidence_ids": ["E1"],
+                "confidence": 0.9, "reason": "来源明确指定英文关键词的中文字符上限",
+            }],
+            "clause_reviews": [{
+                "clause_id": "C1", "classification": "executable",
+                "requirement_indexes": [0], "reason": "已按来源设置字符上限",
+            }],
+            "unsupported_items": [], "reported_conflicts": [],
+        }
+
+        errors = validate_response(response, request)
+        self.assertFalse(any("keywords_en.max_item_chars:unresolved_source" in error for error in errors), errors)
+        self.assertFalse(any("keywords_en.item_length_metric:cjk_characters" in error for error in errors), errors)
+
     def test_approval_fields_cannot_be_mapped_to_classification_or_completion(self) -> None:
         request = _request("非公开学位论文审批表编号和批准日期")
         response = {

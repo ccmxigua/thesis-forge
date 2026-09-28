@@ -15,6 +15,7 @@ from source_obligation_compiler import (  # noqa: E402
     compile_abstract_source_constraints,
     compile_continuation_caption_requirement,
     compile_explicit_keyword_count_range,
+    compile_keyword_source_constraints,
     compile_known_source_obligations,
     compile_known_source_obligation_ids,
     has_explicit_keyword_count_signal,
@@ -28,6 +29,7 @@ from source_obligation_compiler import (  # noqa: E402
     materialize_complete_abstract_source_constraints,
     materialize_known_source_verification,
     materialize_source_verification_classifications,
+    materialize_source_keyword_constraints,
     materialize_soft_keyword_count_guidance,
     source_fact_value_matches,
     has_mixed_external_document_action_signal,
@@ -35,6 +37,154 @@ from source_obligation_compiler import (  # noqa: E402
 
 
 class SourceObligationCompilerTests(unittest.TestCase):
+    def test_chinese_phrase_for_english_keywords_resolves_one_language_and_cjk_cap(self) -> None:
+        source = "英文关键词最多7个汉字"
+        clause = {
+            "id": "C_EN_KEYWORDS",
+            "text": source,
+            "source_text_full": source,
+            "evidence_ids": ["E_EN_KEYWORDS"],
+            "source_span": {
+                "evidence_id": "E_EN_KEYWORDS",
+                "start_offset": 0,
+                "end_offset": len(source),
+                "text": source,
+                "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
+            },
+        }
+
+        compiled = compile_keyword_source_constraints(clause)
+
+        self.assertEqual(compiled["language_key"], "keywords_en")
+        self.assertEqual(compiled["properties"]["max_item_chars"], 7)
+        self.assertEqual(compiled["properties"]["item_length_metric"], "cjk_characters")
+
+    def test_source_keyword_constraints_project_to_nested_contract_without_semantic_drift(self) -> None:
+        evidence = {
+            "E00060": (
+                "关键词是为了便于做文献索引和检索工作而从论文中选取出来用以表示全文主题内容信息的"
+                "单词或术语，在论文中有明确出处，关键词在摘要内容后另起一行，一般3～8个，之间用分号分开。"
+            ),
+            "E00061": "关键词：术语；最多7个汉字；最少3组，最多8组",
+            "E00066": (
+                "Keywords in the abstract content after another line, generally 3~8, "
+                "separated by semicolons. The key words are selected from the paper."
+            ),
+        }
+
+        def clause(clause_id: str, evidence_id: str, quote: str) -> dict:
+            full = evidence[evidence_id]
+            start = full.index(quote)
+            return {
+                "id": clause_id,
+                "text": quote,
+                "source_text_full": full,
+                "evidence_ids": [evidence_id],
+                "source_span": {
+                    "evidence_id": evidence_id,
+                    "start_offset": start,
+                    "end_offset": start + len(quote),
+                    "text": quote,
+                    "source_sha256": hashlib.sha256(full.encode("utf-8")).hexdigest(),
+                },
+            }
+
+        clauses = [
+            clause(
+                "C00069", "E00060",
+                "关键词在摘要内容后另起一行，一般3～8个，之间用分号分开",
+            ),
+            clause("C00071", "E00061", "最多7个汉字"),
+            clause("C00072", "E00061", "最少3组，最多8组"),
+            clause(
+                "C00077", "E00066",
+                "Keywords in the abstract content after another line, generally 3~8, "
+                "separated by semicolons.",
+            ),
+            clause(
+                "C00068", "E00060",
+                "关键词是为了便于做文献索引和检索工作而从论文中选取出来用以表示全文主题内容信息的"
+                "单词或术语，在论文中有明确出处",
+            ),
+        ]
+        response = {
+            "contract_version": "3.0",
+            "requirements": [
+                {
+                    "role": "keywords_zh", "properties": {"separator": "semicolon"},
+                    "clause_ids": ["C00069", "C00071", "C00072"],
+                    "evidence_ids": ["E00060", "E00061"], "confidence": 0.97,
+                },
+                {
+                    "role": "keywords_en", "properties": {"separator": "semicolon"},
+                    "clause_ids": ["C00077"], "evidence_ids": ["E00066"],
+                    "confidence": 0.98,
+                },
+            ],
+            "clause_reviews": [
+                {"clause_id": item["id"], "classification": "executable"}
+                for item in clauses if item["id"] != "C00068"
+            ] + [{"clause_id": "C00068", "classification": "requires_source_verification"}],
+        }
+
+        self.assertEqual(
+            compile_keyword_source_constraints(clauses[3])["properties"]["separator"],
+            "semicolon",
+        )
+        projected, audit = materialize_source_keyword_constraints(response, clauses)
+        self.assertEqual(response["requirements"], projected["requirements"][:2])
+        self.assertEqual(len(audit), 2)
+        zh = projected["requirements"][2]["properties"]["keywords_zh"]
+        en = projected["requirements"][3]["properties"]["keywords_en"]
+        self.assertEqual(zh["count_guidance"], {
+            "min_count": 3, "max_count": 8, "strength": "general_guidance",
+        })
+        self.assertEqual((zh["min_count"], zh["max_count"]), (3, 8))
+        self.assertEqual((zh["max_item_chars"], zh["item_length_metric"]), (7, "cjk_characters"))
+        self.assertEqual((zh["require_after_role"], zh["separator"]), ("abstract_body_zh", "semicolon"))
+        self.assertEqual(en["count_guidance"], {
+            "min_count": 3, "max_count": 8, "strength": "general_guidance",
+        })
+        self.assertEqual((en["require_after_role"], en["separator"]), ("abstract_body_en", "semicolon"))
+        self.assertNotIn("min_count", en)
+        self.assertNotIn("max_count", en)
+        self.assertEqual(
+            projected["clause_reviews"][-1]["classification"],
+            "requires_source_verification",
+        )
+        self.assertNotIn("C00068", [
+            clause_id for item in audit for clause_id in item["clause_ids"]
+        ])
+        again, second_audit = materialize_source_keyword_constraints(projected, clauses)
+        self.assertEqual(again, projected)
+        self.assertEqual(second_audit, [])
+
+    def test_source_keyword_projection_preserves_conflicting_existing_values(self) -> None:
+        source = "关键词：术语；最多7个汉字"
+        clause = {
+            "id": "C1", "text": "最多7个汉字", "source_text_full": source,
+            "evidence_ids": ["E1"],
+            "source_span": {
+                "evidence_id": "E1", "start_offset": 7, "end_offset": 13,
+                "text": "最多7个汉字",
+                "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
+            },
+        }
+        response = {
+            "contract_version": "3.0",
+            "requirements": [
+                {"role": "keywords_zh", "properties": {}, "clause_ids": ["C1"],
+                 "evidence_ids": ["E1"], "confidence": 0.9},
+                {"role": "content_constraints", "properties": {"keywords_zh": {
+                    "max_item_chars": 99,
+                }}, "clause_ids": ["C1"], "evidence_ids": ["E1"], "confidence": 0.9},
+            ],
+            "clause_reviews": [{"clause_id": "C1", "classification": "executable"}],
+        }
+        projected, audit = materialize_source_keyword_constraints(response, [clause])
+        self.assertEqual(projected["requirements"][1]["properties"]["keywords_zh"]["max_item_chars"], 99)
+        self.assertIn("max_item_chars", audit[0]["unprojected_conflicting_fields"])
+
     def test_registered_keyword_source_verification_corrects_only_misclassified_human_check(self) -> None:
         source = (
             "关键词是为了便于做文献索引和检索工作而从论文中选取出来用以表示全文主题内容信息的"

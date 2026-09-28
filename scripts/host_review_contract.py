@@ -21,10 +21,12 @@ from source_obligation_compiler import (
     source_fact_value_matches,
     compile_soft_keyword_count_guidance,
     compile_explicit_keyword_count_range,
+    compile_keyword_source_constraints,
     has_explicit_keyword_count_signal,
     source_text_candidates,
     exact_clause_source_text,
     materialize_complete_abstract_source_constraints,
+    materialize_source_keyword_constraints,
     materialize_soft_keyword_count_guidance,
     materialize_known_source_verification,
 )
@@ -765,12 +767,26 @@ def _keyword_obligation_gaps(
         r"英文关键词|\benglish\s+keywords?\b|\bkey\s*words?\b",
         obligation_text, re.I,
     ) else "keywords_zh"
+    source_constraints = compile_keyword_source_constraints(clause)
+    source_properties = (
+        source_constraints.get("properties", {})
+        if isinstance(source_constraints, dict)
+        and source_constraints.get("language_key") == key
+        else {}
+    )
     gaps: list[str] = []
     if has_chinese_character_limit:
-        if f"{key}.max_item_chars" not in properties:
+        expected_item_limit = source_properties.get("max_item_chars")
+        if expected_item_limit is None:
+            gaps.append(f"{key}.max_item_chars:unresolved_source")
+        elif properties.get(f"{key}.max_item_chars") != expected_item_limit:
             gaps.append(f"{key}.max_item_chars")
         elif properties.get(f"{key}.item_length_metric") != "cjk_characters":
             gaps.append(f"{key}.item_length_metric:cjk_characters")
+    for field in ("separator", "require_after_role"):
+        expected_value = source_properties.get(field)
+        if expected_value is not None and properties.get(f"{key}.{field}") != expected_value:
+            gaps.append(f"{key}.{field}")
     guidance = compile_soft_keyword_count_guidance(obligation_text)
     guidance_candidates = [guidance] if guidance is not None else []
     unique_guidance = {
@@ -1407,6 +1423,9 @@ def validate_response(response: Any, chunk: dict[str, Any]) -> list[str]:
         response, chunk.get("clauses"),
     )
     response, _ = materialize_complete_abstract_source_constraints(
+        response, chunk.get("clauses"),
+    )
+    response, _ = materialize_source_keyword_constraints(
         response, chunk.get("clauses"),
     )
     response, _ = materialize_soft_keyword_count_guidance(

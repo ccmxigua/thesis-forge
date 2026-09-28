@@ -63,9 +63,11 @@ from evidence_context_guards import (
 )
 from source_obligation_compiler import (
     SOURCE_VERIFICATION_CLASSIFICATION_POLICY_VERSION,
+    SOURCE_KEYWORD_CONSTRAINT_PROJECTION_POLICY_VERSION,
     materialize_complete_abstract_source_constraints,
     materialize_known_source_verification,
     materialize_source_verification_classifications,
+    materialize_source_keyword_constraints,
     materialize_soft_keyword_count_guidance,
 )
 from requirements_input import RequirementsInputError, normalize_requirements_input
@@ -1927,12 +1929,12 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
                 "Every emitted requirement must be referenced by at least one covered, executable, or verify_existing clause_review; do not emit unused requirement objects. Every such clause review reference must point to a semantically matching emitted requirement.",
                 "Every emitted requirement MUST contain at least one non-null property in its role-specific properties object. A field_key identifies a content instance but is not an executable payload; do not emit properties: {} or use field_key alone. For text and cover-field roles, copy the exact evidence-backed text into properties.text; for style/layout roles, emit the declared nested style or layout property.",
                 "Mechanical response gate: classification is not normative_basis. Never put informational, executable, or any classification string into normative_basis; use only the enum values declared by response_schema and omit the field when no declared basis is supported.",
-                "Mechanical response gate: require_after_role and keyword constraints must remain at the exact nested path declared by the selected role_properties_schema. Do not create a top-level keywords_zh/keywords_en role or move nested properties into a different role.",
+                "Keyword role boundary: content rules such as count_guidance, mandatory min_count/max_count, max_item_chars, item_length_metric, require_after_role, and separator belong under a content_constraints requirement at properties.keywords_zh or properties.keywords_en. A top-level keywords_zh/keywords_en role may describe only its declared role/style properties; it cannot stand in for the nested content-constraint payload.",
       "For an explicit acknowledgments length clause such as '字数一般不超过500字', use the content_constraints role with the nested payload properties.acknowledgments.max_chars. Do not emit generic null-valued placeholder fields or put the limit at the role root; the bridge may compile this exact evidence-backed form mechanically.",
       "For an explicit appendix placement clause such as '附录放在正文之后另起页', use the appendices role with properties.page_break_each: true. Do not emit generic null-valued appendix fields or infer labels/titles/order from this clause; the bridge may compile only this exact evidence-backed page-break form mechanically.",
       "For a cover requirement with an empty required institution string and the declared neutral placeholder policy, preserve the cover structure and use '——'; never copy a school name or infer an institution identity from nearby evidence.",
                 "Mechanical response gate: on retry after local rejection, regenerate the complete object from this chunk. Never auto-correct an invalid enum, invent missing evidence, change a semantic classification without evidence, or reuse a prior response. Apply only mechanical schema corrections explicitly required by the validator, such as omitting an invalid optional field or using [] for a non-executable classification.",
-                "Mechanical retry gate: a partial_clause_coverage error does not authorize changing classification, obligations, clause_ids, or requirement count. Preserve the baseline classification and complete the missing role-specific requirement only when the current evidence and declared schema support it; otherwise return the baseline unchanged and let the bridge fail closed.",
+                "Mechanical retry gate: a partial_clause_coverage error does not authorize changing classification, obligations, clause_ids, or requirement count. Preserve the baseline classification and complete the missing role-specific requirement only when the current evidence and declared schema support it; keyword paths must be represented under content_constraints.properties.keywords_zh/keywords_en and linked to the exact source clause/evidence. Otherwise return the baseline unchanged and let the bridge fail closed.",
                 "Mechanical retry gate: when executable_review_requires_all_obligations_covered is reported, never change a non-covered obligation to covered merely to satisfy the gate. Preserve each obligation id and status; if the current evidence/backend cannot cover one obligation, reclassify only that clause to the most accurate non-executable classification and remove its clause edge from requirements. Do not change any other review, requirement payload, evidence, or obligation.",
                 "Mechanical response gate: if a clause contains several obligations, include an obligations array with one object per obligation (id, status, reason). Status covered is allowed only when that obligation is fully represented; any residual obligation makes the parent review non-executable.",
                 "deterministic_obligation_keys are a code-owned source checklist, not IDs to copy into obligations[]. The contract independently checks their role-specific requirement properties; do not spend output tokens echoing these keys. Use obligations[] for your semantic decomposition and include any source obligations not represented by the deterministic checklist. A model-authored covered status never overrides a failed property check.",
@@ -2064,11 +2066,15 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
         "source_verification_classification_policy_version": (
             SOURCE_VERIFICATION_CLASSIFICATION_POLICY_VERSION
         ),
+        "source_keyword_constraint_projection_policy_version": (
+            SOURCE_KEYWORD_CONSTRAINT_PROJECTION_POLICY_VERSION
+        ),
         "authorized_semantic_transforms": copy.deepcopy(AUTHORIZED_MERGE_SEMANTIC_TRANSFORMS),
         "allowed_transformations": [
             "derive_contract_3_reverse_relation",
             "project_authoritative_existing_requirement_payload",
             "project_registered_existing_content_verification",
+            "project_registered_source_keyword_constraints",
             "normalize_registered_content_instances",
             "apply_versioned_registered_semantic_guard",
         ],
@@ -2111,6 +2117,18 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
             "semantic_inference": "disabled_for_registered_complete_source_bundles",
             "authorization": "complete_registered_source_bundle_projection_v1",
             "repairs": abstract_source_repairs,
+        })
+    projected_response, source_keyword_constraint_repairs = materialize_source_keyword_constraints(
+        projected_response, clauses,
+    )
+    if source_keyword_constraint_repairs:
+        audit.append({
+            "type": "source_keyword_constraint_projection",
+            "rule_id": "source_bound_keyword_constraint_projection_v1",
+            "projection_policy_version": SOURCE_KEYWORD_CONSTRAINT_PROJECTION_POLICY_VERSION,
+            "semantic_inference": "none",
+            "authorization": "exact_current_source_and_linked_keyword_role_v1",
+            "repairs": source_keyword_constraint_repairs,
         })
     projected_response, soft_keyword_repairs = materialize_soft_keyword_count_guidance(
         projected_response, clauses,
@@ -3641,6 +3659,9 @@ def merge_host_agent_review_packets(
     aggregate, abstract_source_projections = materialize_complete_abstract_source_constraints(
         aggregate, full_clauses,
     )
+    aggregate, source_keyword_constraint_projections = materialize_source_keyword_constraints(
+        aggregate, full_clauses,
+    )
     aggregate, soft_keyword_guidance_projections = materialize_soft_keyword_count_guidance(
         aggregate, full_clauses,
     )
@@ -3687,12 +3708,16 @@ def merge_host_agent_review_packets(
         "source_verification_classification_policy_version": (
             SOURCE_VERIFICATION_CLASSIFICATION_POLICY_VERSION
         ),
+        "source_keyword_constraint_projection_policy_version": (
+            SOURCE_KEYWORD_CONSTRAINT_PROJECTION_POLICY_VERSION
+        ),
         "deduplication_policy": copy.deepcopy(deduplication),
         "semantic_review_ledger_path": str(ledger_path.resolve()),
         "semantic_review_ledger_sha256": sha256_json(ledger),
         "merge_commit_path": str(merge_commit_path.resolve()),
         "existing_requirement_payload_projection": existing_payload_repairs,
         "complete_abstract_source_projection": abstract_source_projections,
+        "source_keyword_constraint_projection": source_keyword_constraint_projections,
         "soft_keyword_count_guidance_projection": soft_keyword_guidance_projections,
         "source_obligation_verification_projection": source_verification_repairs,
         "source_verification_classification_projection": (

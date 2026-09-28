@@ -239,12 +239,14 @@ from semantic_contract import (  # noqa: E402
 )
 from source_obligation_compiler import (  # noqa: E402
     SOURCE_VERIFICATION_CLASSIFICATION_POLICY_VERSION,
+    SOURCE_KEYWORD_CONSTRAINT_PROJECTION_POLICY_VERSION,
     compile_continuation_caption_requirement,
     compile_known_source_obligation_ids,
     has_mixed_external_document_action_signal,
     materialize_complete_abstract_source_constraints,
     materialize_known_source_verification,
     materialize_source_verification_classifications,
+    materialize_source_keyword_constraints,
     materialize_soft_keyword_count_guidance,
 )
 
@@ -686,7 +688,7 @@ _BASE_CONTRACT_REPAIR_RULES = (
     "If classification is informational, use requirement_indexes: [] and omit normative_basis unless a declared normative basis is explicitly supported by the cited evidence; never copy classification into normative_basis.",
     "Only covered, executable, and verify_existing clause reviews may contain requirement_indexes; every other classification must use an empty array.",
     "Every executable/covered/verify_existing requirement reference must be a zero-based index of a semantically matching emitted requirement whose clause_ids contains that exact review clause_id; check every review/index pair independently. Never carry an adjacent clause's index, change clause_ids to make validation pass, or emit an unused requirement.",
-    "Do not move nested properties to a top-level requirement role: a nested key such as require_after_role is legal only where the supplied role schema places it.",
+    "For keyword content constraints, keep count_guidance, min_count/max_count, max_item_chars, item_length_metric, require_after_role, and separator under a content_constraints requirement at properties.keywords_zh or properties.keywords_en. Preserve a top-level keyword role only for its own declared role/style properties; do not use it as the sole representation of content constraints.",
     "Every emitted requirement must contain at least one non-null property in its role-specific properties object. A field_key identifies a content instance but is not an executable payload; do not emit properties: {} or use field_key alone. For text and cover-field roles, copy the exact evidence-backed text into properties.text; for style/layout roles, emit the declared nested style or layout property.",
     "For an explicit acknowledgments length clause such as '字数一般不超过500字', use the content_constraints role with the nested payload properties.acknowledgments.max_chars. Do not emit generic null-valued placeholder fields or put the limit at the role root; the bridge may compile this exact evidence-backed form mechanically.",
     "For an explicit appendix placement clause such as '附录放在正文之后另起页', use the appendices role with properties.page_break_each: true. Do not emit generic null-valued appendix fields or infer labels/titles/order from this clause; the bridge may compile only this exact evidence-backed page-break form mechanically.",
@@ -698,7 +700,7 @@ _BASE_CONTRACT_REPAIR_RULES = (
     "A clause can be executable only when every independently verifiable obligation is represented. Preserve language targets, units, limits, exceptions, and prohibited-content requirements; a partial requirement must be classified non-executable with requirement_indexes: [] rather than promoted to full coverage.",
     "A single clause may support multiple requirements when it contains obligations for different roles. Repeat the exact clause_id and cited evidence_ids in each semantically matching requirement; a continuation-table clause may therefore bind both table continuation and table_caption position/alignment. Do not hide one role's obligation inside another role or change classification merely because one role is incomplete.",
     "Role boundary for equations: use the top-level equations role for layout properties declared by equationLayoutSpec (same_line, no_lines, alignment, number_alignment, number_parentheses, center_tab_twips, or right_tab_twips). Use equation only for an exact equation/content occurrence. Never put style or an invented layout key in equation; if no declared equations property represents the rule, keep the clause non-executable rather than guessing.",
-    "A partial_clause_coverage error never authorizes changing classification, obligations, clause_ids, or requirement count on retry. Preserve the baseline and complete a missing role-specific requirement only when current evidence and the declared schema support it; otherwise return the baseline unchanged and let the bridge fail closed.",
+    "A partial_clause_coverage error never authorizes changing classification, obligations, clause_ids, or requirement count on retry. Preserve the baseline and complete a missing role-specific requirement only when current evidence and the declared schema support it; keyword content-constraint gaps belong under content_constraints.properties.keywords_zh/keywords_en and must link to the exact source clause/evidence; otherwise return the baseline unchanged and let the bridge fail closed.",
     "When executable_review_requires_all_obligations_covered is reported, never change a non-covered obligation to covered merely to satisfy the validator. Preserve each obligation id and status; if the current evidence/backend cannot cover one obligation, reclassify only that clause to the most accurate non-executable classification and remove its clause edge from requirements. Do not change any other review, requirement payload, evidence, or obligation.",
     "When a contract-3.0 retry reports executable_review_requires_derived_requirement, preserve every non-placeholder requirement from the rejected response and add one evidence-backed requirement for each distinct named executable clause that lacks an authoritative edge; never drop verify_existing requirements, collapse several missing clauses into an unbound placeholder, or replace the baseline requirement set.",
     "Use only a verified runtime_context.runtime_inventory anchor. A zero-match, multi-match, or blocked anchor is not executable; never infer a nearby heading or use the declarations role as an insertion anchor.",
@@ -764,7 +766,7 @@ def _contract_repair_guidance(
         )
     if "require_after_role" in text or "unknown_or_disallowed_role" in text or "additionalproperties" in text:
         targeted.append(
-            "Re-read the exact role_properties_schema for each requirement and place each property only at its declared nesting level; do not create a keywords_zh/keywords_en role when the schema expects content_constraints.properties.keywords_zh/keywords_en."
+            "Re-read the exact role_properties_schema for each requirement and place each property only at its declared nesting level. Keyword content constraints belong under content_constraints.properties.keywords_zh/keywords_en; preserve a top-level keyword role only for its permitted role/style properties."
         )
     if "input_prerequisites" in text or "runtime_context" in text:
         targeted.append(
@@ -807,7 +809,17 @@ def _contract_repair_guidance(
         targeted.append(
             "Return raw JSON only: no Markdown fences, comments, trailing commas, duplicate keys, or explanatory text; parse the complete object before sending it."
         )
-    if "partial_clause_coverage" in text or "abstract_target_or_translation_ambiguous" in text:
+    keyword_partial = (
+        "partial_clause_coverage" in text
+        and re.search(r"keywords_(?:zh|en)\.", text) is not None
+    )
+    if keyword_partial:
+        targeted.append(
+            "The reported keyword gap is a role/path coverage error. Preserve the clause classification, obligations, and all existing source/evidence links. Put the missing properties under a content_constraints requirement at properties.keywords_zh or properties.keywords_en, linked to the exact cited clause_id/evidence_id; do not treat a top-level keywords role as covering this payload. Keep generally/usually ranges only in count_guidance with strength general_guidance; use hard min_count/max_count only for an explicit mandatory range, and represent an explicit Chinese-character cap with both max_item_chars and item_length_metric cjk_characters. If any target or unit remains ambiguous, leave the baseline unchanged and fail closed."
+        )
+    elif "abstract_target_or_translation_ambiguous" in text or (
+        "partial_clause_coverage" in text and "abstract_" in text
+    ):
         targeted.append(
             "The rejected clause contains residual abstract obligations or an ambiguous language target. "
             "Preserve the baseline classification, obligations, clause_ids, and requirement count. "
@@ -815,6 +827,10 @@ def _contract_repair_guidance(
             "complete that requirement and repeat the exact clause_id/evidence_ids for the additional role; "
             "otherwise return the baseline unchanged. Do not add a guessed min/max/semantic property, "
             "change Chinese abstract to English abstract, or reclassify merely to escape the coverage error."
+        )
+    elif "partial_clause_coverage" in text:
+        targeted.append(
+            "Preserve the baseline classification, obligations, clause_ids, and requirement count. Complete only a missing role-specific property explicitly supported by the current evidence and declared schema; otherwise return the baseline unchanged and let the bridge fail closed."
         )
     if "executable_review_requires_all_obligations_covered" in text:
         targeted.append(
@@ -986,10 +1002,23 @@ def _structured_contract_repair_guidance(
                 "Keep the requirement role, properties, clause_ids, all other evidence IDs, classifications, and every other response field unchanged."
             )
         elif code == "partial_clause_coverage":
-            rule = (
-                f"At {pointer}, preserve every obligation and do not promote partial coverage. "
-                "Use a non-executable classification when the supplied evidence does not resolve all obligations."
-            )
+            raw_error = str(record.get("raw_error") or "").lower()
+            if re.search(r"keywords_(?:zh|en)\.", raw_error):
+                rule = (
+                    f"At {pointer}, preserve classification, obligations, and all current clause/evidence links. "
+                    "Place the missing keyword properties in a content_constraints requirement under "
+                    "properties.keywords_zh or properties.keywords_en and bind it to the exact cited clauses/evidence. "
+                    "Keep generally/usually count ranges advisory in count_guidance; only explicit mandatory ranges "
+                    "may populate min_count/max_count. For an explicit Chinese-character cap, include both "
+                    "max_item_chars and item_length_metric='cjk_characters'. Do not treat a top-level keyword role "
+                    "as coverage for this payload. "
+                    "If the source target or unit is ambiguous, preserve the parent response and fail closed."
+                )
+            else:
+                rule = (
+                    f"At {pointer}, preserve every obligation and do not promote partial coverage. "
+                    "Complete only source-backed properties allowed by the exact role schema; otherwise preserve the parent and fail closed."
+                )
         elif code == "executable_review_obligations_uncovered":
             rule = (
                 f"At {pointer}, do not change any non-covered obligation status to covered merely to satisfy the gate. "
@@ -8013,6 +8042,9 @@ def prepare_native_response_candidate(
     response, abstract_source_projections = materialize_complete_abstract_source_constraints(
         response, chunk.get("clauses"),
     )
+    response, source_keyword_constraint_projections = materialize_source_keyword_constraints(
+        response, chunk.get("clauses"),
+    )
     response, soft_keyword_guidance_projections = materialize_soft_keyword_count_guidance(
         response, chunk.get("clauses"),
     )
@@ -8151,8 +8183,12 @@ def prepare_native_response_candidate(
         "source_verification_classification_policy_version": (
             SOURCE_VERIFICATION_CLASSIFICATION_POLICY_VERSION
         ),
+        "source_keyword_constraint_projection_policy_version": (
+            SOURCE_KEYWORD_CONSTRAINT_PROJECTION_POLICY_VERSION
+        ),
         "existing_requirement_payload_projections": existing_payload_projections,
         "complete_abstract_source_projections": abstract_source_projections,
+        "source_keyword_constraint_projections": source_keyword_constraint_projections,
         "soft_keyword_count_guidance_projections": soft_keyword_guidance_projections,
         "source_obligation_verification_projections": source_verification_projections,
         "source_verification_classification_projections": (
@@ -9028,9 +9064,15 @@ def run_host_agent_chunk(
         "source_verification_classification_policy_version": candidate_audit[
             "source_verification_classification_policy_version"
         ],
+        "source_keyword_constraint_projection_policy_version": candidate_audit[
+            "source_keyword_constraint_projection_policy_version"
+        ],
         "existing_requirement_payload_projections": existing_payload_projections,
         "complete_abstract_source_projections": candidate_audit[
             "complete_abstract_source_projections"
+        ],
+        "source_keyword_constraint_projections": candidate_audit[
+            "source_keyword_constraint_projections"
         ],
         "soft_keyword_count_guidance_projections": candidate_audit[
             "soft_keyword_count_guidance_projections"
@@ -9051,6 +9093,9 @@ def run_host_agent_chunk(
             "existing_requirement_payload": len(existing_payload_projections),
             "complete_abstract_source": len(candidate_audit[
                 "complete_abstract_source_projections"
+            ]),
+            "source_keyword_constraints": len(candidate_audit[
+                "source_keyword_constraint_projections"
             ]),
             "soft_keyword_count_guidance": len(candidate_audit[
                 "soft_keyword_count_guidance_projections"
@@ -11277,10 +11322,12 @@ def run_bridge(
                             for field in (
                                 "existing_requirement_payload_projections",
                                 "complete_abstract_source_projections",
+                                "source_keyword_constraint_projections",
                                 "soft_keyword_count_guidance_projections",
                                 "source_obligation_verification_projections",
                                 "source_verification_classification_projections",
                                 "source_verification_classification_policy_version",
+                                "source_keyword_constraint_projection_policy_version",
                                 "declaration_source_text_projections",
                                 "source_literal_whitespace_projections",
                                 "mechanical_repairs",

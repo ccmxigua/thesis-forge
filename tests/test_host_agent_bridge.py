@@ -1468,6 +1468,144 @@ class HostAgentBridgeTests(unittest.TestCase):
         self.assertIn("Delete only the unknown property 'style_hint'", retry)
         self.assertNotIn("Do not repair by deleting evidence, clearing indexes", retry)
 
+    def test_retry_guidance_routes_keyword_payload_gaps_to_nested_content_constraints(self) -> None:
+        raw_error = (
+            "$.clause_reviews[9]: partial_clause_coverage:"
+            "keywords_zh.count_guidance,keywords_zh.max_item_chars"
+        )
+        retry = bridge._contract_repair_guidance(
+            f"local response contract validation failed: {raw_error}",
+            include_base=False,
+        )
+        self.assertIn(
+            "content_constraints requirement at properties.keywords_zh",
+            retry,
+        )
+        self.assertIn("count_guidance", retry)
+        self.assertIn("general_guidance", retry)
+        self.assertIn("max_item_chars", retry)
+        self.assertIn("do not treat a top-level keywords role as covering", retry)
+        self.assertIn("fail closed", retry)
+
+        structured = bridge._structured_contract_repair_guidance([{
+            "code": "partial_clause_coverage",
+            "json_pointer": "$.clause_reviews[9]",
+            "raw_error": raw_error,
+        }], contract_version="3.0")
+        self.assertIn("content_constraints requirement", structured)
+        self.assertIn("only explicit mandatory ranges", structured)
+
+    def test_keyword_source_constraints_pass_the_production_candidate_boundary(self) -> None:
+        evidence_doc = {"evidence": [
+            {
+                "id": "E1", "kind": "paragraph",
+                "text": "关键词在摘要内容后另起一行，一般3～8个，之间用分号分开",
+            },
+            {
+                "id": "E2", "kind": "paragraph",
+                "text": "关键词：术语；最多7个汉字；最少3组，最多8组",
+            },
+            {
+                "id": "E3", "kind": "paragraph",
+                "text": (
+                    "Keywords in the abstract content after another line, generally 3~8, "
+                    "separated by semicolons."
+                ),
+            },
+        ]}
+        clauses = self._bind_test_source_spans([
+            {"id": "C00069", "text": evidence_doc["evidence"][0]["text"], "evidence_ids": ["E1"]},
+            {
+                "id": "C00071", "text": "最多7个汉字",
+                "source_text_full": evidence_doc["evidence"][1]["text"],
+                "evidence_ids": ["E2"],
+            },
+            {
+                "id": "C00072", "text": "最少3组，最多8组",
+                "source_text_full": evidence_doc["evidence"][1]["text"],
+                "evidence_ids": ["E2"],
+            },
+            {"id": "C00077", "text": evidence_doc["evidence"][2]["text"], "evidence_ids": ["E3"]},
+        ], evidence_doc)
+        chunk = engine.build_llm_request(
+            [], clauses, evidence_doc, {}, "full", contract_version="3.0",
+            runtime_context={"code_fingerprint_sha256": "9" * 64},
+        )
+        chunk = attach_request_provenance(
+            chunk, source_sha256="a" * 64, evidence_doc=evidence_doc,
+            clauses=chunk["clauses"], run_id="keyword-source-projection-test",
+        )
+
+        def native_keyword_requirement(role: str, clause_ids: list[str], evidence_ids: list[str]) -> dict:
+            role_properties = {
+                "font": None, "paragraph": None, "numbering": None,
+                "position": None, "prefix": None, "separator": "semicolon",
+                "style_hint": None, "text": None, "header_content": None,
+                "bottom_border": None,
+            }
+            return {
+                "existing_requirement_id": None, "field_key": None,
+                "clause_ids": clause_ids, "source_fragment_clause_ids": None,
+                "evidence_ids": evidence_ids, "confidence": 0.97,
+                "reason": "The cited source explicitly specifies keyword formatting.",
+                "applicability": None, "input_prerequisites": None,
+                "verification": {
+                    "mode": "static_docx",
+                    "checks": ["Verify the keyword presentation against the cited source."],
+                    "checker_ids": None,
+                },
+                "role": role, "properties": role_properties,
+            }
+
+        reviews = []
+        for clause_id, duty in (
+            ("C00069", "placement, general count guidance, and separator"),
+            ("C00071", "Chinese-character item length"),
+            ("C00072", "mandatory keyword group count"),
+            ("C00077", "English keyword placement, count guidance, and separator"),
+        ):
+            reviews.append({
+                "clause_id": clause_id, "classification": "executable",
+                "normative_basis": "explicit_normative_text",
+                "reason": f"The linked source requirement represents {duty}.",
+                "obligations": [{
+                    "id": f"{clause_id}-duty", "status": "covered",
+                    "reason": f"The linked requirement represents {duty}.",
+                }],
+            })
+        raw_response = {
+            "contract_version": "3.0",
+            "requirements": [
+                native_keyword_requirement(
+                    "keywords_zh", ["C00069", "C00071", "C00072"], ["E1", "E2"],
+                ),
+                native_keyword_requirement("keywords_en", ["C00077"], ["E3"]),
+            ],
+            "clause_reviews": reviews,
+            "unsupported_items": [], "reported_conflicts": [],
+        }
+
+        accepted, audit = bridge.prepare_native_response_candidate(raw_response, chunk)
+        self.assertEqual(bridge.validate_host_agent_response(accepted, chunk), [])
+        self.assertEqual(len(audit["source_keyword_constraint_projections"]), 2)
+        projected = [
+            item for item in accepted["requirements"]
+            if item.get("role") == "content_constraints"
+        ]
+        self.assertEqual(len(projected), 2)
+        zh = next(item["properties"]["keywords_zh"] for item in projected
+                  if "keywords_zh" in item["properties"])
+        en = next(item["properties"]["keywords_en"] for item in projected
+                  if "keywords_en" in item["properties"])
+        self.assertEqual(zh["count_guidance"], {
+            "min_count": 3, "max_count": 8, "strength": "general_guidance",
+        })
+        self.assertEqual((zh["min_count"], zh["max_count"], zh["max_item_chars"]), (3, 8, 7))
+        self.assertEqual((en["count_guidance"]["strength"], en["separator"]),
+                         ("general_guidance", "semicolon"))
+        self.assertNotIn("min_count", en)
+        self.assertNotIn("max_count", en)
+
     def test_retry_guidance_targets_exact_requirement_clause_mapping(self) -> None:
         retry = bridge._contract_repair_guidance(
             "local response contract validation failed: "

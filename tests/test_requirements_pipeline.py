@@ -321,6 +321,59 @@ class RequirementsPipelineTest(unittest.TestCase):
         gate = next(item for item in audit if item.get("type") == "post_merge_gate")
         self.assertEqual(gate["unresolved_reported_conflict_count"], 1)
 
+    def test_llm_primary_projects_keyword_origin_to_human_verification(self) -> None:
+        source = (
+            "关键词是为了便于做文献索引和检索工作而从论文中选取出来用以表示全文主题内容信息的"
+            "单词或术语，在论文中有明确出处"
+        )
+        clause = {"id": "C00068", "text": source, "evidence_ids": ["E00060"]}
+        response = {
+            "contract_version": "3.0",
+            "requirements": [],
+            "clause_reviews": [{
+                "clause_id": "C00068",
+                "classification": "requires_source_content",
+                "reason": "The keyword provenance must be supplied or verified.",
+                "obligations": [{
+                    "id": "C00068-obligation-1",
+                    "status": "requires_source_content",
+                    "reason": "Verify that the keywords have an explicit thesis source.",
+                }],
+            }],
+            "unsupported_items": [],
+            "reported_conflicts": [],
+        }
+        expected_provenance = {"run_id": "current-run", "source_sha256": "a" * 64}
+
+        spec, conflicts, audit = requirements_engine.merge_llm_primary(
+            Path("synthetic-source"),
+            {"schema_version": "1.0", "roles": {}, "page": {},
+             "requirements": [], "content_instances": []},
+            [clause], response, {"E00060"}, expected_provenance=expected_provenance,
+        )
+
+        review = next(item for item in spec["clause_compliance"] if item["clause_id"] == "C00068")
+        self.assertEqual(review["status"], "input_provided_unverified")
+        self.assertEqual(spec["requirements"], [])
+        projection = next(
+            item for item in audit
+            if item.get("type") == "source_verification_classification_projection"
+        )
+        self.assertEqual(
+            projection["semantic_transformation_policy_version"],
+            "merge-semantic-guards-v2",
+        )
+        self.assertEqual(
+            projection["projection_policy_version"],
+            "source-verification-classification-v1",
+        )
+        self.assertEqual(projection["repairs"][0]["provenance"], expected_provenance)
+        self.assertEqual(projection["repairs"][0]["before_classification"], "requires_source_content")
+        self.assertEqual(projection["repairs"][0]["after_classification"], "requires_source_verification")
+        self.assertTrue(projection["repairs"][0]["human_verification_required"])
+        self.assertIs(projection["repairs"][0]["submission_ready"], False)
+        self.assertFalse(any(item.get("type") == "llm_contract" for item in conflicts), conflicts)
+
     def test_preprocess_infers_xrefs_without_aux(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             td = Path(td); source = td / "source.tex"; output = td / "preprocessed.tex"

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import copy
 import hashlib
+import json
 import sys
 import unittest
 from pathlib import Path
@@ -10,12 +11,15 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 from source_obligation_compiler import (  # noqa: E402
+    SOURCE_VERIFICATION_CLASSIFICATION_POLICY_VERSION,
     compile_abstract_source_constraints,
     compile_continuation_caption_requirement,
     compile_explicit_keyword_count_range,
     compile_known_source_obligations,
     compile_known_source_obligation_ids,
     has_explicit_keyword_count_signal,
+    has_explicit_authoring_action_cue,
+    is_explicit_authoring_content_quote,
     compile_security_marking_options,
     compile_security_marking_shorter_allowances,
     compile_soft_keyword_count_guidance,
@@ -23,6 +27,7 @@ from source_obligation_compiler import (  # noqa: E402
     compile_unresolved_manual_review_codes,
     materialize_complete_abstract_source_constraints,
     materialize_known_source_verification,
+    materialize_source_verification_classifications,
     materialize_soft_keyword_count_guidance,
     source_fact_value_matches,
     has_mixed_external_document_action_signal,
@@ -30,6 +35,169 @@ from source_obligation_compiler import (  # noqa: E402
 
 
 class SourceObligationCompilerTests(unittest.TestCase):
+    def test_registered_keyword_source_verification_corrects_only_misclassified_human_check(self) -> None:
+        source = (
+            "关键词是为了便于做文献索引和检索工作而从论文中选取出来用以表示全文主题内容信息的"
+            "单词或术语，在论文中有明确出处"
+        )
+        clause = {
+            "id": "C00068", "text": source, "evidence_ids": ["E00060"],
+        }
+        response = {
+            "contract_version": "3.0",
+            "provenance": {"run_id": "run-current", "source_sha256": "a" * 64},
+            "requirements": [],
+            "clause_reviews": [{
+                "clause_id": "C00068",
+                "classification": "requires_source_content",
+                "reason": "The actual keyword provenance must be supplied or verified.",
+                "normative_basis": "explicit_normative_text",
+                "obligations": [{
+                    "id": "C00068-obligation-1",
+                    "status": "requires_source_content",
+                    "reason": "The keyword origin must be verified from the thesis.",
+                }],
+            }],
+            "unsupported_items": [], "reported_conflicts": [],
+        }
+
+        projected, audit = materialize_source_verification_classifications(
+            response, [clause], provenance=response["provenance"],
+        )
+
+        self.assertEqual(response["clause_reviews"][0]["classification"], "requires_source_content")
+        self.assertEqual(response["clause_reviews"][0]["obligations"][0]["status"], "requires_source_content")
+        self.assertEqual(projected["clause_reviews"][0]["classification"], "requires_source_verification")
+        self.assertEqual(projected["clause_reviews"][0]["obligations"], [])
+        self.assertEqual(
+            projected["clause_reviews"][0]["reason"],
+            response["clause_reviews"][0]["reason"],
+        )
+        self.assertEqual(len(audit), 1)
+        self.assertEqual(audit[0]["clause_id"], "C00068")
+        self.assertEqual(
+            audit[0]["policy_version"], SOURCE_VERIFICATION_CLASSIFICATION_POLICY_VERSION,
+        )
+        self.assertEqual(audit[0]["provenance"]["run_id"], "run-current")
+        self.assertEqual(audit[0]["source_evidence_ids"], ["E00060"])
+        self.assertTrue(audit[0]["human_verification_required"])
+        self.assertIs(audit[0]["submission_ready"], False)
+        self.assertEqual(audit[0]["original_primary_obligations"], response["clause_reviews"][0]["obligations"])
+        again, second_audit = materialize_source_verification_classifications(
+            projected, [clause], provenance=response["provenance"],
+        )
+        self.assertEqual(again, projected)
+        self.assertEqual(second_audit, [])
+
+    def test_source_verification_projection_does_not_erase_authoring_or_mixed_work(self) -> None:
+        source = "关键词须源自论文并有明确出处。"
+        response = {
+            "contract_version": "3.0", "requirements": [],
+            "clause_reviews": [{
+                "clause_id": "C1", "classification": "requires_source_content",
+                "reason": "pending", "obligations": [{
+                    "id": "O1", "status": "requires_source_content", "reason": "pending",
+                }],
+            }],
+        }
+        cases = [
+            # The exact source explicitly asks the author to provide genuine content.
+            ([{"id": "C1", "text": "关键词须源自论文；作者应补充本人真实研究内容。", "evidence_ids": ["E1"]}], response),
+            # A genuine author task need not mention a sample or placeholder.
+            ([{"id": "C1", "text": "关键词须源自论文并有明确出处；作者须撰写摘要。", "evidence_ids": ["E1"]}], response),
+            # A requirement edge means this is mixed with executable work.
+            ([{"id": "C1", "text": source, "evidence_ids": ["E1"]}], {
+                **response, "requirements": [{"clause_ids": ["C1"]}],
+            }),
+            # More than the narrowly recognized single source-content inventory is ambiguous.
+            ([{"id": "C1", "text": source, "evidence_ids": ["E1"]}], {
+                **response, "clause_reviews": [{
+                    **response["clause_reviews"][0],
+                    "obligations": [
+                        response["clause_reviews"][0]["obligations"][0],
+                        {"id": "O2", "status": "requires_source_content", "reason": "another duty"},
+                    ],
+                }],
+            }),
+            # Different disposition remains untouched.
+            ([{"id": "C1", "text": source, "evidence_ids": ["E1"]}], {
+                **response, "clause_reviews": [{
+                    **response["clause_reviews"][0],
+                    "obligations": [{"id": "O1", "status": "unverifiable", "reason": "pending"}],
+                }],
+            }),
+        ]
+        for clauses, candidate in cases:
+            with self.subTest(clauses=clauses, requirements=candidate["requirements"]):
+                projected, audit = materialize_source_verification_classifications(candidate, clauses)
+                self.assertEqual(projected, candidate)
+                self.assertEqual(audit, [])
+
+        mixed_source = "关键词须源自论文并有明确出处；作者须撰写摘要。"
+        self.assertEqual(
+            compile_source_content_verification_codes(mixed_source),
+            ["keyword_source_traceability_verification"],
+        )
+        self.assertFalse(is_explicit_authoring_content_quote(mixed_source))
+        self.assertTrue(has_explicit_authoring_action_cue(mixed_source))
+
+    def test_ambiguous_author_action_wording_conservatively_disables_projection(self) -> None:
+        response = {
+            "contract_version": "3.0", "requirements": [],
+            "clause_reviews": [{
+                "clause_id": "C1", "classification": "requires_source_content",
+                "reason": "pending", "obligations": [{
+                    "id": "O1", "status": "requires_source_content", "reason": "pending",
+                }],
+            }],
+        }
+        sources = [
+            "关键词须源自论文并有明确出处；作者不得提供未经核实的关键词。",
+            "关键词须源自论文并有明确出处；如作者提供关键词，应核查来源。",
+            "关键词须源自论文并有明确出处；作者提供的论文需要注明出处。",
+        ]
+        for source in sources:
+            with self.subTest(source=source):
+                clause = {"id": "C1", "text": source, "evidence_ids": ["E1"]}
+                self.assertTrue(has_explicit_authoring_action_cue(source))
+                projected, audit = materialize_source_verification_classifications(
+                    response, [clause],
+                )
+                self.assertEqual(projected, response)
+                self.assertEqual(audit, [])
+
+    def test_each_source_verification_projection_hashes_its_own_intermediate_response(self) -> None:
+        source = "关键词须源自论文并有明确出处。"
+        clauses = [
+            {"id": clause_id, "text": source, "evidence_ids": [f"E{index}"]}
+            for index, clause_id in enumerate(("C1", "C2"), start=1)
+        ]
+        response = {
+            "contract_version": "3.0", "requirements": [],
+            "clause_reviews": [{
+                "clause_id": clause["id"],
+                "classification": "requires_source_content",
+                "reason": "Source-origin verification remains pending.",
+                "obligations": [{
+                    "id": f"{clause['id']}-O1",
+                    "status": "requires_source_content",
+                    "reason": "Verify the source in the thesis.",
+                }],
+            } for clause in clauses],
+        }
+
+        projected, audit = materialize_source_verification_classifications(response, clauses)
+        first_intermediate = copy.deepcopy(response)
+        first_intermediate["clause_reviews"][0]["classification"] = "requires_source_verification"
+        first_intermediate["clause_reviews"][0]["obligations"] = []
+        encode = lambda value: hashlib.sha256(json.dumps(
+            value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()
+
+        self.assertEqual(len(audit), 2)
+        self.assertEqual(audit[0]["after_response_sha256"], encode(first_intermediate))
+        self.assertEqual(audit[1]["after_response_sha256"], encode(projected))
+
     def test_mixed_external_and_local_document_action_cue_is_detected_conservatively(self) -> None:
         self.assertTrue(has_mixed_external_document_action_signal(
             "封面须写明学号，并由导师签字盖章"

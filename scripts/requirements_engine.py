@@ -62,8 +62,10 @@ from evidence_context_guards import (
     sample_content_guard,
 )
 from source_obligation_compiler import (
+    SOURCE_VERIFICATION_CLASSIFICATION_POLICY_VERSION,
     materialize_complete_abstract_source_constraints,
     materialize_known_source_verification,
+    materialize_source_verification_classifications,
     materialize_soft_keyword_count_guidance,
 )
 from requirements_input import RequirementsInputError, normalize_requirements_input
@@ -183,11 +185,12 @@ ALLOWED_REQUIREMENT_ROLES = set(ALL_TEXT_ROLES) | TOP_LEVEL_REQUIREMENT_ROLES | 
 # as if no transformation happened.  Keep the policy versioned so a future
 # guard cannot silently acquire authority merely by being added to the merge
 # function.
-MERGE_SEMANTIC_TRANSFORM_POLICY_VERSION = "merge-semantic-guards-v1"
+MERGE_SEMANTIC_TRANSFORM_POLICY_VERSION = "merge-semantic-guards-v2"
 AUTHORIZED_MERGE_SEMANTIC_TRANSFORMS = {
     "non_normative_sample_content": "registered_evidence_context_guard_v1",
     "manual_empty_requirement_normalization": "registered_contract_boundary_v1",
     "declaration_placeholder_only_normalization": "registered_declaration_boundary_v1",
+    "existing_content_source_verification": "registered_source_verification_without_authoring_instruction_v1",
 }
 
 
@@ -2058,10 +2061,14 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
         "input_rule_spec_sha256": input_rule_spec_sha256,
         "semantic_inference": "disabled_for_unauthorized_changes",
         "semantic_transformation_policy_version": MERGE_SEMANTIC_TRANSFORM_POLICY_VERSION,
+        "source_verification_classification_policy_version": (
+            SOURCE_VERIFICATION_CLASSIFICATION_POLICY_VERSION
+        ),
         "authorized_semantic_transforms": copy.deepcopy(AUTHORIZED_MERGE_SEMANTIC_TRANSFORMS),
         "allowed_transformations": [
             "derive_contract_3_reverse_relation",
             "project_authoritative_existing_requirement_payload",
+            "project_registered_existing_content_verification",
             "normalize_registered_content_instances",
             "apply_versioned_registered_semantic_guard",
         ],
@@ -2115,6 +2122,24 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
             "semantic_inference": "none",
             "authorization": "source_qualified_keyword_range_projection_v1",
             "repairs": soft_keyword_repairs,
+        })
+    projected_response, source_verification_classification_repairs = (
+        materialize_source_verification_classifications(
+            projected_response, clauses,
+            provenance=expected_provenance if isinstance(expected_provenance, dict) else None,
+        )
+    )
+    if source_verification_classification_repairs:
+        audit.append({
+            "type": "source_verification_classification_projection",
+            "rule_id": "project_registered_existing_content_verification_v1",
+            "semantic_transformation_policy_version": MERGE_SEMANTIC_TRANSFORM_POLICY_VERSION,
+            "projection_policy_version": SOURCE_VERIFICATION_CLASSIFICATION_POLICY_VERSION,
+            "semantic_inference": "none",
+            "authorization": AUTHORIZED_MERGE_SEMANTIC_TRANSFORMS[
+                "existing_content_source_verification"
+            ],
+            "repairs": source_verification_classification_repairs,
         })
     projected_response, source_verification_repairs = materialize_known_source_verification(
         projected_response, clauses,
@@ -3619,6 +3644,11 @@ def merge_host_agent_review_packets(
     aggregate, soft_keyword_guidance_projections = materialize_soft_keyword_count_guidance(
         aggregate, full_clauses,
     )
+    aggregate, source_verification_classification_projections = (
+        materialize_source_verification_classifications(
+            aggregate, full_clauses, provenance=full_provenance,
+        )
+    )
     aggregate, source_verification_repairs = materialize_known_source_verification(
         aggregate, full_clauses,
     )
@@ -3653,6 +3683,10 @@ def merge_host_agent_review_packets(
             "model_authoritative_v2_1" if contract_version == HOST_REVIEW_CONTRACT_V2
             else "code_derived_v3_0"
         ),
+        "semantic_transformation_policy_version": MERGE_SEMANTIC_TRANSFORM_POLICY_VERSION,
+        "source_verification_classification_policy_version": (
+            SOURCE_VERIFICATION_CLASSIFICATION_POLICY_VERSION
+        ),
         "deduplication_policy": copy.deepcopy(deduplication),
         "semantic_review_ledger_path": str(ledger_path.resolve()),
         "semantic_review_ledger_sha256": sha256_json(ledger),
@@ -3661,6 +3695,9 @@ def merge_host_agent_review_packets(
         "complete_abstract_source_projection": abstract_source_projections,
         "soft_keyword_count_guidance_projection": soft_keyword_guidance_projections,
         "source_obligation_verification_projection": source_verification_repairs,
+        "source_verification_classification_projection": (
+            source_verification_classification_projections
+        ),
     }
     receipt = {
         "schema_version": "1.0",

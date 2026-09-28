@@ -13,6 +13,9 @@ import re
 from typing import Any
 
 
+SOURCE_VERIFICATION_CLASSIFICATION_POLICY_VERSION = "source-verification-classification-v1"
+
+
 _OPTIONAL_CAPTION = re.compile(
     r"(?P<phrase>(?:续表题|表标题|表题)(?:\s|[（(]){0,4}"
     r"(?<!不)(?<!非)(?<!未)(?:可以|可)省略(?:[）)])?)",
@@ -911,6 +914,84 @@ def compile_source_content_verification_codes(source_text: Any) -> list[str]:
     return ["keyword_source_traceability_verification"]
 
 
+def is_explicit_authoring_content_quote(quote: Any) -> bool:
+    """Recognize only a source instruction that explicitly asks for authored content.
+
+    This conservative lexical gate is shared by the independent reviewer and
+    source-verification projections. It is not a general semantic classifier:
+    unsupported or ambiguous wording remains pending instead of being
+    reinterpreted as an authoring task.
+    """
+    if not isinstance(quote, str) or not quote.strip():
+        return False
+    compact = re.sub(r"\s+", "", quote).casefold()
+    chinese_scope_markers = (
+        "不得", "不要", "不能", "不应", "不宜", "不可", "无需", "无须", "禁止", "避免", "切勿",
+        "如果", "若", "假如", "倘若", "除非", "只有在", "仅当", "如有", "当……时",
+    )
+    if any(token in compact for token in chinese_scope_markers):
+        return False
+    english = quote.casefold()
+    if re.search(
+        r"\b(?:not|never|don't|doesn't|didn't|cannot|can't|shouldn't|mustn't|without|unless|if|when|only\s+if|provided\s+that)\b",
+        english,
+    ):
+        return False
+    chinese_sample = any(token in compact for token in (
+        "示例", "样例", "范例", "虚构", "杜撰", "编的", "编写的",
+    ))
+    chinese_author = any(token in compact for token in ("作者", "自行", "自己", "本人"))
+    chinese_action = any(token in compact for token in (
+        "撰写", "编写", "补充", "填写", "提供", "替换",
+    ))
+    chinese_genuine_content = any(token in compact for token in (
+        "真实内容", "实际内容", "真实研究", "实际研究", "本人内容",
+    ))
+    if chinese_author and chinese_action and (chinese_sample or chinese_genuine_content):
+        return True
+
+    english_sample = any(token in english for token in (
+        "example", "sample", "fictitious", "fabricated", "placeholder",
+    ))
+    english_author = bool(re.search(r"\b(author|you|yourself)\b", english))
+    english_action = bool(re.search(
+        r"\b(write|draft|provide|replace|fill\s+in|supply)\b", english,
+    ))
+    english_genuine_content = any(token in english for token in (
+        "genuine content", "actual research", "original content",
+    ))
+    return english_author and english_action and (english_sample or english_genuine_content)
+
+
+def has_explicit_authoring_action_cue(source_text: Any) -> bool:
+    """Conservatively detect any author/learner action mixed into a clause.
+
+    This is intentionally broader than the placeholder-authoring gate above.
+    A clause that combines traceability with a genuine author task must not be
+    collapsed to a verification-only classification, even when the task does
+    not mention a sample or placeholder.
+    """
+    if not isinstance(source_text, str) or not source_text.strip():
+        return False
+    compact = re.sub(r"\s+", "", source_text).casefold()
+    chinese_author = any(token in compact for token in (
+        "作者", "毕业生", "学生本人", "本人", "申请人",
+    ))
+    chinese_action = any(token in compact for token in (
+        "撰写", "编写", "补充", "填写", "提供", "替换", "选择", "选取",
+        "整理", "录入", "添加", "列出", "写出", "提交", "撰录", "编制", "创作",
+    ))
+    if chinese_author and chinese_action:
+        return True
+    english = source_text.casefold()
+    english_author = bool(re.search(r"\b(?:author|student|applicant|you)\b", english))
+    english_action = bool(re.search(
+        r"\b(?:write|draft|provide|supply|create|prepare|compose|fill|add|select|choose|enter|submit)\b",
+        english,
+    ))
+    return english_author and english_action
+
+
 def _explicit_abstract_hard_support(source_text: Any, property_name: str) -> bool:
     if not isinstance(source_text, str) or not source_text.strip():
         return False
@@ -1535,4 +1616,111 @@ def materialize_known_source_verification(
                 "authorization": "exact_compiled_source_obligation_checker_binding",
                 "rule_id": "materialize_known_source_verification_v1",
             })
+    return projected, audit
+
+
+def materialize_source_verification_classifications(
+    response: Any, clauses: Any, *, provenance: Any = None,
+) -> tuple[Any, list[dict[str, Any]]]:
+    """Keep code-registered existing-content checks in a human-verification state.
+
+    A primary model may describe existing-content provenance as content that
+    must be supplied, even though the current source only requires the content
+    to originate in the thesis and be traceable. For the narrow v3 shape below,
+    code projects that misclassification to ``requires_source_verification``.
+    It does not create a requirement or claim the check passed. Explicit
+    authoring instructions, executable requirements, mixed/manual source facts,
+    and non-singleton model obligation inventories are left untouched.
+    """
+    if (
+        not isinstance(response, dict)
+        or response.get("contract_version") != "3.0"
+        or not isinstance(clauses, list)
+    ):
+        return copy.deepcopy(response), []
+    reviews = response.get("clause_reviews")
+    requirements = response.get("requirements")
+    if not isinstance(reviews, list) or not isinstance(requirements, list):
+        return copy.deepcopy(response), []
+    clause_map = {
+        item.get("id"): item for item in clauses
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    review_map = {
+        item.get("clause_id"): item for item in reviews
+        if isinstance(item, dict) and isinstance(item.get("clause_id"), str)
+    }
+    if len(clause_map) != len(clauses) or len(review_map) != len(reviews):
+        return copy.deepcopy(response), []
+
+    projected = copy.deepcopy(response)
+    projected_review_map = {
+        item.get("clause_id"): item for item in projected["clause_reviews"]
+        if isinstance(item, dict) and isinstance(item.get("clause_id"), str)
+    }
+    audit: list[dict[str, Any]] = []
+    for clause_id, clause in sorted(clause_map.items()):
+        source_text = exact_clause_source_text(clause)
+        verification_codes = compile_source_content_verification_codes(source_text)
+        if (
+            not verification_codes
+            or is_explicit_authoring_content_quote(source_text)
+            or has_explicit_authoring_action_cue(source_text)
+            or compile_known_source_obligation_ids(source_text)
+            or compile_unresolved_manual_review_codes(source_text)
+        ):
+            continue
+        review = projected_review_map.get(clause_id)
+        original_review = review_map.get(clause_id)
+        obligations = original_review.get("obligations") if isinstance(original_review, dict) else None
+        if (
+            not isinstance(review, dict)
+            or not isinstance(original_review, dict)
+            or original_review.get("classification") != "requires_source_content"
+            or not isinstance(obligations, list)
+            or len(obligations) != 1
+            or not isinstance(obligations[0], dict)
+            or obligations[0].get("status") != "requires_source_content"
+            or any(
+                isinstance(requirement, dict)
+                and clause_id in (requirement.get("clause_ids") or [])
+                for requirement in requirements
+            )
+        ):
+            continue
+
+        before_response_sha256 = hashlib.sha256(json.dumps(
+            response, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()
+        before_review = copy.deepcopy(review)
+        review["classification"] = "requires_source_verification"
+        review["obligations"] = []
+        after_response_sha256 = hashlib.sha256(json.dumps(
+            projected, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        ).encode("utf-8")).hexdigest()
+        audit.append({
+            "rule_id": "project_registered_existing_content_verification_v1",
+            "policy_version": SOURCE_VERIFICATION_CLASSIFICATION_POLICY_VERSION,
+            "authorization": "registered_source_verification_without_authoring_instruction_v1",
+            "clause_id": clause_id,
+            "source_evidence_ids": sorted({
+                str(value) for value in (clause.get("evidence_ids") or [])
+                if isinstance(value, str) and value
+            }),
+            "source_quote_sha256": hashlib.sha256(
+                source_text.encode("utf-8")
+            ).hexdigest(),
+            "source_content_verification_codes": verification_codes,
+            "provenance": copy.deepcopy(provenance) if isinstance(provenance, dict) else None,
+            "before_classification": "requires_source_content",
+            "after_classification": "requires_source_verification",
+            "original_primary_obligations": copy.deepcopy(obligations),
+            "original_review_sha256": hashlib.sha256(json.dumps(
+                before_review, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            ).encode("utf-8")).hexdigest(),
+            "before_response_sha256": before_response_sha256,
+            "after_response_sha256": after_response_sha256,
+            "human_verification_required": True,
+            "submission_ready": False,
+        })
     return projected, audit

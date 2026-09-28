@@ -35,6 +35,7 @@ from source_obligation_compiler import (
     compile_source_content_verification_codes,
     compile_unresolved_manual_review_codes,
     has_mixed_external_document_action_signal,
+    is_explicit_authoring_content_quote as _is_explicit_authoring_content_quote,
 )
 
 
@@ -107,56 +108,8 @@ class SourceVerificationClassificationCorrectionRequiredError(NativeSemanticRevi
 
 
 def is_explicit_authoring_content_quote(quote: Any) -> bool:
-    """Recognize only explicit source instructions for author-supplied content.
-
-    This conservative lexical gate is not a general semantic classifier. If
-    the source uses wording outside this small supported vocabulary, the
-    independent review remains unresolved instead of manufacturing a pending
-    author-input state.
-    """
-    if not isinstance(quote, str) or not quote.strip():
-        return False
-    compact = re.sub(r"\s+", "", quote).casefold()
-    # This gate authorizes an outstanding positive author action. A matching
-    # keyword set is insufficient when its scope is negated or conditional;
-    # keep such wording for semantic review instead of manufacturing a draft
-    # placeholder from a lexical coincidence.
-    chinese_scope_markers = (
-        "不得", "不要", "不能", "不应", "不宜", "不可", "无需", "无须", "禁止", "避免", "切勿",
-        "如果", "若", "假如", "倘若", "除非", "只有在", "仅当", "如有", "当……时",
-    )
-    if any(token in compact for token in chinese_scope_markers):
-        return False
-    english = quote.casefold()
-    if re.search(
-        r"\b(?:not|never|don't|doesn't|didn't|cannot|can't|shouldn't|mustn't|without|unless|if|when|only\s+if|provided\s+that)\b",
-        english,
-    ):
-        return False
-    chinese_sample = any(token in compact for token in (
-        "示例", "样例", "范例", "虚构", "杜撰", "编的", "编写的",
-    ))
-    chinese_author = any(token in compact for token in ("作者", "自行", "自己", "本人"))
-    chinese_action = any(token in compact for token in (
-        "撰写", "编写", "补充", "填写", "提供", "替换",
-    ))
-    chinese_genuine_content = any(token in compact for token in (
-        "真实内容", "实际内容", "真实研究", "实际研究", "本人内容",
-    ))
-    if chinese_author and chinese_action and (chinese_sample or chinese_genuine_content):
-        return True
-
-    english_sample = any(token in english for token in (
-        "example", "sample", "fictitious", "fabricated", "placeholder",
-    ))
-    english_author = bool(re.search(r"\b(author|you|yourself)\b", english))
-    english_action = bool(re.search(
-        r"\b(write|draft|provide|replace|fill\s+in|supply)\b", english,
-    ))
-    english_genuine_content = any(token in english for token in (
-        "genuine content", "actual research", "original content",
-    ))
-    return english_author and english_action and (english_sample or english_genuine_content)
+    """Compatibility wrapper for the shared source-owned authoring guard."""
+    return _is_explicit_authoring_content_quote(quote)
 
 
 def _exact_clause_source_text(

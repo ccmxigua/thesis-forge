@@ -1216,6 +1216,91 @@ class HostAgentBridgeTests(unittest.TestCase):
             errors = bridge.validate_host_agent_response(response, chunk)
             self.assertTrue(any("normative_basis" in error for error in errors), errors)
 
+    def test_keyword_origin_is_projected_to_human_verification_not_authoring(self) -> None:
+        source = (
+            "关键词是为了便于做文献索引和检索工作而从论文中选取出来用以表示全文主题内容信息的"
+            "单词或术语，在论文中有明确出处"
+        )
+        with tempfile.TemporaryDirectory() as td:
+            _review_dir, chunk = self._packet(
+                Path(td) / "requirements", source=source, contract_version="3.0",
+            )
+            clause_id = chunk["clauses"][0]["id"]
+            response = {
+                "contract_version": chunk["contract_version"],
+                "provenance": chunk["provenance"],
+                "requirements": [],
+                "clause_reviews": [{
+                    "clause_id": clause_id,
+                    "classification": "requires_source_content",
+                    "normative_basis": "explicit_normative_text",
+                    "reason": "The keyword's thesis origin must be verified against the manuscript.",
+                    "obligations": [{
+                        "id": f"{clause_id}-obligation-1",
+                        "status": "requires_source_content",
+                        "reason": "The keyword source is not verifiable from this formatting packet.",
+                    }],
+                }],
+                "unsupported_items": [], "reported_conflicts": [],
+            }
+
+            accepted, audit = bridge.prepare_native_response_candidate(response, chunk)
+            self.assertEqual(bridge.validate_host_agent_response(accepted, chunk), [])
+            self.assertEqual(
+                audit["source_verification_classification_policy_version"],
+                "source-verification-classification-v1",
+            )
+            self.assertEqual(
+                accepted["clause_reviews"][0]["classification"],
+                "requires_source_verification",
+            )
+            self.assertEqual(accepted["clause_reviews"][0]["obligations"], [])
+            self.assertEqual(accepted["requirements"], [])
+            self.assertEqual(
+                audit["source_verification_classification_projections"][0]["authorization"],
+                "registered_source_verification_without_authoring_instruction_v1",
+            )
+
+            request = bridge.build_obligation_coverage_request(
+                accepted, chunk, run_id=chunk["provenance"]["run_id"], chunk_index=4,
+            )
+            check = request["checks"][0]
+            self.assertEqual(check["review_context"]["classification"], "requires_source_verification")
+            self.assertEqual(check["review_context"]["primary_obligations"], [])
+            self.assertEqual(
+                check["review_context"]["source_content_verification_codes"],
+                ["keyword_source_traceability_verification"],
+            )
+            verification_pending = {"results": [{
+                "check_id": clause_id,
+                "verdict": "source_content_verification_pending",
+                "rationale": "A human must verify the selected keywords against the thesis manuscript.",
+                "evidence_quotes": [source],
+                "machine_obligation_ids": [],
+                "identified_obligations": [{
+                    "source_quote": source,
+                    "disposition": "source_content_verification_pending",
+                    "requirement_refs": [],
+                }],
+            }]}
+            validated = bridge.validate_obligation_coverage_response(
+                verification_pending, request["checks"],
+            )
+            self.assertEqual(validated[0]["verdict"], "source_content_verification_pending")
+
+            falsely_authoring = copy.deepcopy(verification_pending)
+            falsely_authoring["results"][0]["verdict"] = "source_content_pending"
+            falsely_authoring["results"][0]["identified_obligations"][0][
+                "disposition"
+            ] = "authoring_content_pending"
+            with self.assertRaisesRegex(
+                bridge.NativeSemanticReviewError,
+                "authoring-content pending lacks an explicit source authoring instruction",
+            ):
+                bridge.validate_obligation_coverage_response(
+                    falsely_authoring, request["checks"],
+                )
+
     def test_preflight_rejects_requirement_index_on_nonexecutable_review(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             _review_dir, chunk = self._packet(Path(td) / "requirements")

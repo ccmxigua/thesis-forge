@@ -60,9 +60,9 @@ class RootCauseGuardTests(unittest.TestCase):
         )
         self.assertFalse(any(item.get("type") == "llm_internal_conflict" for item in conflicts))
         policy = next(item for item in audit if item.get("type") == "merge_transformation_policy")
-        self.assertEqual(policy["semantic_transformation_policy_version"], "merge-semantic-guards-v1")
+        self.assertEqual(policy["semantic_transformation_policy_version"], "merge-semantic-guards-v2")
         guard = next(item for item in audit if item.get("type") == "normative_scope_guard")
-        self.assertEqual(guard["policy_version"], "merge-semantic-guards-v1")
+        self.assertEqual(guard["policy_version"], "merge-semantic-guards-v2")
         self.assertEqual(guard["authorization"], "registered_evidence_context_guard_v1")
         self.assertEqual(spec["requirements"], [])
 

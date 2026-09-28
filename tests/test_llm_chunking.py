@@ -136,6 +136,14 @@ class HostAgentReviewTests(unittest.TestCase):
             )
             receipt = json.loads((review_dir / "merge-receipt.json").read_text())
             ledger = json.loads((review_dir / "semantic-review-ledger.json").read_text())
+            self.assertEqual(
+                metadata["source_verification_classification_policy_version"],
+                "source-verification-classification-v1",
+            )
+            self.assertEqual(
+                receipt["source_verification_classification_policy_version"],
+                "source-verification-classification-v1",
+            )
             self.assertEqual(receipt["aggregate_sha256"], engine.sha256_json(merged))
             self.assertEqual(receipt["semantic_review_ledger_sha256"], engine.sha256_json(ledger))
             self.assertEqual(ledger["response_sha256"], receipt["aggregate_sha256"])
@@ -197,6 +205,105 @@ class HostAgentReviewTests(unittest.TestCase):
                 metadata["complete_abstract_source_projection"],
             )
             self.assertEqual(receipt["complete_abstract_source_projection"], [])
+
+    def test_v3_chunk_merge_projects_keyword_origin_to_bound_human_verification(self) -> None:
+        source = (
+            "关键词是为了便于做文献索引和检索工作而从论文中选取出来用以表示全文主题内容信息的"
+            "单词或术语，在论文中有明确出处"
+        )
+        other_source = "目录标题应保持居中。"
+        clauses = [
+            {"id": "C00068", "text": source, "evidence_ids": ["E00060"],
+             "source_kind": "paragraph", "location": {"part": "document", "child_index": 1},
+             "part_index": 0},
+            {"id": "C00069", "text": other_source, "evidence_ids": ["E00061"],
+             "source_kind": "paragraph", "location": {"part": "document", "child_index": 2},
+             "part_index": 0},
+        ]
+        evidence = {"evidence": [
+            {"id": "E00060", "text": source, "kind": "paragraph"},
+            {"id": "E00061", "text": other_source, "kind": "paragraph"},
+        ]}
+        for clause in clauses:
+            exact = next(item["text"] for item in evidence["evidence"]
+                         if item["id"] == clause["evidence_ids"][0])
+            clause["source_span"] = {
+                "evidence_id": clause["evidence_ids"][0],
+                "start_offset": 0,
+                "end_offset": len(exact),
+                "text": exact,
+                "source_sha256": hashlib.sha256(exact.encode("utf-8")).hexdigest(),
+            }
+        request = engine.build_llm_request(
+            [], clauses, evidence, {}, "full", contract_version=HOST_REVIEW_CONTRACT_V3,
+        )
+        request = attach_request_provenance(
+            request, source_sha256="a" * 64, evidence_doc=evidence, clauses=clauses,
+            run_id="keyword-source-verification-merge-test",
+        )
+
+        with tempfile.TemporaryDirectory() as td:
+            review_dir = Path(td) / "requirements"
+            engine.prepare_host_agent_review_packets(
+                request, clauses, evidence, "a" * 64, review_dir, chunk_size=1,
+            )
+            chunks = json.loads(
+                (review_dir / "llm-request-chunks.json").read_text(encoding="utf-8")
+            )
+            for chunk in chunks:
+                clause = chunk["clauses"][0]
+                if clause["id"] == "C00068":
+                    review = {
+                        "clause_id": "C00068",
+                        "classification": "requires_source_content",
+                        "reason": "The keywords must be supplied or verified against the thesis.",
+                        "obligations": [{
+                            "id": "C00068-obligation-1",
+                            "status": "requires_source_content",
+                            "reason": "Verify the source of the selected keywords.",
+                        }],
+                    }
+                else:
+                    review = {
+                        "clause_id": "C00069", "classification": "informational",
+                        "reason": "This is a non-substantive test clause.",
+                    }
+                response = {
+                    "contract_version": HOST_REVIEW_CONTRACT_V3,
+                    "provenance": chunk["provenance"],
+                    "requirements": [],
+                    "clause_reviews": [review],
+                    "unsupported_items": [],
+                    "reported_conflicts": [],
+                }
+                (review_dir / chunk["batch"]["response_filename"]).write_text(
+                    json.dumps(response, ensure_ascii=False), encoding="utf-8",
+                )
+
+            merged, metadata = engine.merge_host_agent_review_packets(review_dir)
+            receipt = json.loads((review_dir / "merge-receipt.json").read_text(encoding="utf-8"))
+            ledger = json.loads((review_dir / "semantic-review-ledger.json").read_text(encoding="utf-8"))
+
+        merged_review = next(item for item in merged["clause_reviews"] if item["clause_id"] == "C00068")
+        self.assertEqual(merged_review["classification"], "requires_source_verification")
+        self.assertEqual(merged_review["obligations"], [])
+        self.assertEqual(merged["requirements"], [])
+        self.assertEqual(metadata["semantic_transformation_policy_version"], "merge-semantic-guards-v2")
+        self.assertEqual(receipt["semantic_transformation_policy_version"], "merge-semantic-guards-v2")
+        self.assertEqual(
+            receipt["source_verification_classification_policy_version"],
+            "source-verification-classification-v1",
+        )
+        projections = receipt["source_verification_classification_projection"]
+        self.assertEqual(len(projections), 1)
+        self.assertEqual(projections[0]["clause_id"], "C00068")
+        self.assertEqual(projections[0]["provenance"]["run_id"], "keyword-source-verification-merge-test")
+        self.assertEqual(projections[0]["policy_version"], "source-verification-classification-v1")
+        self.assertTrue(projections[0]["human_verification_required"])
+        self.assertIs(projections[0]["submission_ready"], False)
+        ledger_review = next(item for item in ledger["clauses"] if item["clause_id"] == "C00068")
+        self.assertEqual(ledger_review["classification"], "requires_source_verification")
+        self.assertEqual(ledger_review["obligations"], [])
 
     def test_merge_preserves_typed_conflicts_from_every_chunk(self) -> None:
         clauses = [

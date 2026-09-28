@@ -238,11 +238,13 @@ from semantic_contract import (  # noqa: E402
     validate_response_provenance,
 )
 from source_obligation_compiler import (  # noqa: E402
+    SOURCE_VERIFICATION_CLASSIFICATION_POLICY_VERSION,
     compile_continuation_caption_requirement,
     compile_known_source_obligation_ids,
     has_mixed_external_document_action_signal,
     materialize_complete_abstract_source_constraints,
     materialize_known_source_verification,
+    materialize_source_verification_classifications,
     materialize_soft_keyword_count_guidance,
 )
 
@@ -8002,6 +8004,12 @@ def prepare_native_response_candidate(
     response, source_verification_projections = materialize_known_source_verification(
         response, chunk.get("clauses"),
     )
+    response, source_verification_classification_projections = (
+        materialize_source_verification_classifications(
+            response, chunk.get("clauses"),
+            provenance=chunk.get("provenance"),
+        )
+    )
     response, abstract_source_projections = materialize_complete_abstract_source_constraints(
         response, chunk.get("clauses"),
     )
@@ -8140,10 +8148,16 @@ def prepare_native_response_candidate(
         response = repaired_response
 
     return response, {
+        "source_verification_classification_policy_version": (
+            SOURCE_VERIFICATION_CLASSIFICATION_POLICY_VERSION
+        ),
         "existing_requirement_payload_projections": existing_payload_projections,
         "complete_abstract_source_projections": abstract_source_projections,
         "soft_keyword_count_guidance_projections": soft_keyword_guidance_projections,
         "source_obligation_verification_projections": source_verification_projections,
+        "source_verification_classification_projections": (
+            source_verification_classification_projections
+        ),
         "declaration_source_text_projections": declaration_source_text_projections,
         "source_fragment_projections": source_fragment_projections,
         "source_fragment_projection_errors": source_fragment_projection_errors,
@@ -8939,6 +8953,9 @@ def run_host_agent_chunk(
     source_verification_projections = candidate_audit[
         "source_obligation_verification_projections"
     ]
+    source_verification_classification_projections = candidate_audit[
+        "source_verification_classification_projections"
+    ]
     declaration_source_text_projections = candidate_audit[
         "declaration_source_text_projections"
     ]
@@ -9008,6 +9025,9 @@ def run_host_agent_chunk(
         "accepted_response_sha256": _response_sha256(response),
         "attempt_stage_snapshots": attempt_stage_snapshots,
         "projection_audit_sha256": _response_sha256(candidate_audit),
+        "source_verification_classification_policy_version": candidate_audit[
+            "source_verification_classification_policy_version"
+        ],
         "existing_requirement_payload_projections": existing_payload_projections,
         "complete_abstract_source_projections": candidate_audit[
             "complete_abstract_source_projections"
@@ -9016,6 +9036,9 @@ def run_host_agent_chunk(
             "soft_keyword_count_guidance_projections"
         ],
         "source_obligation_verification_projections": source_verification_projections,
+        "source_verification_classification_projections": (
+            source_verification_classification_projections
+        ),
         "declaration_source_text_projections": declaration_source_text_projections,
         "source_fragment_projections": candidate_audit[
             "source_fragment_projections"
@@ -9033,6 +9056,9 @@ def run_host_agent_chunk(
                 "soft_keyword_count_guidance_projections"
             ]),
             "source_obligation_verification": len(source_verification_projections),
+            "source_verification_classification": len(
+                source_verification_classification_projections
+            ),
             "fixed_declaration_source_text": len(declaration_source_text_projections),
             "source_fragment_literals": len(candidate_audit[
                 "source_fragment_projections"
@@ -11253,6 +11279,8 @@ def run_bridge(
                                 "complete_abstract_source_projections",
                                 "soft_keyword_count_guidance_projections",
                                 "source_obligation_verification_projections",
+                                "source_verification_classification_projections",
+                                "source_verification_classification_policy_version",
                                 "declaration_source_text_projections",
                                 "source_literal_whitespace_projections",
                                 "mechanical_repairs",

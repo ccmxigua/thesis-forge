@@ -72,9 +72,12 @@ verified source span, or a role-schema-declared all-null/empty properties shell
 with a matching `empty_requirement_properties` validator record and an
 explicitly external verification mode. The latter has no DOCX operation; its
 raw response remains in the original sidecar and the removed object in the
-repair audit. Non-null
-role-specific properties, field keys, conditional applicability, input
-prerequisites, altered text, and mixed/local payloads are not removable.
+repair audit. A conditional all-null external shell is also removable only
+when its external verification, exact current-source binding, and pending
+obligations pass the same checks; its complete applicability remains in the
+repair audit as **pending human scope**, not a verified condition. Non-null
+role-specific properties, field keys, input prerequisites, altered text, and
+mixed/local payloads are not removable.
 After projection the complete contract and independent source-first obligation
 review must pass; the external actions stay pending and block submission.
 Mixed executable/external edges, empty/orphan clause/evidence relations, stale
@@ -373,6 +376,12 @@ and requirements. It preserves explicit clause links and compiler candidates
 without claiming semantic coverage, execution, or successful verification.
 Importance and force remain `not_assessed` unless a separately validated
 source supplies them; no requirement is removed or demoted from this graph.
+The graph also publishes a deterministic 0–100 `review_priority` for each
+source clause, keyed to its recorded review classification and current source
+hash. This is a work-queue score only: unresolved/unreviewed items come first,
+informational items last. It is **not** a school's normative importance score,
+does not assert source-obligation completeness, and has no effect on
+requirement coverage, capability, human-review, or submission gates.
 The graph is validated against `obligation-shadow-graph.schema.json` before it
 is persisted. The manual-review ledger separately records an AO→MO→MR
 crosswalk plus clause/requirement/question/evidence IDs copied from each same

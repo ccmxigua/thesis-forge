@@ -11,7 +11,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from compliance import classification_requires_requirement
+from compliance import classification_requires_requirement, normalized_state
 from format_spec_validation import load_and_validate
 from host_review_contract import derived_requirement_indexes
 from semantic_contract import sha256_json
@@ -57,6 +57,36 @@ def _shadow_node_id(kind: str, response_sha256: str, identity: Any) -> str:
     return f"SG-{kind}-{digest[:24]}"
 
 
+_REVIEW_PRIORITY_BY_STATE = {
+    "unresolved": 100,
+    "missing": 100,
+    "failed": 100,
+    "unsupported_backend": 90,
+    "unverifiable": 90,
+    "external_compliance": 85,
+    "requires_metadata": 80,
+    "requires_source_content": 80,
+    "input_provided_unverified": 80,
+    "pending_execution": 60,
+    "generated_and_verified": 30,
+    "verified_existing": 30,
+    "not_applicable": 20,
+    "informational": 10,
+}
+
+
+def _review_priority(classification: Any) -> tuple[int, str, str]:
+    """Rank *review work*, never the normative importance of a source rule.
+
+    Unreviewed/unknown states go first. The score cannot grant compliance,
+    suppress a requirement, or resolve applicability.
+    """
+    state = normalized_state(classification) if isinstance(classification, str) else "unreviewed"
+    score = _REVIEW_PRIORITY_BY_STATE.get(state, 100)
+    band = "urgent" if score >= 90 else "high" if score >= 70 else "routine" if score >= 40 else "low"
+    return score, band, state
+
+
 def _obligation_shadow_graph(
     response: dict[str, Any], clauses: list[dict[str, Any]],
     clause_records: list[dict[str, Any]], requirements: list[Any],
@@ -92,6 +122,7 @@ def _obligation_shadow_graph(
     review_count = 0
     model_obligation_count = 0
     compiled_fact_count = 0
+    review_priority_entries: list[dict[str, Any]] = []
 
     for clause in clauses:
         if not isinstance(clause, dict) or not isinstance(clause.get("id"), str):
@@ -106,6 +137,16 @@ def _obligation_shadow_graph(
         clause_node_ids[clause_id] = node_id
         reviewed = isinstance(record.get("classification"), str)
         review_count += int(reviewed)
+        priority_score, priority_band, priority_state = _review_priority(record.get("classification"))
+        review_priority_entries.append({
+            "clause_id": clause_id,
+            "node_id": node_id,
+            "source_text_sha256": record.get("source_text_sha256"),
+            "review_classification": record.get("classification") if reviewed else None,
+            "normalized_state": priority_state,
+            "score": priority_score,
+            "band": priority_band,
+        })
         nodes.append({
             "node_id": node_id,
             "node_type": "source_clause",
@@ -271,11 +312,20 @@ def _obligation_shadow_graph(
         count_by_type[node_type] = count_by_type.get(node_type, 0) + 1
     return {
         "protocol": "obligation_shadow_graph_v1",
-        "schema_version": "1.0",
+        "schema_version": "1.1",
         "status": "analysis_only",
         "submission_ready": False,
         "inventory_completeness": "incomplete_by_design",
         "binding": binding,
+        "review_priority": {
+            "policy": "operational_review_triage_v1",
+            "scope": "source_clauses_only",
+            "effect": "sort_only_no_compliance_or_release_effect",
+            "entries": sorted(
+                review_priority_entries,
+                key=lambda item: (-item["score"], item["clause_id"]),
+            ),
+        },
         "metrics": {
             "source_clause_count": len(clause_node_ids),
             "reviewed_clause_count": review_count,
@@ -290,6 +340,7 @@ def _obligation_shadow_graph(
             "source_obligation_inventory_complete": False,
             "model_obligation_inventory_complete": False,
             "importance_assessment_complete": False,
+            "review_priority_scored_clause_count": len(review_priority_entries),
             "final_applicable_requirement_count": None,
             "manual_marker_count": None,
         },

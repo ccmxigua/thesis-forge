@@ -33,7 +33,7 @@ from host_review_schema import (  # noqa: E402
 )
 from requirements_engine import build_llm_request  # noqa: E402
 from semantic_contract import attach_request_provenance  # noqa: E402
-from semantic_review_ledger import build_semantic_review_ledger  # noqa: E402
+from semantic_review_ledger import _review_priority, build_semantic_review_ledger  # noqa: E402
 from compliance import build_clause_records, finalize_records, summarize  # noqa: E402
 
 
@@ -1121,11 +1121,22 @@ class HostReviewV3Tests(unittest.TestCase):
         self.assertEqual(graph["binding"]["response_sha256"], ledger["response_sha256"])
         self.assertEqual(graph["binding"]["run_id"], "run-v3-test")
         self.assertEqual(graph["manual_review_crosswalk"]["entries"], [])
+        self.assertEqual(graph["review_priority"]["policy"], "operational_review_triage_v1")
+        self.assertEqual(graph["review_priority"]["effect"], "sort_only_no_compliance_or_release_effect")
+        self.assertEqual(graph["metrics"]["review_priority_scored_clause_count"], 1)
+        self.assertFalse(graph["metrics"]["importance_assessment_complete"])
+        priority = graph["review_priority"]["entries"][0]
+        self.assertEqual(priority["clause_id"], self.clauses[0]["id"])
+        self.assertEqual(priority["review_classification"], "executable")
+        self.assertEqual(priority["normalized_state"], "pending_execution")
+        self.assertEqual(priority["score"], 60)
         self.assertTrue(all(
             node["dimensions"]["importance"] == "not_assessed"
             for node in graph["nodes"]
         ))
         clause_node = next(node for node in graph["nodes"] if node["node_type"] == "source_clause")
+        self.assertEqual(priority["node_id"], clause_node["node_id"])
+        self.assertEqual(priority["source_text_sha256"], clause_node["source_ref"]["source_text_sha256"])
         self.assertEqual(clause_node["dimensions"]["execution_status"], "not_executed_here")
         self.assertEqual(clause_node["record"]["review_classification"], "executable")
         requirement_node = next(node for node in graph["nodes"] if node["node_type"] == "requirement")
@@ -1148,6 +1159,20 @@ class HostReviewV3Tests(unittest.TestCase):
         ))
         self.assertEqual(graph["metrics"]["requirement_count"], 1)
         self.assertEqual(graph["metrics"]["explicit_requirement_clause_edge_count"], 1)
+        informational_graph = build_semantic_review_ledger(
+            self._informational_response(), self.clauses,
+        )["obligation_shadow_graph"]
+        self.assertEqual(informational_graph["review_priority"]["entries"][0]["score"], 10)
+        self.assertEqual(informational_graph["metrics"]["requirement_count"], 0)
+        self.assertFalse(informational_graph["submission_ready"])
+        self.assertEqual(_review_priority("unresolved"), (100, "urgent", "unresolved"))
+        self.assertEqual(_review_priority("external_compliance"), (85, "high", "external_compliance"))
+        self.assertEqual(_review_priority(None), (100, "urgent", "unreviewed"))
+        invalid_score = copy.deepcopy(graph)
+        invalid_score["review_priority"]["entries"][0]["score"] = 101
+        self.assertTrue(load_and_validate(
+            invalid_score, ROOT / "schema" / "obligation-shadow-graph.schema.json",
+        ))
 
         changed = copy.deepcopy(response)
         changed["clause_reviews"][0]["reason"] += " changed"

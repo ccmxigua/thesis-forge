@@ -4,12 +4,12 @@
   "type": "object",
   "required": [
     "protocol", "schema_version", "status", "submission_ready",
-    "inventory_completeness", "binding", "metrics", "nodes", "edges",
+    "inventory_completeness", "binding", "review_priority", "metrics", "nodes", "edges",
     "equivalence_candidates", "equivalence_policy", "manual_review_crosswalk"
   ],
   "properties": {
     "protocol": {"const": "obligation_shadow_graph_v1"},
-    "schema_version": {"const": "1.0"},
+    "schema_version": {"const": "1.1"},
     "status": {"const": "analysis_only"},
     "submission_ready": {"const": false},
     "inventory_completeness": {"const": "incomplete_by_design"},
@@ -31,6 +31,36 @@
       },
       "additionalProperties": false
     },
+    "review_priority": {
+      "type": "object",
+      "required": ["policy", "scope", "effect", "entries"],
+      "properties": {
+        "policy": {"const": "operational_review_triage_v1"},
+        "scope": {"const": "source_clauses_only"},
+        "effect": {"const": "sort_only_no_compliance_or_release_effect"},
+        "entries": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "clause_id", "node_id", "source_text_sha256", "review_classification",
+              "normalized_state", "score", "band"
+            ],
+            "properties": {
+              "clause_id": {"type": "string", "minLength": 1},
+              "node_id": {"type": "string", "pattern": "^SG-clause-[0-9a-f]{24}$"},
+              "source_text_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+              "review_classification": {"type": ["string", "null"]},
+              "normalized_state": {"type": "string", "minLength": 1},
+              "score": {"type": "integer", "minimum": 0, "maximum": 100},
+              "band": {"enum": ["urgent", "high", "routine", "low"]}
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
+    },
     "metrics": {
       "type": "object",
       "required": [
@@ -39,6 +69,7 @@
         "model_declared_obligation_count", "compiled_source_fact_count",
         "node_count_by_type", "source_obligation_inventory_complete",
         "model_obligation_inventory_complete", "importance_assessment_complete",
+        "review_priority_scored_clause_count",
         "final_applicable_requirement_count", "manual_marker_count"
       ],
       "properties": {
@@ -56,6 +87,7 @@
         "source_obligation_inventory_complete": {"const": false},
         "model_obligation_inventory_complete": {"const": false},
         "importance_assessment_complete": {"const": false},
+        "review_priority_scored_clause_count": {"type": "integer", "minimum": 0},
         "final_applicable_requirement_count": {"type": ["integer", "null"], "minimum": 0},
         "manual_marker_count": {"type": ["integer", "null"], "minimum": 0}
       },

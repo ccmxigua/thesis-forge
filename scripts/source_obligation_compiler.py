@@ -1265,6 +1265,11 @@ def is_explicit_authoring_content_quote(quote: Any) -> bool:
     if not isinstance(quote, str) or not quote.strip():
         return False
     compact = re.sub(r"\s+", "", quote).casefold()
+    # An example of an instruction is not itself an instruction to the author.
+    if re.match(r"^(?:示例|样例|范例|反例|例如|比如)[：:]", compact) or re.search(
+        r"(?:示例|样例|范例|反例)(?:正文)?(?:写着|写道|称)[“‘\"']", compact
+    ):
+        return False
     chinese_scope_markers = (
         "不得", "不要", "不能", "不应", "不宜", "不可", "无需", "无须", "禁止", "避免", "切勿",
         "如果", "若", "假如", "倘若", "除非", "只有在", "仅当", "如有", "当……时",
@@ -1289,6 +1294,33 @@ def is_explicit_authoring_content_quote(quote: Any) -> bool:
     ))
     if chinese_author and chinese_action and (chinese_sample or chinese_genuine_content):
         return True
+
+    # Some templates directly ask for thesis content based on the author's
+    # actual work without calling the surrounding text a sample or using the
+    # literal words "真实内容". Require a content-writing context or a complete
+    # stand-alone instruction; a generic form field is not enough.
+    actual_instruction = re.search(
+        r"根据(?:本人)?(?:论文(?:的)?)?实际情况(?:自行)?(?:撰写|填写)", compact
+    )
+    if actual_instruction and not _inside_quote(compact, actual_instruction.start()):
+        prefix = compact[:actual_instruction.start()]
+        trailing = compact[actual_instruction.end():]
+        example_prefix = re.search(r"(?:示例|样例|范例|反例|例如|比如)[：:]", prefix)
+        technical_target = re.search(
+            r"页码|字体|字号|格式|样式|封面|签名|日期|学号|姓名|表题|图题|图表|边距|行距|编号|字段|栏位",
+            prefix,
+        )
+        content_section = re.search(
+            r"(?:本(?:部分|节|章)主要(?:介绍|撰写)[^。！？；;]{1,48}|"
+            r"研究(?:方法|过程)[^。！？；;]{0,40})[，,]?$",
+            prefix,
+        )
+        stand_alone = (
+            ("论文" in actual_instruction.group() or "本人" in actual_instruction.group())
+            and re.fullmatch(r"[。.!！?？]*", trailing) is not None
+        )
+        if not example_prefix and ((content_section and not technical_target) or stand_alone):
+            return True
 
     english_sample = any(token in english for token in (
         "example", "sample", "fictitious", "fabricated", "placeholder",

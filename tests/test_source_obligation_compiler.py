@@ -37,6 +37,34 @@ from source_obligation_compiler import (  # noqa: E402
 
 
 class SourceObligationCompilerTests(unittest.TestCase):
+    def test_actual_circumstances_authoring_requires_an_explicit_content_directive(self) -> None:
+        for quote in (
+            "本部分主要介绍选题的背景及选题原因，根据实际情况自行填写",
+            "本部分主要撰写选题的目的，根据实际情况自行填写",
+            "本部分主要撰写选题的意义，根据实际情况自行填写",
+            "本部分主要撰写选题的理论与应用价值，根据实际情况自行填写",
+            "研究方法同上不再累述，根据实际情况填写",
+            "根据论文实际情况撰写",
+            "根据本人论文的实际情况填写",
+        ):
+            with self.subTest(quote=quote):
+                self.assertTrue(is_explicit_authoring_content_quote(quote))
+
+        for quote in (
+            "如果需要，本部分主要撰写选题的意义，根据实际情况自行填写",
+            "本部分不应撰写选题的意义，根据实际情况自行填写",
+            "本部分主要撰写国内的研究现状，不能是文献资料的简单摘录，需要分类、总结、归纳",
+            "示例：本部分主要撰写选题的意义，根据实际情况自行填写",
+            "样例正文写着‘本部分主要撰写选题的意义，根据实际情况自行填写’",
+            "本部分主要介绍图的样式，根据实际情况自行填写",
+            "作者根据实际情况自行填写页码",
+            "根据论文实际情况撰写图题",
+            "这里演示图的样式，以下不再重复，根据论文实际情况添加即可",
+            "作者须撰写摘要",
+        ):
+            with self.subTest(quote=quote):
+                self.assertFalse(is_explicit_authoring_content_quote(quote))
+
     def test_chinese_phrase_for_english_keywords_resolves_one_language_and_cjk_cap(self) -> None:
         source = "英文关键词最多7个汉字"
         clause = {

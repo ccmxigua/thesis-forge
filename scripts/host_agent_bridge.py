@@ -184,6 +184,7 @@ from host_review_contract import (  # noqa: E402
     SUPPORTED_HOST_REVIEW_CONTRACTS,
     _conflict_target_property_known,
     _resolve_contract_schema,
+    classify_semantic_payload,
     contract_error_records,
     provenance_error_records,
     analyze_requirement_relations,
@@ -885,6 +886,13 @@ def _structured_contract_repair_guidance(
         for record in records if isinstance(record, dict)
     }
     external_inventory_retry = "external_action_obligations_missing" in record_codes
+    external_relation_pointers = {
+        str(record.get("json_pointer"))
+        for record in records
+        if isinstance(record, dict)
+        and record.get("code") == "non_requirement_classification_relation"
+        and record.get("mechanically_removable") is False
+    }
     for record in records:
         if not isinstance(record, dict):
             continue
@@ -1008,9 +1016,19 @@ def _structured_contract_repair_guidance(
                 rule = (
                     f"At {pointer}, do not remove the source-only requirement in this retry. First add only the missing, source-derived external obligations named by the external_action_obligations_missing record; the bridge will independently decide whether the invalid DOCX edge can be projected afterward."
                 )
+            elif pointer in external_relation_pointers:
+                rule = (
+                    f"At {pointer}, do not delete or rewrite this external-duty requirement on a model retry. "
+                    "Only the bridge may remove an empty DOCX edge after matching the current validator records, "
+                    "exact source/evidence, pending atomic obligations, and complete revalidation. "
+                    "Preserve every other requirement and source edge; if that projection cannot be proven, fail closed."
+                )
             else:
                 rule = (
-                    f"At {pointer}, remove only this requirement object if every clause_id it contains is classified as a non-requirement state such as unresolved, requires_source_content, unsupported, external_compliance, or informational. Preserve every clause_review classification, obligation, reason, evidence ID, and every other requirement exactly; do not reclassify a clause, split or merge requirements, or invent a replacement. If the linked classifications are mixed or removal would change any other field, return the parent unchanged and fail closed."
+                    f"At {pointer}, remove only the validator-identified informational-only requirement "
+                    "when its mechanically_removable fact is true. Unresolved, external, unsupported, and "
+                    "prerequisite-bound requirements are not generic deletion candidates. Preserve every other "
+                    "requirement and source edge exactly; otherwise fail closed."
                 )
         elif code == "external_action_obligations_missing":
             rule = (
@@ -1068,12 +1086,19 @@ def _structured_contract_repair_guidance(
                 "do not move it, rename it, or invent a replacement."
             )
         elif code == "empty_requirement_properties":
-            rule = (
+            if pointer.removesuffix(".properties") in external_relation_pointers:
+                rule = (
+                    f"At {pointer}, this is an empty external-duty DOCX shell, not a missing style. "
+                    "Do not invent a property or delete the object on a model retry; the bridge alone may "
+                    "project it after the source-bound external-action checks pass."
+                )
+            else:
+                rule = (
                 f"At {pointer}, emit a non-empty role-specific properties object. "
                 "field_key alone is not an executable payload; copy exact evidence-backed text into properties.text or emit the declared style/layout property. "
                 "If this object has no clause_ids, no evidence_ids, no semantic properties, and an empty reason, it is an unbound provider placeholder: remove only that placeholder rather than filling it or assigning a guessed clause. "
                 "For the exact appendix placement wording '附录放在正文之后另起页', use only appendices.page_break_each: true; do not guess other appendix properties."
-            )
+                )
         elif code == "cover_institution_placeholder":
             rule = (
                 f"At {pointer}, this cover chunk has no trusted institution value. "
@@ -1791,6 +1816,64 @@ def _retry_change_paths(previous: Any, current: Any) -> list[str]:
     visit(before.get("unsupported_items"), after.get("unsupported_items"), "$.unsupported_items")
     visit(before.get("top_level"), after.get("top_level"), "$.top_level")
     return changed
+
+
+def _retry_preserved_source_edge_changes(previous: Any, current: Any) -> list[dict[str, Any]]:
+    """Explain source-edge drift hidden by a requirement-array membership change.
+
+    This is diagnostic only. It does not authorize an edit. A requirement is
+    matched only when its role, selector, and clause IDs are unique on both
+    sides; ambiguous duplicates remain covered by the coarse fail-closed path.
+    """
+    if not isinstance(previous, dict) or not isinstance(current, dict):
+        return []
+    before, after = previous.get("requirements"), current.get("requirements")
+    if not isinstance(before, list) or not isinstance(after, list):
+        return []
+
+    def identity(item: Any) -> str | None:
+        if not isinstance(item, dict) or not isinstance(item.get("clause_ids"), list):
+            return None
+        return _response_sha256({
+            "role": item.get("role"),
+            "existing_requirement_id": item.get("existing_requirement_id"),
+            "field_key": item.get("field_key"),
+            "clause_ids": item["clause_ids"],
+        })
+
+    indexed: list[dict[str, tuple[int, dict[str, Any]]]] = []
+    for requirements in (before, after):
+        mapping: dict[str, tuple[int, dict[str, Any]]] = {}
+        duplicates: set[str] = set()
+        for index, item in enumerate(requirements):
+            key = identity(item)
+            if key is None:
+                continue
+            if key in mapping:
+                duplicates.add(key)
+            else:
+                mapping[key] = (index, item)
+        for key in duplicates:
+            mapping.pop(key, None)
+        indexed.append(mapping)
+    changes: list[dict[str, Any]] = []
+    for key in sorted(set(indexed[0]) & set(indexed[1])):
+        before_index, before_item = indexed[0][key]
+        after_index, after_item = indexed[1][key]
+        before_ids, after_ids = before_item.get("evidence_ids"), after_item.get("evidence_ids")
+        if not isinstance(before_ids, list) or not isinstance(after_ids, list) or before_ids == after_ids:
+            continue
+        changes.append({
+            "previous_requirement_index": before_index,
+            "current_requirement_index": after_index,
+            "role": before_item.get("role"),
+            "clause_ids": copy.deepcopy(before_item["clause_ids"]),
+            "removed_evidence_ids": [value for value in before_ids if value not in after_ids],
+            "added_evidence_ids": [value for value in after_ids if value not in before_ids],
+            "previous_evidence_ids": copy.deepcopy(before_ids),
+            "current_evidence_ids": copy.deepcopy(after_ids),
+        })
+    return changes
 
 
 def _retry_arrays_reordered(previous: Any, current: Any) -> bool:
@@ -5241,6 +5324,11 @@ def _retry_semantic_change_error(
             else None
         ),
         "semantic_review_required": True,
+        "preserved_source_edge_changes": (
+            _retry_preserved_source_edge_changes(
+                comparison_previous, comparison_current,
+            ) if path.startswith("$.requirements") else []
+        ),
     } for path in changed_paths]
     return error, changed_paths
 
@@ -5924,7 +6012,9 @@ def _is_null_payload_external_requirement(
         isinstance(declared_properties, dict)
         and isinstance(properties, dict)
         and set(properties) <= set(declared_properties)
-        and all(value is None for value in properties.values())
+        and classify_semantic_payload(
+            properties, role_schema=role_schema, contract_root=contract,
+        ) == "empty"
     )
 
 
@@ -6651,6 +6741,178 @@ def _project_redundant_public_cover_condition(
     }]
 
 
+def _project_source_bound_zero_based_cover_orders(
+    response: Any, error_records: list[dict[str, Any]],
+    chunk: dict[str, Any] | None, baseline_sha256: str,
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    """Translate a complete zero-based cover field sequence to one-based order.
+
+    Array order is preserved. A partial shift, duplicate order, unbound label,
+    stale error record, or unrelated validation error is not a repair plan.
+    The caller revalidates the complete candidate after this projection.
+    """
+    if not isinstance(response, dict) or not isinstance(chunk, dict):
+        return None, []
+    provenance = chunk.get("provenance")
+    if not isinstance(provenance, dict) or any(
+        not isinstance(provenance.get(key), str) or not provenance[key]
+        for key in ("run_id", "source_sha256", "evidence_sha256", "clause_sha256", "request_sha256")
+    ):
+        return None, []
+    requirements = response.get("requirements")
+    if not isinstance(requirements, list):
+        return None, []
+
+    requirement_index: int | None = None
+    order_groups: set[str] = set()
+    institution_error = False
+    parent_error = False
+    for record in error_records:
+        if not isinstance(record, dict) or record.get("response_sha256") != baseline_sha256:
+            return None, []
+        pointer = str(record.get("json_pointer") or "")
+        raw_error = str(record.get("raw_error") or "")
+        match = re.fullmatch(r"\$\.requirements\[(\d+)\](.*)", pointer)
+        if match is None:
+            return None, []
+        index, suffix = int(match.group(1)), match.group(2)
+        if requirement_index is None:
+            requirement_index = index
+        if index != requirement_index or index >= len(requirements):
+            return None, []
+        code = record.get("code")
+        if (
+            code == "contract_validation_error" and suffix == ""
+            and raw_error == f"{pointer}: must match at least one schema in anyOf"
+        ):
+            parent_error = True
+        elif (
+            code == "cover_institution_placeholder"
+            and suffix == ".properties.institution"
+            and raw_error == f"{pointer}: is shorter than 1 characters"
+        ):
+            institution_error = True
+        elif (
+            code == "contract_validation_error"
+            and suffix == ".properties.fields[0].order"
+            and raw_error == f"{pointer}: must be >= 1"
+        ):
+            order_groups.add("fields")
+        elif (
+            code == "cover_binding_violation"
+            and suffix == ".properties.non_public_administration.fields[0].order"
+            and raw_error == f"{pointer}: must be >= 1"
+        ):
+            order_groups.add("non_public_administration.fields")
+        else:
+            return None, []
+    if not parent_error or not order_groups or requirement_index is None:
+        return None, []
+    requirement = requirements[requirement_index]
+    properties = requirement.get("properties") if isinstance(requirement, dict) else None
+    if not isinstance(requirement, dict) or requirement.get("role") != "cover" or not isinstance(properties, dict):
+        return None, []
+    cited_clause_ids = requirement.get("clause_ids")
+    cited_evidence_ids = requirement.get("evidence_ids")
+    if (
+        not isinstance(cited_clause_ids, list) or not cited_clause_ids
+        or not isinstance(cited_evidence_ids, list) or not cited_evidence_ids
+        or any(not isinstance(value, str) or not value for value in cited_clause_ids)
+        or any(not isinstance(value, str) or not value for value in cited_evidence_ids)
+        or len(cited_clause_ids) != len(set(cited_clause_ids))
+    ):
+        return None, []
+    evidence_context = chunk.get("evidence_context")
+    clauses = chunk.get("clauses")
+    if not isinstance(evidence_context, dict) or not isinstance(clauses, list):
+        return None, []
+    cited_evidence = set(cited_evidence_ids)
+    ordered_clauses = [
+        clause for clause in clauses
+        if isinstance(clause, dict) and clause.get("id") in cited_clause_ids
+    ]
+    if len(ordered_clauses) != len(cited_clause_ids):
+        return None, []
+    if institution_error and (
+        properties.get("institution") not in ("", None)
+        or properties.get("missing_value_policy") != "placeholder"
+        or properties.get("missing_value_placeholder") != NEUTRAL_COVER_PLACEHOLDER
+    ):
+        return None, []
+
+    repaired = copy.deepcopy(response)
+    repaired_properties = repaired["requirements"][requirement_index]["properties"]
+    field_audits: list[dict[str, Any]] = []
+    for group in sorted(order_groups):
+        admin = repaired_properties.get("non_public_administration")
+        if group != "fields" and not isinstance(admin, dict):
+            return None, []
+        fields = (
+            repaired_properties.get("fields") if group == "fields"
+            else admin.get("fields")
+        )
+        if not isinstance(fields, list) or not fields or any(not isinstance(field, dict) for field in fields):
+            return None, []
+        if [field.get("order") for field in fields] != list(range(len(fields))) or any(
+            type(field.get("order")) is not int for field in fields
+        ):
+            return None, []
+        source_positions: list[int] = []
+        for field in fields:
+            label = normalize_label(field.get("label"))
+            if not label or not isinstance(field.get("id"), str) or not field["id"]:
+                return None, []
+            matches = [
+                position for position, clause in enumerate(ordered_clauses)
+                if label in normalize_label(clause.get("text"))
+                and any(
+                    evidence_id in cited_evidence
+                    and isinstance(evidence_context.get(evidence_id), dict)
+                    and label in normalize_label(evidence_context[evidence_id].get("text"))
+                    for evidence_id in (clause.get("evidence_ids") or [])
+                )
+            ]
+            if len(matches) != 1:
+                return None, []
+            source_positions.append(matches[0])
+        if source_positions != sorted(source_positions):
+            return None, []
+        for index in range(1, len(fields)):
+            if source_positions[index] == source_positions[index - 1] and not (
+                fields[index - 1].get("id") == "embargo_start"
+                and fields[index].get("id") == "embargo_until"
+                and normalize_label(fields[index - 1].get("label")) == "保密期限"
+                and normalize_label(fields[index].get("label")) == "保密期限"
+            ):
+                return None, []
+        for index, field in enumerate(fields):
+            field["order"] = index + 1
+            field_audits.append({
+                "group": group,
+                "field_id": field["id"],
+                "from_order": index,
+                "to_order": index + 1,
+                "source_clause_id": ordered_clauses[source_positions[index]]["id"],
+            })
+    if institution_error:
+        repaired_properties["institution"] = NEUTRAL_COVER_PLACEHOLDER
+    return repaired, [{
+        "code": "cover_order_zero_based",
+        "rule_id": "normalize_source_bound_zero_based_cover_order_v1",
+        "requirement_index": requirement_index,
+        "fields": field_audits,
+        "institution_placeholder_applied": institution_error,
+        "run_id": provenance["run_id"],
+        "case_id": chunk.get("case_id"),
+        "source_sha256": provenance["source_sha256"],
+        "clause_sha256": provenance["clause_sha256"],
+        "evidence_sha256": provenance["evidence_sha256"],
+        "request_sha256": provenance["request_sha256"],
+        "source_response_sha256": baseline_sha256,
+        "repaired_response_sha256": _response_sha256(repaired),
+    }]
+
+
 def _apply_safe_mechanical_repairs_one_rule(
     response: Any, error_records: list[dict[str, Any]],
     *, chunk: dict[str, Any] | None = None,
@@ -6706,6 +6968,11 @@ def _apply_safe_mechanical_repairs_one_rule(
     repaired = copy.deepcopy(response)
     repairs: list[dict[str, Any]] = []
     baseline_sha256 = baseline_response_sha256 or _response_sha256(response)
+    zero_based_cover, zero_based_cover_audit = _project_source_bound_zero_based_cover_orders(
+        response, error_records, chunk, baseline_sha256,
+    )
+    if zero_based_cover is not None:
+        return zero_based_cover, zero_based_cover_audit
     redundant_cover_condition, redundant_cover_audit = _project_redundant_public_cover_condition(
         response, error_records, chunk, baseline_sha256,
     )
@@ -7333,6 +7600,14 @@ def _apply_safe_mechanical_repairs_one_rule(
         def is_unbound_placeholder(requirement: Any) -> bool:
             if not isinstance(requirement, dict):
                 return False
+            if set(requirement) - {
+                "role", "properties", "clause_ids", "source_fragment_clause_ids",
+                "evidence_ids", "existing_requirement_id", "field_key", "reason",
+                "confidence", "applicability", "input_prerequisites", "verification",
+            }:
+                return False
+            if not isinstance(requirement.get("role"), str) or not requirement["role"]:
+                return False
             properties = requirement.get("properties")
             if not isinstance(properties, dict) or not all(
                 is_empty_value(value) for value in properties.values()
@@ -7340,6 +7615,7 @@ def _apply_safe_mechanical_repairs_one_rule(
                 return False
             return (
                 is_empty_value(requirement.get("clause_ids"))
+                and is_empty_value(requirement.get("source_fragment_clause_ids"))
                 and is_empty_value(requirement.get("evidence_ids"))
                 and is_empty_value(requirement.get("existing_requirement_id"))
                 and is_empty_value(requirement.get("field_key"))
@@ -7368,6 +7644,11 @@ def _apply_safe_mechanical_repairs_one_rule(
                     return None
                 return index
             if code == "contract_validation_error":
+                if (
+                    pointer == f"$.requirements[{index}]"
+                    and raw_error == f"{pointer}: must match at least one schema in anyOf"
+                ):
+                    return index
                 if pointer != f"$.requirements[{index}].reason" or "is shorter than 1 characters" not in raw_error:
                     return None
                 return index
@@ -7396,6 +7677,9 @@ def _apply_safe_mechanical_repairs_one_rule(
         )
         if can_remove_placeholders:
             for record in error_records:
+                if record.get("response_sha256") not in (None, baseline_sha256):
+                    can_remove_placeholders = False
+                    break
                 index = related_placeholder_index(record)
                 if index is None:
                     can_remove_placeholders = False
@@ -8138,6 +8422,27 @@ def _apply_safe_mechanical_repairs(
     if not isinstance(response, dict) or not error_records:
         return None, []
 
+    external_records = [
+        record for record in error_records
+        if isinstance(record, dict)
+        and record.get("code") == "non_requirement_classification_relation"
+    ]
+    if external_records:
+        # An external projection may run after a disjoint repair, but only
+        # when the entire initial error bundle came from this exact frozen
+        # candidate. The projection itself will revalidate the intermediate
+        # candidate and must account for *all* errors then remaining.
+        if not isinstance(chunk, dict):
+            return None, []
+        actual_records = contract_error_records(
+            validate_host_agent_response(response, chunk),
+            response=response, chunk=chunk,
+        )
+        if sorted(_response_sha256(item) for item in actual_records) != sorted(
+            _response_sha256(item) for item in error_records
+        ):
+            return None, []
+
     grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for record in error_records:
         if not isinstance(record, dict):
@@ -8148,7 +8453,17 @@ def _apply_safe_mechanical_repairs(
             key = ("object", match.group(1))
         else:
             key = ("record", f"{pointer}|{record.get('code')}|{record.get('raw_error')}")
-        grouped.setdefault(key, []).append(record)
+        group = grouped.setdefault(key, [])
+        # The schema layer and the role-specific layer can emit the same
+        # unknown-property diagnostic. Deduplicate only this exact fact when
+        # an external composition has already authenticated the *entire*
+        # validator bundle above. Other duplicate repair records remain a
+        # hard failure rather than extra deletion authority.
+        if not (
+            external_records and record.get("code") == "unknown_property"
+            and record in group
+        ):
+            group.append(record)
 
     def sort_key(item: tuple[tuple[str, str], list[dict[str, Any]]]) -> tuple[int, int, str]:
         kind, key = item[0]
@@ -8190,6 +8505,14 @@ def _apply_safe_mechanical_repairs(
         return left == right or left.startswith(right + ".") or left.startswith(right + "[") or right.startswith(left + ".") or right.startswith(left + "[")
 
     for key, records in sorted(grouped.items(), key=sort_key):
+        if any(
+            record.get("code") == "non_requirement_classification_relation"
+            for record in records
+        ):
+            # A source-bound external deletion is not a group-local repair:
+            # its rule checks the complete validator record set. Defer it
+            # until disjoint repairs have been applied and revalidated.
+            continue
         before_group_hash = _response_sha256(candidate)
         trial, repairs = _apply_safe_mechanical_repairs_one_rule(
             candidate, records, chunk=chunk,
@@ -8212,6 +8535,42 @@ def _apply_safe_mechanical_repairs(
             "plan_before_sha256": before_group_hash,
             "plan_after_sha256": _response_sha256(trial),
         } for repair in repairs)
+
+    if external_records and audit:
+        original_requirements = response.get("requirements")
+        candidate_requirements = candidate.get("requirements")
+        if (
+            not isinstance(original_requirements, list)
+            or not isinstance(candidate_requirements, list)
+            or len(candidate_requirements) != len(original_requirements)
+            or candidate.get("clause_reviews") != response.get("clause_reviews")
+        ):
+            return None, []
+        external_indexes = {record.get("requirement_index") for record in external_records}
+        if any(
+            type(index) is not int or not 0 <= index < len(original_requirements)
+            or candidate_requirements[index] != original_requirements[index]
+            for index in external_indexes
+        ):
+            return None, []
+        before_projection_hash = _response_sha256(candidate)
+        remaining_records = contract_error_records(
+            validate_host_agent_response(candidate, chunk),
+            response=candidate, chunk=chunk,
+        )
+        projected, external_audit = _project_external_action_requirements(
+            candidate, remaining_records, chunk,
+        )
+        if projected is not None and external_audit:
+            candidate = projected
+            audit.extend({
+                **repair,
+                "planner_id": "composable_source_bound_patch_plan_v1",
+                "target_group": "external_action_after_disjoint_repairs",
+                "partial_candidate_only": True,
+                "plan_before_sha256": before_projection_hash,
+                "plan_after_sha256": _response_sha256(projected),
+            } for repair in external_audit)
 
     if not audit:
         return None, []
@@ -8971,6 +9330,15 @@ def _host_prompt(*, request_path: Path, chunk_path: Path,
         contract_version == HOST_REVIEW_CONTRACT_V3
         and "non_requirement_classification_relation" in retry_codes
     )
+    v3_external_relation_retry = (
+        v3_non_requirement_projection_retry
+        and any(
+            isinstance(record, dict)
+            and record.get("code") == "non_requirement_classification_relation"
+            and record.get("mechanically_removable") is False
+            for record in (retry_error_records or [])
+        )
+    )
     v3_external_action_inventory_retry = (
         contract_version == HOST_REVIEW_CONTRACT_V3
         and "external_action_obligations_missing" in retry_codes
@@ -9016,7 +9384,11 @@ def _host_prompt(*, request_path: Path, chunk_path: Path,
             "requirement and review unchanged. If the parent contains a requirement with empty clause_ids, empty evidence_ids, "
             "empty properties, and an empty reason, remove only that unbound provider placeholder; never assign it a guessed clause."
             if v3_relation_addition_retry else
-            "For non_requirement_classification_relation, remove only the validator-identified requirement objects whose clause_ids are all classified as non-requirement states. Preserve every clause_review and every other requirement byte-for-byte; do not reclassify, split, merge, reorder, or invent a replacement."
+            "For an external-duty relation, preserve the parent requirement and every source edge exactly. "
+            "Only the bridge may remove an empty DOCX shell after its source-bound validator plan and complete revalidation; "
+            "if that cannot be proved, return unchanged and fail closed."
+            if v3_external_relation_retry else
+            "For non_requirement_classification_relation, remove only validator-identified informational-only objects with mechanically_removable=true. Preserve every other requirement and its source edges byte-for-byte; do not reclassify, split, merge, reorder, or invent a replacement."
             if v3_non_requirement_projection_retry else
             "For a clause with executable_review_requires_all_obligations_covered, preserve every obligation id and status. "
             "If an obligation remains non-covered, reclassify only that clause to the most accurate non-executable classification "
@@ -9065,8 +9437,10 @@ minimum change. The embedded payload excludes bridge-owned provenance:
         retry_invariant = """\nFINAL RETRY INVARIANT: preserve the complete requirement graph, every clause_ids/evidence_ids relation, every clause review, and all existing role-native payloads. For each source_fragment_binding_violation record, add or correct only source_fragment_clause_ids on the same requirement. A role that declares top-level properties.text may set only that field to the exact current-source composition (or null for deterministic materialization). For declarations, preserve properties.items[].heading/body/body_parts exactly and never add properties.text; the bridge binds source fragments to those role-native fields. No requirement identity, clause/evidence links, classification, or other payload changes are authorized. Use current cited clause IDs in source order; no guessed adjacency, paraphrase, unrelated clause, or other change is authorized. The bridge rechecks hashes, evidence, spans, order, and boundaries, then runs the full validator and both raw-to-raw and candidate-to-candidate drift checks. If no exact binding or role-native destination is provable, return unchanged and fail closed."""
     elif v3_external_action_inventory_retry:
         retry_invariant = """\nFINAL RETRY INVARIANT: preserve every requirement and every clause review exactly except the exact obligations arrays named by external_action_obligations_missing. Add only distinct source-supported external duties with status unverifiable. Do not remove the invalid body_text requirement yourself; the bridge may project it only after current source/evidence checks and candidate validation. If the source cannot support a complete inventory, return the parent unchanged and let the bridge fail closed."""
+    elif v3_external_relation_retry:
+        retry_invariant = """\nFINAL RETRY INVARIANT: do not remove or modify an external-duty requirement, any requirement source edge, or any clause review. The bridge alone can project a proved empty DOCX shell while preserving pending atomic duties. If no such exact code-owned repair exists, return unchanged and fail closed; do not use a generic non-requirement deletion rule."""
     elif v3_non_requirement_projection_retry:
-        retry_invariant = """\nFINAL RETRY INVARIANT: copy every clause_review classification, obligation, reason, and evidence ID from the repair baseline exactly. Remove only the validator-identified requirement objects whose clause_ids are all bound to non-requirement classifications; preserve every other requirement object and all requirement fields exactly. Do not reclassify a clause, invent a replacement, or change any unrelated field. If this exact projection is not possible, return the parent unchanged and let the bridge fail closed."""
+        retry_invariant = """\nFINAL RETRY INVARIANT: copy every clause_review classification, obligation, reason, and evidence ID from the repair baseline exactly. Remove only validator-identified informational-only requirement objects with mechanically_removable=true; preserve every other requirement and all source edges exactly. External, unresolved, unsupported, and prerequisite-bound objects are not generic deletion candidates. If this exact projection is not possible, return the parent unchanged and fail closed."""
     elif v3_relation_addition_retry:
         retry_invariant = """\nFINAL RETRY INVARIANT: copy every clause_review classification and obligation
 from the repair baseline exactly. Preserve every non-placeholder requirement

@@ -157,7 +157,7 @@ class HostAgentBridgeTests(unittest.TestCase):
     @staticmethod
     def _fake_independent_review(
         response: dict, chunk: dict, *, review_dir: Path, run_id: str,
-        chunk_index: int, attempt: int, **_kwargs,
+        chunk_index: int, attempt: int, result_builder=None, **_kwargs,
     ) -> dict:
         """Offline, source-bound reviewer double for bridge orchestration tests."""
         response_sha = bridge._response_sha256(response)
@@ -174,16 +174,23 @@ class HostAgentBridgeTests(unittest.TestCase):
         raw_response = {"results": []}
         for check in source_packet["checks"]:
             source_ref = check["source_spans"][0]["ref_id"]
-            raw_response["results"].append({
+            default_result = {
                 "check_id": check["check_id"],
                 "verdict": "consistent",
                 "rationale": "offline bridge integration fixture",
                 "evidence_refs": [source_ref],
                 "identified_obligations": [],
-            })
+            }
+            raw_response["results"].append(
+                result_builder(check, source_ref) if result_builder else default_result
+            )
         compiled_response, compilation = bridge.compile_source_reference_response(
             raw_response, request, bridge.OBLIGATION_COVERAGE_SCHEMA, coverage=True,
         )
+        if result_builder:
+            bridge.validate_obligation_coverage_response(
+                copy.deepcopy(compiled_response), request["checks"],
+            )
         request_path = out_dir / "request.json"
         source_packet_path = out_dir / "source-reference-packet.json"
         raw_response_path = out_dir / "raw-response.json"
@@ -5591,6 +5598,15 @@ class HostAgentBridgeTests(unittest.TestCase):
             } for index in (1, 2)],
             "unsupported_items": [], "reported_conflicts": [],
         }
+        # Native normalization turns these nullable children into nested
+        # empty dictionaries, not a top-level empty properties object.
+        response["requirements"][0]["properties"] = {
+            "abstract_zh": {"required": None, "min_chars": None},
+            "abstract_en": {"required": None},
+            "keywords_zh": {"required": None},
+            "keywords_en": {"required": None},
+            "acknowledgments": {"max_chars": None},
+        }
         normalized = bridge.normalize_native_response(response, chunk["response_schema"])
         records = bridge.contract_error_records(
             bridge.validate_host_agent_response(normalized, chunk),
@@ -5682,6 +5698,391 @@ class HostAgentBridgeTests(unittest.TestCase):
         self.assertIsNone(bridge._project_external_action_requirements(
             missing_inventory, missing_records, chunk,
         )[0])
+
+    def test_external_shell_retry_guidance_does_not_authorize_model_deletion(self) -> None:
+        parent = {
+            "contract_version": "3.0",
+            "requirements": [
+                {"role": "cover", "clause_ids": ["C00048"],
+                 "evidence_ids": ["E00037", "E00045"],
+                 "properties": {"public_policy": "blank"}},
+                {"role": "content_constraints", "clause_ids": ["C00039"],
+                 "evidence_ids": ["E00037"],
+                 "properties": {"abstract_zh": {}}},
+            ],
+            "clause_reviews": [{"clause_id": "C00039",
+                                "classification": "external_compliance",
+                                "obligations": [{"id": "instructor_consent",
+                                                 "status": "unverifiable"}]}],
+        }
+        records = [{
+            "code": "non_requirement_classification_relation",
+            "json_pointer": "$.requirements[1]", "requirement_index": 1,
+            "mechanically_removable": False,
+        }, {
+            "code": "empty_requirement_properties",
+            "json_pointer": "$.requirements[1].properties",
+        }]
+        guidance = bridge._structured_contract_repair_guidance(
+            records, contract_version="3.0",
+        )
+        self.assertIn("do not delete", guidance)
+        self.assertIn("Do not invent a property", guidance)
+        self.assertNotIn("remove only this requirement object", guidance)
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            packet = root / "chunk.json"
+            packet.write_text('{"contract_version":"3.0"}', encoding="utf-8")
+            parent_path = root / "parent.json"
+            parent_path.write_text(json.dumps(parent), encoding="utf-8")
+            prompt = bridge._host_prompt(
+                request_path=root / "request.json", chunk_path=packet,
+                response_path=root / "response.json", run_id="run",
+                chunk_index=3, chunk_count=20, attempt=2,
+                retry_hint="contract failed", retry_parent_response_path=parent_path,
+                retry_error_records=records,
+            )
+        self.assertIn("The bridge alone can project a proved empty DOCX shell", prompt)
+        self.assertNotIn("remove only the validator-identified requirement objects whose clause_ids", prompt)
+
+        # A model retry that also drops the preserved cover evidence edge is
+        # not equivalent to the code-owned removal of the external shell.
+        unsafe_retry = copy.deepcopy(parent)
+        unsafe_retry["requirements"] = [copy.deepcopy(parent["requirements"][0])]
+        unsafe_retry["requirements"][0]["evidence_ids"].remove("E00045")
+        self.assertNotEqual(unsafe_retry["requirements"], parent["requirements"][:1])
+        error, paths = bridge._retry_semantic_change_error(
+            parent, unsafe_retry, records, contract_version="3.0",
+        )
+        self.assertIsNotNone(error)
+        self.assertEqual(paths, ["$.requirements"])
+        self.assertEqual(error.error_records[0]["preserved_source_edge_changes"], [{
+            "previous_requirement_index": 0,
+            "current_requirement_index": 0,
+            "role": "cover",
+            "clause_ids": ["C00048"],
+            "removed_evidence_ids": ["E00045"],
+            "added_evidence_ids": [],
+            "previous_evidence_ids": ["E00037", "E00045"],
+            "current_evidence_ids": ["E00037"],
+        }])
+
+    def test_external_shell_and_independent_unknown_property_compose(self) -> None:
+        sources = [
+            "非公开材料须经导师同意、作者申请和主管部门批准",
+            "正文使用宋体",
+        ]
+        evidence_doc = {"evidence": [
+            {"id": f"E{index}", "text": source, "kind": "paragraph"}
+            for index, source in enumerate(sources, 1)
+        ]}
+        clauses = self._bind_test_source_spans([
+            exact_source_clause(f"C{index}", source, f"E{index}")
+            for index, source in enumerate(sources, 1)
+        ], evidence_doc)
+        chunk = engine.build_llm_request(
+            [], clauses, evidence_doc, {}, "full", contract_version="3.0",
+        )
+        chunk["case_id"] = "standalone"
+        chunk = attach_request_provenance(
+            chunk, source_sha256="c" * 64, evidence_doc=evidence_doc,
+            clauses=clauses, run_id="composed-external-shell-test",
+        )
+        response = {
+            "contract_version": "3.0", "provenance": chunk["provenance"],
+            "requirements": [{
+                "role": "content_constraints",
+                "properties": {
+                    "abstract_zh": {"required": None, "min_chars": None},
+                    "abstract_en": {"required": None},
+                    "keywords_zh": {"required": None},
+                    "keywords_en": {"required": None},
+                    "acknowledgments": {"max_chars": None},
+                },
+                "clause_ids": ["C1"], "evidence_ids": ["E1"],
+                "reason": "The source requires external consent and approval.",
+                "confidence": 0.99,
+                "verification": {"mode": "external", "checks": ["Check real approval."]},
+            }, {
+                "role": "body_text",
+                "properties": {"font": {"cjk": "SimSun"}, "style": "three_line"},
+                "clause_ids": ["C2"], "evidence_ids": ["E2"],
+                "reason": "The source sets the body font.", "confidence": 0.9,
+                "verification": {"mode": "word_render", "checks": ["Check font."]},
+            }],
+            "clause_reviews": [{
+                "clause_id": "C1", "classification": "external_compliance",
+                "normative_basis": "external_duty", "reason": "External approvals remain pending.",
+                "obligations": [
+                    {"id": action, "status": "unverifiable", "reason": "Requires a real person."}
+                    for action in ("instructor_consent", "author_application", "department_approval")
+                ],
+            }, {
+                "clause_id": "C2", "classification": "executable",
+                "reason": "The font can be formatted.",
+                "obligations": [{
+                    "id": "body_font", "status": "covered",
+                    "reason": "The font property covers this source clause.",
+                }],
+            }],
+            "unsupported_items": [], "reported_conflicts": [],
+        }
+        candidate = bridge.normalize_native_response(response, chunk["response_schema"])
+        records = bridge.contract_error_records(
+            bridge.validate_host_agent_response(candidate, chunk),
+            response=candidate, chunk=chunk,
+        )
+        self.assertIn("non_requirement_classification_relation", [item["code"] for item in records])
+        self.assertIn("unknown_property", [item["code"] for item in records])
+        mechanically_repaired, _repairs = bridge._apply_safe_mechanical_repairs(
+            candidate, records, chunk=chunk,
+        )
+        self.assertIsNotNone(mechanically_repaired, records)
+        accepted, audit = bridge.prepare_native_response_candidate(response, chunk)
+        self.assertEqual(len(accepted["requirements"]), 1)
+        self.assertEqual(accepted["requirements"][0]["clause_ids"], ["C2"])
+        self.assertEqual(accepted["requirements"][0]["properties"], {"font": {"cjk": "SimSun"}})
+        self.assertEqual(accepted["clause_reviews"], candidate["clause_reviews"])
+        self.assertEqual(bridge.validate_host_agent_response(accepted, chunk), [])
+        self.assertTrue(any(item.get("rule_id") == "external_action_relation_projection_v3"
+                            for item in audit["mechanical_repairs"]))
+
+        # Validator order is not part of repair authority. A stale record,
+        # an invalid property on the deleted object, or an independent
+        # unrepairable error must never be hidden by the external deletion.
+        reversed_candidate, _ = bridge._apply_safe_mechanical_repairs(
+            candidate, list(reversed(records)), chunk=chunk,
+        )
+        self.assertEqual(reversed_candidate, accepted)
+        stale_records = copy.deepcopy(records)
+        stale_records[0]["response_sha256"] = "0" * 64
+        self.assertIsNone(bridge._apply_safe_mechanical_repairs(
+            candidate, stale_records, chunk=chunk,
+        )[0])
+        overlapping = copy.deepcopy(response)
+        overlapping["requirements"][0]["properties"]["style"] = "three_line"
+        with self.assertRaises(ValueError):
+            bridge.prepare_native_response_candidate(overlapping, chunk)
+        unrepairable = copy.deepcopy(response)
+        unrepairable["requirements"][1]["properties"]["font"]["cjk"] = 123
+        with self.assertRaises(ValueError):
+            bridge.prepare_native_response_candidate(unrepairable, chunk)
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            review_dir = root / "requirements"
+            engine.prepare_host_agent_review_packets(
+                chunk, clauses, evidence_doc, "c" * 64,
+                review_dir, chunk_size=2,
+            )
+            packet = json.loads(
+                (review_dir / "llm-request-chunks.json").read_text(encoding="utf-8")
+            )[0]
+            packet_raw = copy.deepcopy(response)
+            packet_raw["provenance"] = packet["provenance"]
+            packet_accepted, _ = bridge.prepare_native_response_candidate(
+                packet_raw, packet,
+            )
+            coverage_request = bridge.build_obligation_coverage_request(
+                packet_accepted, packet,
+                run_id=packet["provenance"]["run_id"], chunk_index=1,
+            )
+            checks = {item["check_id"]: item for item in coverage_request["checks"]}
+            self.assertEqual(checks["C1"]["review_context"]["linked_requirements"], [])
+            self.assertEqual(len(checks["C2"]["review_context"]["linked_requirements"]), 1)
+            actions = ("导师同意", "作者申请", "主管部门批准")
+            action_ids = ("instructor_consent", "author_application", "department_approval")
+            coverage_response = {"results": [{
+                "check_id": "C1", "verdict": "external_compliance_pending",
+                "rationale": "Each real-world approval remains unverified.",
+                "evidence_quotes": [sources[0]],
+                "machine_obligation_ids": checks["C1"]["review_context"]["machine_obligation_ids"],
+                "identified_obligations": [{
+                    "source_quote": quote,
+                    "disposition": "external_action_pending",
+                    "primary_obligation_id": identifier,
+                    "requirement_refs": [],
+                } for quote, identifier in zip(actions, action_ids)],
+            }, {
+                "check_id": "C2", "verdict": "consistent",
+                "rationale": "The retained font property represents this source.",
+                "evidence_quotes": [sources[1]],
+                "machine_obligation_ids": checks["C2"]["review_context"]["machine_obligation_ids"],
+                "identified_obligations": [{
+                    "source_quote": sources[1], "disposition": "represented",
+                    "requirement_refs": [checks["C2"]["review_context"]["linked_requirements"][0]["requirement_ref"]],
+                }],
+            }]}
+            validated_coverage = bridge.validate_obligation_coverage_response(
+                coverage_response, coverage_request["checks"],
+            )
+            self.assertEqual(
+                [item["primary_obligation_id"] for item in validated_coverage[0]["identified_obligations"]],
+                list(action_ids),
+            )
+            collapsed_coverage = copy.deepcopy(coverage_response)
+            collapsed_coverage["results"][0]["identified_obligations"] = [
+                collapsed_coverage["results"][0]["identified_obligations"][0]
+            ]
+            with self.assertRaises(bridge.NativeSemanticReviewError):
+                bridge.validate_obligation_coverage_response(
+                    collapsed_coverage, coverage_request["checks"],
+                )
+            def source_bound_review_result(check: dict, source_ref: str) -> dict:
+                context = check["review_context"]
+                if check["check_id"] == "C1":
+                    summaries = {
+                        "instructor_consent": "核验导师同意记录",
+                        "author_application": "核验作者申请记录",
+                        "department_approval": "核验主管部门批准记录",
+                    }
+                    return {
+                        "check_id": "C1", "verdict": "external_compliance_pending",
+                        "rationale": "Three actual external approvals remain unverified.",
+                        "evidence_refs": [source_ref],
+                        "identified_obligations": [{
+                            "source_ref": source_ref,
+                            "disposition": "external_action_pending",
+                            "primary_obligation_id": action,
+                            "obligation_summary": summaries[action],
+                            "requirement_refs": [],
+                        } for action in action_ids],
+                    }
+                return {
+                    "check_id": "C2", "verdict": "consistent",
+                    "rationale": "The retained font property represents this clause.",
+                    "evidence_refs": [source_ref],
+                    "identified_obligations": [{
+                        "source_ref": source_ref, "disposition": "represented",
+                        "requirement_refs": [
+                            context["linked_requirements"][0]["requirement_ref"]
+                        ],
+                    }],
+                }
+
+            primary_envelope = {
+                "runId": "offline-composite-repair", "status": "ok",
+                "provider": "openai", "model": "gpt-5.6-luna",
+                "result": {"payloads": [{"text": json.dumps(packet_raw, ensure_ascii=False)}]},
+            }
+            primary_result = subprocess.CompletedProcess(
+                ["openclaw"], 0, json.dumps(primary_envelope), "",
+            )
+            self._independent_review_patch.stop()
+            response_path = review_dir / "llm-response.json"
+            with patch.object(bridge, "_run_command", return_value=primary_result) as primary_call, \
+                    patch.object(
+                        bridge, "_run_independent_obligation_coverage_review",
+                        side_effect=lambda *args, **kwargs: self._fake_independent_review(
+                            *args, result_builder=source_bound_review_result, **kwargs,
+                        ),
+                    ):
+                run_audit = bridge.run_bridge(
+                    review_dir, response_out=response_path,
+                    agent_id="main", timeout=1, max_attempts=1,
+                    openclaw_bin="openclaw", model="openai/gpt-5.6-luna",
+                    host_runtime="openclaw",
+                )
+            self.assertEqual(primary_call.call_count, 1)
+            self.assertEqual(run_audit["status"], "merged")
+            self.assertEqual(
+                [item.get("rule_id") or item.get("code")
+                 for item in run_audit["chunk_runs"][0]["mechanical_repairs"]],
+                ["unknown_property", "external_action_relation_projection_v3"],
+            )
+            merged = json.loads(response_path.read_text(encoding="utf-8"))
+            self.assertEqual([item["clause_ids"] for item in merged["requirements"]], [["C2"]])
+            self.assertEqual(
+                [item["clause_id"] for item in merged["clause_reviews"]],
+                ["C1", "C2"],
+            )
+            self.assertEqual(
+                [item["id"] for item in merged["clause_reviews"][0]["obligations"]],
+                ["instructor_consent", "author_application", "department_approval"],
+            )
+            receipt = json.loads((review_dir / "merge-receipt.json").read_text(encoding="utf-8"))
+            ledger = json.loads((review_dir / "semantic-review-ledger.json").read_text(encoding="utf-8"))
+            self.assertEqual(receipt["aggregate_sha256"], engine.sha256_json(merged))
+            self.assertEqual(receipt["semantic_review_ledger_sha256"], engine.sha256_json(ledger))
+
+            request_path = review_dir / "llm-request.json"
+            full_request = json.loads(request_path.read_text(encoding="utf-8"))
+            extraction_manifest = {
+                "run_id": full_request["provenance"]["run_id"],
+                "llm_request_body_sha256": request_body_sha256(full_request),
+                "llm_request_envelope_sha256": request_envelope_sha256(full_request),
+                "llm_request_file_sha256": sha256_file(request_path),
+                "runtime_context": full_request.get("runtime_context"),
+            }
+            receipts = pipeline.validate_host_review_receipts(
+                response_path=response_path, audit_path=review_dir / "host-agent-run.json",
+                receipt_path=review_dir / "merge-receipt.json",
+                extraction_manifest=extraction_manifest, work=root,
+                output_policy="review_draft",
+            )
+            independent = receipts["independent_obligation_reviews"]
+            self.assertEqual(len(independent), 1)
+            self.assertTrue(independent[0]["submission_blocked_by_source_content_verification"])
+            self.assertEqual(independent[0]["mixed_external_items"], [])
+            pending = independent[0]["source_content_verification_items"]
+            self.assertEqual(len(pending), 3)
+            self.assertEqual(
+                {item["obligation_summary"] for item in pending},
+                {"核验导师同意记录", "核验作者申请记录", "核验主管部门批准记录"},
+            )
+            self.assertEqual(len({item["analysis_obligation_id"] for item in pending}), 3)
+            gates = pipeline._source_content_verification_release_gates(
+                independent, clauses=clauses, evidence_doc=evidence_doc,
+                expected_run_id=extraction_manifest["run_id"],
+            )
+            self.assertEqual(len(gates), 3)
+            self.assertEqual(len({item["analysis_obligation_id"] for item in gates}), 3)
+            self.assertTrue(all(not item["execution_authorized"] for item in gates))
+            with self.assertRaises(ValueError):
+                pipeline.validate_host_review_receipts(
+                    response_path=response_path, audit_path=review_dir / "host-agent-run.json",
+                    receipt_path=review_dir / "merge-receipt.json",
+                    extraction_manifest=extraction_manifest, work=root,
+                    output_policy="submission",
+                )
+            stale_independent = copy.deepcopy(independent)
+            stale_independent[0]["source_content_verification_items"][0]["source_text_sha256"] = "0" * 64
+            with self.assertRaises(ValueError):
+                pipeline._source_content_verification_release_gates(
+                    stale_independent, clauses=clauses, evidence_doc=evidence_doc,
+                    expected_run_id=extraction_manifest["run_id"],
+                )
+            provenance = packet["provenance"]
+            manual_ledger = build_manual_review_ledger(
+                {}, [], release_gates=gates,
+                binding={
+                    "case_id": "standalone", "run_id": extraction_manifest["run_id"],
+                    "source_sha256": provenance["source_sha256"],
+                    "clause_sha256": provenance["clause_sha256"],
+                    "evidence_sha256": provenance["evidence_sha256"],
+                    "request_sha256": extraction_manifest["llm_request_body_sha256"],
+                    "requirements_sha256": sha256_json(merged["requirements"]),
+                    "input_source_sha256": provenance["source_sha256"],
+                    "format_spec_sha256": "0" * 64,
+                    "official_template_sha256": None,
+                    "official_template_source": "not_supplied",
+                },
+            )
+            self.assertFalse(manual_ledger["submission_ready"])
+            draft_path = review_dir / "composite-external-draft.docx"
+            draft = Document()
+            marker_receipts = append_manual_review_markers(draft, manual_ledger)
+            draft.save(draft_path)
+            marker_audit = audit_manual_review_markers(draft_path, manual_ledger)
+            self.assertEqual(len(marker_receipts), 3)
+            self.assertTrue(marker_audit["valid"])
+            self.assertEqual(marker_audit["visible_marker_count"], 3)
+            self.assertEqual(marker_audit["style_errors"], [])
+            draft_text = "\n".join(paragraph.text for paragraph in Document(draft_path).paragraphs)
+            self.assertIn("核验导师同意记录", draft_text)
+            self.assertIn("核验作者申请记录", draft_text)
+            self.assertIn("核验主管部门批准记录", draft_text)
+            self.assertFalse(marker_audit["submission_ready"])
 
     def test_external_projection_refuses_a_clause_with_a_local_field_action_cue(self) -> None:
         source = "封面须写明学号，并由导师签字盖章"
@@ -5962,6 +6363,74 @@ class HostAgentBridgeTests(unittest.TestCase):
             )
             self.assertIsNone(rejected)
             response["requirements"][1][field] = [] if field != "reason" else ""
+
+    def test_mechanical_repair_removes_schema_invalid_unbound_placeholder_only(self) -> None:
+        placeholder = {
+            "existing_requirement_id": None, "field_key": None,
+            "clause_ids": [], "source_fragment_clause_ids": None,
+            "evidence_ids": [], "confidence": 0.0, "reason": "",
+            "applicability": None, "input_prerequisites": None,
+            "verification": None, "role": "body_text",
+            "properties": {"font": None, "text": None},
+        }
+        response = {
+            "requirements": [
+                {"role": "body_text", "properties": {"text": "原文"},
+                 "clause_ids": ["C1"], "evidence_ids": ["E1"]},
+                placeholder,
+            ],
+            "clause_reviews": [{"clause_id": "C1", "classification": "covered"}],
+        }
+
+        def records(candidate: dict) -> list[dict]:
+            sha = bridge._response_sha256(candidate)
+            return [{
+                "code": code, "json_pointer": pointer,
+                "raw_error": raw, "response_sha256": sha,
+                **extra,
+            } for code, pointer, raw, extra in [
+                ("contract_validation_error", "$.requirements[1]",
+                 "$.requirements[1]: must match at least one schema in anyOf", {}),
+                ("contract_validation_error", "$.requirements[1].reason",
+                 "$.requirements[1].reason: is shorter than 1 characters", {}),
+                ("empty_requirement_properties", "$.requirements[1].properties",
+                 "$.requirements[1].properties: must_include_semantic_payload", {}),
+                ("schema_contract_violation", "$.requirements[1].clause_ids",
+                 "$.requirements[1].clause_ids: must_be_non_empty", {}),
+                ("schema_contract_violation", "$.requirements[1].evidence_ids",
+                 "$.requirements[1].evidence_ids: must_be_non_empty", {}),
+                ("requirement_relation_mismatch", "$.requirements[1]",
+                 "requirements_not_referenced_by_clause_review:1",
+                 {"relation_category": "missing_clause_relation"}),
+            ]]
+
+        repaired, audit = bridge._apply_safe_mechanical_repairs(response, records(response))
+        self.assertIsNotNone(repaired)
+        self.assertEqual(repaired["requirements"], response["requirements"][:1])
+        self.assertEqual(response["requirements"][1], placeholder)
+        self.assertEqual(audit[-1]["removed_requirement_indexes"], [1])
+        self.assertEqual(audit[-1]["source_response_sha256"], bridge._response_sha256(response))
+
+        for field, value in (
+            ("source_fragment_clause_ids", ["C1"]),
+            ("reason", "有待确认的语义"),
+            ("unexpected_semantic_field", "不可丢弃"),
+        ):
+            changed = copy.deepcopy(response)
+            changed["requirements"][1][field] = value
+            self.assertIsNone(bridge._apply_safe_mechanical_repairs(changed, records(changed))[0])
+
+        wrong_hash = records(response)
+        wrong_hash[0]["response_sha256"] = "0" * 64
+        self.assertIsNone(bridge._apply_safe_mechanical_repairs(response, wrong_hash)[0])
+        unrelated_error = records(response) + [{
+            "code": "contract_validation_error",
+            "json_pointer": "$.requirements[0]",
+            "raw_error": "$.requirements[0]: must match at least one schema in anyOf",
+        }]
+        self.assertIsNone(bridge._apply_safe_mechanical_repairs_one_rule(
+            response, unrelated_error,
+        )[0])
 
     def test_unbound_semantic_orphan_is_audited_then_full_contract_is_revalidated(self) -> None:
         source = "北京体育大学学位评定委员会办公室盖章(有效)"
@@ -7584,6 +8053,109 @@ class HostAgentBridgeTests(unittest.TestCase):
         )
         self.assertIsNone(rejected)
 
+    def test_zero_based_cover_orders_shift_only_complete_source_bound_groups(self) -> None:
+        labels = ["论文题目", "申请密级", "保密期限", "审批表编号"]
+        chunk = {
+            "case_id": "case-test",
+            "provenance": {
+                "run_id": "run-test", "source_sha256": "a" * 64,
+                "clause_sha256": "b" * 64, "evidence_sha256": "c" * 64,
+                "request_sha256": "d" * 64,
+            },
+            "clauses": [
+                {"id": f"C{i}", "text": label, "evidence_ids": [f"E{i}"]}
+                for i, label in enumerate(labels, 1)
+            ],
+            "evidence_context": {
+                f"E{i}": {"id": f"E{i}", "text": label}
+                for i, label in enumerate(labels, 1)
+            },
+        }
+        response = {
+            "requirements": [{
+                "role": "cover", "clause_ids": ["C1", "C2", "C3", "C4"],
+                "evidence_ids": ["E1", "E2", "E3", "E4"],
+                "properties": {
+                    "institution": "", "missing_value_policy": "placeholder",
+                    "missing_value_placeholder": "——",
+                    "fields": [{"id": "title_zh", "label": "论文题目", "order": 0}],
+                    "non_public_administration": {"fields": [
+                        {"id": "security_marking", "label": "申请密级", "order": 0},
+                        {"id": "embargo_start", "label": "保密期限", "order": 1},
+                        {"id": "embargo_until", "label": "保密期限", "order": 2},
+                        {"id": "approval_number", "label": "审批表编号", "order": 3},
+                    ]},
+                },
+            }],
+        }
+
+        def records(candidate: dict) -> list[dict]:
+            sha = bridge._response_sha256(candidate)
+            return [{"code": code, "json_pointer": pointer,
+                     "raw_error": raw, "response_sha256": sha}
+                    for code, pointer, raw in (
+                ("contract_validation_error", "$.requirements[0]",
+                 "$.requirements[0]: must match at least one schema in anyOf"),
+                ("cover_institution_placeholder", "$.requirements[0].properties.institution",
+                 "$.requirements[0].properties.institution: is shorter than 1 characters"),
+                ("contract_validation_error", "$.requirements[0].properties.fields[0].order",
+                 "$.requirements[0].properties.fields[0].order: must be >= 1"),
+                ("cover_binding_violation", "$.requirements[0].properties.non_public_administration.fields[0].order",
+                 "$.requirements[0].properties.non_public_administration.fields[0].order: must be >= 1"),
+            )]
+
+        repaired, audit = bridge._apply_safe_mechanical_repairs(
+            response, records(response), chunk=chunk,
+        )
+        self.assertIsNotNone(repaired)
+        assert repaired is not None
+        props = repaired["requirements"][0]["properties"]
+        self.assertEqual(props["institution"], "——")
+        self.assertEqual([field["order"] for field in props["fields"]], [1])
+        self.assertEqual(
+            [field["order"] for field in props["non_public_administration"]["fields"]],
+            [1, 2, 3, 4],
+        )
+        self.assertEqual(response["requirements"][0]["properties"]["institution"], "")
+        self.assertEqual(audit[0]["rule_id"], "normalize_source_bound_zero_based_cover_order_v1")
+        self.assertEqual(audit[0]["source_response_sha256"], bridge._response_sha256(response))
+        self.assertEqual(audit[0]["run_id"], "run-test")
+
+        for mutation in ("duplicate_order", "order_gap", "wrong_source", "source_reversed",
+                         "boolean_order", "missing_placeholder_policy", "uncited_evidence"):
+            candidate = copy.deepcopy(response)
+            fields = candidate["requirements"][0]["properties"]["non_public_administration"]["fields"]
+            if mutation == "duplicate_order":
+                fields[1]["order"] = 0
+            elif mutation == "order_gap":
+                fields[2]["order"] = 4
+            elif mutation == "wrong_source":
+                fields[0]["label"] = "未引用的标签"
+            elif mutation == "source_reversed":
+                fields[0], fields[-1] = fields[-1], fields[0]
+                for index, field in enumerate(fields):
+                    field["order"] = index
+            elif mutation == "boolean_order":
+                fields[0]["order"] = False
+            elif mutation == "missing_placeholder_policy":
+                candidate["requirements"][0]["properties"].pop("missing_value_policy")
+            elif mutation == "uncited_evidence":
+                candidate["requirements"][0]["evidence_ids"].remove("E3")
+            self.assertIsNone(
+                bridge._apply_safe_mechanical_repairs(candidate, records(candidate), chunk=chunk)[0],
+                mutation,
+            )
+
+        stale = records(response)
+        stale[0]["response_sha256"] = "0" * 64
+        self.assertIsNone(bridge._apply_safe_mechanical_repairs(response, stale, chunk=chunk)[0])
+        unrelated = records(response) + [{
+            "code": "contract_validation_error", "json_pointer": "$.requirements[0].reason",
+            "raw_error": "$.requirements[0].reason: is shorter than 1 characters",
+            "response_sha256": bridge._response_sha256(response),
+        }]
+        self.assertIsNone(bridge._apply_safe_mechanical_repairs(response, unrelated, chunk=chunk)[0])
+
     def test_cover_security_marking_is_migrated_only_from_exact_linked_source(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             _review_dir, chunk = self._packet(
@@ -7762,6 +8334,13 @@ class HostAgentBridgeTests(unittest.TestCase):
                 "E1": {"id": "E1", "text": "正文使用宋体"},
                 "E2": {"id": "E2", "text": "非公开论文须经审批，公开论文该项为空白"},
             }
+            # This fixture extends the packet after _packet() built its
+            # source-scoped response schema; keep the schema's ID enum aligned.
+            chunk["response_schema"] = engine.build_llm_request(
+                [], chunk["clauses"],
+                {"evidence": list(chunk["evidence_context"].values())},
+                {}, "full", contract_version="2.1",
+            )["response_schema"]
             response = {
                 "contract_version": "2.1",
                 "requirements": [{

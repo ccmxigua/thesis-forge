@@ -330,6 +330,7 @@ def build_host_review_response_schema(
     allowed_review_classifications: set[str],
     contract_version: str,
     eligible_existing_ids: list[str] | None = None,
+    eligible_clause_ids: list[str] | None = None,
 ) -> dict[str, Any]:
     """Compile the one Host Review response schema used by all adapters.
 
@@ -374,12 +375,25 @@ def build_host_review_response_schema(
         )
         if isinstance(target_role, dict):
             target_role["enum"] = sorted(allowed_requirement_roles)
+    # Use the exact current packet IDs in the local contract and in its native
+    # projection. Never rely on the model to preserve zero padding or infer an
+    # ID from a nearby clause. The post-response relation validator remains
+    # authoritative for which of these IDs may be cited together.
+    clause_ids = sorted(set(eligible_clause_ids or []))
+    clause_id_schema = (
+        {"type": "string", "enum": clause_ids}
+        if clause_ids else {"type": "string"}
+    )
+    if isinstance(reported_conflict_definition, dict) and clause_ids:
+        reported_conflict_definition["properties"]["clause_ids"]["items"] = copy.deepcopy(
+            clause_id_schema
+        )
     requirement_common_properties = {
         "existing_requirement_id": {"type": "string", "minLength": 1},
         "field_key": {"type": "string", "minLength": 1},
-        "clause_ids": {"type": "array", "items": {"type": "string"}},
+        "clause_ids": {"type": "array", "items": copy.deepcopy(clause_id_schema)},
         "source_fragment_clause_ids": {
-            "type": "array", "items": {"type": "string", "minLength": 1},
+            "type": "array", "items": {**copy.deepcopy(clause_id_schema), "minLength": 1},
             "minItems": 1, "uniqueItems": True,
             "description": "Ordered references to source clauses whose exact literal fragments are materialized by code.",
         },
@@ -423,7 +437,7 @@ def build_host_review_response_schema(
                     else ["clause_id", "classification", "requirement_indexes", "reason"]
                 ),
                 "properties": {
-                    "clause_id": {"type": "string"},
+                    "clause_id": copy.deepcopy(clause_id_schema),
                     "classification": {"enum": sorted(allowed_review_classifications)},
                     "reason": {"type": "string", "minLength": 1},
                     "obligations": {"type": "array", "items": {

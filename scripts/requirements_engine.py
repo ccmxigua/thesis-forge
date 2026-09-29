@@ -818,8 +818,11 @@ def split_clauses(evidence_doc: dict[str, Any]) -> list[dict[str, Any]]:
         parts = [segment for part in strong_parts for segment in _split_role_segments(part)]
         source_cursor = 0
         for part_i, part in enumerate(parts):
-            if len(part) < 3:
-                continue
+            # A short source fragment can still be an obligation (签字、盖章),
+            # a layout instruction (居中), or a paper size (A4). Silently
+            # dropping it creates an unreviewed hole before clause coverage.
+            # The delimiter/whitespace-only fragments were already excluded
+            # above; every remaining fragment must receive an exact span.
             normalized_start = text.find(part, source_cursor)
             if normalized_start < 0:
                 raise ValueError(
@@ -860,7 +863,99 @@ def split_clauses(evidence_doc: dict[str, Any]) -> list[dict[str, Any]]:
                     "context_after": copy.deepcopy(ev.get("context_after", [])),
                 },
             })
+    coverage = audit_clause_source_coverage(evidence_doc, clauses)
+    if coverage["unreviewed_spans"]:
+        first = coverage["unreviewed_spans"][0]
+        raise ValueError(
+            "source text was omitted before clause review: "
+            f"evidence={first['evidence_id']!r}, start={first['start_offset']}, "
+            f"text={first['text']!r}"
+        )
     return clauses
+
+
+def audit_clause_source_coverage(
+    evidence_doc: dict[str, Any], clauses: list[dict[str, Any]],
+) -> dict[str, Any]:
+    """Account for every source character, including deliberate delimiters.
+
+    A source fragment must either be inside an exact clause span or appear in
+    this explicit exclusion ledger. The latter is limited to segmentation
+    punctuation/whitespace and a conjunction between covered role segments;
+    short semantic text is never excluded by length.
+    """
+    spans_by_evidence: dict[str, list[dict[str, Any]]] = {}
+    for clause in clauses:
+        if not isinstance(clause, dict) or not isinstance(clause.get("source_span"), dict):
+            raise ValueError("clause source coverage requires exact source spans")
+        span = clause["source_span"]
+        spans_by_evidence.setdefault(str(span.get("evidence_id")), []).append(span)
+    excluded: list[dict[str, Any]] = []
+    unreviewed: list[dict[str, Any]] = []
+    covered_count = 0
+    for item in evidence_doc["evidence"]:
+        evidence_id = str(item["id"])
+        source = item["text"]
+        if not isinstance(source, str):
+            raise ValueError(f"source evidence {evidence_id!r} has no text string")
+        mask = [False] * len(source)
+        for span in spans_by_evidence.pop(evidence_id, []):
+            start, end = span.get("start_offset"), span.get("end_offset")
+            if (
+                type(start) is not int or type(end) is not int
+                or start < 0 or end > len(source) or start >= end
+                or source[start:end] != span.get("text")
+                or any(mask[start:end])
+            ):
+                raise ValueError(f"overlapping or stale source span: evidence={evidence_id!r}")
+            mask[start:end] = [True] * (end - start)
+            covered_count += end - start
+        covered_before = [False] * (len(source) + 1)
+        covered_after = [False] * (len(source) + 1)
+        for index in range(len(source)):
+            covered_before[index + 1] = covered_before[index] or mask[index]
+        for index in range(len(source) - 1, -1, -1):
+            covered_after[index] = covered_after[index + 1] or mask[index]
+        cursor = 0
+        while cursor < len(source):
+            if mask[cursor]:
+                cursor += 1
+                continue
+            start = cursor
+            character = source[cursor]
+            if character.isspace() or character in "：:;；。，,、":
+                reason = "segmentation_boundary"
+            elif character in "和及" and covered_before[cursor] and covered_after[cursor + 1]:
+                reason = "role_boundary_conjunction"
+            else:
+                reason = "unreviewed_source_content"
+            cursor += 1
+            while cursor < len(source) and not mask[cursor]:
+                current = source[cursor]
+                current_reason = (
+                    "segmentation_boundary"
+                    if current.isspace() or current in "：:;；。，,、" else
+                    "role_boundary_conjunction"
+                    if current in "和及" and covered_before[cursor] and covered_after[cursor + 1] else
+                    "unreviewed_source_content"
+                )
+                if current_reason != reason:
+                    break
+                cursor += 1
+            record = {
+                "evidence_id": evidence_id, "start_offset": start,
+                "end_offset": cursor, "text": source[start:cursor],
+                "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
+                "reason": reason,
+            }
+            (unreviewed if reason == "unreviewed_source_content" else excluded).append(record)
+    if spans_by_evidence:
+        raise ValueError("clause source span cites an unknown evidence ID")
+    return {
+        "schema_version": "1.0", "status": "failed" if unreviewed else "complete",
+        "covered_character_count": covered_count,
+        "excluded_spans": excluded, "unreviewed_spans": unreviewed,
+    }
 
 
 def identify_role(text: str) -> tuple[str | None, list[str]]:
@@ -1984,6 +2079,10 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
                 eligible_existing_ids=[
                     item["id"] for item in request_rule_spec.get("requirements", [])
                     if isinstance(item, dict) and isinstance(item.get("id"), str)
+                ],
+                eligible_clause_ids=[
+                    item["id"] for item in clause_packets
+                    if isinstance(item.get("id"), str)
                 ],
             )
         }
@@ -3901,7 +4000,8 @@ def write_json(path: Path, data: Any) -> None:
 
 
 GENERATED_REQUIREMENT_ARTIFACTS = {
-    "document-evidence.json", "requirement-clauses.json", "format-spec.json",
+    "document-evidence.json", "requirement-clauses.json", "clause-source-coverage.json",
+    "format-spec.json",
     "questions.json", "conflicts.json", "schema-validation.json", "llm-request.json",
     "llm-request-chunks.json", "llm-response.raw.json", "llm-response-chunks.json",
     "host-agent-review-manifest.json", "llm-batch-manifest.json", "llm-merge-audit.json",
@@ -4322,6 +4422,7 @@ def _analyse(args: argparse.Namespace) -> int:
     write_json(out / "document-evidence.json", evidence)
     write_json(out / "evidence-context.json", evidence_payload(evidence))
     write_json(out / "requirement-clauses.json", clauses)
+    write_json(out / "clause-source-coverage.json", audit_clause_source_coverage(evidence, clauses))
     write_json(out / "format-spec.json", spec)
     write_json(out / "questions.json", questions)
     write_json(out / "conflicts.json", conflicts)
@@ -4344,6 +4445,7 @@ def _analyse(args: argparse.Namespace) -> int:
         "clause_count": len(clauses),
         "format_spec_sha256": _sha256(out / "format-spec.json"),
         "requirement_clauses_sha256": _sha256(out / "requirement-clauses.json"),
+        "clause_source_coverage_sha256": _sha256(out / "clause-source-coverage.json"),
         "document_evidence_sha256": _sha256(out / "document-evidence.json"),
         "evidence_sha256": _sha256(out / "evidence-context.json"),
         # The old field is retained as a compatibility alias for the semantic

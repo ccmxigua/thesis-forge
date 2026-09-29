@@ -51,7 +51,44 @@ SUPPORTED_HOST_REVIEW_CONTRACTS = {
 }
 
 
-def requirement_payload_errors(item: Any, index: int) -> list[str]:
+def _contains_semantic_value(value: Any) -> bool:
+    """An empty container/null is not an operation; false and zero are."""
+    if value is None:
+        return False
+    if isinstance(value, dict):
+        return any(_contains_semantic_value(child) for child in value.values())
+    if isinstance(value, list):
+        return any(_contains_semantic_value(child) for child in value)
+    return True
+
+
+def classify_semantic_payload(
+    properties: Any, *, role_schema: dict[str, Any] | None = None,
+    contract_root: dict[str, Any] | None = None,
+) -> str:
+    """Classify a role payload without granting permission to discard it.
+
+    A structurally unknown payload must remain invalid even when it has no
+    apparent leaf values.  Native nullable optionals are normalized before
+    this check; the local role schema remains the authority for known keys.
+    """
+    if properties is None or properties == {}:
+        return "empty"
+    if not isinstance(properties, dict):
+        return "invalid"
+    if role_schema is not None:
+        try:
+            if validate_instance(properties, role_schema, contract_root):
+                return "invalid"
+        except (KeyError, ValueError, TypeError):
+            return "invalid"
+    return "substantive" if _contains_semantic_value(properties) else "empty"
+
+
+def requirement_payload_errors(
+    item: Any, index: int, *, role_schema: dict[str, Any] | None = None,
+    contract_root: dict[str, Any] | None = None,
+) -> list[str]:
     """Reject requirements that contain no executable semantic payload.
 
     ``properties`` is intentionally a role-specific union in the native
@@ -63,10 +100,11 @@ def requirement_payload_errors(item: Any, index: int) -> list[str]:
     """
     if not isinstance(item, dict):
         return []
-    properties = item.get("properties")
-    if isinstance(properties, dict) and properties:
-        return []
-    return [f"$.requirements[{index}].properties: must_include_semantic_payload"]
+    if classify_semantic_payload(
+        item.get("properties"), role_schema=role_schema, contract_root=contract_root,
+    ) == "empty":
+        return [f"$.requirements[{index}].properties: must_include_semantic_payload"]
+    return []
 
 
 def _response_sha256(response: Any) -> str:
@@ -1558,8 +1596,10 @@ def validate_response(response: Any, chunk: dict[str, Any]) -> list[str]:
         )
         if role not in allowed_roles:
             errors.append(f"$.requirements[{index}].role: unknown_or_disallowed_role")
-        errors.extend(requirement_payload_errors(item, index))
         role_schema = role_schemas.get(role) if isinstance(role_schemas, dict) else None
+        errors.extend(requirement_payload_errors(
+            item, index, role_schema=role_schema, contract_root=contract_root,
+        ))
         if isinstance(role_schema, dict):
             try:
                 errors.extend(validate_instance(

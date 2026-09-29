@@ -20,6 +20,7 @@ from host_review_contract import (  # noqa: E402
     _table_obligation_gaps,
     _keyword_obligation_gaps,
     _literal_text_source_binding_error,
+    classify_semantic_payload,
     contract_error_records,
     derived_requirement_indexes,
     provenance_error_records,
@@ -1594,6 +1595,33 @@ class HostReviewV3Tests(unittest.TestCase):
         self.assertNotEqual(value_schema, {})
         self.assertEqual(native_schema_support_errors(value_schema), [])
 
+    def test_current_chunk_clause_ids_are_constrained_in_local_and_native_schemas(self) -> None:
+        local = self.request["response_schema"]
+        native = native_output_schema(local)
+        self.assertEqual(native_schema_support_errors(native), [])
+        for schema in (local, native):
+            branches = schema["properties"]["requirements"]["items"]["anyOf"]
+            for branch in branches:
+                props = branch["properties"]
+                self.assertEqual(props["clause_ids"]["items"]["enum"], ["C1"])
+                fragment = props["source_fragment_clause_ids"]
+                if "anyOf" in fragment:
+                    fragment = next(item for item in fragment["anyOf"] if item.get("type") == "array")
+                self.assertEqual(fragment["items"]["enum"], ["C1"])
+            for review_branch in schema["properties"]["clause_reviews"]["items"]["anyOf"]:
+                self.assertEqual(review_branch["properties"]["clause_id"]["enum"], ["C1"])
+            self.assertEqual(
+                schema["$defs"]["reportedConflict"]["properties"]["clause_ids"]["items"]["enum"],
+                ["C1"],
+            )
+
+        invalid = self._executable_response()
+        invalid["requirements"][0]["clause_ids"] = ["C01"]
+        self.assertTrue(validate_response(invalid, self.request))
+        invalid = self._informational_response()
+        invalid["clause_reviews"][0]["clause_id"] = "C01"
+        self.assertTrue(validate_response(invalid, self.request))
+
     def test_requirement_native_schema_binds_role_to_payload_and_normalizes_by_role(self) -> None:
         native_schema = native_output_schema(self.request["response_schema"])
         branches = native_schema["properties"]["requirements"]["items"]["anyOf"]
@@ -1638,6 +1666,19 @@ class HostReviewV3Tests(unittest.TestCase):
             any(record["code"] == "empty_requirement_properties" for record in records),
             records,
         )
+
+    def test_nested_empty_payload_is_not_executable_but_false_is(self) -> None:
+        contract = self.request["requirement_contract"]
+        schema = contract["role_properties_schema"]["content_constraints"]
+        root = {"$defs": contract.get("$defs", {})}
+        classify = lambda properties: classify_semantic_payload(
+            properties, role_schema=schema, contract_root=root,
+        )
+        self.assertEqual(classify({"abstract_zh": {}, "keywords_en": {}}), "empty")
+        self.assertEqual(classify({"abstract_zh": {"required": False}}), "substantive")
+        self.assertEqual(classify({"unknown_nullable_field": None}), "invalid")
+        self.assertEqual(classify({"abstract_zh": {"required": 0}}), "invalid")
+        self.assertEqual(classify_semantic_payload({"value": 0}), "substantive")
 
     def test_input_prerequisite_namespace_is_not_model_defined(self) -> None:
         response = self._executable_response()

@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+
+from docx import Document
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -18,6 +21,7 @@ from thesis_format_pipeline import (  # noqa: E402
 from obligation_workflow import OBLIGATION_ANALYSIS_LEDGER_PROTOCOL  # noqa: E402
 from format_spec_validation import load_and_validate  # noqa: E402
 from manual_review import build_manual_review_ledger  # noqa: E402
+from manual_review_display import append_manual_review_markers, audit_manual_review_markers  # noqa: E402
 from semantic_contract import sha256_json  # noqa: E402
 
 
@@ -420,6 +424,83 @@ class ThesisFormatPipelinePolicyTests(unittest.TestCase):
                 [review], clauses=[clause], evidence_doc=tampered,
                 expected_run_id="run-1",
             )
+
+    def test_pure_external_actions_remain_distinct_manual_draft_gates(self) -> None:
+        source = "须经导师同意、作者申请和学院批准"
+        actions = ["导师同意", "作者申请", "学院批准"]
+        bundles = [self._pending_bundle(
+            clause_id="C00039", text=source, start=source.index(action),
+            end=source.index(action) + len(action), obligation_index=index,
+            evidence_id="E00037",
+        ) for index, action in enumerate(actions)]
+        review, clause, evidence_doc, _ = bundles[0]
+        review.pop("source_content_pending_items")
+        review["source_content_verification_items"] = []
+        for _, _, _, item in bundles:
+            item.update(
+                work_type="external_action", disposition="external_action_pending",
+                obligation_summary=f"人工核验{item['source_quote']}的完成证据",
+            )
+            review["source_content_verification_items"].append(item)
+        gates = _source_content_verification_release_gates(
+            [review], clauses=[clause], evidence_doc=evidence_doc,
+            expected_run_id="run-1",
+        )
+        self.assertEqual(len(gates), 3)
+        self.assertEqual({gate["source_text"] for gate in gates}, set(actions))
+        self.assertEqual(len({gate["analysis_obligation_id"] for gate in gates}), 3)
+        self.assertEqual({gate["source_code"] for gate in gates},
+                         {"independent_external_action"})
+        self.assertEqual({gate["category"] for gate in gates},
+                         {"runtime_manual_unverifiable"})
+        self.assertTrue(all(not gate["execution_authorized"] for gate in gates))
+        self.assertTrue(all("不得提交" in gate["action"] for gate in gates))
+
+        ledger = build_manual_review_ledger(
+            {}, [], release_gates=gates,
+            binding={
+                "case_id": "bsu", "run_id": "run-1",
+                "source_sha256": "a" * 64, "clause_sha256": "b" * 64,
+                "evidence_sha256": "c" * 64, "request_sha256": "d" * 64,
+                "requirements_sha256": "e" * 64,
+                "input_source_sha256": "f" * 64,
+                "format_spec_sha256": "0" * 64,
+                "official_template_sha256": None,
+                "official_template_source": "not_supplied",
+            },
+        )
+        self.assertFalse(ledger["submission_ready"])
+        self.assertEqual(len(ledger["items"]), 3)
+        self.assertEqual(
+            {item["analysis_obligation_id"] for item in ledger["items"]},
+            {gate["analysis_obligation_id"] for gate in gates},
+        )
+        self.assertEqual(len({item["manual_obligation_id"] for item in ledger["items"]}), 3)
+        document = Document()
+        document.add_paragraph("论文原始正文")
+        marker_receipts = append_manual_review_markers(document, ledger)
+        self.assertEqual(len(marker_receipts), 3)
+        with tempfile.TemporaryDirectory() as td:
+            marked_path = Path(td) / "external-pending.docx"
+            document.save(marked_path)
+            marker_audit = audit_manual_review_markers(marked_path, ledger)
+        self.assertTrue(marker_audit["valid"], marker_audit)
+        self.assertFalse(marker_audit["submission_ready"])
+        self.assertEqual(marker_audit["visible_marker_count"], 3)
+        self.assertEqual(
+            {item["analysis_obligation_id"] for item in marker_audit["marker_bindings"]},
+            {gate["analysis_obligation_id"] for gate in gates},
+        )
+
+
+    def test_pure_external_review_allows_draft_but_never_submission(self) -> None:
+        results = [{"check_id": "C00039", "verdict": "external_compliance_pending"}]
+        self.assertEqual(
+            enforce_obligation_review_output_policy(results, output_policy="review_draft"),
+            ["C00039"],
+        )
+        with self.assertRaises(ValueError):
+            enforce_obligation_review_output_policy(results, output_policy="submission")
 
     def test_mixed_external_review_allows_draft_but_never_submission(self) -> None:
         results = [{"check_id": "C00040", "verdict": "mixed_execution_external_pending"}]

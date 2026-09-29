@@ -236,6 +236,34 @@ class RequirementsPipelineTest(unittest.TestCase):
         self.assertEqual(raw[span["start_offset"]:span["end_offset"]], span["text"])
         self.assertEqual(span["evidence_id"], "E1")
 
+    def test_split_clauses_keeps_short_meaningful_source_fragments(self) -> None:
+        raw = "签字；盖章；居中；A4。须盖章"
+        evidence = {"evidence": [{
+            "id": "E1", "text": raw, "kind": "paragraph",
+            "location": {"part": "document", "order": 1},
+            "context_before": [], "context_after": [],
+        }]}
+        clauses = requirements_engine.split_clauses(evidence)
+        self.assertEqual([item["text"] for item in clauses],
+                         ["签字", "盖章", "居中", "A4", "须盖章"])
+        for clause in clauses:
+            span = clause["source_span"]
+            self.assertEqual(span["text"], raw[span["start_offset"]:span["end_offset"]])
+            self.assertEqual(span["text"], clause["text"])
+            self.assertEqual(span["source_sha256"], hashlib.sha256(raw.encode()).hexdigest())
+        coverage = requirements_engine.audit_clause_source_coverage(evidence, clauses)
+        self.assertEqual(coverage["status"], "complete")
+        self.assertEqual(coverage["unreviewed_spans"], [])
+        self.assertTrue(coverage["excluded_spans"])
+        self.assertEqual({item["reason"] for item in coverage["excluded_spans"]},
+                         {"segmentation_boundary"})
+
+        missing = requirements_engine.audit_clause_source_coverage(evidence, clauses[1:])
+        self.assertEqual(missing["status"], "failed")
+        self.assertEqual(missing["unreviewed_spans"][0]["text"], "签字")
+        self.assertEqual(missing["unreviewed_spans"][0]["source_sha256"],
+                         hashlib.sha256(raw.encode()).hexdigest())
+
     def test_unresolved_spine_annotation_is_not_reclassified_by_nearby_context(self) -> None:
         clauses = [
             {
@@ -2066,9 +2094,17 @@ b&=2\notag
             self.skipTest("external BTBU template is not included in this source checkout")
         evidence = requirements_engine.extract_document_evidence(source)
         clauses = requirements_engine.split_clauses(evidence)
-        reference_ids = [f"C{i:05d}" for i in range(250, 256)]
-        references = [clause for clause in clauses if clause["id"] in reference_ids]
-        self.assertEqual([clause["id"] for clause in references], reference_ids)
+        # Clause ordinals legitimately shift when short source fragments are
+        # retained. Select the six filled entries by their source structure,
+        # not by a stale sequence number.
+        heading_indexes = [index for index, clause in enumerate(clauses)
+                           if clause["text"] == "参考文献"]
+        self.assertEqual(len(heading_indexes), 1)
+        references = clauses[heading_indexes[0] + 1:heading_indexes[0] + 7]
+        self.assertEqual([re.match(r"^\[(\d+)\] ", clause["text"]).group(1)
+                          if re.match(r"^\[(\d+)\] ", clause["text"]) else None
+                          for clause in references], [str(number) for number in range(1, 7)])
+        reference_ids = [clause["id"] for clause in references]
 
         requirements = []
         reference_indexes = {}

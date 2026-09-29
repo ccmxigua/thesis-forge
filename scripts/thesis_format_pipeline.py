@@ -839,13 +839,16 @@ def _validate_independent_obligation_receipts(
             }:
                 continue
             check_id = obligation.get("check_id")
-            external_mixed = obligation.get("work_type") == "external_action"
-            if external_mixed and (
-                result_by_check.get(str(check_id), {}).get("verdict")
-                != "mixed_execution_external_pending"
+            external_action = obligation.get("work_type") == "external_action"
+            review_verdict = result_by_check.get(str(check_id), {}).get("verdict")
+            external_mixed = external_action and review_verdict == "mixed_execution_external_pending"
+            if external_action and (
+                review_verdict not in {
+                    "mixed_execution_external_pending", "external_compliance_pending",
+                }
                 or obligation.get("disposition") != "external_action_pending"
             ):
-                continue
+                raise ValueError("external-action ledger item is not bound to a pending independent review")
             check = checks_by_id.get(str(check_id)) if isinstance(check_id, str) else None
             context = check.get("review_context") if isinstance(check, dict) else None
             cited_evidence = (
@@ -1138,7 +1141,10 @@ def enforce_obligation_review_output_policy(
     manual_review_clause_ids = sorted({
         str(item.get("check_id")) for item in results
         if isinstance(item, dict)
-        and item.get("verdict") in {"manual_review_required", "mixed_execution_external_pending"}
+        and item.get("verdict") in {
+            "manual_review_required", "external_compliance_pending",
+            "mixed_execution_external_pending",
+        }
         and isinstance(item.get("check_id"), str)
     })
     source_content_pending_clause_ids = sorted({
@@ -1424,8 +1430,10 @@ def _source_content_verification_release_gates(
         external_items = independent_review.get("mixed_external_items", [])
         if not isinstance(source_items, list) or not isinstance(external_items, list):
             raise ValueError("independent review human-verification items must be arrays")
-        pending_items = source_items + external_items
-        for pending in pending_items:
+        pending_items = [(item, False) for item in source_items] + [
+            (item, True) for item in external_items
+        ]
+        for pending, from_mixed_review in pending_items:
             if not isinstance(pending, dict):
                 raise ValueError("source-content verification item must be an object")
             clause_id = pending.get("clause_id")
@@ -1438,13 +1446,15 @@ def _source_content_verification_release_gates(
             source_sha = pending.get("source_text_sha256")
             source_location = pending.get("source_location")
             analysis_identity = pending.get("analysis_obligation_identity")
-            external_mixed = pending.get("work_type") == "external_action"
+            external_action = pending.get("work_type") == "external_action"
+            if from_mixed_review and not external_action:
+                raise ValueError("mixed external review item is not an external action")
             if isinstance(obligation_id, str) and obligation_id in seen_obligation_ids:
                 raise ValueError("duplicate source-content verification obligation")
             if (
                 not isinstance(clause_id, str) or not clause_id
                 or pending.get("work_type") not in {"existing_content_verification", "external_action"}
-                or (external_mixed and pending.get("disposition") != "external_action_pending")
+                or (external_action and pending.get("disposition") != "external_action_pending")
                 or not isinstance(obligation_id, str)
                 or not re.fullmatch(r"AO-[0-9a-f]{24}", obligation_id)
                 or obligation_id in seen_obligation_ids
@@ -1563,11 +1573,12 @@ def _source_content_verification_release_gates(
                 )
             gates.append({
                 "source_code": (
-                    "independent_mixed_external_action" if external_mixed
+                    "independent_mixed_external_action" if from_mixed_review
+                    else "independent_external_action" if external_action
                     else "independent_existing_content_verification"
                 ),
                 "category": (
-                    "runtime_manual_unverifiable" if external_mixed
+                    "runtime_manual_unverifiable" if external_action
                     else "semantic_content_review"
                 ),
                 "source_text": quote,
@@ -1575,7 +1586,7 @@ def _source_content_verification_release_gates(
                 "action": (
                     "请人工核对真实审批、同意或其他外部行动的完成证据并记录结论；"
                     "文档中的文字或占位不能替代该证据，重新绑定复核前不得提交。"
-                    if external_mixed else
+                    if external_action else
                     "请人工对照原始要求核验论文现有内容，并记录对应的段落、数据、图表或引文位置及结论；"
                     "记录经当前运行重新绑定和复核前，此项仍未通过。"
                 ),

@@ -210,6 +210,7 @@ from host_runtime import (  # noqa: E402
 )
 from native_semantic_review import (  # noqa: E402
     ExternalComplianceCorrectionRequiredError,
+    InconsistentObligationVerdictError,
     MissingExecutableObligationInventoryError,
     MissingSourceObligationInventoryError,
     NativeSemanticReviewError,
@@ -4372,7 +4373,9 @@ def _v3_authoring_content_retry_is_source_bound(
         quote = obligation.get("source_quote") if isinstance(obligation, dict) else None
         if (
             not isinstance(obligation, dict)
-            or obligation.get("disposition") != "unrepresented"
+            or obligation.get("disposition") not in {
+                "unrepresented", "authoring_content_pending",
+            }
             or not isinstance(quote, str)
             or not quote
             or quote not in exact_source
@@ -5858,13 +5861,30 @@ def _is_null_payload_external_requirement(
     ):
         return False
     applicability = requirement.get("applicability")
-    if applicability not in (None, {}) and not (
+    unconditional = (
+        applicability in (None, {})
+        or (
+            isinstance(applicability, dict)
+            and set(applicability) <= {"status", "conditions", "exceptions"}
+            and applicability.get("status") == "always"
+            and applicability.get("conditions") in (None, [])
+            and applicability.get("exceptions") in (None, [])
+        )
+    )
+    conditional_pending = (
         isinstance(applicability, dict)
         and set(applicability) <= {"status", "conditions", "exceptions"}
-        and applicability.get("status") == "always"
-        and applicability.get("conditions") in (None, [])
-        and applicability.get("exceptions") in (None, [])
-    ):
+        and applicability.get("status") == "conditional"
+        and isinstance(applicability.get("conditions"), list)
+        and bool(applicability["conditions"])
+        and all(isinstance(item, dict) and item for item in applicability["conditions"])
+        and isinstance(applicability.get("exceptions"), list)
+        and all(isinstance(item, str) for item in applicability["exceptions"])
+    )
+    # A conditional external duty is still pending, never an executable DOCX
+    # operation. Keep its full scope in the immutable raw response and repair
+    # audit; the source-first reviewer and release gate remain authoritative.
+    if not (unconditional or conditional_pending):
         return False
     verification = requirement.get("verification")
     if (
@@ -6102,6 +6122,12 @@ def _project_external_action_requirements(
         "json_pointer": "$.requirements", "removed_indexes": sorted(targets),
         "removed_requirements": [copy.deepcopy(requirements[index]) for index in sorted(targets)],
         "projection_kinds": {str(index): projection_kinds[index] for index in sorted(targets)},
+        "pending_conditional_applicability": {
+            str(index): copy.deepcopy(requirements[index]["applicability"])
+            for index in sorted(targets)
+            if isinstance(requirements[index].get("applicability"), dict)
+            and requirements[index]["applicability"].get("status") == "conditional"
+        },
         "source_response_sha256": _response_sha256(response),
         "repaired_response_sha256": _response_sha256(projected),
         "source_chunk_sha256": _response_sha256(chunk),
@@ -10210,7 +10236,13 @@ def _run_independent_obligation_coverage_review(
                     for obligation in ledger_obligations
                     if isinstance(obligation, dict)
                     and obligation.get("check_id") == clause_id
-                    and obligation.get("disposition") == "unrepresented"
+                    and (
+                        obligation.get("disposition") == "unrepresented"
+                        or (
+                            review_context.get("classification") == "informational"
+                            and obligation.get("disposition") == "authoring_content_pending"
+                        )
+                    )
                 ]
                 missing_quotes = list(dict.fromkeys(
                     obligation.get("source_quote")
@@ -10600,10 +10632,10 @@ def _run_independent_obligation_coverage_review(
             "provider_attempt_history": attempt_history,
         }  # type: ignore[attr-defined]
         raise error from review_error
-    except MissingSourceObligationInventoryError as review_error:
+    except (MissingSourceObligationInventoryError, InconsistentObligationVerdictError) as review_error:
         retryable = _provider_attempt < INDEPENDENT_REVIEW_PROVIDER_MAX_ATTEMPTS
         retry_feedback = {
-            "code": MissingSourceObligationInventoryError.code,
+            "code": review_error.code,
             "clause_ids": list(review_error.clause_ids),
         }
         failure_envelope = {
@@ -10611,7 +10643,7 @@ def _run_independent_obligation_coverage_review(
             "protocol": OBLIGATION_COVERAGE_PROTOCOL,
             "status": "rejected",
             "retryable": retryable,
-            "retry_code": MissingSourceObligationInventoryError.code,
+            "retry_code": review_error.code,
             "next_request_retry_feedback": retry_feedback if retryable else None,
             "provider_attempt": _provider_attempt,
             "next_provider_attempt": _provider_attempt + 1 if retryable else None,
@@ -10631,7 +10663,7 @@ def _run_independent_obligation_coverage_review(
         attempt_record = {
             "provider_attempt": _provider_attempt,
             "status": "semantic_contract_rejected",
-            "retry_code": MissingSourceObligationInventoryError.code,
+            "retry_code": review_error.code,
             "missing_clause_ids": list(review_error.clause_ids),
             "error": str(review_error),
             "audit_path": audit_path.relative_to(review_dir).as_posix(),
@@ -10667,7 +10699,7 @@ def _run_independent_obligation_coverage_review(
         )
         error.error_records = [{
             "code": "independent_obligation_review_correction_exhausted",
-            "retry_code": MissingSourceObligationInventoryError.code,
+            "retry_code": review_error.code,
             "provider_attempts": _provider_attempt,
             "provider_attempt_history": attempt_history,
             "missing_clause_ids": list(review_error.clause_ids),

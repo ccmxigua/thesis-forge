@@ -646,6 +646,59 @@ class HostAgentBridgeTests(unittest.TestCase):
                 )
                 self.assertEqual(json.loads(audit_path.read_text(encoding="utf-8"))["status"], "rejected")
 
+    def test_inconsistent_incomplete_disposition_rereviews_unchanged_candidate_once(self) -> None:
+        self._independent_review_patch.stop()
+        chunk, response, valid_review = self._missing_inventory_review_case()
+        calls: list[dict] = []
+
+        def reject_then_review(request: dict, **kwargs: dict) -> dict:
+            calls.append(copy.deepcopy(request))
+            if len(calls) == 1:
+                raise bridge.InconsistentObligationVerdictError(["C00061"])
+            return bind_mock_review_to_source_spans(
+                valid_review, request, kwargs["output_dir"],
+            )
+
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(bridge, "run_native_semantic_review", side_effect=reject_then_review), \
+                    patch.object(bridge.time, "sleep"):
+                pointer = bridge._run_independent_obligation_coverage_review(
+                    response, chunk, review_dir=Path(td),
+                    run_id="run-empty-inventory-correction", chunk_index=4, attempt=1,
+                    host_runtime="codex", model="gpt-5.6-luna", timeout=10,
+                    agent_id="main", runner="exec", binary="codex", config_path=None,
+                    controller=bridge.RunController(),
+                )
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(calls[0]["provenance"], calls[1]["provenance"])
+            self.assertEqual(calls[1]["retry_feedback"], {
+                "code": bridge.InconsistentObligationVerdictError.code,
+                "clause_ids": ["C00061"],
+            })
+            self.assertEqual(pointer["candidate_response_sha256"], bridge._response_sha256(response))
+
+    def test_inconsistent_incomplete_disposition_exhaustion_fails_closed(self) -> None:
+        self._independent_review_patch.stop()
+        chunk, response, _ = self._missing_inventory_review_case()
+        with tempfile.TemporaryDirectory() as td:
+            with patch.object(
+                bridge, "run_native_semantic_review",
+                side_effect=bridge.InconsistentObligationVerdictError(["C00061"]),
+            ) as review_call, patch.object(bridge.time, "sleep"):
+                with self.assertRaises(bridge.IndependentObligationReviewError) as caught:
+                    bridge._run_independent_obligation_coverage_review(
+                        response, chunk, review_dir=Path(td),
+                        run_id="run-empty-inventory-correction", chunk_index=4, attempt=1,
+                        host_runtime="codex", model="gpt-5.6-luna", timeout=10,
+                        agent_id="main", runner="exec", binary="codex", config_path=None,
+                        controller=bridge.RunController(),
+                    )
+            self.assertEqual(review_call.call_count, 2)
+            self.assertEqual(
+                caught.exception.error_records[0]["retry_code"],
+                bridge.InconsistentObligationVerdictError.code,
+            )
+
     def test_independent_coverage_does_not_retry_unclassified_provider_or_contract_errors(self) -> None:
         self._independent_review_patch.stop()
         source = "表格应居中"
@@ -2722,6 +2775,10 @@ class HostAgentBridgeTests(unittest.TestCase):
         self.assertTrue(bridge._v3_authoring_content_retry_is_source_bound(
             review_context, clause, evidence, missing,
         ))
+        pending = [{**missing[0], "disposition": "authoring_content_pending"}]
+        self.assertTrue(bridge._v3_authoring_content_retry_is_source_bound(
+            review_context, clause, evidence, pending,
+        ))
 
         clause_with_context = copy.deepcopy(clause)
         clause_with_context["evidence_ids"] = ["E1", "E2"]
@@ -2751,9 +2808,9 @@ class HostAgentBridgeTests(unittest.TestCase):
             review_context, stale_span_clause, evidence, missing,
         ))
 
-    def test_informational_authoring_omission_makes_bounded_primary_retryable(self) -> None:
+    def test_informational_authoring_pending_makes_bounded_primary_retryable(self) -> None:
         self._independent_review_patch.stop()
-        source = "以下示例内容请作者根据需要自行撰写真实研究内容。"
+        source = "这些文字都是编的，根据需要自己撰写"
         provenance = {
             "run_id": "run-authoring-primary-retry", "source_sha256": "a" * 64,
             "evidence_sha256": "b" * 64, "clause_sha256": "c" * 64,
@@ -2787,7 +2844,7 @@ class HostAgentBridgeTests(unittest.TestCase):
                 "rationale": "The author-input obligation is unrepresented.",
                 "evidence_quotes": [source], "machine_obligation_ids": [],
                 "identified_obligations": [{
-                    "source_quote": source, "disposition": "unrepresented",
+                    "source_quote": source, "disposition": "authoring_content_pending",
                     "obligation_summary": "The author must supply genuine thesis content.",
                     "requirement_refs": [],
                 }],
@@ -5368,9 +5425,40 @@ class HostAgentBridgeTests(unittest.TestCase):
         self.assertEqual(accepted["requirements"], [])
         self.assertEqual(len(audit["mechanical_repairs"]), 1)
 
+        # A conditional approval/stamp duty remains a manual external action.
+        # Its applicability is retained in the audit, not treated as an
+        # executable document property or silently dropped.
+        conditional = copy.deepcopy(normalized)
+        for requirement in conditional["requirements"]:
+            requirement["applicability"] = {
+                "status": "conditional",
+                "conditions": [{
+                    "fact": "thesis_profile.security_level",
+                    "operator": "in",
+                    "value": ["restricted", "classified"],
+                }],
+                "exceptions": ["公开论文不适用"],
+            }
+        conditional_records = bridge.contract_error_records(
+            bridge.validate_host_agent_response(conditional, chunk),
+            response=conditional, chunk=chunk,
+        )
+        conditional_projected, conditional_repairs = bridge._project_external_action_requirements(
+            conditional, conditional_records, chunk,
+        )
+        self.assertIsNotNone(conditional_projected)
+        self.assertEqual(conditional_projected["requirements"], [])
+        self.assertEqual(conditional_projected["clause_reviews"], conditional["clause_reviews"])
+        self.assertEqual(
+            conditional_repairs[0]["pending_conditional_applicability"],
+            {str(index): requirement["applicability"]
+             for index, requirement in enumerate(conditional["requirements"])},
+        )
+        self.assertEqual(bridge.validate_host_agent_response(conditional_projected, chunk), [])
+
         for label, mutate in (
             ("existing_identity", lambda item: item.update(existing_requirement_id="R-old")),
-            ("conditional", lambda item: item.update(applicability={
+            ("invalid_conditional", lambda item: item.update(applicability={
                 "status": "conditional", "conditions": [{"fact": "security_level"}],
             })),
             ("local_verification", lambda item: item["verification"].update(mode="static_docx")),

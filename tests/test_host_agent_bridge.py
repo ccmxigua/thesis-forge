@@ -918,6 +918,108 @@ class HostAgentBridgeTests(unittest.TestCase):
             self.assertEqual(pointer["status"], "rejected")
             self.assertEqual(envelope["status"], "rejected")
 
+    def test_executable_gap_routes_to_primary_without_rewriting_other_inventories(self) -> None:
+        self._independent_review_patch.stop()
+        source_missing = "表格应居中"
+        source_represented = "图题应居中"
+        provenance = {"run_id": "run-primary-gap"}
+        chunk = {
+            "provenance": provenance,
+            "clauses": [
+                exact_source_clause("C1", source_missing, "E1"),
+                exact_source_clause("C2", source_represented, "E2"),
+            ],
+            "evidence_context": {
+                "E1": {"id": "E1", "text": source_missing},
+                "E2": {"id": "E2", "text": source_represented},
+            },
+        }
+        response = {
+            "provenance": provenance,
+            "clause_reviews": [
+                {"clause_id": "C1", "classification": "covered", "reason": "covered"},
+                {"clause_id": "C2", "classification": "covered", "reason": "covered"},
+            ],
+            "requirements": [
+                {"id": "R1", "role": "table", "clause_ids": ["C1"],
+                 "evidence_ids": ["E1"], "properties": {}},
+                {"id": "R2", "role": "figure_caption", "clause_ids": ["C2"],
+                 "evidence_ids": ["E2"], "properties": {}},
+            ],
+        }
+        initial_response_sha = bridge._response_sha256(response)
+
+        def independent_review(request: dict, **kwargs: dict) -> dict:
+            checks = {item["check_id"]: item for item in request["checks"]}
+            represented_ref = checks["C2"]["review_context"]["linked_requirements"][0][
+                "requirement_ref"
+            ]
+            review_result = {
+                "protocol": bridge.OBLIGATION_COVERAGE_PROTOCOL,
+                "status": "completed", "response_sha256": "f" * 64,
+                "results": [
+                    {
+                        "check_id": "C1", "verdict": "incomplete",
+                        "rationale": "the candidate does not preserve the alignment obligation",
+                        "evidence_quotes": [source_missing],
+                        "identified_obligations": [{
+                            "source_quote": source_missing,
+                            "disposition": "unrepresented", "requirement_refs": [],
+                        }],
+                        "machine_obligation_ids": checks["C1"]["review_context"][
+                            "machine_obligation_ids"
+                        ],
+                    },
+                    {
+                        "check_id": "C2", "verdict": "consistent",
+                        "rationale": "the linked requirement represents this source obligation",
+                        "evidence_quotes": [source_represented],
+                        "identified_obligations": [{
+                            "source_quote": source_represented,
+                            "disposition": "represented",
+                            "requirement_refs": [represented_ref],
+                        }],
+                        "machine_obligation_ids": checks["C2"]["review_context"][
+                            "machine_obligation_ids"
+                        ],
+                    },
+                ],
+                "summary": {"consistent": 1, "incomplete": 1, "uncertain": 0},
+            }
+            bound = bind_mock_review_to_source_spans(
+                review_result, request, kwargs["output_dir"],
+            )
+            bridge.validate_obligation_coverage_response(
+                {"results": copy.deepcopy(bound["results"])}, request["checks"],
+            )
+            return bound
+
+        with tempfile.TemporaryDirectory() as td:
+            review_dir = Path(td)
+            with patch.object(bridge, "run_native_semantic_review", side_effect=independent_review) as review_call, \
+                    patch.object(bridge.time, "sleep") as sleep:
+                with self.assertRaises(bridge.IndependentObligationReviewError) as caught:
+                    bridge._run_independent_obligation_coverage_review(
+                        response, chunk, review_dir=review_dir,
+                        run_id="run-primary-gap", chunk_index=1, attempt=1,
+                        host_runtime="codex", model="gpt-5.6-luna", timeout=10,
+                        agent_id="main", runner="exec", binary="codex",
+                        config_path=None, controller=bridge.RunController(),
+                    )
+            review_call.assert_called_once()
+            sleep.assert_not_called()
+            self.assertTrue(getattr(caught.exception, "retryable", False), str(caught.exception))
+            self.assertEqual(bridge._response_sha256(response), initial_response_sha)
+            record = caught.exception.error_records[0]
+            self.assertEqual(record["clause_id"], "C1")
+            self.assertEqual(record["primary_retry_authorization"],
+                             "executable_requirement_completion")
+            pointer = caught.exception.independent_review_audit
+            self.assertEqual(pointer["provider_attempt"], 1)
+            ledger = json.loads((review_dir / pointer["obligation_analysis_ledger_path"]).read_text())
+            self.assertEqual({item["check_id"] for item in ledger["obligations"]}, {"C1", "C2"})
+            self.assertFalse((review_dir / "independent-review-chunk-0001-attempt-01-provider-attempt-02").exists())
+
     @staticmethod
     def _external_compliance_review_case() -> tuple[dict, dict, dict, str]:
         source = "学位论文作者签名： 年 月 日"

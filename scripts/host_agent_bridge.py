@@ -10102,6 +10102,39 @@ def _write_obligation_analysis_ledger(
     }
 
 
+def _complete_executable_gap_can_route_to_primary(
+    error_records: list[dict[str, Any]],
+    coverage_checks: dict[str, dict[str, Any]],
+) -> bool:
+    """Route a fully inventoried executable gap without re-reviewing the whole chunk."""
+    if not error_records:
+        return False
+    for record in error_records:
+        clause_id = record.get("clause_id")
+        check = coverage_checks.get(clause_id) if isinstance(clause_id, str) else None
+        context = check.get("review_context") if isinstance(check, dict) else None
+        missing = record.get("missing_obligations")
+        if (
+            record.get("primary_retry_authorization")
+            != "executable_requirement_completion"
+            or not isinstance(context, dict)
+            or context.get("classification") != "covered"
+            or context.get("requires_requirement") is not True
+            or context.get("manual_review_codes")
+            or not isinstance(missing, list)
+            or not missing
+            or any(
+                not isinstance(item, dict)
+                or item.get("disposition") != "unrepresented"
+                or not isinstance(item.get("source_quote"), str)
+                or not item["source_quote"]
+                for item in missing
+            )
+        ):
+            return False
+    return True
+
+
 def _run_independent_obligation_coverage_review(
     response: dict[str, Any],
     chunk: dict[str, Any],
@@ -10306,7 +10339,19 @@ def _run_independent_obligation_coverage_review(
                     "review_request_sha256": review_result.get("request_sha256"),
                     "review_response_sha256": review_result.get("response_sha256"),
                 })
-            if _provider_attempt < INDEPENDENT_REVIEW_PROVIDER_MAX_ATTEMPTS:
+            # A complete, source-bound finding that an executable requirement
+            # is missing belongs to the primary candidate retry. Asking the
+            # independent reviewer to rewrite the entire chunk can discard
+            # unrelated, already inventoried obligations without changing the
+            # candidate. Reserve provider re-review for findings whose source
+            # scope or disposition still needs independent clarification.
+            direct_primary_requirement_retry = _complete_executable_gap_can_route_to_primary(
+                error_records, coverage_checks,
+            )
+            if (
+                _provider_attempt < INDEPENDENT_REVIEW_PROVIDER_MAX_ATTEMPTS
+                and not direct_primary_requirement_retry
+            ):
                 retry_feedback = {
                     "code": "independent_obligation_review_incomplete",
                     "checks": correction_checks,

@@ -65,6 +65,19 @@ class MissingSourceObligationInventoryError(NativeSemanticReviewError):
         )
 
 
+class InconsistentObligationVerdictError(NativeSemanticReviewError):
+    """An incomplete verdict has no explicitly unrepresented obligation."""
+
+    code = "incomplete_without_unrepresented_obligation"
+
+    def __init__(self, clause_ids: list[str]) -> None:
+        self.clause_ids = tuple(sorted(set(clause_ids)))
+        super().__init__(
+            "independent obligation review lacks an unrepresented obligation "
+            "for incomplete clause(s) " + ", ".join(self.clause_ids)
+        )
+
+
 # Preserve the public import name used by earlier callers while broadening the
 # invariant from executable requirements to all non-informational clauses.
 MissingExecutableObligationInventoryError = MissingSourceObligationInventoryError
@@ -785,6 +798,22 @@ def validate_obligation_coverage_response(
             raise NativeSemanticReviewError(
                 f"unsupported_backend clause cannot be marked consistent or executable: {check_id}"
             )
+        if (
+            verdict == "incomplete"
+            and classification == "informational"
+            and context.get("requires_requirement") is False
+            and not linked
+            and not context.get("primary_obligations")
+            and not expected_machine_ids
+            and authoring_pending > 0
+            and authoring_pending == len(result.get("identified_obligations", []))
+        ):
+            # An independent reviewer may correctly identify an exact author-input
+            # instruction that the primary reviewer mislabeled informational. This
+            # remains incomplete and can only enter the source-bound primary retry;
+            # it is never accepted as a completed authoring obligation here.
+            by_id[check_id] = result
+            continue
         if authoring_pending:
             raise NativeSemanticReviewError(
                 f"authoring-content disposition requires source_content_pending verdict for {check_id}"
@@ -796,9 +825,7 @@ def validate_obligation_coverage_response(
                 f"independent obligation review verdict conflicts with its findings for {check_id}"
             )
         if verdict == "incomplete" and not unrepresented:
-            raise NativeSemanticReviewError(
-                f"independent obligation review lacks an unrepresented obligation for {check_id}"
-            )
+            raise InconsistentObligationVerdictError([check_id])
         if verdict == "uncertain" and (
             not ambiguous or scope_unresolved or not safely_unresolved
         ):
@@ -986,6 +1013,13 @@ def _prompt(request: dict[str, Any]) -> str:
             and isinstance(retry_feedback.get("clause_ids"), list)
             else []
         )
+        inconsistent_clause_ids = (
+            sorted({value for value in retry_feedback.get("clause_ids", []) if isinstance(value, str)})
+            if isinstance(retry_feedback, dict)
+            and retry_feedback.get("code") == InconsistentObligationVerdictError.code
+            and isinstance(retry_feedback.get("clause_ids"), list)
+            else []
+        )
         scope_review_checks = (
             [
                 item for item in retry_feedback.get("checks", [])
@@ -1033,6 +1067,20 @@ def _prompt(request: dict[str, Any]) -> str:
                 "obligation. If at least one authorized scope_unresolved obligation remains, preserve any independent "
                 "unrepresented obligations alongside it and keep the overall verdict manual_review_required; if no "
                 "authorized scope_unresolved obligation remains, use incomplete for any unrepresented obligation.\n"
+            )
+        elif inconsistent_clause_ids:
+            retry_instruction = (
+                "\nA prior independent review of this same unchanged candidate returned verdict=incomplete "
+                "without an unrepresented obligation for clause(s) "
+                + ", ".join(inconsistent_clause_ids)
+                + ". Re-read each exact source span and the entire linked requirement, including top-level "
+                "hard properties and nested guidance or advisory properties. Do not assume a rule is missing "
+                "because one nested guidance field is non-mandatory; a separate hard property may cover it. "
+                "If a source obligation truly is absent or weakened, identify that exact obligation as "
+                "unrepresented and use incomplete. If it is fully preserved, use represented and consistent. "
+                "Use ambiguous/uncertain only for genuine ambiguity in the source itself. This feedback does "
+                "not authorize changing the candidate, source, provenance, or links, and never authorizes "
+                "inventing or relabeling an obligation solely to pass validation.\n"
             )
         elif retry_clause_ids:
             retry_instruction = (
@@ -1112,8 +1160,9 @@ def _prompt(request: dict[str, Any]) -> str:
             "the exact source explicitly requires the author to provide genuine thesis content; identify each such "
             "source passage as authoring_content_pending and use no requirement_refs. This means the source input "
             "is still pending, not that the content was written or a requirement satisfied. If the primary response "
-            "instead classifies that explicit authoring instruction as informational, use incomplete so the bounded "
-            "primary retry can correct only that classification. Never draft the missing thesis content. When "
+            "instead classifies that explicit authoring instruction as informational, use incomplete with an "
+            "authoring_content_pending disposition and no requirement_refs so the bounded primary retry can "
+            "correct only that classification. This is not a completed result. Never draft the missing thesis content. When "
             "an exact source obligation requires existing thesis/paper content, data, figures, or citations to be "
             "traceable to an artifact not included in this review request, "
             "use verdict source_content_verification_pending and disposition source_content_verification_pending "

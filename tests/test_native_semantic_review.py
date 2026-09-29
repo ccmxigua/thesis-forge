@@ -443,6 +443,46 @@ class NativeSemanticReviewTests(unittest.TestCase):
         self.assertIn("C00061", prompt)
         self.assertIn("Never invent an obligation", prompt)
 
+    def test_incomplete_with_only_ambiguous_disposition_requests_bounded_rereview(self) -> None:
+        source = "最少3组，最多8组"
+        check = {
+            "check_id": "C00072", "document_text": source,
+            "review_context": {
+                "classification": "executable", "requires_requirement": True,
+                "machine_obligation_ids": [],
+                "linked_requirements": [{
+                    "requirement_ref": "RR-keywords", "role": "content_constraints",
+                    "properties": {"keywords_zh": {
+                        "min_count": 3, "max_count": 8,
+                        "count_guidance": {"min_count": 3, "max_count": 8,
+                                           "strength": "general_guidance"},
+                    }},
+                }],
+            },
+        }
+        response = {"results": [{
+            "check_id": "C00072", "verdict": "incomplete",
+            "rationale": "Only guidance was noticed.",
+            "evidence_quotes": [source], "machine_obligation_ids": [],
+            "identified_obligations": [{
+                "source_quote": source, "disposition": "ambiguous",
+                "requirement_refs": ["RR-keywords"],
+            }],
+        }]}
+        with self.assertRaises(native_review.InconsistentObligationVerdictError) as caught:
+            validate_obligation_coverage_response(response, [check])
+        self.assertEqual(caught.exception.clause_ids, ("C00072",))
+        prompt = native_review._prompt({
+            "protocol": native_review.OBLIGATION_COVERAGE_PROTOCOL,
+            "checks": [], "retry_feedback": {
+                "code": native_review.InconsistentObligationVerdictError.code,
+                "clause_ids": ["C00072"],
+            },
+        })
+        self.assertIn("C00072", prompt)
+        self.assertIn("top-level", prompt)
+        self.assertIn("unchanged candidate", prompt)
+
     def test_author_input_is_pending_not_requirement_or_satisfaction(self) -> None:
         source = "以下示例内容是编写的，请作者根据需要自行撰写真实研究内容。"
         check = {
@@ -466,6 +506,65 @@ class NativeSemanticReviewTests(unittest.TestCase):
             validate_obligation_coverage_response(pending, [check])[0]["verdict"],
             "source_content_pending",
         )
+
+    def test_actual_circumstances_authoring_is_kept_pending_when_source_bound(self) -> None:
+        source = "本部分主要撰写选题的意义，根据实际情况自行填写"
+        check = {
+            "check_id": "C00098", "document_text": source,
+            "review_context": {
+                "classification": "requires_source_content", "requires_requirement": False,
+                "linked_requirements": [], "machine_obligation_ids": [],
+            },
+        }
+        response = {"results": [{
+            "check_id": "C00098", "verdict": "source_content_pending",
+            "rationale": "The source directs the author to write the topic significance.",
+            "evidence_quotes": [source], "machine_obligation_ids": [],
+            "identified_obligations": [{
+                "source_quote": source,
+                "disposition": "authoring_content_pending", "requirement_refs": [],
+            }],
+        }]}
+        self.assertEqual(
+            validate_obligation_coverage_response(response, [check])[0]["verdict"],
+            "source_content_pending",
+        )
+
+    def test_informational_sample_authoring_is_incomplete_until_primary_correction(self) -> None:
+        source = "这些文字都是编的，根据需要自己撰写"
+        check = {
+            "check_id": "C00096", "document_text": source,
+            "review_context": {
+                "classification": "informational", "requires_requirement": False,
+                "primary_obligations": [], "linked_requirements": [],
+                "machine_obligation_ids": [],
+            },
+        }
+        result = {
+            "check_id": "C00096", "verdict": "incomplete",
+            "rationale": "The sample text must be replaced with genuine author content.",
+            "evidence_quotes": [source], "machine_obligation_ids": [],
+            "identified_obligations": [{
+                "source_quote": source, "disposition": "authoring_content_pending",
+                "requirement_refs": [],
+            }],
+        }
+        self.assertEqual(
+            validate_obligation_coverage_response({"results": [result]}, [check])[0]["verdict"],
+            "incomplete",
+        )
+        for changed in (
+            {"verdict": "consistent"},
+            {"verdict": "source_content_pending"},
+            {"identified_obligations": [{
+                "source_quote": source, "disposition": "authoring_content_pending",
+                "requirement_refs": ["RR-unlinked"],
+            }]},
+        ):
+            with self.subTest(changed=changed), self.assertRaises(NativeSemanticReviewError):
+                validate_obligation_coverage_response(
+                    {"results": [{**result, **changed}]}, [check],
+                )
 
     def test_nonexplicit_english_correction_notice_becomes_manual_target_review(self) -> None:
         source = "The following English is not correct."

@@ -21,6 +21,7 @@
     },
     "provenance": {"$ref": "#/$defs/provenance"},
     "security_level": {"enum": ["public", "restricted", "classified"]},
+    "approval_status": {"enum": ["approved", "not_approved", "unknown"]},
     "has_appendices": {"type": "boolean"},
     "has_figure_list": {"type": "boolean"},
     "has_table_list": {"type": "boolean"},

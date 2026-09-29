@@ -263,6 +263,12 @@ def cover_binding_errors(spec: dict[str, Any]) -> list[str]:
                 )
         if admin.get("public_policy") != "blank":
             errors.append("$.cover.non_public_administration.public_policy: must be 'blank'")
+        if ("publication_default_policy" in admin
+                and admin["publication_default_policy"] != "unapproved_is_public"):
+            errors.append(
+                "$.cover.non_public_administration.publication_default_policy: "
+                "must be 'unapproved_is_public'"
+            )
     return errors
 
 

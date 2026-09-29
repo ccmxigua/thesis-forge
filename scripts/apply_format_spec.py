@@ -533,6 +533,22 @@ def _compile_non_public_administration(cover: dict[str, Any], profile: dict[str,
     if not isinstance(administration, dict):
         return None
     security_level = profile.get("security_level")
+    declared_approval_status = profile.get("approval_status")
+    approval_status = declared_approval_status or "unknown"
+    approval_status_origin = (
+        "legacy_absent" if declared_approval_status is None
+        else "explicit_unknown" if declared_approval_status == "unknown"
+        else "declared"
+    )
+    publication_default_policy = administration.get("publication_default_policy")
+    policy_implies_public = (
+        publication_default_policy == "unapproved_is_public"
+        and approval_status == "not_approved"
+    )
+    effective_security_level = (
+        "public" if policy_implies_public and security_level is None
+        else security_level
+    )
     fields: list[dict[str, Any]] = []
     for field in sorted(administration.get("fields", []), key=lambda item: item.get("order", 0)):
         value = _metadata_value(metadata, field.get("id", "")) if trusted else ""
@@ -543,15 +559,29 @@ def _compile_non_public_administration(cover: dict[str, Any], profile: dict[str,
             "source": field.get("value_from"),
             "display_policy": field.get("display_policy"),
         })
-    if security_level == "public":
+    if (policy_implies_public
+            and security_level in {"restricted", "classified"}):
+        status = "conflicting_external_evidence"
+    elif effective_security_level == "public":
         status = "blank_public"
-    elif security_level in {"restricted", "classified"} and all(item["value_kind"] == "trusted" for item in fields):
+    elif (security_level in {"restricted", "classified"}
+          and approval_status == "approved"
+          and all(item["value_kind"] == "trusted" for item in fields)):
         status = "provided_unverified"
     else:
         status = "pending_external_approval"
     return {
         "applicability": administration.get("applicability"),
         "public_policy": administration.get("public_policy"),
+        "publication_default_policy": publication_default_policy,
+        "approval_status": approval_status,
+        "approval_status_origin": approval_status_origin,
+        "approval_status_verified": False,
+        "effective_security_level": effective_security_level,
+        "security_level_derivation": (
+            "source_policy_and_explicit_not_approved" if policy_implies_public
+            and security_level is None else "declared_or_unknown"
+        ),
         "source_region": administration.get("source_region"),
         "security_marking_options": copy.deepcopy(
             administration.get("security_marking_options") or []
@@ -652,6 +682,15 @@ def apply_cover(doc: Document, cover: dict[str, Any], profile: dict[str, Any],
     administration = contract.get("non_public_administration")
     if isinstance(administration, dict):
         counts["non_public_administration_status"] = administration.get("status")
+        counts["non_public_administration_policy_decision"] = {
+            "publication_default_policy": administration.get("publication_default_policy"),
+            "approval_status": administration.get("approval_status"),
+            "approval_status_origin": administration.get("approval_status_origin"),
+            "approval_status_verified": administration.get("approval_status_verified"),
+            "declared_security_level": administration.get("security_level"),
+            "effective_security_level": administration.get("effective_security_level"),
+            "derivation": administration.get("security_level_derivation"),
+        }
         counts["non_public_administration_pending_fields"] = [
             item.get("id") for item in administration.get("fields", [])
             if isinstance(item, dict) and item.get("value_kind") != "trusted"

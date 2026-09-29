@@ -32,6 +32,9 @@ from semantic_source_references import (
 )
 from source_obligation_compiler import (
     compile_known_source_obligation_ids,
+    compile_known_source_obligations,
+    PUBLICATION_DEFAULT_OBLIGATION_ID,
+    PUBLIC_ADMIN_BLANK_OBLIGATION_ID,
     compile_source_content_verification_codes,
     compile_unresolved_manual_review_codes,
     has_explicit_authoring_action_cue,
@@ -498,6 +501,43 @@ def validate_obligation_coverage_response(
             raise NativeSemanticReviewError(
                 f"independent obligation review omitted or changed code-owned source facts for {check_id}"
             )
+        publication_facts = [
+            fact for fact in compile_known_source_obligations(source_text)
+            if fact["id"] in {
+                PUBLICATION_DEFAULT_OBLIGATION_ID, PUBLIC_ADMIN_BLANK_OBLIGATION_ID,
+            }
+        ]
+        if publication_facts and result.get("verdict") == "mixed_execution_external_pending":
+            # This exact source sentence states two document/publication
+            # policies, not an instruction to obtain an actual approval.
+            # An adjacent approval clause may carry a separate external
+            # action, but it cannot replace either atom here.
+            raise NativeSemanticReviewError(
+                f"independent obligation review misclassified a publication "
+                f"default source atom as an external approval action for {check_id}"
+            )
+        if publication_facts and result.get("verdict") == "consistent":
+            identified = result.get("identified_obligations") or []
+            # Source quotes can include context, but two different effects
+            # must occupy two different inventory entries.  A single broad
+            # quotation or a list of machine IDs is not atomic coverage.
+            matched_indexes: set[int] = set()
+            for fact in publication_facts:
+                matching = [
+                    index for index, obligation in enumerate(identified)
+                    if isinstance(obligation, dict)
+                    and obligation.get("disposition") == "represented"
+                    and obligation.get("requirement_refs")
+                    and isinstance(obligation.get("source_quote"), str)
+                    and fact["evidence_text"] in obligation["source_quote"]
+                    and index not in matched_indexes
+                ]
+                if not matching:
+                    raise NativeSemanticReviewError(
+                        f"independent obligation review has no separate represented "
+                        f"source atom {fact['id']} for {check_id}"
+                    )
+                matched_indexes.add(matching[0])
         linked = context.get("linked_requirements") if isinstance(context.get("linked_requirements"), list) else []
         safely_unresolved = context.get("classification") == "unresolved" and not linked
         live_manual_codes = compile_unresolved_manual_review_codes(source_text)

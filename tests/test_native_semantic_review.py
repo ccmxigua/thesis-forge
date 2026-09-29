@@ -33,6 +33,60 @@ from compliance import FORMAT_BLOCKING_STATES, normalized_state  # noqa: E402
 
 
 class NativeSemanticReviewTests(unittest.TestCase):
+    def test_publication_review_cannot_call_one_atom_full_coverage(self) -> None:
+        source = "未经批准的均为公开学位论文（公开的学位论文本项为空白）"
+        machine_ids = [
+            "cover.publication_default.unapproved_is_public",
+            "cover.publication_default.public_blank",
+        ]
+        check = {
+            "check_id": "C-public", "document_text": source,
+            "review_context": {
+                "classification": "covered", "requires_requirement": True,
+                "linked_requirements": [{"requirement_ref": "RR-cover"}],
+                "machine_obligation_ids": machine_ids,
+            },
+        }
+        atom = lambda disposition: {
+            "source_quote": source, "disposition": disposition,
+            "requirement_refs": ["RR-cover"] if disposition == "represented" else [],
+        }
+        response = {"results": [{
+            "check_id": "C-public", "verdict": "consistent", "rationale": "Both effects.",
+            "evidence_quotes": [source], "machine_obligation_ids": machine_ids,
+            "identified_obligations": [atom("represented")],
+        }]}
+        with self.assertRaisesRegex(NativeSemanticReviewError, "separate represented source atom"):
+            validate_obligation_coverage_response(response, [check])
+        response["results"][0]["identified_obligations"].append(atom("represented"))
+        self.assertEqual(
+            validate_obligation_coverage_response(response, [check])[0]["verdict"],
+            "consistent",
+        )
+        response["results"][0]["verdict"] = "incomplete"
+        response["results"][0]["identified_obligations"][0] = atom("unrepresented")
+        self.assertEqual(
+            validate_obligation_coverage_response(response, [check])[0]["verdict"],
+            "incomplete",
+        )
+        mixed = copy.deepcopy(response)
+        mixed["results"][0]["verdict"] = "mixed_execution_external_pending"
+        mixed["results"][0]["identified_obligations"] = [
+            {**atom("represented"), "primary_obligation_id": "public_blank"},
+            {**atom("unrepresented"), "disposition": "external_action_pending",
+             "primary_obligation_id": "approval_evidence"},
+        ]
+        mixed_check = copy.deepcopy(check)
+        mixed_check["review_context"].update({
+            "classification": "executable_with_external_check",
+            "primary_obligations": [
+                {"id": "public_blank", "status": "covered", "reason": "DOCX rule"},
+                {"id": "approval_evidence", "status": "unverifiable", "reason": "External"},
+            ],
+        })
+        with self.assertRaisesRegex(NativeSemanticReviewError, "misclassified a publication"):
+            validate_obligation_coverage_response(mixed, [mixed_check])
+
     def setUp(self) -> None:
         self.checks = [{
             "check_id": "abstract_zh.require_third_person",
@@ -1287,7 +1341,7 @@ class NativeSemanticReviewTests(unittest.TestCase):
             validate_obligation_coverage_response(forged, [executable])
 
     def test_mixed_docx_rule_and_real_world_approval_remain_distinct(self) -> None:
-        source = "未经批准的均为公开学位论文（公开的学位论文本项为空白）"
+        source = "封面应留有签字栏，导师本人须签字确认。"
         check = {
             "check_id": "C00040", "document_text": source,
             "review_context": {
@@ -1308,10 +1362,10 @@ class NativeSemanticReviewTests(unittest.TestCase):
             "evidence_quotes": [source],
             "machine_obligation_ids": [],
             "identified_obligations": [
-                {"source_quote": "公开的学位论文本项为空白", "disposition": "represented",
+                {"source_quote": "封面应留有签字栏", "disposition": "represented",
                  "primary_obligation_id": "blank_public_field",
                  "requirement_refs": ["RR-public-blank"]},
-                {"source_quote": "未经批准", "disposition": "external_action_pending",
+                {"source_quote": "导师本人须签字确认", "disposition": "external_action_pending",
                  "primary_obligation_id": "approval_evidence", "requirement_refs": []},
             ],
         }]}

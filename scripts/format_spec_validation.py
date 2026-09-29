@@ -318,6 +318,17 @@ def load_and_validate(
         if (metadata.get("embargo_start") and metadata.get("embargo_until")
                 and str(metadata["embargo_start"]) > str(metadata["embargo_until"])):
             errors.append("$.thesis_profile.cover_metadata: embargo_start must not be after embargo_until")
+    administration = (
+        cover.get("non_public_administration") if isinstance(cover, dict) else None
+    )
+    if (isinstance(administration, dict)
+            and administration.get("publication_default_policy") == "unapproved_is_public"
+            and profile.get("approval_status") == "not_approved"
+            and profile.get("security_level") in {"restricted", "classified"}):
+        errors.append(
+            "$.thesis_profile: not_approved conflicts with a non-public security_level; "
+            "verify the external approval record before formatting"
+        )
     declarations = instance.get("declarations") if isinstance(instance, dict) else None
     if isinstance(declarations, dict):
         items = [item for item in declarations.get("items", []) if isinstance(item, dict)]

@@ -6,9 +6,11 @@ description: Convert thesis LaTeX or DOCX files using a school's .doc/.docx form
 # Thesis LaTeX/DOCX Formatting
 
 This project is a host-runtime skill. The Agent invoking it supplies semantic
-interpretation with the model it is currently using. The project never selects
-an LLM, calls a provider, reads an API key, or assumes that the host model is
-OpenAI, Grok, Claude, or any other specific vendor.
+interpretation with the model it is currently using. The deterministic Python
+commands do not require a Codex executable: any agent with local file and
+Python access can use the packet workflow below. Automatic invocation exists
+only for hosts with an implemented native adapter. Python does not gain access
+to an arbitrary chat agent's model merely because that agent loaded this file.
 
 ## Operating contract
 
@@ -211,8 +213,11 @@ current host does not expose an automatic adapter, this packet workflow is
 the supported path; the missing capability is reported rather than replaced
 by OpenClaw, Claude, Codex, or another installed program.
 
-The packet workflow remains valid for Codex, Claude, OpenClaw, and other
-hosts.  The host identity and the model/provider identity are separate
+The packet workflow is portable across Codex, Claude, OpenClaw, and other
+hosts that can read/write the packets and run Python. It is a **non-release
+review-draft** path unless the host supplies the full current-run independent
+review receipts and final Word acceptance. The host identity and the
+model/provider identity are separate
 dimensions.  If a host does not expose a model name, record it as
 `unobservable`; do not infer it from an installed CLI or from a model label.
 
@@ -300,7 +305,8 @@ python3 scripts/thesis_format.py \
   requirements.doc input.tex review-draft.docx \
   --work-dir build/review-draft \
   --output-policy review_draft \
-  --llm-response build/review-draft/review/host-agent-response.json
+  --llm-response build/review-draft/review/host-agent-response.json \
+  --offline-review-draft
 ```
 
 The pipeline writes a run-bound `manual-review-items.json` sidecar and appends
@@ -333,7 +339,8 @@ pass. The ten-school batch runner defaults to this policy. Use
 submission-mode run has been started fresh; that mode retains the full
 fail-closed capability, render, and final audit gates.
 
-`--allow-offline-review` is only a non-release test escape hatch. It requires
+`--allow-offline-review` is the host-neutral packet path for non-release
+review drafts and offline tests. It requires
 `--output-policy review_draft` and cannot be combined with
 `--require-submission-ready` or `--strict-release`; a supplied response without
 current host receipts must never be presented as submission-ready.
@@ -490,6 +497,13 @@ and must:
 7. report uncertainty as `unresolved`, `requires_metadata`,
    `requires_source_content`, `unsupported_backend`, `unverifiable`, or another
    contract classification rather than inventing a requirement.
+
+If a source clause explicitly states both that an unapproved thesis is public
+and that the administrative item is blank for a public thesis, retain **both**
+effects on its source-linked cover requirement:
+`non_public_administration.publication_default_policy="unapproved_is_public"`
+and `public_policy="blank"`. The two effects need separate obligation entries.
+This source rule does not establish whether a real approval was granted.
 
 An administrative approval/marking sentence is not an administrative field
 table. If the current source does not name exact fields such as an approval
@@ -666,21 +680,26 @@ The merge step validates each chunk's contract and provenance, checks complete
 clause coverage, shifts local requirement indexes, and binds the merged
 response to the full request. It performs no network call.
 
-Then run the final formatting stage:
+On a host without an automatic adapter, run the **non-release** final stage:
 
 ```bash
 python3 scripts/thesis_format.py \
   requirements.doc input.tex output.docx \
   --work-dir build/host-review \
-  --llm-response build/host-review/review/host-agent-response.json
+  --llm-response build/host-review/review/host-agent-response.json \
+  --offline-review-draft
 ```
 
-The final stage writes fresh deterministic artifacts under
+This path verifies the current extraction, chunk contracts, aggregate, merge
+receipt, semantic ledger, and commit hashes, then writes fresh deterministic
+artifacts under
 `build/host-review/execution/requirements/`, re-extracts the requirements,
-verifies the response and the review/merge receipts against the new extraction,
-applies the format specification, and runs the configured
-DOCX/official-template/release audits. A response from another document,
-another run, or another chunk set must be rejected.
+and applies the format specification where the remaining gates permit it.
+Its manifest says `offline_merged_without_independent_review`; it does **not**
+claim independent source-first review or submission readiness. An unresolved
+technical or semantic blocker may still prevent DOCX generation. A response
+from another document, run, or chunk set must be rejected. Formal submission
+still requires audited host execution, official-template and Word acceptance.
 
 ## Word/PDF release gate
 

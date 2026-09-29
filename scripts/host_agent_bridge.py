@@ -256,6 +256,7 @@ from source_obligation_compiler import (  # noqa: E402
     materialize_known_source_verification,
     materialize_source_verification_classifications,
     materialize_source_keyword_constraints,
+    materialize_publication_default_policy,
     materialize_soft_keyword_count_guidance,
 )
 
@@ -660,7 +661,7 @@ _BASE_CONTRACT_REPAIR_RULES = (
     "For an explicit appendix placement clause such as '附录放在正文之后另起页', use the appendices role with properties.page_break_each: true. Do not emit generic null-valued appendix fields or infer labels/titles/order from this clause; the bridge may compile only this exact evidence-backed page-break form mechanically.",
     "For a cover requirement with an empty required institution string and the declared neutral placeholder policy, preserve the cover structure and use '——'; never copy a school name or infer an institution identity from nearby evidence.",
     "Do not fabricate evidence or guess a semantic classification. Make only the mechanical schema corrections required by the supplied error, then regenerate the complete response from the current chunk.",
-    "Administrative approval/marking tables belong under cover.non_public_administration, must be conditional on thesis_profile.security_level with an equals or in condition selecting restricted/classified theses, and must be blank for public theses. If the current chunk contains only this administrative region, cover.fields may be an empty array; never duplicate administrative fields into ordinary cover.fields. Do not use not_equals as the executable binding. Bind approval-number and approval-date labels to approval_number and approval_date; never substitute classification_number or completion_date. When one visible 保密期限 label describes an explicit two-ended date range, preserve two distinct fields in source order: first embargo_start, then embargo_until; do not collapse both endpoints into embargo_until.",
+    "Administrative approval/marking tables belong under cover.non_public_administration, must be conditional on thesis_profile.security_level with an equals or in condition selecting restricted/classified theses, and must be blank for public theses. When the current source explicitly says both unapproved theses are public and the item is blank for public theses, preserve TWO atomic obligations: publication_default_policy='unapproved_is_public' and public_policy='blank', each represented in the clause review. Never treat missing approval evidence as not_approved. If the current chunk contains only this administrative region, cover.fields may be an empty array; never duplicate administrative fields into ordinary cover.fields. Do not use not_equals as the executable binding. Bind approval-number and approval-date labels to approval_number and approval_date; never substitute classification_number or completion_date. When one visible 保密期限 label describes an explicit two-ended date range, preserve two distinct fields in source order: first embargo_start, then embargo_until; do not collapse both endpoints into embargo_until.",
     "conditional_constraints has abstract-language and degree-dependent abstract fields only; it cannot represent a public-blank cover condition. Keep that duty on a current-source-bound cover.non_public_administration.public_policy='blank' requirement, and never add a second all-null conditional_constraints requirement. Preserve an independent unrepresentable duty as unresolved instead of inventing a payload.",
     "fixed_declaration_candidates group source text only; they do not classify every grouped clause as executable. A declarations requirement may link only executable/covered/verify_existing clauses and their backing evidence. Leave real-world consent, application, approval, signature, and seal clauses external and unlinked, even when their wording is printed. Use the candidate's exact source_evidence_ids for text materialization; never create an empty or title-only declaration. Administrative approval/marking regions belong to cover.non_public_administration, not declarations.",
     "Input prerequisite keys are namespace-bound by kind: metadata uses thesis_profile., source_content uses source_inventory., template_resource uses template_profile., and runtime uses runtime.; never emit runtime_context.* or invent an unregistered path.",
@@ -8994,6 +8995,9 @@ def prepare_native_response_candidate(
     response, source_keyword_constraint_projections = materialize_source_keyword_constraints(
         response, chunk.get("clauses"),
     )
+    response, publication_default_projections = materialize_publication_default_policy(
+        response, chunk.get("clauses"),
+    )
     response, soft_keyword_guidance_projections = materialize_soft_keyword_count_guidance(
         response, chunk.get("clauses"),
     )
@@ -9138,6 +9142,7 @@ def prepare_native_response_candidate(
         "existing_requirement_payload_projections": existing_payload_projections,
         "complete_abstract_source_projections": abstract_source_projections,
         "source_keyword_constraint_projections": source_keyword_constraint_projections,
+        "publication_default_projections": publication_default_projections,
         "soft_keyword_count_guidance_projections": soft_keyword_guidance_projections,
         "source_obligation_verification_projections": source_verification_projections,
         "source_verification_classification_projections": (
@@ -10052,6 +10057,9 @@ def run_host_agent_chunk(
         "source_keyword_constraint_projections": candidate_audit[
             "source_keyword_constraint_projections"
         ],
+        "publication_default_projections": candidate_audit[
+            "publication_default_projections"
+        ],
         "soft_keyword_count_guidance_projections": candidate_audit[
             "soft_keyword_count_guidance_projections"
         ],
@@ -10074,6 +10082,9 @@ def run_host_agent_chunk(
             ]),
             "source_keyword_constraints": len(candidate_audit[
                 "source_keyword_constraint_projections"
+            ]),
+            "publication_default": len(candidate_audit[
+                "publication_default_projections"
             ]),
             "soft_keyword_count_guidance": len(candidate_audit[
                 "soft_keyword_count_guidance_projections"
@@ -12399,6 +12410,7 @@ def run_bridge(
                                 "existing_requirement_payload_projections",
                                 "complete_abstract_source_projections",
                                 "source_keyword_constraint_projections",
+                                "publication_default_projections",
                                 "soft_keyword_count_guidance_projections",
                                 "source_obligation_verification_projections",
                                 "source_verification_classification_projections",

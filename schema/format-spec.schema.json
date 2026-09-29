@@ -1811,6 +1811,9 @@
             "classified"
           ]
         },
+        "approval_status": {
+          "enum": ["approved", "not_approved", "unknown"]
+        },
         "metadata_status": {
           "enum": [
             "complete",
@@ -2053,6 +2056,10 @@
         },
         "public_policy": {
           "const": "blank"
+        },
+        "publication_default_policy": {
+          "const": "unapproved_is_public",
+          "description": "Source policy only. Does not prove approval state or authorize marking a thesis public without a verified fact."
         },
         "source_region": {
           "type": "string",

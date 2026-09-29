@@ -37,6 +37,28 @@ from source_obligation_compiler import (  # noqa: E402
 
 
 class SourceObligationCompilerTests(unittest.TestCase):
+    def test_publication_sentence_compiles_two_distinct_source_effects_only_when_complete(self) -> None:
+        text = "未经批准的均为公开学位论文（公开的学位论文本项为空白）"
+        facts = compile_known_source_obligations(text)
+        self.assertEqual(
+            {fact["id"] for fact in facts},
+            {"cover.publication_default.unapproved_is_public",
+             "cover.publication_default.public_blank"},
+        )
+        self.assertEqual({fact["evidence_text"] for fact in facts}, {
+            "未经批准的均为公开学位论文", "公开的学位论文本项为空白",
+        })
+        for unsafe in (
+            "示例：" + text, "“" + text + "”", text + "但另有例外",
+            "未经批准的均为公开学位论文", "公开的学位论文本项为空白",
+        ):
+            with self.subTest(unsafe=unsafe):
+                self.assertFalse(
+                    {fact["id"] for fact in compile_known_source_obligations(unsafe)}
+                    & {"cover.publication_default.unapproved_is_public",
+                       "cover.publication_default.public_blank"}
+                )
+
     def test_actual_circumstances_authoring_requires_an_explicit_content_directive(self) -> None:
         for quote in (
             "本部分主要介绍选题的背景及选题原因，根据实际情况自行填写",

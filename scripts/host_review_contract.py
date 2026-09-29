@@ -17,7 +17,9 @@ from existing_requirement_contract import (
     existing_reference_errors, project_authoritative_existing_payloads,
 )
 from source_obligation_compiler import (
+    PUBLICATION_DEFAULT_OBLIGATION_ID,
     SECURITY_MARKING_SHORTER_ALLOWANCE_OBLIGATION_ID,
+    compile_known_source_obligation_ids,
     compile_known_source_obligations,
     source_fact_value_matches,
     compile_soft_keyword_count_guidance,
@@ -1185,6 +1187,64 @@ def _security_marking_qualifier_binding_errors(
     return errors
 
 
+def _publication_default_policy_binding_errors(
+    response: dict[str, Any], clauses: Any,
+) -> list[str]:
+    """Reject a model-invented default policy without an exact linked source."""
+    requirements = response.get("requirements")
+    if not isinstance(requirements, list) or not isinstance(clauses, list):
+        return []
+    by_id: dict[str, list[dict[str, Any]]] = {}
+    for clause in clauses:
+        if isinstance(clause, dict) and isinstance(clause.get("id"), str):
+            by_id.setdefault(clause["id"], []).append(clause)
+    errors: list[str] = []
+    for index, requirement in enumerate(requirements):
+        if not isinstance(requirement, dict) or requirement.get("role") != "cover":
+            continue
+        properties = requirement.get("properties")
+        admin = (properties.get("non_public_administration")
+                 if isinstance(properties, dict) else None)
+        if not isinstance(admin, dict) or "publication_default_policy" not in admin:
+            continue
+        pointer = (
+            f"$.requirements[{index}].properties.non_public_administration"
+            ".publication_default_policy"
+        )
+        linked_ids = requirement.get("clause_ids")
+        evidence_ids = requirement.get("evidence_ids")
+        if not isinstance(linked_ids, list) or not isinstance(evidence_ids, list):
+            errors.append(f"{pointer}: must_be_bound_to_exact_linked_source_clause")
+            continue
+        source_backed = False
+        for clause_id in linked_ids:
+            matches = by_id.get(clause_id, []) if isinstance(clause_id, str) else []
+            if len(matches) != 1:
+                continue
+            clause = matches[0]
+            span = clause.get("source_span")
+            clause_evidence = clause.get("evidence_ids")
+            if (
+                not isinstance(span, dict)
+                or not isinstance(clause_evidence, list)
+                or len(clause_evidence) != 1
+                or span.get("evidence_id") != clause_evidence[0]
+                or clause_evidence[0] not in evidence_ids
+                or span.get("text") != clause.get("text")
+                or not isinstance(span.get("source_sha256"), str)
+                or re.fullmatch(r"[0-9a-f]{64}", span["source_sha256"]) is None
+            ):
+                continue
+            if PUBLICATION_DEFAULT_OBLIGATION_ID in compile_known_source_obligation_ids(
+                span["text"]
+            ):
+                source_backed = True
+                break
+        if not source_backed:
+            errors.append(f"{pointer}: must_be_bound_to_exact_linked_source_clause")
+    return errors
+
+
 def _validate_obligations(
     review: dict[str, Any], review_index: int, *,
     require_semantic_decomposition: bool = False,
@@ -1519,6 +1579,9 @@ def validate_response(response: Any, chunk: dict[str, Any]) -> list[str]:
     errors: list[str] = []
     errors.extend(source_fragment_errors)
     errors.extend(_security_marking_qualifier_binding_errors(
+        response, chunk.get("clauses"),
+    ))
+    errors.extend(_publication_default_policy_binding_errors(
         response, chunk.get("clauses"),
     ))
     if contract_version not in SUPPORTED_HOST_REVIEW_CONTRACTS:

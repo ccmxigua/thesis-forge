@@ -38,7 +38,8 @@ def pipeline_command(args: argparse.Namespace, *, prepare_host_review: bool = Fa
                      llm_response: Path | None = None, run_id: str | None = None,
                      requirements_dir: Path | None = None,
                      host_agent_audit: Path | None = None,
-                     merge_receipt: Path | None = None) -> list[str]:
+                     merge_receipt: Path | None = None,
+                     offline_merge_receipt: Path | None = None) -> list[str]:
     output_policy = getattr(
         args,
         "output_policy",
@@ -66,6 +67,8 @@ def pipeline_command(args: argparse.Namespace, *, prepare_host_review: bool = Fa
         command += ["--host-agent-audit", str(host_agent_audit)]
     if merge_receipt:
         command += ["--merge-receipt", str(merge_receipt)]
+    if offline_merge_receipt:
+        command += ["--allow-offline-review", "--offline-merge-receipt", str(offline_merge_receipt)]
     for option, value in (("--style-template", args.style_template),
                           ("--thesis-profile", args.thesis_profile),
                           ("--template-profile", args.template_profile),
@@ -110,6 +113,8 @@ def main(argv: list[str]) -> int:
                    help="expected native host runtime; must match THESIS_FORGE_HOST_RUNTIME")
     p.add_argument("--llm-response", type=Path,
                    help="offline complete contract-3.0 response, or an explicitly bound legacy 2.1 response, produced by the current host Agent")
+    p.add_argument("--offline-review-draft", action="store_true",
+                   help="complete the current agent's merged packet response as a non-release draft without Codex/OpenClaw CLI; never submission-ready")
     p.add_argument("--host-review-chunk-size", type=int, default=20,
                    help="clauses per fresh Host Agent packet (default: 20)")
     p.add_argument("--host-agent-timeout", type=int, default=900,
@@ -145,6 +150,11 @@ def main(argv: list[str]) -> int:
     args = p.parse_args(argv)
     if args.output_policy == "review_draft" and (args.require_submission_ready or args.strict_release):
         p.error("--require-submission-ready/--strict-release require --output-policy submission")
+    if args.offline_review_draft and (
+        not args.llm_response or args.output_policy != "review_draft"
+        or args.require_submission_ready or args.strict_release
+    ):
+        p.error("--offline-review-draft requires --llm-response and review_draft, and cannot release a submission")
     if sum(bool(value) for value in (
         args.prepare_agent_review, args.auto_host_agent, bool(args.llm_response),
     )) > 1:
@@ -273,10 +283,13 @@ def main(argv: list[str]) -> int:
         extraction_manifest = review_requirements / "extraction-manifest.json"
         audit = review_requirements / "host-agent-run.json"
         receipt = review_requirements / "merge-receipt.json"
-        if not extraction_manifest.is_file() or not audit.is_file() or not receipt.is_file():
+        if not extraction_manifest.is_file() or not receipt.is_file() or (
+            not args.offline_review_draft and not audit.is_file()
+        ):
             p.error(
-                "manual --llm-response requires the fresh review extraction manifest, "
-                "host-agent-run.json, and merge-receipt.json under --work-dir/review/requirements"
+                "manual --llm-response requires the fresh review extraction manifest and "
+                "merge-receipt.json; submission also requires host-agent-run.json under "
+                "--work-dir/review/requirements"
             )
         try:
             extraction = strict_json_read(extraction_manifest)
@@ -287,8 +300,9 @@ def main(argv: list[str]) -> int:
             args, llm_response=args.llm_response,
             requirements_dir=args.work_dir.resolve() / "execution" / "requirements",
             run_id=str(current_run_id),
-            host_agent_audit=audit,
-            merge_receipt=receipt,
+            host_agent_audit=None if args.offline_review_draft else audit,
+            merge_receipt=None if args.offline_review_draft else receipt,
+            offline_merge_receipt=receipt if args.offline_review_draft else None,
         )
     else:
         p.error("final formatting requires --llm-response, or use --auto-host-agent for one-command execution")

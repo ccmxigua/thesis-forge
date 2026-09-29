@@ -6680,17 +6680,33 @@ class HostAgentBridgeTests(unittest.TestCase):
             errors = bridge.validate_host_agent_response(normalized, chunk)
             self.assertEqual(
                 errors,
-                ["$.requirements[1].properties: must_include_semantic_payload"],
+                [
+                    "$.requirements[1].properties: must_include_semantic_payload",
+                    "$.clause_reviews[0]: partial_clause_coverage:"
+                    "cover.publication_default.unapproved_is_public",
+                ],
             )
             accepted, audit = bridge.prepare_native_response_candidate(raw, chunk)
             self.assertEqual(len(accepted["requirements"]), 1)
-            self.assertEqual(
-                accepted["requirements"][0]["properties"],
-                normalized["requirements"][0]["properties"],
+            expected_properties = copy.deepcopy(normalized["requirements"][0]["properties"])
+            expected_properties["non_public_administration"]["publication_default_policy"] = (
+                "unapproved_is_public"
             )
             self.assertEqual(
-                accepted["requirements"][0]["verification"]["checks"],
-                ["Check the public cover blank policy.", "Check the public blank policy."],
+                accepted["requirements"][0]["properties"],
+                expected_properties,
+            )
+            self.assertEqual(
+                accepted["requirements"][0]["verification"]["checks"][0],
+                "Check the public cover blank policy.",
+            )
+            self.assertEqual(
+                accepted["requirements"][0]["verification"]["checks"][-1],
+                "Check the public blank policy.",
+            )
+            self.assertIn(
+                "cover_non_public_administration",
+                accepted["requirements"][0]["verification"]["checker_ids"],
             )
             self.assertEqual(accepted["clause_reviews"], normalized["clause_reviews"])
             self.assertEqual(bridge.validate_host_agent_response(accepted, chunk), [])

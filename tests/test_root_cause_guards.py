@@ -568,6 +568,48 @@ class RootCauseGuardTests(unittest.TestCase):
             {"label": "秘密", "maximum_duration": {"value": 10, "unit": "年"}},
         ])
 
+    def test_approval_is_not_inferred_and_conflicting_profile_is_rejected(self) -> None:
+        cover = {"non_public_administration": {
+            "public_policy": "blank",
+            "publication_default_policy": "unapproved_is_public",
+            "fields": [],
+        }}
+        unknown = compile_cover_contract(cover, {"security_level": "restricted"})[
+            "non_public_administration"
+        ]
+        self.assertEqual(unknown["status"], "pending_external_approval")
+        self.assertEqual(unknown["approval_status"], "unknown")
+        self.assertEqual(unknown["approval_status_origin"], "legacy_absent")
+        self.assertFalse(unknown["approval_status_verified"])
+        derived = compile_cover_contract(cover, {"approval_status": "not_approved"})[
+            "non_public_administration"
+        ]
+        self.assertEqual(derived["status"], "blank_public")
+        self.assertEqual(derived["effective_security_level"], "public")
+        self.assertEqual(
+            derived["security_level_derivation"],
+            "source_policy_and_explicit_not_approved",
+        )
+        no_source_rule = compile_cover_contract(
+            {"non_public_administration": {"public_policy": "blank", "fields": []}},
+            {"approval_status": "not_approved"},
+        )["non_public_administration"]
+        self.assertEqual(no_source_rule["status"], "pending_external_approval")
+        rejected = load_and_validate(
+            {"thesis_profile": {
+                "security_level": "restricted", "approval_status": "not_approved",
+            }, "cover": cover},
+            ROOT / "schema" / "format-spec.schema.json",
+        )
+        self.assertTrue(any("not_approved conflicts" in error for error in rejected))
+        without_policy = load_and_validate(
+            {"thesis_profile": {
+                "security_level": "restricted", "approval_status": "not_approved",
+            }, "cover": {"non_public_administration": {"public_policy": "blank"}}},
+            ROOT / "schema" / "format-spec.schema.json",
+        )
+        self.assertFalse(any("not_approved conflicts" in error for error in without_policy))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -16,6 +16,7 @@ from format_spec_validation import load_and_validate, schema_support_errors, val
 from host_review_contract import (  # noqa: E402
     HOST_REVIEW_CONTRACT_V3,
     _abstract_obligation_gaps,
+    _publication_default_policy_binding_errors,
     _security_marking_qualifier_binding_errors,
     _table_obligation_gaps,
     _keyword_obligation_gaps,
@@ -69,6 +70,62 @@ def _with_test_source_spans(clauses: list[dict], evidence_doc: dict) -> list[dic
 
 
 class HostReviewV3Tests(unittest.TestCase):
+    def test_publication_policy_requires_both_source_bound_cover_effects(self) -> None:
+        clause = {"id": "C-public", "text": "未经批准的均为公开学位论文（公开的学位论文本项为空白）"}
+        requirement = {
+            "role": "cover", "properties": {"non_public_administration": {
+                "public_policy": "blank",
+                "publication_default_policy": "unapproved_is_public",
+            }},
+            "verification": {"checker_ids": ["cover_non_public_administration"]},
+        }
+        self.assertEqual(_table_obligation_gaps(clause, [requirement], [0]), [])
+        missing = copy.deepcopy(requirement)
+        del missing["properties"]["non_public_administration"]["publication_default_policy"]
+        self.assertEqual(
+            _table_obligation_gaps(clause, [missing], [0]),
+            ["cover.publication_default.unapproved_is_public"],
+        )
+        missing["properties"]["non_public_administration"]["publication_default_policy"] = "wrong"
+        self.assertEqual(
+            _table_obligation_gaps(clause, [missing], [0]),
+            ["cover.publication_default.unapproved_is_public"],
+        )
+        other = {"id": "C-other", "text": "公开论文", "evidence_ids": ["E-other"]}
+        self.assertEqual(_table_obligation_gaps(other, [requirement], [0]), [])
+
+    def test_publication_default_cannot_be_added_to_unrelated_cover_source(self) -> None:
+        source = "未经批准的均为公开学位论文（公开的学位论文本项为空白）"
+        clause = {
+            "id": "C-public", "text": source, "evidence_ids": ["E-public"],
+            "source_span": {
+                "evidence_id": "E-public", "text": source,
+                "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
+            },
+        }
+        requirement = {
+            "role": "cover", "clause_ids": ["C-public"], "evidence_ids": ["E-public"],
+            "properties": {"non_public_administration": {
+                "publication_default_policy": "unapproved_is_public",
+            }},
+        }
+        self.assertEqual(
+            _publication_default_policy_binding_errors({"requirements": [requirement]}, [clause]),
+            [],
+        )
+        for wrong_clause, wrong_requirement in (
+            ({**clause, "text": "公开论文"}, requirement),
+            (clause, {**requirement, "evidence_ids": ["E-foreign"]}),
+            (clause, {**requirement, "clause_ids": ["C-other"]}),
+            ({key: value for key, value in clause.items() if key != "source_span"}, requirement),
+        ):
+            with self.subTest(clause=wrong_clause, requirement=wrong_requirement):
+                errors = _publication_default_policy_binding_errors(
+                    {"requirements": [wrong_requirement]}, [wrong_clause],
+                )
+                self.assertEqual(len(errors), 1)
+                self.assertIn("must_be_bound_to_exact_linked_source_clause", errors[0])
+
     def setUp(self) -> None:
         self.clauses = [{
             "id": "C1",

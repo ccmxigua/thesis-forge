@@ -105,6 +105,13 @@ SECURITY_MARKING_OPTIONS_OBLIGATION_ID = "cover.security_marking_options"
 SECURITY_MARKING_SHORTER_ALLOWANCE_OBLIGATION_ID = (
     "cover.security_marking_options.shorter_duration_allowed"
 )
+PUBLICATION_DEFAULT_OBLIGATION_ID = "cover.publication_default.unapproved_is_public"
+PUBLIC_ADMIN_BLANK_OBLIGATION_ID = "cover.publication_default.public_blank"
+_PUBLICATION_COMPOUND = re.compile(
+    r"(?P<decision>(?:未经批准|未获批准|未获得批准)的(?:均|一律)(?:为|视为|按)公开学位论文(?:处理)?)"
+    r"[（(](?P<blank>公开的?学位论文(?:本项|此项|该项)(?:为)?(?:空白|留空))[）)]"
+    r"[。.]?\Z"
+)
 _SECURITY_MARKING_OPTION = re.compile(
     r"[□☐]\s*(?P<label>[^□☐\s,，;；()（）]{1,24})\s*[（(]\s*"
     r"(?:≤|不超过|至多|最多)\s*(?P<value>\d{1,4})\s*"
@@ -169,6 +176,18 @@ KNOWN_SOURCE_OBLIGATION_BINDINGS: dict[str, dict[str, Any]] = {
         "roles": ["cover"],
         "property_path": "properties.non_public_administration.security_marking_options",
         "match_mode": "security_marking_option",
+        "required_checker_ids": ["cover_non_public_administration"],
+    },
+    PUBLICATION_DEFAULT_OBLIGATION_ID: {
+        "roles": ["cover"],
+        "property_path": "properties.non_public_administration.publication_default_policy",
+        "expected_value": "unapproved_is_public",
+        "required_checker_ids": ["cover_non_public_administration"],
+    },
+    PUBLIC_ADMIN_BLANK_OBLIGATION_ID: {
+        "roles": ["cover"],
+        "property_path": "properties.non_public_administration.public_policy",
+        "expected_value": "blank",
         "required_checker_ids": ["cover_non_public_administration"],
     },
 }
@@ -432,6 +451,12 @@ def compile_known_source_obligation_ids(source_text: Any) -> list[str]:
     for segment in _safe_known_source_segments(source_text):
         result.update(_compile_known_source_obligation_ids_in_segment(segment))
     result.difference_update(_unsafe_known_source_targets(source_text))
+    # Conditional policy is deliberately parsed separately: the general
+    # formatting-fact compiler rejects conditional prose.  Only this complete,
+    # unquoted two-effect sentence is narrow enough to compile.  Do not treat
+    # arbitrary mentions of approval/publication as a resolved approval fact.
+    if _PUBLICATION_COMPOUND.fullmatch(source_text.strip().replace("\n", "")):
+        result.update((PUBLICATION_DEFAULT_OBLIGATION_ID, PUBLIC_ADMIN_BLANK_OBLIGATION_ID))
     if {
         "table.continuation.caption_optional", "table.continuation.caption_required",
     }.issubset(result):
@@ -467,6 +492,10 @@ def compile_known_source_obligations(source_text: Any) -> list[dict[str, Any]]:
     facts: list[dict[str, Any]] = []
     safe_source = "\n".join(_safe_known_source_segments(source_text)) \
         if isinstance(source_text, str) else ""
+    publication_match = (
+        _PUBLICATION_COMPOUND.fullmatch(source_text.strip().replace("\n", ""))
+        if isinstance(source_text, str) else None
+    )
     for obligation_id in compile_known_source_obligation_ids(source_text):
         binding = KNOWN_SOURCE_OBLIGATION_BINDINGS.get(obligation_id)
         if binding is None:
@@ -478,8 +507,89 @@ def compile_known_source_obligations(source_text: Any) -> list[dict[str, Any]]:
             fact["expected_value"] = compile_security_marking_shorter_allowances(safe_source)
         else:
             fact["expected_value"] = copy.deepcopy(binding.get("expected_value"))
+        if publication_match and obligation_id in {
+            PUBLICATION_DEFAULT_OBLIGATION_ID, PUBLIC_ADMIN_BLANK_OBLIGATION_ID,
+        }:
+            group = "decision" if obligation_id == PUBLICATION_DEFAULT_OBLIGATION_ID else "blank"
+            fact["evidence_text"] = publication_match.group(group)
         facts.append(fact)
     return facts
+
+
+def materialize_publication_default_policy(
+    response: Any, clauses: Any,
+) -> tuple[Any, list[dict[str, Any]]]:
+    """Fill only a missing, exact-source policy on an already linked cover.
+
+    This is a structural projection, not an approval decision.  A conflicting
+    model value, missing source span, ambiguous cover edge, or unrelated
+    approval prose is never repaired.  The shared contract is revalidated by
+    each caller after this projection.
+    """
+    if not isinstance(response, dict) or not isinstance(clauses, list):
+        return response, []
+    requirements = response.get("requirements")
+    reviews = response.get("clause_reviews")
+    if not isinstance(requirements, list) or not isinstance(reviews, list):
+        return response, []
+    review_by_id = {
+        item.get("clause_id"): item for item in reviews
+        if isinstance(item, dict) and isinstance(item.get("clause_id"), str)
+    }
+    projected = copy.deepcopy(response)
+    repairs: list[dict[str, Any]] = []
+    for clause in clauses:
+        if not isinstance(clause, dict):
+            continue
+        clause_id = clause.get("id")
+        span = clause.get("source_span")
+        evidence_ids = clause.get("evidence_ids")
+        if (
+            not isinstance(clause_id, str)
+            or not isinstance(span, dict)
+            or not isinstance(evidence_ids, list)
+            or len(evidence_ids) != 1
+            or span.get("evidence_id") != evidence_ids[0]
+            or not isinstance(span.get("text"), str)
+            or span["text"] != clause.get("text")
+            or not isinstance(span.get("source_sha256"), str)
+            or re.fullmatch(r"[0-9a-f]{64}", span["source_sha256"]) is None
+            or review_by_id.get(clause_id, {}).get("classification")
+            not in {"covered", "executable", "verify_existing", "executable_with_external_check"}
+            or PUBLICATION_DEFAULT_OBLIGATION_ID not in compile_known_source_obligation_ids(span["text"])
+        ):
+            continue
+        linked = [
+            index for index, item in enumerate(requirements)
+            if isinstance(item, dict) and item.get("role") == "cover"
+            and isinstance(item.get("clause_ids"), list)
+            and clause_id in item["clause_ids"]
+            and isinstance(item.get("evidence_ids"), list)
+            and evidence_ids[0] in item["evidence_ids"]
+        ]
+        if len(linked) != 1:
+            continue
+        index = linked[0]
+        admin = projected["requirements"][index].get("properties", {}).get(
+            "non_public_administration"
+        )
+        if (
+            not isinstance(admin, dict)
+            or admin.get("public_policy") != "blank"
+            or "publication_default_policy" in admin
+        ):
+            continue
+        admin["publication_default_policy"] = "unapproved_is_public"
+        repairs.append({
+            "authorization": "exact_source_publication_default_projection_v1",
+            "clause_id": clause_id,
+            "evidence_id": evidence_ids[0],
+            "source_sha256": span["source_sha256"],
+            "source_span_sha256": hashlib.sha256(span["text"].encode("utf-8")).hexdigest(),
+            "requirement_index": index,
+            "property_path": "properties.non_public_administration.publication_default_policy",
+        })
+    return projected, repairs
 
 
 def compile_security_marking_shorter_allowances(

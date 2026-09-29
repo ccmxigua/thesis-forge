@@ -137,6 +137,14 @@ def validate_semantic_review_configuration(args: argparse.Namespace, parser: arg
             "--output-policy review_draft and cannot satisfy "
             "--require-submission-ready or --strict-release"
         )
+    if args.offline_merge_receipt and (
+        not args.allow_offline_review or not args.llm_response
+        or args.host_agent_audit or args.merge_receipt
+    ):
+        parser.error(
+            "--offline-merge-receipt requires --allow-offline-review and --llm-response, "
+            "and cannot be combined with native host-agent receipts"
+        )
     if (
         args.compliance_mode == "full"
         and args.llm_response
@@ -1884,7 +1892,9 @@ def validate_host_review_receipts(
     for item in marker_artifacts:
         if not isinstance(item, dict) or not isinstance(item.get("path"), str):
             raise ValueError("merge commit marker contains an invalid artifact record")
-        path = _path_under(work / item["path"], work, label="merge artifact")
+        # The producer records artifact paths relative to the enclosing
+        # review directory, not the pipeline work root.
+        path = _path_under(receipt_path.parent.parent / item["path"], work, label="merge artifact")
         digest = item.get("sha256")
         if not isinstance(digest, str) or len(digest) != 64 or path in artifact_records:
             raise ValueError("merge commit marker contains an invalid hash or duplicate path")
@@ -1943,6 +1953,101 @@ def validate_host_review_receipts(
             {"path": str(ledger_path), "sha256": ledger_sha}
             if response_contract_version == HOST_REVIEW_CONTRACT_V3 else None
         ),
+    }
+
+
+def validate_offline_merge_receipt(
+    *, response_path: Path, receipt_path: Path,
+    extraction_manifest: dict[str, Any], work: Path,
+) -> dict[str, Any]:
+    """Validate a host-neutral packet merge for a non-release review draft.
+
+    A correct merge proves current-run bytes and contract structure, not that
+    an independent agent audited source obligations or that a provider/model
+    actually ran.  The caller must keep submission_ready false.
+    """
+    response_path = _path_under(response_path, work, label="offline merged response")
+    receipt_path = _path_under(receipt_path, work, label="offline merge receipt")
+    response = read_json(response_path)
+    receipt = read_json(receipt_path)
+    expected_run_id = extraction_manifest.get("run_id")
+    expected_body_sha = (
+        extraction_manifest.get("llm_request_body_sha256")
+        or extraction_manifest.get("llm_request_sha256")
+    )
+    expected_envelope_sha = extraction_manifest.get("llm_request_envelope_sha256")
+    expected_file_sha = extraction_manifest.get("llm_request_file_sha256")
+    if not expected_run_id or not expected_body_sha:
+        raise ValueError("offline review extraction has no fresh run identity")
+    if (
+        receipt.get("status") != "merged"
+        or receipt.get("protocol") != "host_agent_semantic_review"
+        or receipt.get("run_id") != expected_run_id
+        or receipt.get("request_body_sha256") != expected_body_sha
+        or (expected_envelope_sha and receipt.get("request_envelope_sha256") != expected_envelope_sha)
+        or (expected_file_sha and receipt.get("request_file_sha256") != expected_file_sha)
+        or receipt.get("runtime_context") != extraction_manifest.get("runtime_context")
+        or receipt.get("aggregate_sha256") != sha256_json(response)
+        or response.get("contract_version") not in SUPPORTED_HOST_REVIEW_CONTRACTS
+    ):
+        raise ValueError("offline merge receipt is not bound to the current extraction and response")
+    merged_path = receipt.get("merged_response_path")
+    if not isinstance(merged_path, str) or Path(merged_path).resolve() != response_path:
+        raise ValueError("offline merge receipt points to a different response")
+    if receipt_path != (work.resolve() / "review" / "requirements" / "merge-receipt.json"):
+        raise ValueError("offline merge receipt is outside the current review directory")
+    ledger_path = _path_under(
+        Path(str(receipt.get("semantic_review_ledger_path") or "")),
+        work, label="offline semantic ledger",
+    )
+    if (
+        not ledger_path.is_file()
+        or sha256_json(read_json(ledger_path)) != receipt.get("semantic_review_ledger_sha256")
+    ):
+        raise ValueError("offline semantic ledger is missing or changed")
+    if read_json(ledger_path).get("response_sha256") != receipt.get("aggregate_sha256"):
+        raise ValueError("offline semantic ledger is not bound to the merged response")
+    marker_path = _path_under(
+        Path(str(receipt.get("merge_commit_path") or "")),
+        work, label="offline merge commit marker",
+    )
+    if marker_path != receipt_path.parent / "merge-commit.json" or not marker_path.is_file():
+        raise ValueError("offline merge commit marker is missing or misplaced")
+    marker = read_json(marker_path)
+    if (
+        marker.get("status") != "committed"
+        or marker.get("protocol") != "host_agent_semantic_review_merge"
+        or marker.get("run_id") != expected_run_id
+        or marker.get("aggregate_sha256") != receipt.get("aggregate_sha256")
+    ):
+        raise ValueError("offline merge commit marker is not bound to this run")
+    artifacts = marker.get("artifacts")
+    if not isinstance(artifacts, list) or len(artifacts) != 3:
+        raise ValueError("offline merge commit marker must cover exactly three artifacts")
+    recorded: dict[Path, str] = {}
+    for item in artifacts:
+        if not isinstance(item, dict) or not isinstance(item.get("path"), str):
+            raise ValueError("offline merge commit marker has an invalid artifact")
+        path = _path_under(
+            receipt_path.parent.parent / item["path"], work,
+            label="offline merge artifact",
+        )
+        digest = item.get("sha256")
+        if path in recorded or not isinstance(digest, str) or len(digest) != 64:
+            raise ValueError("offline merge commit marker has a duplicate or invalid digest")
+        if not path.is_file() or sha256_file(path) != digest:
+            raise ValueError("offline merge artifact bytes changed after commit")
+        recorded[path] = digest
+    if set(recorded) != {response_path, receipt_path, ledger_path}:
+        raise ValueError("offline merge commit marker contains unrelated artifacts")
+    return {
+        "status": "offline_merged_without_independent_review",
+        "submission_ready": False,
+        "response": file_record(response_path),
+        "merge_receipt": file_record(receipt_path),
+        "semantic_review_ledger": file_record(ledger_path),
+        "run_id": expected_run_id,
+        "request_body_sha256": expected_body_sha,
     }
 
 
@@ -2368,6 +2473,8 @@ def _main(argv: list[str]) -> int:
                    help="unsafe expert override: continue despite unresolved style-map questions; requirement questions still block")
     p.add_argument("--allow-offline-review", action="store_true",
                    help="non-release test mode only; requires --output-policy review_draft and permits compilation without a native call receipt")
+    p.add_argument("--offline-merge-receipt", type=Path,
+                   help="current-run packet merge receipt; validates offline review bytes but never proves independent review or release readiness")
     p.add_argument("--preview-placeholders", action="store_true",
                    help="opt-in supported-subset preview: continue past unresolved requirement semantics while keeping the artifact non-submission-ready")
     p.add_argument(
@@ -2764,6 +2871,18 @@ def _main(argv: list[str]) -> int:
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             manifest.update(status="failed", reason="host-agent review receipt gate failed",
                             host_review_receipt_error=str(exc))
+            write_json(manifest_path, manifest); print(json.dumps(manifest, ensure_ascii=False)); return 10
+    if args.llm_response and args.offline_merge_receipt:
+        try:
+            manifest["offline_review_receipt"] = validate_offline_merge_receipt(
+                response_path=args.llm_response,
+                receipt_path=args.offline_merge_receipt,
+                extraction_manifest=extraction_manifest,
+                work=work,
+            )
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            manifest.update(status="failed", reason="offline merge receipt gate failed",
+                            offline_merge_receipt_error=str(exc))
             write_json(manifest_path, manifest); print(json.dumps(manifest, ensure_ascii=False)); return 10
     if args.llm_response:
         # Do this before semantic issue binding, capability planning, section

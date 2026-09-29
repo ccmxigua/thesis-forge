@@ -4,6 +4,7 @@ import argparse
 import sys
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -34,6 +35,31 @@ class ThesisFormatWrapperTests(unittest.TestCase):
             command[command.index("--template-profile") + 1],
             "template-profile.json",
         )
+
+    def test_portable_offline_draft_does_not_request_native_host(self) -> None:
+        args = self._args()
+        args.require_submission_ready = False
+        args.strict_release = False
+        command = wrapper.pipeline_command(
+            args, llm_response=Path("review/response.json"),
+            offline_merge_receipt=Path("review/merge-receipt.json"),
+        )
+        self.assertIn("--allow-offline-review", command)
+        self.assertIn("--offline-merge-receipt", command)
+        self.assertNotIn("--host-agent-audit", command)
+        self.assertNotIn("--strict-release", command)
+
+    def test_packet_preparation_does_not_select_native_adapter(self) -> None:
+        with patch.object(wrapper, "run_stage", return_value=0) as run_stage:
+            code = wrapper.main([
+                "requirements.docx", "thesis.tex", "--work-dir", "build/run",
+                "--prepare-agent-review",
+            ])
+        self.assertEqual(code, 0)
+        command = run_stage.call_args.args[0]
+        self.assertIn("--prepare-host-review", command)
+        self.assertNotIn("--host-runtime", command)
+        self.assertNotIn("--auto-host-agent", command)
 
 
 if __name__ == "__main__":

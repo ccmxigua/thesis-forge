@@ -134,7 +134,42 @@ def _pre_render_checks(source: Path, validation_path: Path) -> tuple[dict[str, A
         "valid": validation.get("valid"),
         "format_ready": validation.get("format_ready"),
         "serialized_docx_valid": validation.get("serialized_docx_valid"),
+        "output_policy": validation.get("output_policy"),
+        "compliance_mode": validation.get("compliance_mode"),
     }
+    if validation.get("output_policy") != "submission" or validation.get("compliance_mode") != "full":
+        blockers.append("pre_render_not_full_submission")
+    if validation.get("docx_fully_compliant") is not True:
+        blockers.append("pre_render_docx_not_fully_compliant")
+    # The pre-render DOCX can legitimately be not_submission_ready until Word
+    # supplies independent render evidence. Do not mistake that for a human or
+    # semantic blocker, and do not treat it as an approval either.
+    submission_status = validation.get("submission_status")
+    if submission_status is not None and not isinstance(submission_status, str):
+        blockers.append("pre_render_submission_status_malformed")
+    elif submission_status in {
+        "manual_review_required", "confirmed_semantic_issues",
+        "content_pending", "cover_metadata_pending",
+    }:
+        blockers.append("pre_render_submission_blocked")
+    if any(validation.get(key) for key in (
+        "manual_review_ledger", "manual_review_findings", "manual_review_markers",
+        "manual_review_receipts",
+    )):
+        blockers.append("pre_render_manual_review_pending")
+    if any(validation.get(key) for key in (
+        "semantic_issue_confirmations", "semantic_issue_ledger", "semantic_issue_binding",
+    )):
+        blockers.append("pre_render_semantic_issues_pending")
+    pending = validation.get("pending_content")
+    placeholder_policy = validation.get("content_placeholder_policy")
+    if pending or (isinstance(placeholder_policy, dict) and placeholder_policy.get("pending")):
+        blockers.append("pre_render_content_pending")
+    if validation.get("preview_placeholders") or validation.get("preview_bypassed_blockers"):
+        blockers.append("pre_render_preview_bypass_present")
+    cover_metadata = validation.get("cover_metadata")
+    if isinstance(cover_metadata, dict) and cover_metadata.get("pending_fields"):
+        blockers.append("pre_render_cover_metadata_pending")
     reported_output = validation.get("output_docx")
     if _reported_path(reported_output) != source:
         blockers.append("pre_render_validation_output_path_mismatch")
@@ -150,6 +185,8 @@ def _pre_render_checks(source: Path, validation_path: Path) -> tuple[dict[str, A
         if not isinstance(receipts, list):
             blockers.append("pre_render_property_receipts_malformed")
         else:
+            if any(not isinstance(item, dict) for item in receipts):
+                blockers.append("pre_render_property_receipts_malformed")
             receipt_hashes = {
                 str(item.get("serialized_docx_sha256"))
                 for item in receipts if isinstance(item, dict)
@@ -214,6 +251,8 @@ def main(argv: list[str] | None = None) -> int:
         "format_comparison": comparison,
         "acceptance_out": acceptance_out,
     }
+    if comparison_markdown:
+        output_scope["format_comparison_markdown"] = comparison_markdown
     for label, path in output_scope.items():
         if path == case_root or case_root not in path.parents:
             parser.error(f"{label} must remain inside the case output directory: {path}")
@@ -229,7 +268,8 @@ def main(argv: list[str] | None = None) -> int:
     ):
         if not path.is_file():
             parser.error(f"{label} does not exist: {path}")
-    output_paths = [source, final, pdf, render_report, submission_audit, comparison, acceptance_out]
+    output_paths = [source, final, pdf, render_report, visual_audit,
+                    submission_audit, comparison, acceptance_out]
     if comparison_markdown:
         output_paths.append(comparison_markdown)
     input_paths = [pre_validation, format_spec, official_template, official_style_map, generated_style_map]
@@ -250,6 +290,9 @@ def main(argv: list[str] | None = None) -> int:
             "schema_version": "1.0",
             "status": "blocked",
             "artifact_stage": "post_word_render",
+            "submission_ready": False,
+            "stopped_at": "pre_render_validation",
+            "word_render_executed": False,
             "created_at": datetime.now(timezone.utc).isoformat(),
             "pre_render_docx": str(source),
             "pre_render_docx_sha256": checks.get("pre_render_artifact", {}).get("sha256"),
@@ -416,6 +459,9 @@ def main(argv: list[str] | None = None) -> int:
         "schema_version": "1.0",
         "status": "accepted" if not blockers else "blocked",
         "artifact_stage": "post_word_render",
+        "submission_ready": not blockers,
+        "stopped_at": None if not blockers else "post_render_validation",
+        "word_render_executed": True,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "pre_render_docx": str(source),
         "pre_render_docx_sha256": checks.get("pre_render_artifact", {}).get("sha256"),

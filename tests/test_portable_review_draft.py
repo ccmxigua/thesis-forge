@@ -3,15 +3,18 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from docx import Document
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import requirements_engine as engine  # noqa: E402
+import offline_review_receipt  # noqa: E402
 from semantic_contract import attach_request_provenance, sha256_file, sha256_json  # noqa: E402
 from thesis_format_pipeline import validate_offline_merge_receipt  # noqa: E402
 
@@ -80,6 +83,39 @@ class PortableReviewDraftTests(unittest.TestCase):
         result = self._check()
         self.assertEqual(result["status"], "offline_merged_without_independent_review")
         self.assertIs(result["submission_ready"], False)
+        self.assertIs(result["independent_review_verified"], False)
+        self.assertIs(result["provider_model_verified"], False)
+
+    def test_portable_cli_works_without_codex_or_other_native_cli(self) -> None:
+        extraction_path = self.work / "review" / "requirements" / "extraction-manifest.json"
+        _write(extraction_path, self.extraction)
+        result = subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "offline_review_receipt.py"),
+             "--work-dir", str(self.work), "--response", str(self.response_path),
+             "--receipt", str(self.receipt_path),
+             "--extraction-manifest", str(extraction_path)],
+            env={"PATH": ""}, capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse(json.loads(result.stdout)["submission_ready"])
+
+    def test_portable_cli_rejects_duplicate_keys_and_nonfinite_numbers(self) -> None:
+        for raw in ('{"run_id":"fresh-run","run_id":"stale"}',
+                    '{"run_id":NaN}'):
+            with self.subTest(raw=raw):
+                extraction_path = self.work / "review" / "requirements" / "extraction-manifest.json"
+                extraction_path.write_text(raw, encoding="utf-8")
+                with self.assertRaises(ValueError):
+                    offline_review_receipt._object(extraction_path, label="offline extraction manifest")
+
+    def test_non_object_receipt_and_response_fail_closed(self) -> None:
+        for path in (self.receipt_path, self.response_path):
+            with self.subTest(path=path):
+                original = path.read_bytes()
+                path.write_text("[]", encoding="utf-8")
+                with self.assertRaisesRegex(ValueError, "must be a JSON object"):
+                    self._check()
+                path.write_bytes(original)
 
     def test_old_run_and_byte_changes_are_rejected(self) -> None:
         self.extraction["run_id"] = "different-run"
@@ -165,6 +201,60 @@ class PortableReviewDraftTests(unittest.TestCase):
         )
         self.assertEqual(result["run_id"], "portable-agent-run")
         self.assertFalse(result["submission_ready"])
+
+    def test_real_wrapper_prepare_merge_and_continue_without_native_cli(self) -> None:
+        root = Path(self.temporary.name) / "cli-smoke"
+        root.mkdir()
+        requirements = root / "requirements.docx"
+        source = root / "source.docx"
+        output = root / "review.docx"
+        work = root / "work"
+        for path, text in ((requirements, "本节为说明性标题。"),
+                           (source, "测试论文正文。")):
+            document = Document()
+            document.add_paragraph(text)
+            document.save(path)
+        base = [sys.executable, str(ROOT / "scripts" / "thesis_format.py"),
+                str(requirements), str(source), str(output),
+                "--work-dir", str(work)]
+        prepared = subprocess.run(base + ["--prepare-agent-review"],
+                                  capture_output=True, text=True, check=False)
+        self.assertEqual(prepared.returncode, 0, prepared.stderr[-1200:] + prepared.stdout[-1200:])
+        review_dir = work / "review" / "requirements"
+        chunks = json.loads((review_dir / "llm-request-chunks.json").read_text(encoding="utf-8"))
+        self.assertTrue(chunks)
+        for chunk in chunks:
+            response = {
+                "contract_version": "3.0", "provenance": chunk["provenance"],
+                "requirements": [],
+                "clause_reviews": [
+                    {"clause_id": clause["id"], "classification": "informational",
+                     "reason": "The cited text is a section label, not a formatting instruction."}
+                    for clause in chunk["clauses"]
+                ],
+                "unsupported_items": [], "reported_conflicts": [],
+            }
+            _write(review_dir / chunk["batch"]["response_filename"], response)
+        merged_path = work / "review" / "host-agent-response.json"
+        merged = subprocess.run(
+            [sys.executable, str(ROOT / "scripts" / "merge_host_agent_review.py"),
+             str(review_dir), "--response-out", str(merged_path)],
+            capture_output=True, text=True, check=False,
+        )
+        self.assertEqual(merged.returncode, 0, merged.stderr[-1200:] + merged.stdout[-1200:])
+        continued = subprocess.run(
+            base + ["--llm-response", str(merged_path), "--offline-review-draft"],
+            capture_output=True, text=True, check=False,
+        )
+        manifest = json.loads((work / "pipeline-manifest.json").read_text(encoding="utf-8"))
+        self.assertNotIn("refusing to reuse a non-empty work directory", continued.stderr)
+        self.assertEqual(manifest["offline_review_receipt"]["status"],
+                         "offline_merged_without_independent_review")
+        self.assertFalse(manifest.get("submission_ready", False))
+        self.assertEqual(continued.returncode, 0,
+                         continued.stderr[-1200:] + continued.stdout[-1200:])
+        self.assertTrue(output.is_file())
+        self.assertEqual(manifest["output_policy"], "review_draft")
 
 
 if __name__ == "__main__":

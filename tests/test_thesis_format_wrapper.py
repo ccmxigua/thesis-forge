@@ -46,6 +46,7 @@ class ThesisFormatWrapperTests(unittest.TestCase):
         )
         self.assertIn("--allow-offline-review", command)
         self.assertIn("--offline-merge-receipt", command)
+        self.assertIn("--allow-existing-work", command)
         self.assertNotIn("--host-agent-audit", command)
         self.assertNotIn("--strict-release", command)
 
@@ -60,6 +61,7 @@ class ThesisFormatWrapperTests(unittest.TestCase):
         self.assertIn("--prepare-host-review", command)
         self.assertNotIn("--host-runtime", command)
         self.assertNotIn("--auto-host-agent", command)
+        self.assertNotIn("--allow-existing-work", command)
 
 
 if __name__ == "__main__":

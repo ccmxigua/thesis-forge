@@ -6,6 +6,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from docx import Document
 import fitz
@@ -46,6 +47,9 @@ class PostRenderAcceptanceTests(unittest.TestCase):
             "valid": True,
             "format_ready": True,
             "serialized_docx_valid": True,
+            "output_policy": "submission",
+            "compliance_mode": "full",
+            "docx_fully_compliant": True,
             "output_docx": str(source),
             "property_receipt_audit": {
                 "valid": True,
@@ -76,6 +80,9 @@ class PostRenderAcceptanceTests(unittest.TestCase):
             "valid": True,
             "format_ready": True,
             "serialized_docx_valid": True,
+            "output_policy": "submission",
+            "compliance_mode": "full",
+            "docx_fully_compliant": True,
             "output_docx": str(output),
             "property_receipt_audit": {
                 "valid": True,
@@ -111,6 +118,9 @@ class PostRenderAcceptanceTests(unittest.TestCase):
     def test_pre_render_receipts_are_bound_to_the_pre_render_docx(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             source, validation, digest = self._pre_render_fixture(Path(td))
+            pending_word = json.loads(validation.read_text(encoding="utf-8"))
+            pending_word.update(submission_ready=False, submission_status="not_submission_ready")
+            validation.write_text(json.dumps(pending_word), encoding="utf-8")
             checks, blockers = post_render._pre_render_checks(source, validation)
             self.assertEqual(blockers, [])
             self.assertEqual(checks["pre_render_artifact"]["sha256"], digest)
@@ -118,6 +128,93 @@ class PostRenderAcceptanceTests(unittest.TestCase):
             validation.write_text(validation.read_text(encoding="utf-8").replace(digest, "0" * 64), encoding="utf-8")
             _checks, blockers = post_render._pre_render_checks(source, validation)
             self.assertIn("pre_render_property_receipt_artifact_hash_mismatch", blockers)
+
+    def test_pre_render_rejects_draft_and_unresolved_inputs_even_if_format_valid(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            source, validation, _ = self._pre_render_fixture(Path(td))
+            base = json.loads(validation.read_text(encoding="utf-8"))
+            variants = (
+                ({"output_policy": "review_draft"}, "pre_render_not_full_submission"),
+                ({"compliance_mode": "supported_subset"}, "pre_render_not_full_submission"),
+                ({"manual_review_findings": [{"id": "MR-1"}]}, "pre_render_manual_review_pending"),
+                ({"manual_review_markers": [{"id": "MR-1"}]}, "pre_render_manual_review_pending"),
+                ({"semantic_issue_confirmations": [{"clause_id": "C1"}]}, "pre_render_semantic_issues_pending"),
+                ({"pending_content": [{"id": "C1"}]}, "pre_render_content_pending"),
+                ({"docx_fully_compliant": False}, "pre_render_docx_not_fully_compliant"),
+                ({"preview_placeholders": True}, "pre_render_preview_bypass_present"),
+                ({"submission_ready": False, "submission_status": "manual_review_required"},
+                 "pre_render_submission_blocked"),
+                ({"submission_status": {"status": "passed"}},
+                 "pre_render_submission_status_malformed"),
+                ({"property_receipt_audit": {"valid": True, "receipts": [None]}},
+                 "pre_render_property_receipts_malformed"),
+            )
+            for change, expected in variants:
+                with self.subTest(change=change):
+                    validation.write_text(json.dumps({**base, **change}), encoding="utf-8")
+                    _, blockers = post_render._pre_render_checks(source, validation)
+                    self.assertIn(expected, blockers)
+
+    def test_post_render_outputs_cannot_alias_inputs_or_escape_case(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            case = root / "case"
+            case.mkdir()
+            source, validation, _ = self._pre_render_fixture(case)
+            inputs = [case / name for name in ("spec.json", "official.docx", "official.json", "generated.json")]
+            for path in inputs:
+                path.write_text("{}", encoding="utf-8")
+            base = [str(source), str(case / "final.docx"), str(case / "final.pdf"),
+                    "--render-report", str(case / "render.json"),
+                    "--visual-audit", str(case / "visual.json"),
+                    "--format-spec", str(inputs[0]), "--pre-validation", str(validation),
+                    "--submission-audit", str(case / "audit.json"),
+                    "--format-comparison", str(case / "comparison.json"),
+                    "--acceptance-out", str(case / "acceptance.json"),
+                    "--official-template", str(inputs[1]),
+                    "--official-style-map", str(inputs[2]),
+                    "--generated-style-map", str(inputs[3])]
+            for option, replacement in (
+                ("--visual-audit", str(validation)),
+                ("--format-comparison-markdown", str(root / "outside.md")),
+            ):
+                with self.subTest(option=option):
+                    args = base.copy()
+                    if option in args:
+                        args[args.index(option) + 1] = replacement
+                    else:
+                        args.extend([option, replacement])
+                    with self.assertRaises(SystemExit):
+                        post_render.main(args)
+
+    def test_pre_render_block_writes_explicit_stop_and_never_starts_word(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source, validation, _ = self._pre_render_fixture(root)
+            report = json.loads(validation.read_text(encoding="utf-8"))
+            report["output_policy"] = "review_draft"
+            validation.write_text(json.dumps(report), encoding="utf-8")
+            inputs = [root / name for name in ("spec.json", "official.docx", "official.json", "generated.json")]
+            for path in inputs:
+                path.write_text("{}", encoding="utf-8")
+            acceptance = root / "acceptance.json"
+            args = [str(source), str(root / "final.docx"), str(root / "final.pdf"),
+                    "--render-report", str(root / "render.json"),
+                    "--visual-audit", str(root / "visual.json"),
+                    "--format-spec", str(inputs[0]), "--pre-validation", str(validation),
+                    "--submission-audit", str(root / "audit.json"),
+                    "--format-comparison", str(root / "comparison.json"),
+                    "--acceptance-out", str(acceptance),
+                    "--official-template", str(inputs[1]),
+                    "--official-style-map", str(inputs[2]),
+                    "--generated-style-map", str(inputs[3])]
+            with patch.object(post_render, "run_step") as run_step:
+                self.assertEqual(post_render.main(args), 2)
+            run_step.assert_not_called()
+            result = json.loads(acceptance.read_text(encoding="utf-8"))
+            self.assertFalse(result["submission_ready"])
+            self.assertFalse(result["word_render_executed"])
+            self.assertEqual(result["stopped_at"], "pre_render_validation")
 
     def test_batch_acceptance_allows_distinct_post_word_hashes(self) -> None:
         with tempfile.TemporaryDirectory() as td:

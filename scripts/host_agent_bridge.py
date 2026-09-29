@@ -8996,7 +8996,7 @@ def prepare_native_response_candidate(
         response, chunk.get("clauses"),
     )
     response, publication_default_projections = materialize_publication_default_policy(
-        response, chunk.get("clauses"),
+        response, chunk.get("clauses"), chunk.get("evidence_context"),
     )
     response, soft_keyword_guidance_projections = materialize_soft_keyword_count_guidance(
         response, chunk.get("clauses"),

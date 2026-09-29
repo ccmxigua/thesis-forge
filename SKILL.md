@@ -680,6 +680,24 @@ The merge step validates each chunk's contract and provenance, checks complete
 clause coverage, shifts local requirement indexes, and binds the merged
 response to the full request. It performs no network call.
 
+Any host with Python and the project dependencies can inspect that merge
+before formatting, without installing a Codex/OpenClaw/Claude CLI:
+
+```bash
+python3 scripts/offline_review_receipt.py \
+  --work-dir build/host-review \
+  --response build/host-review/review/host-agent-response.json \
+  --receipt build/host-review/review/requirements/merge-receipt.json \
+  --extraction-manifest build/host-review/review/requirements/extraction-manifest.json
+```
+
+The command checks current-run identities, strict JSON, artifact bytes and
+paths. Its result explicitly says `independent_review_verified=false`,
+`provider_model_verified=false`, and `submission_ready=false`: these facts
+cannot be proved by a locally generated merge receipt. Keep the source,
+response and code fingerprint unchanged between preparation and continuation;
+otherwise start a fresh work directory.
+
 On a host without an automatic adapter, run the **non-release** final stage:
 
 ```bash
@@ -695,6 +713,9 @@ receipt, semantic ledger, and commit hashes, then writes fresh deterministic
 artifacts under
 `build/host-review/execution/requirements/`, re-extracts the requirements,
 and applies the format specification where the remaining gates permit it.
+The wrapper explicitly requests the safe existing-work transition; the
+pipeline still checks the preparation manifest, source hash and code
+fingerprint before accepting it.
 Its manifest says `offline_merged_without_independent_review`; it does **not**
 claim independent source-first review or submission readiness. An unresolved
 technical or semantic blocker may still prevent DOCX generation. A response

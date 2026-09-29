@@ -28,6 +28,7 @@ from source_obligation_compiler import (  # noqa: E402
     compile_unresolved_manual_review_codes,
     materialize_complete_abstract_source_constraints,
     materialize_known_source_verification,
+    materialize_publication_default_policy,
     materialize_source_verification_classifications,
     materialize_source_keyword_constraints,
     materialize_soft_keyword_count_guidance,
@@ -755,6 +756,74 @@ class SourceObligationCompilerTests(unittest.TestCase):
         for source in cases:
             with self.subTest(source=source):
                 self.assertEqual(compile_known_source_obligation_ids(source), [])
+
+    def test_prohibitions_never_compile_as_positive_table_facts(self) -> None:
+        cases = (
+            ("表题不得居中", "table_caption.alignment_center"),
+            ("续表不得重复表头", "table.continuation.repeat_header_row"),
+            ("表题不得置于表上方", "table_caption.position_above"),
+            ("表题不应居中。表题须居中。", "table_caption.alignment_center"),
+            ("“表题居中”", "table_caption.alignment_center"),
+        )
+        for source, target in cases:
+            with self.subTest(source=source):
+                self.assertNotIn(target, compile_known_source_obligation_ids(source))
+        self.assertIn(
+            "table.continuation.repeat_header_row",
+            compile_known_source_obligation_ids("续表均应重复表头"),
+        )
+        self.assertIn(
+            "table_caption.alignment_center",
+            compile_known_source_obligation_ids("表题应居中"),
+        )
+        self.assertIn(
+            "table_caption.alignment_center",
+            compile_known_source_obligation_ids("表题不得不居中"),
+        )
+        self.assertIn(
+            "table.continuation.repeat_header_row",
+            compile_known_source_obligation_ids("续表不得不重复表头"),
+        )
+
+    def test_publication_projection_requires_current_exact_evidence_and_unique_ids(self) -> None:
+        source = "未经批准的均为公开学位论文（公开的学位论文本项为空白）"
+        digest = hashlib.sha256(source.encode("utf-8")).hexdigest()
+        clause = {
+            "id": "C1", "text": source, "evidence_ids": ["E1"],
+            "source_span": {"evidence_id": "E1", "start_offset": 0,
+                            "end_offset": len(source), "text": source,
+                            "source_sha256": digest},
+        }
+        evidence = {"E1": {"id": "E1", "text": source}}
+        response = {
+            "clause_reviews": [{"clause_id": "C1", "classification": "executable"}],
+            "requirements": [{"role": "cover", "clause_ids": ["C1"],
+                              "evidence_ids": ["E1"], "properties": {
+                                  "non_public_administration": {"public_policy": "blank"}}}],
+        }
+        projected, audit = materialize_publication_default_policy(response, [clause], evidence)
+        self.assertEqual(len(audit), 1)
+        self.assertEqual(projected["requirements"][0]["properties"]
+                         ["non_public_administration"]["publication_default_policy"],
+                         "unapproved_is_public")
+        self.assertNotIn("publication_default_policy", response["requirements"][0]
+                         ["properties"]["non_public_administration"])
+        variants = (
+            (response, [clause], {}),
+            (response, [{**clause, "source_span": {**clause["source_span"],
+                                                  "source_sha256": "0" * 64}}], evidence),
+            (response, [{**clause, "source_span": {**clause["source_span"],
+                                                  "start_offset": 1}}], evidence),
+            (response, [clause, clause], evidence),
+            ({**response, "clause_reviews": response["clause_reviews"] * 2}, [clause], evidence),
+            ({**response, "requirements": [{**response["requirements"][0],
+                                             "properties": None}]}, [clause], evidence),
+        )
+        for candidate, clauses, context in variants:
+            with self.subTest(candidate=candidate, clauses=clauses, context=context):
+                unchanged, repairs = materialize_publication_default_policy(candidate, clauses, context)
+                self.assertEqual(repairs, [])
+                self.assertEqual(unchanged, candidate)
 
     def test_compiled_facts_bind_to_role_specific_properties(self) -> None:
         source = "表序后跟表题(可省略)和“(续)”，居中置于表上方，续表均应重复表头"

@@ -3813,7 +3813,7 @@ def merge_host_agent_review_packets(
         aggregate, full_clauses,
     )
     aggregate, publication_default_projections = materialize_publication_default_policy(
-        aggregate, full_clauses,
+        aggregate, full_clauses, full_request.get("evidence_context"),
     )
     aggregate, soft_keyword_guidance_projections = materialize_soft_keyword_count_guidance(
         aggregate, full_clauses,

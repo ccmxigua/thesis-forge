@@ -374,7 +374,7 @@ def _compile_known_source_obligation_ids_in_segment(source_text: str) -> list[st
     text = re.sub(r"\s+", "", source_text)
     result: list[str] = []
     is_continuation_table = "续" in text and "表" in text
-    if is_continuation_table and re.search(r"[（(]续[）)]|续表", text):
+    if is_continuation_table and re.search(r"[（(]续[）)]", text):
         result.append("table.continuation.caption_suffix")
     if is_continuation_table and "重复表头" in text:
         result.append("table.continuation.repeat_header_row")
@@ -405,6 +405,8 @@ def _known_source_targets_mentioned(source_text: str) -> set[str]:
         })
     if "表" in compact and re.search(r"表上方|置于表上|表上.*居中|居中.*表上", compact):
         targets.update({"table_caption.position_above", "table_caption.alignment_center"})
+    if "表" in compact and "居中" in compact:
+        targets.add("table_caption.alignment_center")
     if re.search(r"[□☐]", source_text) and re.search(r"限制|秘密|机密|密级", source_text):
         targets.add(SECURITY_MARKING_OPTIONS_OBLIGATION_ID)
     if "可少于" in compact and re.search(r"限制|秘密|机密|密级", compact):
@@ -436,6 +438,27 @@ def _unsafe_known_source_targets(source_text: str) -> set[str]:
     for segment in segments:
         if _CONTEXT_UNSAFE.search(segment):
             targets.update(_known_source_targets_mentioned(segment))
+        if "表" in segment:
+            for match in re.finditer(r"居中|表上方|置于表上|重复表头", segment):
+                if not _inside_quote(segment, match.start()):
+                    continue
+                targets.add({
+                    "居中": "table_caption.alignment_center",
+                    "表上方": "table_caption.position_above",
+                    "置于表上": "table_caption.position_above",
+                    "重复表头": "table.continuation.repeat_header_row",
+                }[match.group()])
+        # A prohibition is not an instruction to apply the positive property.
+        # Suppress the named target across the whole source, including when a
+        # conflicting positive sentence is present. Do not infer its inverse.
+        compact = re.sub(r"\s+", "", segment)
+        prohibition = r"(?:不得(?!不)|不应|不可|不能|不宜|禁止|严禁|无需|无须|不必|不允许|不可以|不要求|不要)"
+        if re.search(prohibition + r".{0,6}重复表头", compact):
+            targets.add("table.continuation.repeat_header_row")
+        if re.search(prohibition + r".{0,6}(?:居中|居中对齐)", compact):
+            targets.add("table_caption.alignment_center")
+        if re.search(prohibition + r".{0,8}(?:置于表上|表上方|放在表上方)", compact):
+            targets.add("table_caption.position_above")
     return targets
 
 
@@ -517,7 +540,7 @@ def compile_known_source_obligations(source_text: Any) -> list[dict[str, Any]]:
 
 
 def materialize_publication_default_policy(
-    response: Any, clauses: Any,
+    response: Any, clauses: Any, evidence_context: Any = None,
 ) -> tuple[Any, list[dict[str, Any]]]:
     """Fill only a missing, exact-source policy on an already linked cover.
 
@@ -526,11 +549,21 @@ def materialize_publication_default_policy(
     approval prose is never repaired.  The shared contract is revalidated by
     each caller after this projection.
     """
-    if not isinstance(response, dict) or not isinstance(clauses, list):
+    if (not isinstance(response, dict) or not isinstance(clauses, list)
+            or not isinstance(evidence_context, dict)):
         return response, []
     requirements = response.get("requirements")
     reviews = response.get("clause_reviews")
     if not isinstance(requirements, list) or not isinstance(reviews, list):
+        return response, []
+    clause_ids = [item.get("id") for item in clauses if isinstance(item, dict)]
+    review_ids = [item.get("clause_id") for item in reviews if isinstance(item, dict)]
+    if (len(clause_ids) != len(clauses)
+            or any(not isinstance(value, str) or not value for value in clause_ids)
+            or len(set(clause_ids)) != len(clause_ids)
+            or len(review_ids) != len(reviews)
+            or any(not isinstance(value, str) or not value for value in review_ids)
+            or len(set(review_ids)) != len(review_ids)):
         return response, []
     review_by_id = {
         item.get("clause_id"): item for item in reviews
@@ -559,6 +592,19 @@ def materialize_publication_default_policy(
             or PUBLICATION_DEFAULT_OBLIGATION_ID not in compile_known_source_obligation_ids(span["text"])
         ):
             continue
+        source_record = evidence_context.get(evidence_ids[0])
+        source_text = source_record.get("text") if isinstance(source_record, dict) else None
+        start, end = span.get("start_offset"), span.get("end_offset")
+        if (
+            not isinstance(source_record, dict)
+            or source_record.get("id") != evidence_ids[0]
+            or not isinstance(source_text, str)
+            or isinstance(start, bool) or not isinstance(start, int) or start < 0
+            or isinstance(end, bool) or not isinstance(end, int) or end <= start
+            or end > len(source_text) or source_text[start:end] != span["text"]
+            or hashlib.sha256(source_text.encode("utf-8")).hexdigest() != span["source_sha256"]
+        ):
+            continue
         linked = [
             index for index, item in enumerate(requirements)
             if isinstance(item, dict) and item.get("role") == "cover"
@@ -570,7 +616,10 @@ def materialize_publication_default_policy(
         if len(linked) != 1:
             continue
         index = linked[0]
-        admin = projected["requirements"][index].get("properties", {}).get(
+        properties = projected["requirements"][index].get("properties")
+        if not isinstance(properties, dict):
+            continue
+        admin = properties.get(
             "non_public_administration"
         )
         if (

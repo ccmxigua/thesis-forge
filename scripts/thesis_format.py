@@ -61,6 +61,10 @@ def pipeline_command(args: argparse.Namespace, *, prepare_host_review: bool = Fa
         command.append("--prepare-host-review")
     elif llm_response:
         command += ["--llm-response", str(llm_response)]
+        # The preparation stage already created this run directory.  The
+        # pipeline verifies its manifest, source bytes and code fingerprint
+        # before permitting this explicit continuation.
+        command.append("--allow-existing-work")
     if run_id:
         command += ["--run-id", run_id]
     if host_agent_audit:

@@ -6056,6 +6056,290 @@ class HostAgentBridgeTests(unittest.TestCase):
                 str(getattr(blocked.exception, "error_records", [])),
             )
 
+    def test_unbound_cover_shell_with_fields_error_is_removed_before_retry(self) -> None:
+        source = "北京体育大学学位评定委员会办公室盖章(有效)"
+        with tempfile.TemporaryDirectory() as td:
+            _review_dir, chunk = self._packet(
+                Path(td) / "review", contract_version="3.0", source=source,
+            )
+            raw = {
+                "contract_version": "3.0",
+                "provenance": chunk["provenance"],
+                "requirements": [{
+                    "existing_requirement_id": None,
+                    "field_key": None,
+                    "clause_ids": [],
+                    "evidence_ids": [],
+                    "confidence": 0.99,
+                    "reason": "占位",
+                    "role": "cover",
+                    "properties": {
+                        "institution": "——",
+                        "fields": [],
+                        "non_public_administration": None,
+                        "missing_value_policy": "placeholder",
+                        "missing_value_placeholder": "——",
+                        "layout_id": "linear",
+                    },
+                }],
+                "clause_reviews": [{
+                    "clause_id": "C1",
+                    "classification": "external_compliance",
+                    "reason": "The office stamp is an external duty.",
+                    "normative_basis": "external_duty",
+                    "obligations": [{
+                        "id": "office_stamp", "status": "unverifiable",
+                        "reason": "A real office stamp remains pending.",
+                    }],
+                }],
+                "unsupported_items": [],
+                "reported_conflicts": [],
+            }
+            normalized = bridge.normalize_native_response(raw, chunk["response_schema"])
+            errors = bridge.validate_host_agent_response(normalized, chunk)
+            records = bridge.contract_error_records(
+                errors, response=normalized, chunk=chunk,
+            )
+            self.assertEqual(
+                {item["code"] for item in records},
+                {
+                    "cover_binding_violation", "schema_contract_violation",
+                    "requirement_relation_mismatch",
+                },
+                errors,
+            )
+            candidate, audit = bridge.prepare_native_response_candidate(raw, chunk)
+            self.assertEqual(candidate["requirements"], [])
+            self.assertEqual(candidate["clause_reviews"], normalized["clause_reviews"])
+            self.assertEqual(bridge.validate_host_agent_response(candidate, chunk), [])
+            self.assertTrue(any(
+                item.get("rule_id") == "remove_unbound_non_placeholder_requirement_v1"
+                and item.get("removed_requirement", {}).get("role") == "cover"
+                for item in audit["mechanical_repairs"]
+            ))
+
+            wrong_error = copy.deepcopy(records)
+            next(item for item in wrong_error if item["code"] == "cover_binding_violation")[
+                "raw_error"
+            ] = "fabricated cover error"
+            self.assertIsNone(bridge._apply_safe_mechanical_repairs(
+                normalized, wrong_error, chunk=chunk,
+            )[0])
+            stale = copy.deepcopy(records)
+            next(item for item in stale if item["code"] == "requirement_relation_mismatch")[
+                "response_sha256"
+            ] = "0" * 64
+            self.assertIsNone(bridge._apply_safe_mechanical_repairs(
+                normalized, stale, chunk=chunk,
+            )[0])
+
+            bound = copy.deepcopy(raw)
+            bound["requirements"][0]["clause_ids"] = ["C1"]
+            bound["requirements"][0]["evidence_ids"] = ["E1"]
+            with self.assertRaises(ValueError):
+                bridge.prepare_native_response_candidate(bound, chunk)
+
+    def test_public_cover_blank_does_not_need_empty_conditional_requirement(self) -> None:
+        source = "未经批准的均为公开学位论文（公开的学位论文本项为空白）"
+        with tempfile.TemporaryDirectory() as td:
+            _review_dir, chunk = self._packet(
+                Path(td) / "review", contract_version="3.0", source=source,
+            )
+            raw = {
+                "contract_version": "3.0",
+                "requirements": [
+                    {
+                        "role": "cover",
+                        "properties": {
+                            "institution": "——", "fields": [],
+                            "non_public_administration": {
+                                "applicability": {
+                                    "status": "conditional",
+                                    "conditions": [{
+                                        "fact": "thesis_profile.security_level",
+                                        "operator": "in",
+                                        "value": ["restricted", "classified"],
+                                    }],
+                                },
+                                "fields": [{
+                                    "id": "security_marking", "label": "申请密级",
+                                    "value_from": "thesis_profile.cover_metadata.security_marking",
+                                    "display_policy": "required", "order": 1,
+                                }],
+                                "public_policy": "blank",
+                                "source_region": "非公开学位论文标注说明",
+                            },
+                            "before_role": "document_start",
+                            "missing_value_policy": "placeholder",
+                            "missing_value_placeholder": "——",
+                            "layout_id": "linear",
+                        },
+                        "clause_ids": ["C1"], "evidence_ids": ["E1"],
+                        "reason": "The cover leaves the administrative region blank for public theses.",
+                        "confidence": 0.9,
+                        "verification": {
+                            "mode": "static_docx", "checks": ["Check the public cover blank policy."],
+                        },
+                    },
+                    {
+                        "role": "conditional_constraints", "properties": {
+                            "abstract_zh_max_chars_by_degree": None,
+                            "require_zh_abstract_for_english_thesis": None,
+                            "require_zh_keywords_for_english_thesis": None,
+                        },
+                        "clause_ids": ["C1"], "evidence_ids": ["E1"],
+                        "reason": "The public-cover blank condition is already in the cover.",
+                        "confidence": 0.9,
+                        "applicability": {"status": "always"},
+                        "verification": {
+                            "mode": "static_docx", "checks": ["Check the public blank policy."],
+                        },
+                    },
+                ],
+                "clause_reviews": [{
+                    "clause_id": "C1", "classification": "executable",
+                    "reason": "The public administrative item must be blank.",
+                    "normative_basis": "explicit_normative_text",
+                    "obligations": [{
+                        "id": "public_blank", "status": "covered",
+                        "reason": "The cover has a blank public policy.",
+                    }],
+                }],
+                "unsupported_items": [], "reported_conflicts": [],
+            }
+            normalized = bridge.normalize_native_response(raw, chunk["response_schema"])
+            errors = bridge.validate_host_agent_response(normalized, chunk)
+            self.assertEqual(
+                errors,
+                ["$.requirements[1].properties: must_include_semantic_payload"],
+            )
+            accepted, audit = bridge.prepare_native_response_candidate(raw, chunk)
+            self.assertEqual(len(accepted["requirements"]), 1)
+            self.assertEqual(
+                accepted["requirements"][0]["properties"],
+                normalized["requirements"][0]["properties"],
+            )
+            self.assertEqual(
+                accepted["requirements"][0]["verification"]["checks"],
+                ["Check the public cover blank policy.", "Check the public blank policy."],
+            )
+            self.assertEqual(accepted["clause_reviews"], normalized["clause_reviews"])
+            self.assertEqual(bridge.validate_host_agent_response(accepted, chunk), [])
+            repair = next(item for item in audit["mechanical_repairs"] if item.get(
+                "rule_id") == "remove_redundant_public_cover_condition_v1")
+            self.assertEqual(repair["source_clause_ids"], ["C1"])
+            self.assertEqual(repair["source_evidence_ids"], ["E1"])
+            self.assertEqual(repair["run_id"], chunk["provenance"]["run_id"])
+            self.assertEqual(repair["case_id"], chunk["case_id"])
+            self.assertEqual(repair["source_sha256"], chunk["provenance"]["source_sha256"])
+            self.assertEqual(repair["clause_sha256"], chunk["provenance"]["clause_sha256"])
+            self.assertEqual(repair["evidence_sha256"], chunk["provenance"]["evidence_sha256"])
+            self.assertEqual(repair["removed_requirement"]["role"], "conditional_constraints")
+            self.assertEqual(repair["transferred_verification_checks"], ["Check the public blank policy."])
+            review_request = bridge.build_obligation_coverage_request(
+                accepted, chunk, run_id=chunk["provenance"]["run_id"], chunk_index=1,
+            )
+            check = next(item for item in review_request["checks"] if item["check_id"] == "C1")
+            self.assertEqual(len(check["review_context"]["linked_requirements"]), 1)
+            self.assertEqual(check["review_context"]["linked_requirements"][0]["role"], "cover")
+            self.assertEqual(check["review_context"]["primary_obligations"][0]["status"], "covered")
+            self.assertTrue(any(
+                "conditional_constraints" in instruction and "public-blank" in instruction
+                for instruction in chunk["instructions"]
+            ))
+            self.assertTrue(any(
+                "conditional_constraints" in rule and "public-blank" in rule
+                for rule in bridge._BASE_CONTRACT_REPAIR_RULES
+            ))
+
+            baseline_hash = bridge._response_sha256(normalized)
+            record = bridge.contract_error_records(
+                errors, response=normalized, chunk=chunk,
+            )[0]
+            def projected(candidate: dict, *, packet: dict | None = None,
+                          original_record: dict | None = None) -> dict | None:
+                candidate_hash = bridge._response_sha256(candidate)
+                current_record = copy.deepcopy(original_record or record)
+                if original_record is None:
+                    current_record["response_sha256"] = candidate_hash
+                return bridge._project_redundant_public_cover_condition(
+                    candidate, [current_record], packet or chunk, candidate_hash,
+                )[0]
+
+            stale = copy.deepcopy(record)
+            stale["response_sha256"] = "0" * 64
+            self.assertIsNone(projected(normalized, original_record=stale))
+            self.assertEqual(record["response_sha256"], baseline_hash)
+            for label, mutate in (
+                ("source-bound other obligation", lambda item: item["clause_reviews"][0][
+                    "obligations"].append({"id": "other", "status": "covered", "reason": "Other"})),
+                ("wrong cover policy", lambda item: item["requirements"][0][
+                    "properties"]["non_public_administration"].update({"public_policy": "show"})),
+                ("public included in cover applicability", lambda item: item[
+                    "requirements"][0]["properties"]["non_public_administration"][
+                    "applicability"]["conditions"][0]["value"].append("public")),
+                ("cover missing source edge", lambda item: item["requirements"][0].update(
+                    {"clause_ids": []})),
+                ("nonempty independent property", lambda item: item["requirements"][1].update(
+                    {"properties": {"require_zh_abstract_for_english_thesis": True}})),
+                ("existing requirement id", lambda item: item["requirements"][1].update(
+                    {"existing_requirement_id": "R1"})),
+                ("independent verification check", lambda item: item[
+                    "requirements"][1]["verification"]["checks"].append(
+                    "Verify a separate declaration signature.")),
+                ("different verification mode", lambda item: item[
+                    "requirements"][1]["verification"].update({"mode": "word_render"})),
+                ("different run provenance", lambda item: item.update({
+                    "provenance": {"run_id": "stale-run"},
+                })),
+                ("two competing cover requirements", lambda item: item[
+                    "requirements"].append(copy.deepcopy(item["requirements"][0]))),
+                ("unresolved review", lambda item: item["clause_reviews"][0].update(
+                    {"classification": "unresolved"})),
+            ):
+                altered = copy.deepcopy(normalized)
+                mutate(altered)
+                self.assertIsNone(projected(altered), label)
+
+            other_source = "公开的学位论文本项为空白；摘要还必须控制字数"
+            other_chunk = copy.deepcopy(chunk)
+            other_chunk["evidence_context"]["E1"]["text"] = other_source
+            other_chunk["clauses"][0]["text"] = other_source
+            self._bind_test_source_spans(
+                other_chunk["clauses"],
+                {"evidence": [other_chunk["evidence_context"]["E1"]]},
+            )
+            self.assertIsNone(projected(normalized, packet=other_chunk))
+
+            for key, value in (("run_id", ""), ("source_sha256", "stale")):
+                invalid_identity_chunk = copy.deepcopy(chunk)
+                invalid_identity_chunk["provenance"][key] = value
+                self.assertIsNone(projected(normalized, packet=invalid_identity_chunk), key)
+
+            external_cover = copy.deepcopy(normalized)
+            external_cover["requirements"][0]["verification"]["mode"] = "external"
+            external_projected = projected(external_cover)
+            self.assertIsNotNone(external_projected)
+            self.assertEqual(
+                external_projected["requirements"][0]["verification"]["mode"],
+                "external",
+            )
+            self.assertIn(
+                "Check the public blank policy.",
+                external_projected["requirements"][0]["verification"]["checks"],
+            )
+
+            reversed_raw = copy.deepcopy(raw)
+            reversed_raw["requirements"].reverse()
+            reversed_candidate, reversed_audit = bridge.prepare_native_response_candidate(
+                reversed_raw, chunk,
+            )
+            self.assertEqual(len(reversed_candidate["requirements"]), 1)
+            self.assertEqual(bridge.validate_host_agent_response(reversed_candidate, chunk), [])
+            reversed_repair = next(item for item in reversed_audit["mechanical_repairs"] if item.get(
+                "rule_id") == "remove_redundant_public_cover_condition_v1")
+            self.assertEqual(reversed_repair["cover_requirement_index_after"], 0)
+
     def test_mechanical_repair_never_removes_mixed_or_noninformational_relations(self) -> None:
         cases = [
             (

@@ -660,6 +660,7 @@ _BASE_CONTRACT_REPAIR_RULES = (
     "For a cover requirement with an empty required institution string and the declared neutral placeholder policy, preserve the cover structure and use '——'; never copy a school name or infer an institution identity from nearby evidence.",
     "Do not fabricate evidence or guess a semantic classification. Make only the mechanical schema corrections required by the supplied error, then regenerate the complete response from the current chunk.",
     "Administrative approval/marking tables belong under cover.non_public_administration, must be conditional on thesis_profile.security_level with an equals or in condition selecting restricted/classified theses, and must be blank for public theses. If the current chunk contains only this administrative region, cover.fields may be an empty array; never duplicate administrative fields into ordinary cover.fields. Do not use not_equals as the executable binding. Bind approval-number and approval-date labels to approval_number and approval_date; never substitute classification_number or completion_date. When one visible 保密期限 label describes an explicit two-ended date range, preserve two distinct fields in source order: first embargo_start, then embargo_until; do not collapse both endpoints into embargo_until.",
+    "conditional_constraints has abstract-language and degree-dependent abstract fields only; it cannot represent a public-blank cover condition. Keep that duty on a current-source-bound cover.non_public_administration.public_policy='blank' requirement, and never add a second all-null conditional_constraints requirement. Preserve an independent unrepresentable duty as unresolved instead of inventing a payload.",
     "fixed_declaration_candidates group source text only; they do not classify every grouped clause as executable. A declarations requirement may link only executable/covered/verify_existing clauses and their backing evidence. Leave real-world consent, application, approval, signature, and seal clauses external and unlinked, even when their wording is printed. Use the candidate's exact source_evidence_ids for text materialization; never create an empty or title-only declaration. Administrative approval/marking regions belong to cover.non_public_administration, not declarations.",
     "Input prerequisite keys are namespace-bound by kind: metadata uses thesis_profile., source_content uses source_inventory., template_resource uses template_profile., and runtime uses runtime.; never emit runtime_context.* or invent an unregistered path.",
     "A clause can be fully executable only when every obligation is represented. For a source clause that separately states both a DOCX action and a real-world approval/consent action, executable_with_external_check preserves the requirement edge and a distinct unverifiable external obligation; it remains a release blocker. Never claim approval from missing metadata or use this mixed state for an unrelated unresolved DOCX rule.",
@@ -6439,6 +6440,217 @@ def _project_unresolved_conflict_target_disjunction(
     }
 
 
+def _project_redundant_public_cover_condition(
+    response: Any, error_records: list[dict[str, Any]],
+    chunk: dict[str, Any] | None, baseline_sha256: str,
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    """Drop an empty abstract-condition shell only when the cover owns its source duty.
+
+    ``conditional_constraints`` has no cover-administration property.  Its
+    all-empty instance cannot implement the public-blank rule.  This is not a
+    general permission to discard source-bound requirements: the current
+    source span, one covered obligation, and a separate executable cover edge
+    must all agree before the complete response is revalidated by the caller.
+    """
+    if (
+        not isinstance(response, dict)
+        or not isinstance(chunk, dict)
+        or len(error_records) != 1
+        or _response_sha256(response) != baseline_sha256
+        or (response.get("provenance") is not None
+            and response.get("provenance") != chunk.get("provenance"))
+    ):
+        return None, []
+    identity = chunk.get("provenance")
+    if (
+        not isinstance(identity, dict)
+        or not isinstance(identity.get("run_id"), str)
+        or not identity["run_id"]
+        or not isinstance(chunk.get("case_id"), str)
+        or not chunk["case_id"]
+        or any(
+            not isinstance(identity.get(key), str)
+            or re.fullmatch(r"[0-9a-f]{64}", identity[key]) is None
+            for key in (
+                "source_sha256", "clause_sha256", "evidence_sha256", "request_sha256",
+            )
+        )
+    ):
+        return None, []
+    record = error_records[0]
+    if not isinstance(record, dict):
+        return None, []
+    pointer = str(record.get("json_pointer") or "")
+    match = re.fullmatch(r"\$\.requirements\[(\d+)\]\.properties", pointer)
+    if (
+        match is None
+        or record.get("code") != "empty_requirement_properties"
+        or record.get("raw_error") != f"{pointer}: must_include_semantic_payload"
+        or record.get("response_sha256") != baseline_sha256
+    ):
+        return None, []
+    requirements = response.get("requirements")
+    index = int(match.group(1))
+    if not isinstance(requirements, list) or index >= len(requirements):
+        return None, []
+    empty = requirements[index]
+    if (
+        not isinstance(empty, dict)
+        or empty.get("role") != "conditional_constraints"
+        or empty.get("properties") != {}
+        or empty.get("existing_requirement_id") not in (None, "")
+        or empty.get("field_key") not in (None, "")
+        or empty.get("source_fragment_clause_ids") not in (None, [])
+        or empty.get("input_prerequisites") not in (None, [])
+        or empty.get("applicability") not in (None, {"status": "always"})
+    ):
+        return None, []
+    clause_ids = empty.get("clause_ids")
+    evidence_ids = empty.get("evidence_ids")
+    if (
+        not isinstance(clause_ids, list) or len(clause_ids) != 1
+        or not isinstance(clause_ids[0], str)
+        or not isinstance(evidence_ids, list) or len(evidence_ids) != 1
+        or not isinstance(evidence_ids[0], str)
+    ):
+        return None, []
+    clause_id, evidence_id = clause_ids[0], evidence_ids[0]
+    clauses = chunk.get("clauses")
+    evidence = chunk.get("evidence_context")
+    if not isinstance(clauses, list) or not isinstance(evidence, dict):
+        return None, []
+    matches = [
+        clause for clause in clauses
+        if isinstance(clause, dict) and clause.get("id") == clause_id
+    ]
+    if len(matches) != 1 or matches[0].get("evidence_ids") != [evidence_id]:
+        return None, []
+    try:
+        source = _exact_clause_source_text(matches[0], evidence)
+    except NativeSemanticReviewError:
+        return None, []
+    if not isinstance(source, str) or not re.fullmatch(
+        r"(?:未经批准的均为公开学位论文[（(])?公开的学位论文本项为空白[）)]?[。.]?",
+        source.strip(),
+    ):
+        return None, []
+    reviews = response.get("clause_reviews")
+    linked_reviews = [
+        review for review in reviews
+        if isinstance(review, dict) and review.get("clause_id") == clause_id
+    ] if isinstance(reviews, list) else []
+    if (
+        len(linked_reviews) != 1
+        or linked_reviews[0].get("classification") != "executable"
+        or not isinstance(linked_reviews[0].get("obligations"), list)
+        or len(linked_reviews[0]["obligations"]) != 1
+        or not isinstance(linked_reviews[0]["obligations"][0], dict)
+        or linked_reviews[0]["obligations"][0].get("status") != "covered"
+    ):
+        return None, []
+    if response.get("unsupported_items") not in (None, []) or response.get("reported_conflicts") not in (None, []):
+        return None, []
+
+    empty_verification = empty.get("verification")
+    checks_to_transfer: list[str] = []
+    if empty_verification is not None:
+        if (
+            not isinstance(empty_verification, dict)
+            or set(empty_verification) - {"mode", "checks", "checker_ids"}
+            or empty_verification.get("mode") != "static_docx"
+            or empty_verification.get("checker_ids") not in (None, [])
+            or not isinstance(empty_verification.get("checks"), list)
+            or not empty_verification["checks"]
+        ):
+            return None, []
+        for check in empty_verification["checks"]:
+            if not isinstance(check, str) or not check.strip():
+                return None, []
+            lowered = check.lower()
+            if not (("public" in lowered and "blank" in lowered)
+                    or ("公开" in check and "空白" in check)):
+                return None, []
+            checks_to_transfer.append(check)
+
+    cover_matches: list[int] = []
+    for other_index, other in enumerate(requirements):
+        if other_index == index or not isinstance(other, dict) or other.get("role") != "cover":
+            continue
+        properties = other.get("properties")
+        administration = properties.get("non_public_administration") if isinstance(properties, dict) else None
+        applicability = administration.get("applicability") if isinstance(administration, dict) else None
+        conditions = applicability.get("conditions") if isinstance(applicability, dict) else None
+        cover_verification = other.get("verification")
+        if (
+            not isinstance(administration, dict)
+            or administration.get("public_policy") != "blank"
+            or not isinstance(administration.get("fields"), list)
+            or not administration["fields"]
+            or not isinstance(applicability, dict)
+            or applicability.get("status") != "conditional"
+            or not isinstance(conditions, list)
+            or len(conditions) != 1
+            or not all(
+                isinstance(condition, dict)
+                and condition.get("fact") == "thesis_profile.security_level"
+                and condition.get("operator") == "in"
+                and isinstance(condition.get("value"), list)
+                and all(isinstance(value, str) for value in condition["value"])
+                and bool(condition["value"])
+                and set(condition["value"]).issubset({"restricted", "classified"})
+                for condition in conditions
+            )
+            or not isinstance(cover_verification, dict)
+            or not isinstance(cover_verification.get("mode"), str)
+            or cover_verification["mode"] not in {"static_docx", "external"}
+            or not isinstance(cover_verification.get("checks"), list)
+            or not all(isinstance(check, str) and check.strip()
+                       for check in cover_verification["checks"])
+            or not isinstance(other.get("clause_ids"), list)
+            or clause_id not in other["clause_ids"]
+            or not isinstance(other.get("evidence_ids"), list)
+            or evidence_id not in other["evidence_ids"]
+        ):
+            continue
+        cover_matches.append(other_index)
+    if len(cover_matches) != 1:
+        return None, []
+
+    repaired = copy.deepcopy(response)
+    cover_index_before = cover_matches[0]
+    cover_checks = repaired["requirements"][cover_index_before]["verification"]["checks"]
+    transferred = [check for check in checks_to_transfer if check not in cover_checks]
+    cover_checks.extend(transferred)
+    removed = repaired["requirements"].pop(index)
+    return repaired, [{
+        "code": "empty_requirement_properties",
+        "rule_id": "remove_redundant_public_cover_condition_v1",
+        "removed_requirement_index": index,
+        "removed_requirement": removed,
+        "removed_requirement_sha256": _response_sha256(removed),
+        "cover_requirement_index_before": cover_index_before,
+        "cover_requirement_index_after": cover_index_before - int(cover_index_before > index),
+        "cover_requirement_before_sha256": _response_sha256(requirements[cover_index_before]),
+        "cover_requirement_after_sha256": _response_sha256(
+            repaired["requirements"][cover_index_before - int(cover_index_before > index)]
+        ),
+        "transferred_verification_checks": transferred,
+        "cover_verification_mode": requirements[cover_index_before]["verification"]["mode"],
+        "source_clause_ids": [clause_id],
+        "source_evidence_ids": [evidence_id],
+        "source_literal_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
+        "run_id": identity["run_id"],
+        "case_id": chunk["case_id"],
+        "source_sha256": identity["source_sha256"],
+        "clause_sha256": identity["clause_sha256"],
+        "evidence_sha256": identity["evidence_sha256"],
+        "request_sha256": identity["request_sha256"],
+        "source_response_sha256": baseline_sha256,
+        "repaired_response_sha256": _response_sha256(repaired),
+        "reason": "the public-blank duty is already bound to the executable cover; the conditional role has no payload",
+    }]
+
+
 def _apply_safe_mechanical_repairs_one_rule(
     response: Any, error_records: list[dict[str, Any]],
     *, chunk: dict[str, Any] | None = None,
@@ -6494,9 +6706,54 @@ def _apply_safe_mechanical_repairs_one_rule(
     repaired = copy.deepcopy(response)
     repairs: list[dict[str, Any]] = []
     baseline_sha256 = baseline_response_sha256 or _response_sha256(response)
+    redundant_cover_condition, redundant_cover_audit = _project_redundant_public_cover_condition(
+        response, error_records, chunk, baseline_sha256,
+    )
+    if redundant_cover_condition is not None:
+        return redundant_cover_condition, redundant_cover_audit
+    requirements_for_orphan_check = response.get("requirements")
+
+    def unbound_cover_fields_companion(record: dict[str, Any]) -> bool:
+        """Recognize only the cover-schema error caused by an unbound shell."""
+        pointer = str(record.get("json_pointer") or "")
+        match = re.fullmatch(r"\$\.requirements\[(\d+)\]\.properties\.fields", pointer)
+        if (
+            record.get("code") != "cover_binding_violation"
+            or match is None
+            or record.get("raw_error") != (
+                f"{pointer}: must contain an ordinary cover field unless "
+                "cover.non_public_administration is present"
+            )
+            or record.get("response_sha256") != baseline_sha256
+            or not isinstance(requirements_for_orphan_check, list)
+        ):
+            return False
+        index = int(match.group(1))
+        if index >= len(requirements_for_orphan_check):
+            return False
+        requirement = requirements_for_orphan_check[index]
+        if not isinstance(requirement, dict) or requirement.get("role") != "cover":
+            return False
+        properties = requirement.get("properties")
+        if (
+            not isinstance(properties, dict)
+            or properties.get("fields") != []
+            or properties.get("non_public_administration") is not None
+        ):
+            return False
+        return any(
+            isinstance(other, dict)
+            and other.get("code") == "requirement_relation_mismatch"
+            and other.get("requirement_index") == index
+            and other.get("relation_category") == "missing_clause_relation"
+            and other.get("response_sha256") == baseline_sha256
+            for other in error_records
+        )
+
     cover_binding_records = [
         record for record in error_records
         if isinstance(record, dict) and record.get("code") == "cover_binding_violation"
+        and not unbound_cover_fields_companion(record)
     ]
     migrated_cover_binding_pointers: set[str] = set()
     if cover_binding_records:
@@ -6996,6 +7253,8 @@ def _apply_safe_mechanical_repairs_one_rule(
                 and "must_be_exact_substring_of_cited_source_span" in raw_error
             ):
                 observed[index].add("unbound_text")
+            elif code == "cover_binding_violation" and unbound_cover_fields_companion(record):
+                observed[index].add("unbound_cover_fields")
             elif (
                 code == "requirement_relation_mismatch"
                 and pointer == f"$.requirements[{index}]"

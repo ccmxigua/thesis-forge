@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import hashlib
 import sys
@@ -21,6 +22,7 @@ from native_semantic_review import (  # noqa: E402
     OBLIGATION_COVERAGE_SCHEMA,
     RetryableNativeSemanticReviewError,
     SourceVerificationClassificationCorrectionRequiredError,
+    SourceVerificationMislabelledAsAuthoringError,
     build_obligation_coverage_request,
     validate_response,
     validate_obligation_coverage_response,
@@ -884,6 +886,66 @@ class NativeSemanticReviewTests(unittest.TestCase):
         forged["results"][0]["identified_obligations"][0]["requirement_refs"] = ["RR-forged"]
         with self.assertRaisesRegex(NativeSemanticReviewError, "unrelated requirement"):
             validate_obligation_coverage_response(forged, [check])
+
+    def test_registered_existing_content_mislabel_gets_only_a_bounded_rereview(self) -> None:
+        source = (
+            "关键词是为了便于做文献索引和检索工作而从论文中选取出来用以表示全文主题内容信息的"
+            "单词或术语，在论文中有明确出处"
+        )
+        check = {
+            "check_id": "C00068", "document_text": source,
+            "review_context": {
+                "classification": "requires_source_verification",
+                "requires_requirement": False,
+                "linked_requirements": [], "primary_obligations": [],
+                "machine_obligation_ids": [], "manual_review_codes": [],
+                "source_content_verification_codes": ["keyword_source_traceability_verification"],
+            },
+        }
+        mistaken = {"results": [{
+            "check_id": "C00068", "verdict": "source_content_pending",
+            "rationale": "The author must add keyword content.",
+            "evidence_quotes": [source], "machine_obligation_ids": [],
+            "identified_obligations": [{
+                "source_quote": source, "disposition": "authoring_content_pending",
+                "requirement_refs": [],
+            }],
+        }]}
+        with self.assertRaises(SourceVerificationMislabelledAsAuthoringError) as caught:
+            validate_obligation_coverage_response(mistaken, [check])
+        self.assertEqual(caught.exception.clause_ids, ("C00068",))
+
+        prompt = native_review._prompt({
+            "protocol": OBLIGATION_COVERAGE_PROTOCOL, "checks": [check],
+            "retry_feedback": {
+                "code": SourceVerificationMislabelledAsAuthoringError.code,
+                "clause_ids": ["C00068"],
+            },
+        })
+        self.assertIn("same unchanged candidate", prompt)
+        self.assertIn("did not explicitly ask", prompt)
+        self.assertIn("never compliance or release approval", prompt)
+
+        no_registered_code = {
+            **check, "review_context": {
+                **check["review_context"],
+                "source_content_verification_codes": [],
+            },
+        }
+        with self.assertRaisesRegex(NativeSemanticReviewError, "source-verification authorization is stale"):
+            validate_obligation_coverage_response(mistaken, [no_registered_code])
+        with_real_authoring = {
+            **check, "document_text": "作者须撰写摘要。关键词须源自论文。",
+            "review_context": {
+                **check["review_context"],
+                "source_content_verification_codes": ["keyword_source_traceability_verification"],
+            },
+        }
+        with_real_authoring_mistake = copy.deepcopy(mistaken)
+        with_real_authoring_mistake["results"][0]["evidence_quotes"] = [with_real_authoring["document_text"]]
+        with_real_authoring_mistake["results"][0]["identified_obligations"][0]["source_quote"] = with_real_authoring["document_text"]
+        with self.assertRaisesRegex(NativeSemanticReviewError, "explicit source authoring instruction"):
+            validate_obligation_coverage_response(with_real_authoring_mistake, [with_real_authoring])
 
     def test_obligation_review_prompt_requires_quotes_for_zero_obligation_conclusions(self) -> None:
         prompt = native_review._prompt({

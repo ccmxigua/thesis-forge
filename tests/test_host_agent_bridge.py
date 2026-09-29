@@ -677,6 +677,96 @@ class HostAgentBridgeTests(unittest.TestCase):
             })
             self.assertEqual(pointer["candidate_response_sha256"], bridge._response_sha256(response))
 
+    def test_mislabelled_source_verification_rereviews_same_candidate_once(self) -> None:
+        self._independent_review_patch.stop()
+        source = (
+            "关键词是为了便于做文献索引和检索工作而从论文中选取出来用以表示全文主题内容信息的"
+            "单词或术语，在论文中有明确出处"
+        )
+        with tempfile.TemporaryDirectory() as td:
+            review_dir, chunk = self._packet(
+                Path(td) / "requirements", source=source, contract_version="3.0",
+            )
+            response = {
+                "contract_version": "3.0", "provenance": chunk["provenance"],
+                "requirements": [], "clause_reviews": [{
+                    "clause_id": "C1", "classification": "requires_source_verification",
+                    "reason": "The existing keywords require human traceability verification.",
+                    "obligations": [],
+                }], "unsupported_items": [], "reported_conflicts": [],
+            }
+            accepted_review = {
+                "status": "completed", "results": [{
+                    "check_id": "C1", "verdict": "source_content_verification_pending",
+                    "rationale": "Human verification of keyword origin is outstanding.",
+                    "evidence_quotes": [source], "machine_obligation_ids": [],
+                    "identified_obligations": [{
+                        "source_quote": source,
+                        "disposition": "source_content_verification_pending",
+                        "requirement_refs": [],
+                    }],
+                }], "summary": {"source_content_verification_pending": 1},
+            }
+            calls: list[dict] = []
+
+            def first_mislabels_then_corrects(request: dict, *, output_dir: Path, **_kwargs: object) -> dict:
+                calls.append(copy.deepcopy(request))
+                if len(calls) == 1:
+                    raise bridge.SourceVerificationMislabelledAsAuthoringError(["C1"])
+                return bind_mock_review_to_source_spans(accepted_review, request, output_dir)
+
+            with patch.object(bridge, "run_native_semantic_review", side_effect=first_mislabels_then_corrects), \
+                    patch.object(bridge.time, "sleep"):
+                pointer = bridge._run_independent_obligation_coverage_review(
+                    response, chunk, review_dir=review_dir,
+                    run_id=chunk["provenance"]["run_id"], chunk_index=1,
+                    attempt=1, host_runtime="codex", model="gpt-5.6-luna",
+                    timeout=10, agent_id="main", runner="exec", binary="codex",
+                    config_path=None, controller=bridge.RunController(),
+                )
+            self.assertEqual(len(calls), 2)
+            self.assertEqual(calls[0]["checks"], calls[1]["checks"])
+            self.assertEqual(calls[0]["provenance"], calls[1]["provenance"])
+            self.assertEqual(calls[1]["retry_feedback"], {
+                "code": bridge.SourceVerificationMislabelledAsAuthoringError.code,
+                "clause_ids": ["C1"],
+            })
+            self.assertEqual(pointer["status"], "completed")
+            self.assertEqual(pointer["candidate_response_sha256"], bridge._response_sha256(response))
+            rejected = json.loads((review_dir / "independent-review-chunk-0001-attempt-01/coverage-audit.json").read_text(encoding="utf-8"))
+            self.assertEqual(rejected["status"], "rejected")
+            self.assertTrue(rejected["source_bound_retry_authorized"])
+
+    def test_mislabelled_source_verification_without_registered_code_does_not_retry(self) -> None:
+        self._independent_review_patch.stop()
+        with tempfile.TemporaryDirectory() as td:
+            review_dir, chunk = self._packet(
+                Path(td) / "requirements", source="表格应居中", contract_version="3.0",
+            )
+            response = {
+                "contract_version": "3.0", "provenance": chunk["provenance"],
+                "requirements": [], "clause_reviews": [{
+                    "clause_id": "C1", "classification": "requires_source_content",
+                    "reason": "pending", "obligations": [],
+                }], "unsupported_items": [], "reported_conflicts": [],
+            }
+            with patch.object(
+                bridge, "run_native_semantic_review",
+                side_effect=bridge.SourceVerificationMislabelledAsAuthoringError(["C1"]),
+            ) as call:
+                with self.assertRaises(bridge.IndependentObligationReviewError) as caught:
+                    bridge._run_independent_obligation_coverage_review(
+                        response, chunk, review_dir=review_dir,
+                        run_id=chunk["provenance"]["run_id"], chunk_index=1,
+                        attempt=1, host_runtime="codex", model="gpt-5.6-luna",
+                        timeout=10, agent_id="main", runner="exec", binary="codex",
+                        config_path=None, controller=bridge.RunController(),
+                    )
+            self.assertEqual(call.call_count, 1)
+            self.assertFalse(caught.exception.retryable)
+            rejected = json.loads((review_dir / "independent-review-chunk-0001-attempt-01/coverage-audit.json").read_text(encoding="utf-8"))
+            self.assertFalse(rejected["source_bound_retry_authorized"])
+
     def test_inconsistent_incomplete_disposition_exhaustion_fails_closed(self) -> None:
         self._independent_review_patch.stop()
         chunk, response, _ = self._missing_inventory_review_case()
@@ -1432,8 +1522,8 @@ class HostAgentBridgeTests(unittest.TestCase):
                 "disposition"
             ] = "authoring_content_pending"
             with self.assertRaisesRegex(
-                bridge.NativeSemanticReviewError,
-                "authoring-content pending lacks an explicit source authoring instruction",
+                bridge.SourceVerificationMislabelledAsAuthoringError,
+                "source-bound existing-content check as authoring",
             ):
                 bridge.validate_obligation_coverage_response(
                     falsely_authoring, request["checks"],

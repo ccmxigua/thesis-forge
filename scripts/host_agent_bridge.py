@@ -217,6 +217,7 @@ from native_semantic_review import (  # noqa: E402
     OBLIGATION_COVERAGE_PROTOCOL,
     OBLIGATION_COVERAGE_SCHEMA,
     SourceVerificationClassificationCorrectionRequiredError,
+    SourceVerificationMislabelledAsAuthoringError,
     RetryableNativeSemanticReviewError,
     _exact_clause_source_text,
     build_obligation_coverage_request,
@@ -247,6 +248,8 @@ from source_obligation_compiler import (  # noqa: E402
     SOURCE_KEYWORD_CONSTRAINT_PROJECTION_POLICY_VERSION,
     compile_continuation_caption_requirement,
     compile_known_source_obligation_ids,
+    compile_source_content_verification_codes,
+    has_explicit_authoring_action_cue,
     has_mixed_external_document_action_signal,
     materialize_complete_abstract_source_constraints,
     materialize_known_source_verification,
@@ -9536,6 +9539,7 @@ def _validate_completed_obligation_ledger_chain(
         "external_compliance_unrepresented_obligation",
         "missing_source_obligation_inventory",
         "independent_obligation_review_incomplete",
+        SourceVerificationMislabelledAsAuthoringError.code,
     }
     if (
         isinstance(provider_attempt, bool) or not isinstance(provider_attempt, int)
@@ -10631,9 +10635,53 @@ def _run_independent_obligation_coverage_review(
             "chunk_index": chunk_index,
             "provider_attempt_history": attempt_history,
         }  # type: ignore[attr-defined]
+        error.retryable = False  # type: ignore[attr-defined]
         raise error from review_error
-    except (MissingSourceObligationInventoryError, InconsistentObligationVerdictError) as review_error:
-        retryable = _provider_attempt < INDEPENDENT_REVIEW_PROVIDER_MAX_ATTEMPTS
+    except (
+        MissingSourceObligationInventoryError,
+        InconsistentObligationVerdictError,
+        SourceVerificationMislabelledAsAuthoringError,
+    ) as review_error:
+        source_verification_mislabel = isinstance(
+            review_error, SourceVerificationMislabelledAsAuthoringError,
+        )
+        checks_by_id = {
+            str(check.get("check_id")): check
+            for check in coverage_request.get("checks", [])
+            if isinstance(check, dict) and isinstance(check.get("check_id"), str)
+        }
+        bound_mislabel = not source_verification_mislabel or all(
+            isinstance(checks_by_id.get(clause_id), dict)
+            and isinstance(checks_by_id[clause_id].get("document_text"), str)
+            and bool(compile_source_content_verification_codes(
+                checks_by_id[clause_id]["document_text"],
+            ))
+            and not has_explicit_authoring_action_cue(
+                checks_by_id[clause_id]["document_text"],
+            )
+            and not is_explicit_authoring_content_quote(
+                checks_by_id[clause_id]["document_text"],
+            )
+            and isinstance(checks_by_id[clause_id].get("review_context"), dict)
+            and checks_by_id[clause_id]["review_context"].get("classification")
+                in {"requires_source_content", "requires_source_verification"}
+            and checks_by_id[clause_id]["review_context"].get("requires_requirement") is False
+            and checks_by_id[clause_id]["review_context"].get(
+                "source_content_verification_codes"
+            ) == compile_source_content_verification_codes(
+                checks_by_id[clause_id]["document_text"],
+            )
+            and not checks_by_id[clause_id]["review_context"].get("linked_requirements")
+            and not checks_by_id[clause_id]["review_context"].get("primary_obligations")
+            and not checks_by_id[clause_id]["review_context"].get("machine_obligation_ids")
+            and not checks_by_id[clause_id]["review_context"].get("manual_review_codes")
+            for clause_id in review_error.clause_ids
+        )
+        retryable = (
+            _provider_attempt < INDEPENDENT_REVIEW_PROVIDER_MAX_ATTEMPTS
+            and bool(review_error.clause_ids)
+            and bound_mislabel
+        )
         retry_feedback = {
             "code": review_error.code,
             "clause_ids": list(review_error.clause_ids),
@@ -10654,6 +10702,7 @@ def _run_independent_obligation_coverage_review(
             "candidate_response_sha256": response_sha,
             "provenance": copy.deepcopy(coverage_request.get("provenance")),
             "missing_clause_ids": list(review_error.clause_ids),
+            "source_bound_retry_authorized": bound_mislabel,
             "error_type": type(review_error).__name__,
             "error": str(review_error),
             "review_output_dir": str(output_dir.resolve()),
@@ -10716,6 +10765,7 @@ def _run_independent_obligation_coverage_review(
             "chunk_index": chunk_index,
             "provider_attempt_history": attempt_history,
         }  # type: ignore[attr-defined]
+        error.retryable = False  # type: ignore[attr-defined]
         raise error from review_error
     except IndependentObligationReviewError:
         raise

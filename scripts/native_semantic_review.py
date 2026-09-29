@@ -34,6 +34,7 @@ from source_obligation_compiler import (
     compile_known_source_obligation_ids,
     compile_source_content_verification_codes,
     compile_unresolved_manual_review_codes,
+    has_explicit_authoring_action_cue,
     has_mixed_external_document_action_signal,
     is_explicit_authoring_content_quote as _is_explicit_authoring_content_quote,
 )
@@ -118,6 +119,19 @@ class SourceVerificationClassificationCorrectionRequiredError(NativeSemanticRevi
             + " classified as non-normative"
         )
         self.check_ids = tuple(check_ids)
+
+
+class SourceVerificationMislabelledAsAuthoringError(NativeSemanticReviewError):
+    """A registered existing-content check was mislabelled as new authoring."""
+
+    code = "source_verification_mislabelled_as_authoring"
+
+    def __init__(self, clause_ids: list[str]) -> None:
+        self.clause_ids = tuple(sorted(set(clause_ids)))
+        super().__init__(
+            "independent review labelled a source-bound existing-content check "
+            "as authoring for clause(s) " + ", ".join(self.clause_ids)
+        )
 
 
 def is_explicit_authoring_content_quote(quote: Any) -> bool:
@@ -538,6 +552,26 @@ def validate_obligation_coverage_response(
                 external_pending += 1
             elif disposition == "authoring_content_pending":
                 if not is_explicit_authoring_content_quote(quote):
+                    if (
+                        live_source_verification_codes
+                        and classification in {
+                            "requires_source_content", "requires_source_verification",
+                        }
+                        and context.get("requires_requirement") is False
+                        and not linked
+                        and not context.get("primary_obligations")
+                        and not expected_machine_ids
+                        and not live_manual_codes
+                        and not has_explicit_authoring_action_cue(source_text)
+                        and not is_explicit_authoring_content_quote(source_text)
+                        and result.get("verdict") == "source_content_pending"
+                        and len(result.get("identified_obligations") or []) == 1
+                        and not requirement_refs
+                    ):
+                        # Reject this review, then allow one *independent* re-read
+                        # of the unchanged candidate. This does not reclassify a
+                        # source duty or count the mistaken review as coverage.
+                        raise SourceVerificationMislabelledAsAuthoringError([check_id])
                     raise NativeSemanticReviewError(
                         f"authoring-content pending lacks an explicit source authoring instruction for {check_id}"
                     )
@@ -1020,6 +1054,13 @@ def _prompt(request: dict[str, Any]) -> str:
             and isinstance(retry_feedback.get("clause_ids"), list)
             else []
         )
+        mislabelled_verification_clause_ids = (
+            sorted({value for value in retry_feedback.get("clause_ids", []) if isinstance(value, str)})
+            if isinstance(retry_feedback, dict)
+            and retry_feedback.get("code") == SourceVerificationMislabelledAsAuthoringError.code
+            and isinstance(retry_feedback.get("clause_ids"), list)
+            else []
+        )
         scope_review_checks = (
             [
                 item for item in retry_feedback.get("checks", [])
@@ -1081,6 +1122,21 @@ def _prompt(request: dict[str, Any]) -> str:
                 "Use ambiguous/uncertain only for genuine ambiguity in the source itself. This feedback does "
                 "not authorize changing the candidate, source, provenance, or links, and never authorizes "
                 "inventing or relabeling an obligation solely to pass validation.\n"
+            )
+        elif mislabelled_verification_clause_ids:
+            retry_instruction = (
+                "\nA prior independent review of this same unchanged candidate called an exact "
+                "source-bound existing-content verification item new authoring for clause(s) "
+                + ", ".join(mislabelled_verification_clause_ids)
+                + ". That disposition was rejected: the cited passage did not explicitly ask "
+                "the author to create content, and this check has a current code-owned "
+                "source_content_verification_codes entry. Re-read the exact source and independently "
+                "decide whether it requires verification of already existing thesis content. "
+                "If it does, keep the work unlinked and human-pending with verdict and disposition "
+                "source_content_verification_pending. If another obligation is present, enumerate it "
+                "without erasing it; if no valid disposition applies, the review must fail closed. "
+                "Do not change the source, candidate, classification, provenance, or links, and do not "
+                "treat this feedback as evidence of compliance.\n"
             )
         elif retry_clause_ids:
             retry_instruction = (

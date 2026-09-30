@@ -589,6 +589,49 @@ class HostReviewCommitMarkerTests(unittest.TestCase):
                     expected_request_file_sha=None,
                 )
 
+    def test_pipeline_rejects_resealed_noncanonical_table_context(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            work = Path(td).resolve()
+            _response, audit_path, _receipt, _extraction = self._make_committed_merge(work)
+            audit = self._reseal_independent_request_for_test(
+                audit_path,
+                lambda request: request["checks"][0]["review_context"].update(
+                    table_structure_context={"relationship": "same_row_immediate_left_unmerged",
+                                             "source_row": {"cells": [{"text": "伪造邻格"}]}},
+                ),
+            )
+            with self.assertRaisesRegex(ValueError, "not reconstructed from the canonical source packet"):
+                pipeline._validate_independent_obligation_receipts(
+                    audit=audit, review_root=audit_path.parent,
+                    expected_run_id="commit-marker-test-run",
+                    expected_request_body_sha=request_body_sha256(
+                        json.loads((audit_path.parent / "llm-request.json").read_text(encoding="utf-8"))
+                    ), expected_request_envelope_sha=None, expected_request_file_sha=None,
+                )
+
+    def test_pipeline_rejects_table_retry_code_on_non_table_clause(self) -> None:
+        from table_source_context import TABLE_CONTEXT_RETRY_CODE
+        with tempfile.TemporaryDirectory() as td:
+            _response, audit_path, _receipt, _extraction = self._make_committed_merge(Path(td).resolve())
+            feedback = {"code": TABLE_CONTEXT_RETRY_CODE, "clause_ids": ["C1"]}
+            audit = self._reseal_independent_request_for_test(
+                audit_path, lambda request: request.update(provider_attempt=2, retry_feedback=feedback),
+            )
+            pointer = audit["chunk_runs"][0]["independent_obligation_review"]
+            envelope_path = audit_path.parent / pointer["audit_path"]
+            envelope = json.loads(envelope_path.read_text())
+            envelope["retry_feedback"] = feedback
+            pointer["retry_feedback"] = feedback
+            envelope_path.write_text(json.dumps(envelope), encoding="utf-8")
+            pointer["audit_sha256"] = sha256_file(envelope_path)
+            with self.assertRaisesRegex(ValueError, "byte or identity validation"):
+                pipeline._validate_independent_obligation_receipts(
+                    audit=audit, review_root=audit_path.parent, expected_run_id="commit-marker-test-run",
+                    expected_request_body_sha=request_body_sha256(
+                        json.loads((audit_path.parent / "llm-request.json").read_text())
+                    ), expected_request_envelope_sha=None, expected_request_file_sha=None,
+                )
+
     def test_pipeline_rejects_resealed_tampered_source_span_selection(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             work = Path(td).resolve()

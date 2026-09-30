@@ -43,6 +43,11 @@ from source_obligation_compiler import (
 )
 
 
+from table_source_context import (
+    TABLE_CONTEXT_RETRY_CODE, build_table_structure_context, table_context_retry_is_source_bound,
+)
+
+
 class NativeSemanticReviewError(RuntimeError):
     """A native semantic review could not be proven valid for this run."""
 
@@ -122,6 +127,17 @@ class SourceVerificationClassificationCorrectionRequiredError(NativeSemanticRevi
             + " classified as non-normative"
         )
         self.check_ids = tuple(check_ids)
+
+
+class TableContextUncertaintyError(NativeSemanticReviewError):
+    """An executable date placeholder needs one unchanged-candidate geometry rereview."""
+
+    code = TABLE_CONTEXT_RETRY_CODE
+
+    def __init__(self, clause_ids: list[str]) -> None:
+        self.clause_ids = tuple(sorted(set(clause_ids)))
+        super().__init__("independent review needs current table geometry rereview for "
+                         + ", ".join(self.clause_ids))
 
 
 class SourceVerificationMislabelledAsAuthoringError(NativeSemanticReviewError):
@@ -394,6 +410,12 @@ def build_obligation_coverage_request(
                 ),
             },
         })
+        try:
+            table_context = build_table_structure_context(clause, evidence_context)
+        except ValueError as exc:
+            raise NativeSemanticReviewError(str(exc)) from exc
+        if table_context is not None:
+            checks[-1]["review_context"]["table_structure_context"] = table_context
     provenance = chunk.get("provenance") if isinstance(chunk.get("provenance"), dict) else {}
     return {
         "protocol": OBLIGATION_COVERAGE_PROTOCOL,
@@ -925,6 +947,9 @@ def validate_obligation_coverage_response(
         if verdict == "uncertain" and (
             not ambiguous or scope_unresolved or not safely_unresolved
         ):
+            if (ambiguous and not scope_unresolved and not unrepresented and not represented
+                    and table_context_retry_is_source_bound(check)):
+                raise TableContextUncertaintyError([check_id])
             raise NativeSemanticReviewError(
                 f"independent obligation review uncertainty is not preserved safely for {check_id}"
             )
@@ -1136,7 +1161,18 @@ def _prompt(request: dict[str, Any]) -> str:
             else []
         )
         retry_instruction = ""
-        if external_retry_checks:
+        if isinstance(retry_feedback, dict) and retry_feedback.get("code") == TableContextUncertaintyError.code:
+            retry_instruction = (
+                "\nThe previous review called a date placeholder ambiguous for check(s) "
+                + strict_json_dumps(retry_feedback.get("clause_ids", []))
+                + ". This is one corrective review of the identical candidate. Re-read the current "
+                "table_structure_context: it records exact same-row cell geometry and neighboring text, "
+                "not a guessed field meaning. Decide independently whether that structure establishes "
+                "the placeholder's target and whether the linked requirement faithfully represents it. "
+                "Do not change candidate, source, classification, links or obligations to pass. "
+                "If ambiguity or misrepresentation remains, keep it; the original fail-closed contract applies.\n"
+            )
+        elif external_retry_checks:
             retry_instruction = (
                 "\nA prior independent-review response for this same unchanged candidate was rejected by a "
                 "deterministic local check. For these external_compliance checks, it identified the following "
@@ -1224,6 +1260,12 @@ def _prompt(request: dict[str, Any]) -> str:
             "For each check, read document_text first and independently enumerate every distinct "
             "normative, structural, quantitative, conditional, exception, prohibition, placement, "
             "or semantic obligation. Only then compare that inventory with review_context. "
+            "For table cells, use code-owned table_structure_context when present to inspect exact "
+            "same-row physical cell relationships, blank cells, and merges. A short placeholder must "
+            "not be assessed in isolation from its proven source structure. Geometry establishes "
+            "location, not field meaning: do not assume adjacency always means a particular field. "
+            "Missing or non-unique geometry is not authority to guess. Neighbor text is context only; "
+            "source_refs still select only this check's document_text. "
             "Do not assume primary_obligations is complete or correct. A source obligation is "
             "represented only when a linked requirement property and its verification contract "
             "faithfully preserve its meaning, scope, modality, strength, and qualifiers. "

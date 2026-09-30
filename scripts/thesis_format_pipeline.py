@@ -60,6 +60,7 @@ from requirements_engine import (
 from artifact_io import atomic_write_text, paths_alias
 from process_runner import run_process
 from source_obligation_compiler import compile_source_content_verification_codes
+from table_source_context import TABLE_CONTEXT_RETRY_CODE, table_retry_feedback_is_source_bound
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -444,6 +445,7 @@ def _validate_independent_obligation_receipts(
             "external_compliance_unrepresented_obligation",
             "missing_source_obligation_inventory",
             "independent_obligation_review_incomplete",
+            TABLE_CONTEXT_RETRY_CODE,
         }
         if (
             request_sha != review_audit.get("request_sha256")
@@ -466,6 +468,8 @@ def _validate_independent_obligation_receipts(
             ))
             or envelope.get("retry_feedback") != retry_feedback
             or independent.get("retry_feedback") != retry_feedback
+            or (isinstance(retry_feedback, dict) and retry_feedback.get("code") == TABLE_CONTEXT_RETRY_CODE
+                and not table_retry_feedback_is_source_bound(review_request))
         ):
             raise ValueError(f"independent obligation request/response {index} failed byte or identity validation")
         checks = review_request.get("checks")

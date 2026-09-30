@@ -21,6 +21,7 @@ from uuid import uuid4
 import xml.etree.ElementTree as ET
 
 from artifact_io import atomic_write_text
+from table_source_context import TABLE_CONTEXT_PROTOCOL, text_sha256
 from document_text_font import TEXT_FONT_ROLES, document_font_policy, materialize_document_font_references
 from existing_requirement_contract import (
     existing_reference_errors,
@@ -585,12 +586,44 @@ def extract_document_evidence(docx: Path) -> dict[str, Any]:
                     if item:
                         evidence.append(item); order += 1
                 elif child.tag == Q("tbl"):
+                    grid_columns = len(child.findall("w:tblGrid/w:gridCol", NS))
+                    bidi = child.find("w:tblPr/w:bidiVisual", NS)
+                    bidi_visual = bidi is not None and bidi.get(Q("val"), "1") not in {"0", "false", "off"}
                     for row_i, tr in enumerate(child.findall("w:tr", NS)):
+                        row_items = []
+                        row_cells = []
+                        def grid_value(node, path, default):
+                            value = node.find(path, NS)
+                            return int(value.get(Q("val"))) if value is not None else default
                         for col_i, tc in enumerate(tr.findall("w:tc", NS)):
+                            paragraphs = []
                             for para_i, p in enumerate(tc.findall("w:p", NS)):
                                 item = _paragraph_evidence(p, f"E{len(evidence)+1:05d}", "table_cell", {"part": "document", "table_child_index": child_index, "row": row_i, "column": col_i, "paragraph": para_i, "order": order})
+                                text = item["text"] if item else ""
+                                paragraphs.append({"paragraph": para_i, "text": text,
+                                                   "text_sha256": text_sha256(text),
+                                                   "evidence_id": item["id"] if item else None})
                                 if item:
                                     evidence.append(item); order += 1
+                                    row_items.append(item)
+                            def merge_value(path):
+                                node = tc.find(path, NS)
+                                return node.get(Q("val"), "continue") if node is not None else None
+                            row_cells.append({"column": col_i, "paragraphs": paragraphs,
+                                              "grid_span": grid_value(tc, "w:tcPr/w:gridSpan", 1),
+                                              "vertical_merge": merge_value("w:tcPr/w:vMerge"),
+                                              "horizontal_merge": merge_value("w:tcPr/w:hMerge"),
+                                              "has_nested_table": tc.find("w:tbl", NS) is not None})
+                        row_context = {"protocol": TABLE_CONTEXT_PROTOCOL, "part": "document",
+                                       "table_child_index": child_index, "row": row_i,
+                                       "table_grid_columns": grid_columns,
+                                       "bidi_visual": bidi_visual,
+                                       "grid_before": grid_value(tr, "w:trPr/w:gridBefore", 0),
+                                       "grid_after": grid_value(tr, "w:trPr/w:gridAfter", 0),
+                                       "cells": row_cells}
+                        row_context["row_sha256"] = sha256_json(row_context)
+                        for item in row_items:
+                            item["table_row_context"] = copy.deepcopy(row_context)
         # Text boxes are not represented by python-docx.  Capture them as
         # separate evidence, but do not count the same AlternateContent twice.
         # The outer paragraph extractor deliberately skips nested txbxContent;

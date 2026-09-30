@@ -226,6 +226,7 @@ from native_semantic_review import (  # noqa: E402
     OBLIGATION_COVERAGE_SCHEMA,
     SourceVerificationClassificationCorrectionRequiredError,
     SourceVerificationMislabelledAsAuthoringError,
+    TableContextUncertaintyError,
     RetryableNativeSemanticReviewError,
     _exact_clause_source_text,
     build_obligation_coverage_request,
@@ -234,6 +235,7 @@ from native_semantic_review import (  # noqa: E402
     validate_obligation_coverage_response,
 )
 from obligation_workflow import OBLIGATION_ANALYSIS_LEDGER_PROTOCOL, work_type_for_disposition
+from table_source_context import table_context_retry_is_source_bound, table_retry_feedback_is_source_bound
 from document_text_font import materialize_document_font_references
 from semantic_source_references import (  # noqa: E402
     REFERENCE_PROTOCOL,
@@ -316,7 +318,7 @@ def compact_model_packet(chunk: dict[str, Any]) -> dict[str, Any]:
             compact_evidence[str(evidence_id)] = {
                 key: item[key]
                 for key in (
-                    "id", "kind", "text", "style_id", "style_name", "location",
+                    "id", "kind", "text", "style_id", "style_name", "location", "table_row_context",
                 )
                 if key in item
             }
@@ -10800,6 +10802,7 @@ def _validate_completed_obligation_ledger_chain(
         "independent_obligation_review_incomplete",
         InconsistentObligationVerdictError.code,
         SourceVerificationMislabelledAsAuthoringError.code,
+        TableContextUncertaintyError.code,
     }
     if (
         isinstance(provider_attempt, bool) or not isinstance(provider_attempt, int)
@@ -10816,6 +10819,8 @@ def _validate_completed_obligation_ledger_chain(
         or review_request.get("provider_attempt") != provider_attempt
         or review_request.get("provenance") != provenance
         or review_request.get("retry_feedback") != retry_feedback
+        or (isinstance(retry_feedback, dict) and retry_feedback.get("code") == TableContextUncertaintyError.code
+            and not table_retry_feedback_is_source_bound(review_request))
         or request_sha != review_audit.get("request_sha256")
         or request_sha != independent_envelope.get("review_request_sha256")
         or request_sha != independent.get("review_request_sha256")
@@ -12013,6 +12018,7 @@ def _run_independent_obligation_coverage_review(
         MissingSourceObligationInventoryError,
         InconsistentObligationVerdictError,
         SourceVerificationMislabelledAsAuthoringError,
+        TableContextUncertaintyError,
     ) as review_error:
         source_verification_mislabel = isinstance(
             review_error, SourceVerificationMislabelledAsAuthoringError,
@@ -12049,6 +12055,11 @@ def _run_independent_obligation_coverage_review(
             and not checks_by_id[clause_id]["review_context"].get("manual_review_codes")
             for clause_id in review_error.clause_ids
         )
+        if isinstance(review_error, TableContextUncertaintyError):
+            bound_mislabel = bool(review_error.clause_ids) and all(
+                table_context_retry_is_source_bound(checks_by_id.get(clause_id, {}))
+                for clause_id in review_error.clause_ids
+            )
         retryable = (
             _provider_attempt < INDEPENDENT_REVIEW_PROVIDER_MAX_ATTEMPTS
             and bool(review_error.clause_ids)

@@ -137,9 +137,9 @@ class SourceVerificationMislabelledAsAuthoringError(NativeSemanticReviewError):
         )
 
 
-def is_explicit_authoring_content_quote(quote: Any) -> bool:
+def is_explicit_authoring_content_quote(quote: Any, *, source_text: Any = None) -> bool:
     """Compatibility wrapper for the shared source-owned authoring guard."""
-    return _is_explicit_authoring_content_quote(quote)
+    return _is_explicit_authoring_content_quote(quote, source_text=source_text)
 
 
 def _exact_clause_source_text(
@@ -591,7 +591,7 @@ def validate_obligation_coverage_response(
             elif disposition == "external_action_pending":
                 external_pending += 1
             elif disposition == "authoring_content_pending":
-                if not is_explicit_authoring_content_quote(quote):
+                if not is_explicit_authoring_content_quote(quote, source_text=source_text):
                     if (
                         live_source_verification_codes
                         and classification in {

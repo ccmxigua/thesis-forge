@@ -215,6 +215,7 @@ class SourceObligationCompilerTests(unittest.TestCase):
             "研究方法同上不再累述，根据实际情况填写",
             "根据论文实际情况撰写",
             "根据本人论文的实际情况填写",
+            "本部分主要撰写国内的研究现状，不能是文献资料的简单摘录，需要分类、总结、归纳",
         ):
             with self.subTest(quote=quote):
                 self.assertTrue(is_explicit_authoring_content_quote(quote))
@@ -222,7 +223,6 @@ class SourceObligationCompilerTests(unittest.TestCase):
         for quote in (
             "如果需要，本部分主要撰写选题的意义，根据实际情况自行填写",
             "本部分不应撰写选题的意义，根据实际情况自行填写",
-            "本部分主要撰写国内的研究现状，不能是文献资料的简单摘录，需要分类、总结、归纳",
             "示例：本部分主要撰写选题的意义，根据实际情况自行填写",
             "样例正文写着‘本部分主要撰写选题的意义，根据实际情况自行填写’",
             "本部分主要介绍图的样式，根据实际情况自行填写",

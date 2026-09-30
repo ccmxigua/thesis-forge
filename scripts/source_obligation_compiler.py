@@ -1644,34 +1644,123 @@ def compile_source_content_verification_codes(source_text: Any) -> list[str]:
     return ["keyword_source_traceability_verification"]
 
 
-def is_explicit_authoring_content_quote(quote: Any) -> bool:
-    """Recognize only a source instruction that explicitly asks for authored content.
+def is_explicit_authoring_content_quote(quote: Any, *, source_text: Any = None) -> bool:
+    """Recognize an unconditional positive content instruction, never compliance.
 
-    This conservative lexical gate is shared by the independent reviewer and
-    source-verification projections. It is not a general semantic classifier:
-    unsupported or ambiguous wording remains pending instead of being
-    reinterpreted as an authoring task.
+    A quality prohibition in another proposition (e.g. do not copy literature)
+    does not negate a positive writing instruction. Negated writing actions,
+    conditional scope and quoted examples still fail closed. Keep the original
+    text intact: these spans only authorize a pending author work item.
     """
     if not isinstance(quote, str) or not quote.strip():
         return False
+    if source_text is not None:
+        # A model-selected substring must not shed a source condition, example
+        # label, conflicting instruction or quotation. Ambiguous repeated
+        # quotations do not establish which occurrence authorized the work.
+        if (
+            not isinstance(source_text, str)
+            or source_text.count(quote) != 1
+            or _inside_quote(source_text, source_text.find(quote))
+        ):
+            return False
+        return (
+            is_explicit_authoring_content_quote(quote)
+            and is_explicit_authoring_content_quote(source_text)
+        )
     compact = re.sub(r"\s+", "", quote).casefold()
     # An example of an instruction is not itself an instruction to the author.
     if re.match(r"^(?:示例|样例|范例|反例|例如|比如)[：:]", compact) or re.search(
         r"(?:示例|样例|范例|反例)(?:正文)?(?:写着|写道|称)[“‘\"']", compact
     ):
         return False
-    chinese_scope_markers = (
-        "不得", "不要", "不能", "不应", "不宜", "不可", "无需", "无须", "禁止", "避免", "切勿",
-        "如果", "若", "假如", "倘若", "除非", "只有在", "仅当", "如有", "当……时",
-    )
-    if any(token in compact for token in chinese_scope_markers):
-        return False
-    english = quote.casefold()
     if re.search(
-        r"\b(?:not|never|don't|doesn't|didn't|cannot|can't|shouldn't|mustn't|without|unless|if|when|only\s+if|provided\s+that)\b",
-        english,
+        r"(?:页面)?(?:布局|排版|版式|样式|格式)[：:]|"
+        r"(?:仅供|只供|用于|作为).{0,8}(?:排版|布局|演示|示例)", compact,
     ):
         return False
+    # A conditional may govern a later comma-separated instruction. Do not
+    # discard its antecedent while searching for an unconditional positive.
+    if re.search(
+        r"如果|若|假如|倘若|除非|只有|仅当|仅在|如有|只要|前提是|必要时|当……时|"
+        r"(?:^|[，,。；;！？!?\n])(?:当|在)[^，,。；;！？!?\n]{1,24}时", compact,
+    ):
+        return False
+    if re.search(
+        r"\b(?:unless|if|when|only\s+if|provided\s+that|on\s+condition|in\s+case)\b", quote, re.I,
+    ):
+        return False
+
+    negative = re.compile(
+        r"不得|不要|不能|不应|不宜|不可|无需|无须|不必|不需要|不要求|禁止|避免|切勿|并非|不是|"
+        r"\b(?:not|never|don't|doesn't|didn't|cannot|can't|shouldn't|mustn't|without)\b",
+        re.I,
+    )
+    # A prohibition on writing itself, including a contradictory positive /
+    # negative pair, cannot be removed as if it were an unrelated quality rule.
+    negated_action = re.compile(
+        r"(?:不得|不要|不能|不应|不宜|不可|无需|无须|不必|不需要|不要求|禁止|避免|切勿|不是|并非)"
+        r"[^，,。；;！？!?\n]{0,16}(?:撰写|编写|补充|填写|提供|替换)|"
+        r"\b(?:not|never|don't|doesn't|didn't|cannot|can't|shouldn't|mustn't|without)\b"
+        r"[^,.;!?\n]{0,32}\b(?:write|draft|provide|replace|fill\s+in|supply)\b",
+        re.I,
+    )
+    if any(not _inside_quote(quote, match.start()) for match in negated_action.finditer(quote)):
+        return False
+
+    # Only unquoted proposition boundaries split the source. Adjacent positive
+    # propositions retain their original context (e.g. section + actual-work
+    # instruction); skipping a negative proposition never joins distant text.
+    boundaries = [0]
+    boundaries.extend(
+        match.end() for match in re.finditer(r"[，,。.;；！？!?\n]", quote)
+        if not _inside_quote(quote, match.start())
+    )
+    if boundaries[-1] != len(quote):
+        boundaries.append(len(quote))
+    positive_start = None
+    for start, end in zip(boundaries, boundaries[1:]):
+        segment = quote[start:end]
+        if negative.search(segment):
+            if positive_start is not None and _positive_authoring_content_instruction(quote[positive_start:start]):
+                return True
+            positive_start = None
+        elif positive_start is None:
+            positive_start = start
+    return positive_start is not None and _positive_authoring_content_instruction(quote[positive_start:])
+
+
+def _positive_authoring_content_instruction(quote: str) -> bool:
+    """Recognize registered positive forms in an unchanged safe source span."""
+    compact = re.sub(r"\s+", "", quote).casefold()
+    if re.search(r"(?:示例|样例|范例|反例|例如|比如)[：:]", compact) or re.search(
+        r"\b(?:for\s+example|example\s*:|sample\s*:|counterexample\s*:)", quote, re.I,
+    ):
+        return False
+    # These are content targets, not layout labels or a generic form field.
+    # Require a complete section-owned directive, not a heading-word match.
+    content_target = (
+        r"(?:国内外|国内|国外)?(?:的)?"
+        r"(?:研究现状|研究综述|文献综述|研究方法|研究过程|研究结果|研究结论|研究背景|"
+        r"选题的(?:背景|原因|目的|意义|理论与应用价值))"
+    )
+    section_instruction = re.compile(
+        r"(?:^|[，,。；;！？!?\n])本(?:部分|节|章)(?:主要)?"
+        r"(?:应当|应该|必须|需要|须|应|需)?(?:撰写|编写|补充|提供)"
+        + content_target + rf"(?:(?:以及|、|及|和|与){content_target})*"
+        + r"(?=$|[，,。；;！？!?\n])"
+    )
+    if any(not _inside_quote(compact, match.start()) for match in section_instruction.finditer(compact)):
+        return True
+    summary_instruction = re.compile(
+        r"(?:^|[，,。；;！？!?\n])本(?:部分|节|章)(?:是|为)对"
+        r"[^，,。；;！？!?\n]{1,48}(?:小结|总结)[，,]"
+        r"(?:重点|主要)(?:说明|阐述)(?:以往|已有|前述|上述)研究对本研究"
+        r"(?:的)?(?:基础贡献|贡献|影响|支撑|启示)"
+    )
+    if any(not _inside_quote(compact, match.start()) for match in summary_instruction.finditer(compact)):
+        return True
+
     chinese_sample = any(token in compact for token in (
         "示例", "样例", "范例", "虚构", "杜撰", "编的", "编写的",
     ))
@@ -1682,7 +1771,11 @@ def is_explicit_authoring_content_quote(quote: Any) -> bool:
     chinese_genuine_content = any(token in compact for token in (
         "真实内容", "实际内容", "真实研究", "实际研究", "本人内容",
     ))
-    if chinese_author and chinese_action and (chinese_sample or chinese_genuine_content):
+    unquoted_action = any(
+        not _inside_quote(compact, match.start())
+        for match in re.finditer(r"撰写|编写|补充|填写|提供|替换", compact)
+    )
+    if chinese_author and chinese_action and unquoted_action and (chinese_sample or chinese_genuine_content):
         return True
 
     # Some templates directly ask for thesis content based on the author's
@@ -1709,9 +1802,10 @@ def is_explicit_authoring_content_quote(quote: Any) -> bool:
             ("论文" in actual_instruction.group() or "本人" in actual_instruction.group())
             and re.fullmatch(r"[。.!！?？]*", trailing) is not None
         )
-        if not example_prefix and ((content_section and not technical_target) or stand_alone):
+        if not example_prefix and not technical_target and (content_section or stand_alone):
             return True
 
+    english = quote.casefold()
     english_sample = any(token in english for token in (
         "example", "sample", "fictitious", "fabricated", "placeholder",
     ))
@@ -1722,7 +1816,11 @@ def is_explicit_authoring_content_quote(quote: Any) -> bool:
     english_genuine_content = any(token in english for token in (
         "genuine content", "actual research", "original content",
     ))
-    return english_author and english_action and (english_sample or english_genuine_content)
+    unquoted_english_action = any(
+        not _inside_quote(quote, match.start())
+        for match in re.finditer(r"\b(write|draft|provide|replace|fill\s+in|supply)\b", quote, re.I)
+    )
+    return english_author and english_action and unquoted_english_action and (english_sample or english_genuine_content)
 
 
 def has_explicit_authoring_action_cue(source_text: Any) -> bool:

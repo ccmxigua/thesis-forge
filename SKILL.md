@@ -597,6 +597,17 @@ identities are well formed, no executable requirement is linked, and the
 source has no explicit authoring cue. Independent review still re-reads that
 same source, and a mistaken multi-item authoring disposition receives only a
 bounded re-review, never automatic approval.
+For source-owned author work items, an explicit positive section-writing or
+research-summary instruction may coexist with a separate quality prohibition
+such as not copying literature. Code recognizes the positive instruction in
+unchanged source spans; it never drops the negative quality requirement or
+authors the missing content. A model-selected quote must be unique, unquoted,
+and authorized by its full current clause text, so selecting only the tail of
+a conditional, example, layout demonstration, or conflicting instruction
+cannot manufacture an unconditional author task. Unknown wording stays
+unresolved. Accepted author work remains `source_content_pending`, with every
+original obligation retained; it is not executable coverage or permission to
+submit. A later fresh run must revalidate these decisions under the new code.
 An `unresolved` primary review caused by backend inability to check a registered
 keyword-origin duty may use the v3 deterministic classification projection only
 when the entire exact current evidence span matches a closed pure-verification

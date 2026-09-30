@@ -237,6 +237,7 @@ from native_semantic_review import (  # noqa: E402
 from obligation_workflow import OBLIGATION_ANALYSIS_LEDGER_PROTOCOL, work_type_for_disposition
 from table_source_context import table_context_retry_is_source_bound, table_retry_feedback_is_source_bound
 from document_text_font import materialize_document_font_references
+from administrative_relation_projection import project_administrative_copies
 from semantic_source_references import (  # noqa: E402
     REFERENCE_PROTOCOL,
     bind_validated_source_reference_selections,
@@ -669,6 +670,7 @@ _BASE_CONTRACT_REPAIR_RULES = (
     "Every executable/covered/verify_existing requirement reference must be a zero-based index of a semantically matching emitted requirement whose clause_ids contains that exact review clause_id; check every review/index pair independently. Never carry an adjacent clause's index, change clause_ids to make validation pass, or emit an unused requirement.",
     "For keyword content constraints, keep count_guidance, min_count/max_count, max_item_chars, item_length_metric, require_after_role, and separator under a content_constraints requirement at properties.keywords_zh or properties.keywords_en. Preserve a top-level keyword role only for its own declared role/style properties; do not use it as the sole representation of content constraints.",
     "Every emitted requirement must contain at least one non-null property in its role-specific properties object. A field_key identifies a content instance but is not an executable payload; do not emit properties: {} or use field_key alone. For text and cover-field roles, copy the exact evidence-backed text into properties.text; for style/layout roles, emit the declared nested style or layout property.",
+    "This non-empty-payload rule applies only to actual DOCX requirements. A pure external approval, consent, application or seal duty must have pending clause-review obligations and NO requirement object. Never copy an administrative table to fill an external requirement. Bind each administrative property to its exact operative clauses: the default-public sentence, table field labels, duration choices and shorter-duration notes may share one source-region requirement with all supporting clause/evidence links. Do not add a second full-table requirement merely to satisfy a missing edge. If distinct regions, unique operations or conflicting values exist, preserve them separately for source-first review rather than merging or deleting them.",
     "For an explicit acknowledgments length clause such as '字数一般不超过500字', use the content_constraints role with the nested payload properties.acknowledgments.max_chars. Do not emit generic null-valued placeholder fields or put the limit at the role root; the bridge may compile this exact evidence-backed form mechanically.",
     "For an explicit appendix placement clause such as '附录放在正文之后另起页', use the appendices role with properties.page_break_each: true. Do not emit generic null-valued appendix fields or infer labels/titles/order from this clause; the bridge may compile only this exact evidence-backed page-break form mechanically.",
     "For a cover requirement with an empty required institution string and the declared neutral placeholder policy, preserve the cover structure and use '——'; never copy a school name or infer an institution identity from nearby evidence.",
@@ -8755,6 +8757,30 @@ def _apply_safe_mechanical_repairs(
     """
     if not isinstance(response, dict) or not error_records:
         return None, []
+
+    # A source-bound table may already preserve every local operation while
+    # the model copied those properties onto pending approvals or onto the
+    # default-public sentence. Authenticate the complete current validator
+    # bundle first; never use selected/stale feedback as deletion authority.
+    if isinstance(chunk, dict):
+        current_errors = validate_host_agent_response(response, chunk)
+        current_records = contract_error_records(current_errors, response=response, chunk=chunk)
+        allowed_copy_errors = all(
+            record.get("code") in {"non_requirement_classification_relation", "missing_derived_requirement",
+                                   "requirement_relation_mismatch"}
+            or (record.get("code") == "cover_binding_violation" and (
+                str(record.get("raw_error", "")).endswith("must_be_bound_to_exact_linked_source_clause")
+                or str(record.get("raw_error", "")).endswith("must_be_bound_to_linked_source_clause")))
+            for record in current_records
+        )
+        if (allowed_copy_errors and current_records
+                and sorted(_response_sha256(item) for item in current_records)
+                == sorted(_response_sha256(item) for item in error_records)):
+            copied, copy_audit = project_administrative_copies(
+                response, chunk, validate=validate_host_agent_response,
+            )
+            if copied is not None and copy_audit:
+                return copied, copy_audit
 
     pruned, prune_audit = _prune_unbound_empty_schema_shells(response, error_records, chunk)
     if pruned is not None:

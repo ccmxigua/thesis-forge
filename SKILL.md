@@ -102,7 +102,7 @@ when its external verification, exact current-source binding, and pending
 obligations pass the same checks; its complete applicability remains in the
 repair audit as **pending human scope**, not a verified condition. Non-null
 role-specific properties, field keys, input prerequisites, altered text, and
-mixed/local payloads are not removable.
+mixed/local payloads are not removable by this source-echo/null-shell rule.
 After projection the complete contract and independent source-first obligation
 review must pass; the external actions stay pending and block submission.
 Mixed executable/external edges, empty/orphan clause/evidence relations, stale
@@ -115,6 +115,27 @@ seal). These guards reject projection; they do not infer that an arbitrary
 clause is purely external. The independent source-first review remains required
 and must reject external-only status whenever its exact source packet contains
 code-known local DOCX obligations.
+
+There is a separate conservative administrative-copy repair, not a general
+external-requirement deletion rule. One uniquely identified executable table
+may retain all DOCX operations while a model has copied its properties onto
+pure pending approvals/seals or onto a redundant default-public requirement.
+The bridge authenticates the complete current validator bundle, exact evidence
+spans and physical locations. The heading, operative default-public paragraph
+and table must be adjacent; another possible table, heading, unknown scope or
+conflicting rule disables this repair. Only the unique source-compiled
+default-public clause may complete a missing table edge. Every removed payload
+must be contained in the retained table with identical values and source order;
+field order numbers may be relative to the copied subset, but their relative
+sequence cannot change. An executable duplicate must have identical properties
+and no unique source edge. Identities, prerequisites, unique properties, altered
+conditions or mixed duties are not removable. Complete removed objects, current
+source spans, run provenance and before/after hashes stay in the repair audit.
+Classifications, obligation inventories and the retained properties never
+change. The full contract and fresh independent source-first review are still
+required; pending actions remain pending and never authorize submission.
+Other layouts are not declared unsupported: they simply receive no mechanical
+copy repair and still require their ordinary source-bound semantic review.
 
 When one response has both a non-removable external-only requirement and a
 different unbound requirement with no clause/evidence links, the two errors do

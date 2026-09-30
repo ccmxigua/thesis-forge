@@ -1178,7 +1178,7 @@ def _security_marking_qualifier_binding_errors(
                 continue
             source_backed = any(
                 source_fact_value_matches(
-                    options, [expected_option], "security_marking_option",
+                    [option], [expected_option], "security_marking_option",
                 )
                 for fact in source_facts
                 for expected_option in fact.get("expected_value", [])

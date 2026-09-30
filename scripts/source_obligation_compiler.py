@@ -13,8 +13,9 @@ import re
 from typing import Any
 
 
-SOURCE_VERIFICATION_CLASSIFICATION_POLICY_VERSION = "source-verification-classification-v1"
-SOURCE_KEYWORD_CONSTRAINT_PROJECTION_POLICY_VERSION = "source-keyword-constraints-v2"
+SOURCE_VERIFICATION_CLASSIFICATION_POLICY_VERSION = "source-verification-classification-v3"
+SOURCE_KEYWORD_CONSTRAINT_PROJECTION_POLICY_VERSION = "source-keyword-constraints-v3"
+SOURCE_HEADING_BINDING_POLICY_VERSION = "source-heading-binding-v1"
 
 
 _OPTIONAL_CAPTION = re.compile(
@@ -1006,16 +1007,71 @@ def compile_keyword_source_constraints(clause: Any) -> dict[str, Any] | None:
     }
 
 
+_COMPLETE_STANDALONE_ZH_KEYWORD_RULE = re.compile(
+    r"^(?:关键词|关键字)在摘要(?:内容|正文)后(?:另起一行|另行)[，,]"
+    r"(?:一般|通常)\d+[～~至]\d+个[，,]"
+    r"(?:之间)?(?:用|以)分号(?:分开|分隔)[。.]?$"
+)
+
+
+def verified_current_source_span(
+    clause: Any, evidence_context: Any,
+) -> tuple[str, str] | None:
+    """Verify an exact span against the current evidence, not model text."""
+    if not isinstance(clause, dict) or not isinstance(evidence_context, dict):
+        return None
+    span = clause.get("source_span")
+    cited = clause.get("evidence_ids")
+    if not isinstance(span, dict) or not isinstance(cited, list) or len(cited) != 1:
+        return None
+    evidence_id = span.get("evidence_id")
+    if not isinstance(evidence_id, str) or cited != [evidence_id]:
+        return None
+    evidence = evidence_context.get(evidence_id)
+    source = evidence.get("text") if isinstance(evidence, dict) else None
+    start, end = span.get("start_offset"), span.get("end_offset")
+    if (
+        not isinstance(source, str)
+        or not isinstance(start, int) or isinstance(start, bool)
+        or not isinstance(end, int) or isinstance(end, bool)
+        or not 0 <= start < end <= len(source)
+        or source[start:end] != span.get("text")
+        or hashlib.sha256(source.encode("utf-8")).hexdigest() != span.get("source_sha256")
+        or (isinstance(clause.get("location"), dict)
+            and clause["location"] != evidence.get("location"))
+    ):
+        return None
+    return evidence_id, source[start:end]
+
+
+def _complete_standalone_keyword_rule(
+    clause: dict[str, Any], compiled: dict[str, Any], evidence_context: Any,
+) -> bool:
+    """Only a closed, fully represented sentence may create its own edge."""
+    binding = verified_current_source_span(clause, evidence_context)
+    if binding is None or compiled.get("language_key") != "keywords_zh":
+        return False
+    exact = binding[1]
+    if _COMPLETE_STANDALONE_ZH_KEYWORD_RULE.fullmatch(re.sub(r"\s+", "", exact)) is None:
+        return False
+    properties = compiled.get("properties")
+    return (
+        isinstance(properties, dict)
+        and set(properties) == {"count_guidance", "require_after_role", "separator"}
+        and properties.get("separator") == "semicolon"
+        and properties.get("require_after_role") == "abstract_body_zh"
+    )
+
+
 def materialize_source_keyword_constraints(
-    response: Any, clauses: Any,
+    response: Any, clauses: Any, *, evidence_context: Any = None,
+    allow_standalone: bool = False,
 ) -> tuple[Any, list[dict[str, Any]]]:
     """Add source-derived keyword constraints to an exactly linked requirement.
 
-    This does not reinterpret an unlinked source clause: projection requires a
-    current, exact-evidence keyword role or an existing nonempty nested keyword
-    content constraint, plus an executable review for each clause. It never
-    changes review classifications or obligation statuses. Existing conflicting
-    values are preserved so the ordinary validator can reject them.
+    A narrowly registered complete sentence can instead create its own edge
+    when its current source span is independently verified. This never changes
+    review classifications; conflicting existing values remain validator errors.
     """
     if not isinstance(response, dict) or not isinstance(clauses, list):
         return copy.deepcopy(response), []
@@ -1081,10 +1137,26 @@ def materialize_source_keyword_constraints(
                 and all(isinstance(value, str) for value in requirement["evidence_ids"])
                 and set(clause_evidence_ids).issubset(set(requirement["evidence_ids"]))
             ]
-        if len(parent_indexes) != 1:
+        standalone = False
+        if not parent_indexes and allow_standalone:
+            # A misbound or competing model requirement is not permission to
+            # synthesize a second one and conceal the original contract error.
+            already_cited = any(
+                isinstance(requirement, dict)
+                and isinstance(requirement.get("clause_ids"), list)
+                and clause_id in requirement["clause_ids"]
+                for requirement in requirements
+            )
+            standalone = (
+                not already_cited
+                and _complete_standalone_keyword_rule(
+                    clause, compiled, evidence_context,
+                )
+            )
+        if len(parent_indexes) != 1 and not standalone:
             continue
-        parent = requirements[parent_indexes[0]]
-        confidence = parent.get("confidence")
+        parent = requirements[parent_indexes[0]] if parent_indexes else None
+        confidence = parent.get("confidence") if parent is not None else 1.0
         if (
             isinstance(confidence, bool) or not isinstance(confidence, (int, float))
             or not 0 <= confidence <= 1
@@ -1093,8 +1165,8 @@ def materialize_source_keyword_constraints(
         groups.setdefault(compiled["language_key"], []).append({
             "clause_id": clause_id,
             "evidence_ids": clause_evidence_ids,
-            "parent_index": parent_indexes[0],
-            "parent_role": parent["role"],
+            "parent_index": parent_indexes[0] if parent_indexes else None,
+            "parent_role": parent["role"] if parent is not None else "source_compiler",
             "confidence": float(confidence),
             "compiled": compiled,
         })
@@ -1112,7 +1184,9 @@ def materialize_source_keyword_constraints(
                     conflicted_fields.add(field)
                     continue
                 desired[field] = copy.deepcopy(value)
-        if not desired:
+        if not desired or (conflicted_fields and any(
+            entry["parent_index"] is None for entry in entries
+        )):
             continue
 
         clause_ids = [entry["clause_id"] for entry in entries]
@@ -1198,13 +1272,20 @@ def materialize_source_keyword_constraints(
         if before_bytes != after_bytes:
             audits.append({
                 "projection_policy_version": SOURCE_KEYWORD_CONSTRAINT_PROJECTION_POLICY_VERSION,
-                "rule_id": "source_bound_keyword_constraint_projection_v2",
-                "authorization": "exact_current_source_and_linked_keyword_requirement_v2",
+                "rule_id": "source_bound_keyword_constraint_projection_v3",
+                "authorization": (
+                    "verified_complete_current_source_without_parent_v1"
+                    if any(entry["parent_index"] is None for entry in entries)
+                    else "exact_current_source_and_linked_keyword_requirement_v2"
+                ),
                 "semantic_inference": "none",
                 "language_key": language_key,
                 "action": "complete_existing_content_constraint" if overlapping_constraints else "add_content_constraint",
                 "requirement_index": requirement_index,
-                "parent_requirement_indexes": sorted({entry["parent_index"] for entry in entries}),
+                "parent_requirement_indexes": sorted({
+                    entry["parent_index"] for entry in entries
+                    if entry["parent_index"] is not None
+                }),
                 "parent_binding_roles": sorted({entry["parent_role"] for entry in entries}),
                 "clause_ids": clause_ids,
                 "evidence_ids": evidence_ids,
@@ -1225,6 +1306,156 @@ def materialize_source_keyword_constraints(
                 "before_sha256": hashlib.sha256(before_bytes).hexdigest(),
                 "after_sha256": hashlib.sha256(after_bytes).hexdigest(),
             })
+    return projected, audits
+
+
+def materialize_structural_heading_clauses(
+    response: Any, clauses: Any, *, evidence_context: Any,
+    anchor_inventory: Any, allowed_roles: Any, role_properties_schema: Any,
+    contract_defs: Any, expected_source_sha256: Any = None,
+) -> tuple[Any, list[dict[str, Any]]]:
+    """Bind a standalone heading only to its exact, unique current anchor.
+
+    Another occurrence of the same heading text is not evidence that it names
+    the target role. Such an executable model claim is kept as unresolved,
+    with the original claim in the audit, rather than inventing a binding.
+    """
+    projected = copy.deepcopy(response)
+    if not all(isinstance(value, dict) for value in (
+        projected, evidence_context, anchor_inventory, role_properties_schema,
+        contract_defs,
+    )) or not isinstance(clauses, list) or not isinstance(allowed_roles, list):
+        return projected, []
+    requirements = projected.get("requirements")
+    reviews = projected.get("clause_reviews")
+    anchors = anchor_inventory.get("anchors")
+    source_identity = anchor_inventory.get("source")
+    if (
+        not isinstance(requirements, list) or not isinstance(reviews, list)
+        or not isinstance(anchors, dict)
+        or not isinstance(source_identity, dict)
+        or anchor_inventory.get("status") != "verified"
+        or not re.fullmatch(
+            r"[0-9a-f]{64}", str(source_identity.get("sha256") or ""),
+        )
+        or (expected_source_sha256 is not None
+            and expected_source_sha256 != source_identity.get("sha256"))
+    ):
+        return projected, []
+
+    def text_role_allowed(role: str) -> bool:
+        if role not in allowed_roles:
+            return False
+        schema = role_properties_schema.get(role)
+        if isinstance(schema, dict) and isinstance(schema.get("$ref"), str):
+            prefix = "#/$defs/"
+            ref = schema["$ref"]
+            schema = contract_defs.get(ref[len(prefix):]) if ref.startswith(prefix) else None
+        return (
+            isinstance(schema, dict)
+            and isinstance(schema.get("properties"), dict)
+            and isinstance(schema["properties"].get("text"), dict)
+            and schema["properties"]["text"].get("type") == "string"
+        )
+
+    review_by_clause: dict[str, list[dict[str, Any]]] = {}
+    for review in reviews:
+        if isinstance(review, dict) and isinstance(review.get("clause_id"), str):
+            review_by_clause.setdefault(review["clause_id"], []).append(review)
+    audits: list[dict[str, Any]] = []
+    for clause in clauses:
+        if not isinstance(clause, dict) or not isinstance(clause.get("id"), str):
+            continue
+        clause_id = clause["id"]
+        matching_reviews = review_by_clause.get(clause_id, [])
+        if len(matching_reviews) != 1 or matching_reviews[0].get("classification") not in {
+            "covered", "executable", "verify_existing",
+        }:
+            continue
+        if any(
+            isinstance(item, dict) and isinstance(item.get("clause_ids"), list)
+            and clause_id in item["clause_ids"] for item in requirements
+        ):
+            continue
+        binding = verified_current_source_span(clause, evidence_context)
+        if binding is None or clause.get("source_kind") != "paragraph":
+            continue
+        evidence_id, exact_text = binding
+        evidence = evidence_context[evidence_id]
+        span = clause["source_span"]
+        if span.get("start_offset") != 0 or span.get("end_offset") != len(evidence["text"]):
+            continue
+        style = str(evidence.get("style_name") or "")
+        if not re.search(r"\bheading\b|\btitle\b|标题|题名", style, re.I):
+            continue
+        normalized = re.sub(r"\s+", "", exact_text).casefold()
+        matching_roles: list[tuple[str, dict[str, Any]]] = []
+        for role, anchor in anchors.items():
+            if not isinstance(role, str) or not text_role_allowed(role) or not isinstance(anchor, dict):
+                continue
+            matches = anchor.get("matches")
+            if (
+                anchor.get("anchor_type") != "semantic_role"
+                or anchor.get("binding_status") != "verified"
+                or anchor.get("match_count") != 1
+                or not isinstance(matches, list) or len(matches) != 1
+                or not isinstance(matches[0], dict)
+            ):
+                continue
+            anchor_text = matches[0].get("text")
+            if isinstance(anchor_text, str) and re.sub(r"\s+", "", anchor_text).casefold() == normalized:
+                matching_roles.append((role, matches[0]))
+        if len(matching_roles) != 1:
+            continue
+        review = matching_reviews[0]
+        obligations = review.get("obligations")
+        if not isinstance(obligations, list) or not obligations or any(
+            not isinstance(item, dict) or item.get("status") != "covered"
+            for item in obligations
+        ):
+            continue
+        role, anchor_match = matching_roles[0]
+        before = copy.deepcopy(projected)
+        original_review = copy.deepcopy(review)
+        action = "add_exact_heading_requirement"
+        if anchor_match.get("evidence_id") == evidence_id:
+            requirements.append({
+                "role": role,
+                "properties": {"text": exact_text},
+                "clause_ids": [clause_id],
+                "evidence_ids": [evidence_id],
+                "confidence": 1.0,
+                "reason": "Exact current source heading equals the unique verified role anchor.",
+            })
+        else:
+            action = "retain_unresolved_heading_binding"
+            review["classification"] = "unresolved"
+            review["normative_basis"] = "insufficient"
+            review["reason"] = (
+                "This heading occurrence differs from the unique verified target role "
+                "anchor; its applicability needs source-grounded review."
+            )
+            for item in obligations:
+                item["status"] = "unresolved"
+                item["reason"] = "The source heading occurrence has no verified target-role binding."
+        audits.append({
+            "projection_policy_version": SOURCE_HEADING_BINDING_POLICY_VERSION,
+            "action": action,
+            "clause_id": clause_id,
+            "evidence_id": evidence_id,
+            "source_sha256": span["source_sha256"],
+            "source_quote": exact_text,
+            "anchor_source_sha256": source_identity["sha256"],
+            "target_role": role,
+            "anchor_evidence_id": anchor_match.get("evidence_id"),
+            "original_review": original_review,
+            "before_sha256": hashlib.sha256(json.dumps(
+                before, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            ).encode("utf-8")).hexdigest(),
+            "after_sha256": hashlib.sha256(json.dumps(
+                projected, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            ).encode("utf-8")).hexdigest(),
+        })
     return projected, audits
 
 
@@ -2150,8 +2381,18 @@ def materialize_known_source_verification(
     return projected, audit
 
 
+_PURE_KEYWORD_ORIGIN_CHECK = re.compile(
+    r"^(?:(?:论文中的)?(?:关键词|关键字)(?:须|应|必须|应当)?"
+    r"(?:源自论文|从论文中选取)"
+    r"(?:[，,；;]?(?:并|并且)?(?:在论文中)?(?:有明确出处|可追溯至对应原文))+"
+    r"|(?:关键词|关键字)是为了便于做文献索引和检索工作而从论文中选取出来"
+    r"用以表示全文主题内容信息的单词或术语[，,]在论文中有明确出处)[。.]?$"
+)
+
+
 def materialize_source_verification_classifications(
     response: Any, clauses: Any, *, provenance: Any = None,
+    evidence_context: Any = None,
 ) -> tuple[Any, list[dict[str, Any]]]:
     """Keep code-registered existing-content checks in a human-verification state.
 
@@ -2161,7 +2402,13 @@ def materialize_source_verification_classifications(
     code projects that misclassification to ``requires_source_verification``.
     It does not create a requirement or claim the check passed. Explicit
     authoring instructions, executable requirements, mixed/manual source facts,
-    and non-singleton model obligation inventories are left untouched.
+    model inventories containing another status or duplicate/invalid IDs are
+    left untouched. Multiple model descriptions of the same registered
+    source-origin check remain in the audit and still require an independent
+    source-obligation review; their count does not create a new authoring duty.
+    An unresolved model claim can take this route only with an exact current
+    evidence binding, explicit normative basis, exclusively unresolved primary
+    duties, and no source ambiguity, condition, executable rule, or conflict.
     """
     if (
         not isinstance(response, dict)
@@ -2204,14 +2451,45 @@ def materialize_source_verification_classifications(
         review = projected_review_map.get(clause_id)
         original_review = review_map.get(clause_id)
         obligations = original_review.get("obligations") if isinstance(original_review, dict) else None
+        baseline_classification = (
+            original_review.get("classification") if isinstance(original_review, dict) else None
+        )
+        source_binding = None
+        expected_obligation_status = "requires_source_content"
+        if baseline_classification == "unresolved":
+            source_binding = verified_current_source_span(clause, evidence_context)
+            expected_obligation_status = "unresolved"
+            if (
+                source_binding is None
+                or source_binding[1] != source_text
+                or original_review.get("normative_basis") != "explicit_normative_text"
+                or _PURE_KEYWORD_ORIGIN_CHECK.fullmatch(source_text) is None
+                or _CONTEXT_UNSAFE.search(source_text)
+                or compile_keyword_source_constraints(clause)
+                or any(
+                    isinstance(item, dict)
+                    and clause_id in (item.get("clause_ids") or [])
+                    for item in (response.get("reported_conflicts") or [])
+                )
+            ):
+                continue
         if (
             not isinstance(review, dict)
             or not isinstance(original_review, dict)
-            or original_review.get("classification") != "requires_source_content"
+            or baseline_classification not in {"requires_source_content", "unresolved"}
             or not isinstance(obligations, list)
-            or len(obligations) != 1
-            or not isinstance(obligations[0], dict)
-            or obligations[0].get("status") != "requires_source_content"
+            or not obligations
+            or any(
+                not isinstance(item, dict)
+                or set(item) != {"id", "status", "reason"}
+                or not isinstance(item.get("id"), str)
+                or not item["id"]
+                or not isinstance(item.get("reason"), str)
+                or not item["reason"]
+                or item.get("status") != expected_obligation_status
+                for item in obligations
+            )
+            or len({item["id"] for item in obligations}) != len(obligations)
             or any(
                 isinstance(requirement, dict)
                 and clause_id in (requirement.get("clause_ids") or [])
@@ -2221,7 +2499,7 @@ def materialize_source_verification_classifications(
             continue
 
         before_response_sha256 = hashlib.sha256(json.dumps(
-            response, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+            projected, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
         ).encode("utf-8")).hexdigest()
         before_review = copy.deepcopy(review)
         review["classification"] = "requires_source_verification"
@@ -2230,7 +2508,7 @@ def materialize_source_verification_classifications(
             projected, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
         ).encode("utf-8")).hexdigest()
         audit.append({
-            "rule_id": "project_registered_existing_content_verification_v1",
+            "rule_id": "project_registered_existing_content_verification_v3",
             "policy_version": SOURCE_VERIFICATION_CLASSIFICATION_POLICY_VERSION,
             "authorization": "registered_source_verification_without_authoring_instruction_v1",
             "clause_id": clause_id,
@@ -2243,8 +2521,11 @@ def materialize_source_verification_classifications(
             ).hexdigest(),
             "source_content_verification_codes": verification_codes,
             "provenance": copy.deepcopy(provenance) if isinstance(provenance, dict) else None,
-            "before_classification": "requires_source_content",
+            "before_classification": baseline_classification,
             "after_classification": "requires_source_verification",
+            "source_span": copy.deepcopy(clause.get("source_span")),
+            "current_evidence_binding_verified": source_binding is not None,
+            "original_primary_review": before_review,
             "original_primary_obligations": copy.deepcopy(obligations),
             "original_review_sha256": hashlib.sha256(json.dumps(
                 before_review, ensure_ascii=False, sort_keys=True, separators=(",", ":"),

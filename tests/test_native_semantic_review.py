@@ -969,6 +969,25 @@ class NativeSemanticReviewTests(unittest.TestCase):
             validate_obligation_coverage_response(mistaken, [check])
         self.assertEqual(caught.exception.clause_ids, ("C00068",))
 
+        split_mistake = copy.deepcopy(mistaken)
+        split_mistake["results"][0]["identified_obligations"].append({
+            "source_quote": source, "disposition": "authoring_content_pending",
+            "requirement_refs": [],
+        })
+        with self.assertRaises(SourceVerificationMislabelledAsAuthoringError):
+            validate_obligation_coverage_response(split_mistake, [check])
+        corrected = copy.deepcopy(split_mistake)
+        corrected["results"][0]["verdict"] = "source_content_verification_pending"
+        for item in corrected["results"][0]["identified_obligations"]:
+            item["disposition"] = "source_content_verification_pending"
+        validated = validate_obligation_coverage_response(corrected, [check])
+        self.assertEqual(validated[0]["verdict"], "source_content_verification_pending")
+
+        mixed_wrong = copy.deepcopy(split_mistake)
+        mixed_wrong["results"][0]["identified_obligations"][1]["source_quote"] = "not in source"
+        with self.assertRaises(NativeSemanticReviewError):
+            validate_obligation_coverage_response(mixed_wrong, [check])
+
         prompt = native_review._prompt({
             "protocol": OBLIGATION_COVERAGE_PROTOCOL, "checks": [check],
             "retry_feedback": {

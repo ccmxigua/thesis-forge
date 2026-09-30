@@ -31,6 +31,7 @@ from source_obligation_compiler import (  # noqa: E402
     materialize_publication_default_policy,
     materialize_source_verification_classifications,
     materialize_source_keyword_constraints,
+    materialize_structural_heading_clauses,
     materialize_soft_keyword_count_guidance,
     source_fact_value_matches,
     has_mixed_external_document_action_signal,
@@ -38,6 +39,151 @@ from source_obligation_compiler import (  # noqa: E402
 
 
 class SourceObligationCompilerTests(unittest.TestCase):
+    def test_complete_current_keyword_clause_creates_missing_parent_dynamically(self) -> None:
+        source = (
+            "关键词是为了便于检索而从正文选取，"
+            "关键词在摘要内容后另起一行，一般3～8个，之间用分号分开。"
+        )
+        quote = "关键词在摘要内容后另起一行，一般3～8个，之间用分号分开"
+        start = source.index(quote)
+        clause = {
+            "id": "C_DYNAMIC", "text": quote, "source_text_full": source,
+            "evidence_ids": ["E_DYNAMIC"],
+            "source_span": {
+                "evidence_id": "E_DYNAMIC", "start_offset": start,
+                "end_offset": start + len(quote), "text": quote,
+                "source_sha256": hashlib.sha256(source.encode()).hexdigest(),
+            },
+        }
+        evidence = {"E_DYNAMIC": {"text": source}}
+        response = {
+            "contract_version": "3.0", "requirements": [],
+            "clause_reviews": [{"clause_id": "C_DYNAMIC", "classification": "executable"}],
+        }
+        projected, audit = materialize_source_keyword_constraints(
+            response, [clause], evidence_context=evidence, allow_standalone=True,
+        )
+        self.assertEqual(response["requirements"], [])
+        self.assertEqual(len(projected["requirements"]), 1)
+        requirement = projected["requirements"][0]
+        self.assertEqual((requirement["clause_ids"], requirement["evidence_ids"]),
+                         (["C_DYNAMIC"], ["E_DYNAMIC"]))
+        self.assertEqual(requirement["role"], "content_constraints")
+        self.assertEqual(requirement["properties"]["keywords_zh"], {
+            "count_guidance": {"min_count": 3, "max_count": 8,
+                               "strength": "general_guidance"},
+            "require_after_role": "abstract_body_zh", "separator": "semicolon",
+        })
+        self.assertNotIn("min_count", requirement["properties"]["keywords_zh"])
+        self.assertEqual(audit[0]["authorization"],
+                         "verified_complete_current_source_without_parent_v1")
+        again, second_audit = materialize_source_keyword_constraints(
+            projected, [clause], evidence_context=evidence, allow_standalone=True,
+        )
+        self.assertEqual((again, second_audit), (projected, []))
+
+        stale = copy.deepcopy(clause)
+        stale["source_span"]["source_sha256"] = "0" * 64
+        for invalid_clause, invalid_evidence in (
+            (stale, evidence),
+            (clause, {"E_OTHER": evidence["E_DYNAMIC"]}),
+        ):
+            rejected, rejected_audit = materialize_source_keyword_constraints(
+                response, [invalid_clause], evidence_context=invalid_evidence,
+                allow_standalone=True,
+            )
+            self.assertEqual((rejected, rejected_audit), (response, []))
+
+        second = copy.deepcopy(clause)
+        second["id"] = "C_ANOTHER"
+        second["evidence_ids"] = ["E_ANOTHER"]
+        second["source_span"]["evidence_id"] = "E_ANOTHER"
+        second_source = source.replace("3～8", "4～8")
+        second_quote = quote.replace("3～8", "4～8")
+        second["text"] = second_quote
+        second["source_text_full"] = second_source
+        second["source_span"].update({
+            "text": second_quote, "start_offset": second_source.index(second_quote),
+            "end_offset": second_source.index(second_quote) + len(second_quote),
+            "source_sha256": hashlib.sha256(second_source.encode()).hexdigest(),
+        })
+        conflicting = copy.deepcopy(response)
+        conflicting["clause_reviews"].append({
+            "clause_id": "C_ANOTHER", "classification": "executable",
+        })
+        blocked, blocked_audit = materialize_source_keyword_constraints(
+            conflicting, [clause, second],
+            evidence_context={**evidence, "E_ANOTHER": {"text": second_source}},
+            allow_standalone=True,
+        )
+        self.assertEqual((blocked, blocked_audit), (conflicting, []))
+
+    def test_standalone_heading_requires_same_verified_anchor_evidence(self) -> None:
+        text = "摘  要"
+        clause = {
+            "id": "C_HEADING", "text": "摘 要", "source_text_full": "摘 要",
+            "source_kind": "paragraph", "evidence_ids": ["E_HEADING"],
+            "location": {"part": "document", "child_index": 12},
+            "source_span": {
+                "evidence_id": "E_HEADING", "start_offset": 0,
+                "end_offset": len(text), "text": text,
+                "source_sha256": hashlib.sha256(text.encode()).hexdigest(),
+            },
+        }
+        evidence = {"E_HEADING": {
+            "text": text, "style_name": "Heading 1",
+            "location": clause["location"],
+        }}
+        anchors = {
+            "status": "verified", "source": {"sha256": "a" * 64},
+            "anchors": {"abstract_title_zh": {
+                "anchor_type": "semantic_role", "binding_status": "verified",
+                "match_count": 1,
+                "matches": [{"evidence_id": "E_HEADING", "text": "摘要"}],
+            }},
+        }
+        response = {"requirements": [], "clause_reviews": [{
+            "clause_id": "C_HEADING", "classification": "executable",
+            "normative_basis": "explicit_normative_text", "reason": "Model claims executable.",
+            "obligations": [{"id": "heading", "status": "covered", "reason": "Model claim."}],
+        }]}
+        options = {
+            "evidence_context": evidence, "anchor_inventory": anchors,
+            "allowed_roles": ["abstract_title_zh"],
+            "role_properties_schema": {"abstract_title_zh": {"$ref": "#/$defs/roleSpec"}},
+            "contract_defs": {"roleSpec": {"properties": {"text": {"type": "string"}}}},
+        }
+        linked, linked_audit = materialize_structural_heading_clauses(
+            response, [clause], **options,
+        )
+        self.assertEqual(linked["requirements"][0]["properties"]["text"], text)
+        self.assertEqual(linked_audit[0]["action"], "add_exact_heading_requirement")
+
+        other_anchor = copy.deepcopy(anchors)
+        other_anchor["anchors"]["abstract_title_zh"]["matches"][0]["evidence_id"] = "E_OTHER"
+        unresolved, unresolved_audit = materialize_structural_heading_clauses(
+            response, [clause], **{**options, "anchor_inventory": other_anchor},
+        )
+        self.assertEqual(unresolved["requirements"], [])
+        self.assertEqual(unresolved["clause_reviews"][0]["classification"], "unresolved")
+        self.assertEqual(unresolved["clause_reviews"][0]["obligations"][0]["status"],
+                         "unresolved")
+        self.assertEqual(unresolved_audit[0]["original_review"],
+                         response["clause_reviews"][0])
+        self.assertEqual(response["clause_reviews"][0]["classification"], "executable")
+
+        ambiguous = copy.deepcopy(other_anchor)
+        ambiguous["anchors"]["abstract_title_zh"]["match_count"] = 2
+        blocked, blocked_audit = materialize_structural_heading_clauses(
+            response, [clause], **{**options, "anchor_inventory": ambiguous},
+        )
+        self.assertEqual((blocked, blocked_audit), (response, []))
+
+        stale_anchor, stale_audit = materialize_structural_heading_clauses(
+            response, [clause], **{**options, "expected_source_sha256": "b" * 64},
+        )
+        self.assertEqual((stale_anchor, stale_audit), (response, []))
+
     def test_publication_sentence_compiles_two_distinct_source_effects_only_when_complete(self) -> None:
         text = "未经批准的均为公开学位论文（公开的学位论文本项为空白）"
         facts = compile_known_source_obligations(text)
@@ -369,6 +515,111 @@ class SourceObligationCompilerTests(unittest.TestCase):
         self.assertEqual(again, projected)
         self.assertEqual(second_audit, [])
 
+        multi = copy.deepcopy(response)
+        multi["clause_reviews"][0]["obligations"].append({
+            "id": "C00068-obligation-2", "status": "requires_source_content",
+            "reason": "The selected keywords must be traceable to the thesis.",
+        })
+        projected_multi, multi_audit = materialize_source_verification_classifications(
+            multi, [clause], provenance=response["provenance"],
+        )
+        self.assertEqual(projected_multi["clause_reviews"][0]["classification"],
+                         "requires_source_verification")
+        self.assertEqual(projected_multi["clause_reviews"][0]["obligations"], [])
+        self.assertEqual(multi_audit[0]["original_primary_obligations"],
+                         multi["clause_reviews"][0]["obligations"])
+        self.assertFalse(multi_audit[0]["submission_ready"])
+
+    def test_unresolved_origin_check_requires_current_pure_source_and_preserves_audit(self) -> None:
+        source = "论文中的关键词须源自论文，并可追溯至对应原文。"
+        clause = {
+            "id": "C_DYNAMIC", "text": source, "evidence_ids": ["E_DYNAMIC"],
+            "source_span": {
+                "evidence_id": "E_DYNAMIC", "start_offset": 0,
+                "end_offset": len(source), "text": source,
+                "source_sha256": hashlib.sha256(source.encode()).hexdigest(),
+            },
+        }
+        evidence = {"E_DYNAMIC": {"text": source}}
+        response = {
+            "contract_version": "3.0", "requirements": [],
+            "reported_conflicts": [],
+            "clause_reviews": [{
+                "clause_id": "C_DYNAMIC", "classification": "unresolved",
+                "normative_basis": "explicit_normative_text", "reason": "Cannot verify automatically.",
+                "obligations": [
+                    {"id": "O1", "status": "unresolved", "reason": "Check selection."},
+                    {"id": "O2", "status": "unresolved", "reason": "Check traceability."},
+                ],
+            }],
+        }
+        provenance = {"run_id": "current-run", "source_sha256": "a" * 64}
+        projected, audit = materialize_source_verification_classifications(
+            response, [clause], provenance=provenance, evidence_context=evidence,
+        )
+        self.assertEqual(response["clause_reviews"][0]["classification"], "unresolved")
+        self.assertEqual(projected["clause_reviews"][0]["classification"], "requires_source_verification")
+        self.assertEqual(projected["requirements"], [])
+        self.assertEqual(audit[0]["original_primary_review"], response["clause_reviews"][0])
+        self.assertEqual(audit[0]["original_primary_obligations"], response["clause_reviews"][0]["obligations"])
+        self.assertEqual(audit[0]["provenance"], provenance)
+        self.assertTrue(audit[0]["current_evidence_binding_verified"])
+        self.assertFalse(audit[0]["submission_ready"])
+        self.assertEqual(audit[0]["source_span"], clause["source_span"])
+        self.assertEqual(materialize_source_verification_classifications(
+            projected, [clause], evidence_context=evidence,
+        ), (projected, []))
+
+        cases = [(response, clause, None)]
+        stale = copy.deepcopy(clause)
+        stale["source_span"]["source_sha256"] = "0" * 64
+        cases.append((response, stale, evidence))
+        wrong_id = copy.deepcopy(clause)
+        wrong_id["source_span"]["evidence_id"] = "E_OTHER"
+        cases.append((response, wrong_id, evidence))
+        wrong_offset = copy.deepcopy(clause)
+        wrong_offset["source_span"]["start_offset"] = 1
+        cases.append((response, wrong_offset, evidence))
+        cases.append((response, clause, {"E_DYNAMIC": {"text": source + "changed"}}))
+        for status in ("unverifiable", "requires_source_content", "covered"):
+            mixed = copy.deepcopy(response)
+            mixed["clause_reviews"][0]["obligations"][1]["status"] = status
+            cases.append((mixed, clause, evidence))
+        duplicate = copy.deepcopy(response)
+        duplicate["clause_reviews"][0]["obligations"][1]["id"] = "O1"
+        cases.append((duplicate, clause, evidence))
+        for invalid in ({"reason": ""}, {"reason": None}, {"undeclared_field": "do not erase"}):
+            malformed = copy.deepcopy(response)
+            malformed["clause_reviews"][0]["obligations"][0].update(invalid)
+            cases.append((malformed, clause, evidence))
+        no_basis = copy.deepcopy(response)
+        no_basis["clause_reviews"][0].pop("normative_basis")
+        cases.append((no_basis, clause, evidence))
+        linked = copy.deepcopy(response)
+        linked["requirements"] = [{"clause_ids": ["C_DYNAMIC"]}]
+        cases.append((linked, clause, evidence))
+        conflict = copy.deepcopy(response)
+        conflict["reported_conflicts"] = [{"clause_ids": ["C_DYNAMIC"]}]
+        cases.append((conflict, clause, evidence))
+        for extra in (
+            "；作者须撰写摘要。", "；关键词必须用红色印刷。",
+            "；如无出处应删除。", "；一般3～8个，之间用分号分开。",
+            "；须经学院审批。",
+        ):
+            unsafe = source.rstrip("。") + extra
+            unsafe_clause = copy.deepcopy(clause)
+            unsafe_clause["text"] = unsafe
+            unsafe_clause["source_span"].update({
+                "text": unsafe, "end_offset": len(unsafe),
+                "source_sha256": hashlib.sha256(unsafe.encode()).hexdigest(),
+            })
+            cases.append((response, unsafe_clause, {"E_DYNAMIC": {"text": unsafe}}))
+        for index, (candidate, current_clause, current_evidence) in enumerate(cases):
+            with self.subTest(case=index):
+                self.assertEqual(materialize_source_verification_classifications(
+                    candidate, [current_clause], evidence_context=current_evidence,
+                ), (candidate, []))
+
     def test_source_verification_projection_does_not_erase_authoring_or_mixed_work(self) -> None:
         source = "关键词须源自论文并有明确出处。"
         response = {
@@ -389,13 +640,13 @@ class SourceObligationCompilerTests(unittest.TestCase):
             ([{"id": "C1", "text": source, "evidence_ids": ["E1"]}], {
                 **response, "requirements": [{"clause_ids": ["C1"]}],
             }),
-            # More than the narrowly recognized single source-content inventory is ambiguous.
+            # A mixed disposition cannot be collapsed into source verification.
             ([{"id": "C1", "text": source, "evidence_ids": ["E1"]}], {
                 **response, "clause_reviews": [{
                     **response["clause_reviews"][0],
                     "obligations": [
                         response["clause_reviews"][0]["obligations"][0],
-                        {"id": "O2", "status": "requires_source_content", "reason": "another duty"},
+                        {"id": "O2", "status": "unverifiable", "reason": "another duty"},
                     ],
                 }],
             }),
@@ -477,6 +728,7 @@ class SourceObligationCompilerTests(unittest.TestCase):
         self.assertEqual(len(audit), 2)
         self.assertEqual(audit[0]["after_response_sha256"], encode(first_intermediate))
         self.assertEqual(audit[1]["after_response_sha256"], encode(projected))
+        self.assertEqual(audit[1]["before_response_sha256"], audit[0]["after_response_sha256"])
 
     def test_mixed_external_and_local_document_action_cue_is_detected_conservatively(self) -> None:
         self.assertTrue(has_mixed_external_document_action_signal(

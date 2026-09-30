@@ -1987,6 +1987,7 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
                 "Treat every supplied clause as in scope for completeness review.",
                 "source_span is deterministic code-owned citation metadata bound to the exact evidence text; do not edit, regenerate, or emit it in your response. Use it only to locate source wording, and cite clause_id/evidence_id instead.",
                 "Return formatting requirements supported by cited clause_ids and evidence_ids.",
+                "Repeated fixed text at distinct source locations is not one concatenated literal. Emit a separate text requirement for each occurrence (for example, an outer cover and an inner title page), each with its own clause_ids, evidence_ids and source_fragment_clause_ids. Similar words do not prove identical scope or a contradiction. With an explicit fragment selector, omit properties.text or use null so code materializes the exact current-source literal, including whitespace. Never select one occurrence while copying another's text or attach unselected repeated occurrences to that requirement.",
                 "For a literal spanning multiple extracted clauses, provide source_fragment_clause_ids in source order only when the requirement role supports a top-level properties.text field; code verifies every exact span and materializes that field. For a genuine fixed declaration, use a current-source candidate only as a source-text grouping; code materializes heading/body_parts from unique complete source evidence, including punctuation, and never adds properties.text. The candidate is not an executable-clause list. For other structural roles without a top-level text field, use only their declared role-native fields. Never concatenate across clauses unless their source locations prove adjacency; if the relation, destination, or separator is unclear, leave the requirement unresolved.",
                 "existing_requirement_id selects an exact supplied current-input candidate; it is not a new output ID. Omit it for a new requirement (null in native structured output). Code assigns new IDs. Never increment IDs or borrow one from a neighboring chunk.",
                 "Every requirement object MUST include a non-empty reason explaining why its role and properties are supported by the cited clause/evidence.",
@@ -2258,7 +2259,7 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
     if source_verification_classification_repairs:
         audit.append({
             "type": "source_verification_classification_projection",
-            "rule_id": "project_registered_existing_content_verification_v1",
+            "rule_id": "project_registered_existing_content_verification_v2",
             "semantic_transformation_policy_version": MERGE_SEMANTIC_TRANSFORM_POLICY_VERSION,
             "projection_policy_version": SOURCE_VERIFICATION_CLASSIFICATION_POLICY_VERSION,
             "semantic_inference": "none",
@@ -3821,6 +3822,7 @@ def merge_host_agent_review_packets(
     aggregate, source_verification_classification_projections = (
         materialize_source_verification_classifications(
             aggregate, full_clauses, provenance=full_provenance,
+            evidence_context=full_request.get("evidence_context"),
         )
     )
     aggregate, source_verification_repairs = materialize_known_source_verification(

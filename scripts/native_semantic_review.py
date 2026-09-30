@@ -605,8 +605,16 @@ def validate_obligation_coverage_response(
                         and not has_explicit_authoring_action_cue(source_text)
                         and not is_explicit_authoring_content_quote(source_text)
                         and result.get("verdict") == "source_content_pending"
-                        and len(result.get("identified_obligations") or []) == 1
-                        and not requirement_refs
+                        and bool(result.get("identified_obligations"))
+                        and all(
+                            isinstance(item, dict)
+                            and item.get("disposition") == "authoring_content_pending"
+                            and not item.get("requirement_refs")
+                            and isinstance(item.get("source_quote"), str)
+                            and item["source_quote"] in source_text
+                            and not is_explicit_authoring_content_quote(item["source_quote"])
+                            for item in result["identified_obligations"]
+                        )
                     ):
                         # Reject this review, then allow one *independent* re-read
                         # of the unchanged candidate. This does not reclassify a

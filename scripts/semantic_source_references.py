@@ -96,6 +96,7 @@ def build_source_reference_packet(request: dict[str, Any]) -> dict[str, Any]:
 
 def source_reference_schema(
     canonical_schema: dict[str, Any], packet: dict[str, Any], *, coverage: bool,
+    constrain_requirement_links: bool = False,
 ) -> dict[str, Any]:
     """Compile per-check alternatives so references cannot cross clauses."""
     schema = copy.deepcopy(canonical_schema)
@@ -176,6 +177,36 @@ def source_reference_schema(
                     for key in obligation["required"]
                 ]
                 compiled_obligation_branches.append(obligation)
+            if constrain_requirement_links:
+                # Generation-time constraint mirrors the canonical coverage
+                # validator. Parsing still preserves invalid raw output for a
+                # typed, bounded corrective review, never silently repairs it.
+                live_refs = sorted({
+                    item["requirement_ref"]
+                    for item in review_context.get("linked_requirements", [])
+                    if isinstance(item, dict) and isinstance(item.get("requirement_ref"), str)
+                    and item["requirement_ref"]
+                })
+                constrained = []
+                for obligation in compiled_obligation_branches:
+                    dispositions = obligation["properties"]["disposition"].get("enum", [])
+                    if "represented" not in dispositions:
+                        constrained.append(obligation)
+                        continue
+                    other = copy.deepcopy(obligation)
+                    other["properties"]["disposition"]["enum"] = [
+                        value for value in dispositions if value != "represented"
+                    ]
+                    if other["properties"]["disposition"]["enum"]:
+                        constrained.append(other)
+                    if live_refs:
+                        represented = copy.deepcopy(obligation)
+                        represented["properties"]["disposition"]["enum"] = ["represented"]
+                        represented["properties"]["requirement_refs"].update({
+                            "minItems": 1, "items": {"type": "string", "enum": live_refs},
+                        })
+                        constrained.append(represented)
+                compiled_obligation_branches = constrained
             if not compiled_obligation_branches:
                 raise ValueError(
                     f"coverage check {check.get('check_id')!r} has no permitted obligation schema branch"

@@ -16,6 +16,7 @@ from native_semantic_review import (
 )
 from host_review_schema import native_output_schema, native_schema_support_errors
 from semantic_contract import sha256_json
+from format_spec_validation import validate_instance
 from semantic_source_references import (
     bind_validated_source_reference_selections,
     build_source_reference_packet,
@@ -25,6 +26,60 @@ from semantic_source_references import (
 
 
 class SemanticSourceReferenceTests(unittest.TestCase):
+    def test_generation_schema_prevents_unlinked_and_cross_check_coverage(self) -> None:
+        request = {"checks": [
+            {"check_id": "label", "document_text": "论文题目", "review_context": {
+                "classification": "informational", "linked_requirements": []}},
+            {"check_id": "duty", "document_text": "表格应居中", "review_context": {
+                "classification": "covered", "linked_requirements": [{"requirement_ref": "RR-live"}]}},
+        ]}
+        before = copy.deepcopy(OBLIGATION_COVERAGE_SCHEMA)
+        packet = build_source_reference_packet(request)
+        wire = source_reference_schema(OBLIGATION_COVERAGE_SCHEMA, packet, coverage=True,
+                                       constrain_requirement_links=True)
+        self.assertEqual(native_schema_support_errors(native_output_schema(wire)), [])
+        self.assertEqual(OBLIGATION_COVERAGE_SCHEMA, before)
+        for check in packet["checks"]:
+            for disposition, refs, valid in (
+                ("represented", [], False),
+                ("represented", ["RR-live"], check["check_id"] == "duty"),
+                ("represented", ["RR-other-clause"], False),
+                ("unrepresented", [], True),
+            ):
+                with self.subTest(check=check["check_id"], disposition=disposition, refs=refs):
+                    source_ref = check["source_spans"][0]["ref_id"]
+                    raw = {"results": [{"check_id": check["check_id"], "verdict": "consistent",
+                        "rationale": "Source audit.", "evidence_refs": [source_ref],
+                        "identified_obligations": [{"source_ref": source_ref,
+                            "disposition": disposition, "requirement_refs": refs}]}]}
+                    self.assertEqual(not bool(validate_instance(raw, wire)), valid)
+            raw["results"][0]["identified_obligations"] = []
+            self.assertEqual(validate_instance(raw, wire), [])
+
+    def test_native_minitems_omission_still_requires_canonical_link_guard(self) -> None:
+        request = {"checks": [{"check_id": "duty", "document_text": "表格应居中",
+            "review_context": {"classification": "covered", "requires_requirement": True,
+                "linked_requirements": [{"requirement_ref": "RR-live"}]}}]}
+        packet = build_source_reference_packet(request)
+        wire = source_reference_schema(OBLIGATION_COVERAGE_SCHEMA, packet, coverage=True,
+                                       constrain_requirement_links=True)
+        ref = packet["checks"][0]["source_spans"][0]["ref_id"]
+        raw = {"results": [{"check_id": "duty", "verdict": "consistent", "rationale": "Claimed.",
+            "evidence_refs": [ref], "identified_obligations": [{
+                "source_ref": ref, "disposition": "represented", "requirement_refs": []}]}]}
+        self.assertTrue(validate_instance(raw, wire))
+        # The native projection intentionally omits unsupported minItems.
+        # It must not replace the authoritative post-provider semantic guard.
+        native = native_output_schema(wire)
+        branches = native["properties"]["results"]["items"]["anyOf"]
+        obligation = next(b for b in branches[0]["properties"]["identified_obligations"]["items"]["anyOf"]
+                          if b["properties"]["disposition"].get("enum") == ["represented"])
+        self.assertNotIn("minItems", obligation["properties"]["requirement_refs"])
+        compiled, _ = compile_source_reference_response(raw, request, OBLIGATION_COVERAGE_SCHEMA, coverage=True)
+        from native_semantic_review import UnlinkedRepresentedObligationError
+        with self.assertRaises(UnlinkedRepresentedObligationError):
+            validate_obligation_coverage_response(compiled, request["checks"])
+
     def setUp(self) -> None:
         self.request = {
             "protocol": "test",

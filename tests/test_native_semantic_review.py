@@ -288,6 +288,59 @@ class NativeSemanticReviewTests(unittest.TestCase):
         with self.assertRaisesRegex(NativeSemanticReviewError, "claims unlinked coverage"):
             validate_obligation_coverage_response(response, [check])
 
+    def test_unlinked_coverage_is_typed_rejection_not_draft_acceptance(self) -> None:
+        for source in ("论文题目", "Department", "表格应居中"):
+            for draft in (False, True):
+                with self.subTest(source=source, draft=draft):
+                    check = {"check_id": "label-or-duty", "document_text": source,
+                             "review_context": {"classification": "informational",
+                                                "requires_requirement": False,
+                                                "linked_requirements": []}}
+                    response = {"results": [{"check_id": check["check_id"],
+                        "verdict": "consistent", "rationale": "Claimed coverage.",
+                        "evidence_quotes": [source], "machine_obligation_ids": [],
+                        "identified_obligations": [{"source_quote": source,
+                            "disposition": "represented", "requirement_refs": []}]}]}
+                    before = copy.deepcopy(response)
+                    with self.assertRaises(native_review.UnlinkedRepresentedObligationError) as caught:
+                        validate_obligation_coverage_response(response, [check], allow_draft_disputes=draft)
+                    self.assertEqual(caught.exception.clause_ids, (check["check_id"],))
+                    self.assertEqual(response, before)
+                    # A genuine omitted duty stays explicit, never becomes
+                    # zero obligations merely because the primary has no links.
+                    response["results"][0]["verdict"] = "incomplete"
+                    response["results"][0]["identified_obligations"][0]["disposition"] = "unrepresented"
+                    result = validate_obligation_coverage_response(response, [check], allow_draft_disputes=draft)
+                    self.assertEqual(result[0]["verdict"], "incomplete")
+                    response["results"][0]["identified_obligations"][0]["source_quote"] = "not current source"
+                    with self.assertRaisesRegex(NativeSemanticReviewError, "non-source obligation quote"):
+                        validate_obligation_coverage_response(response, [check])
+
+    def test_unlinked_review_feedback_preserves_semantic_choice_and_candidate(self) -> None:
+        prompt = native_review._prompt({
+            "protocol": OBLIGATION_COVERAGE_PROTOCOL,
+            "checks": [{"check_id": "label-x", "document_text": "论文题目",
+                        "review_context": {"classification": "informational"}}],
+            "retry_feedback": {"code": native_review.UnlinkedRepresentedObligationError.code,
+                               "clause_ids": ["label-x"]},
+        })
+        self.assertIn("one corrective review of the identical candidate", prompt)
+        self.assertIn("never", prompt.lower())
+        self.assertIn("retain that duty as unrepresented", prompt)
+        self.assertIn("not permission to add requirements or change classification", prompt)
+        self.assertIn("leave identified_obligations empty", prompt)
+
+    def test_empty_string_requirement_reference_cannot_bypass_canonical_schema(self) -> None:
+        check = {"check_id": "label", "document_text": "Label", "review_context": {
+            "classification": "informational", "requires_requirement": False,
+            "linked_requirements": [{"requirement_ref": ""}]}}
+        response = {"results": [{"check_id": "label", "verdict": "consistent",
+            "rationale": "Claimed coverage.", "evidence_quotes": ["Label"],
+            "machine_obligation_ids": [], "identified_obligations": [{
+                "source_quote": "Label", "disposition": "represented", "requirement_refs": [""]}]}]}
+        with self.assertRaisesRegex(NativeSemanticReviewError, "violates its JSON schema"):
+            validate_obligation_coverage_response(response, [check], allow_draft_disputes=True)
+
     def test_scope_dependency_metadata_is_schema_bound_to_scope_unresolved(self) -> None:
         source = "密级"
         check = {
@@ -1993,6 +2046,7 @@ class NativeSemanticReviewTests(unittest.TestCase):
             expected_packet = native_review.build_source_reference_packet(request)
             self.assertEqual(local_schema, native_review.source_reference_schema(
                 OBLIGATION_COVERAGE_SCHEMA, expected_packet, coverage=True,
+                constrain_requirement_links=True,
             ))
             canonical_schema = json.loads(
                 (output_dir / "canonical-response-schema.json").read_text(encoding="utf-8")

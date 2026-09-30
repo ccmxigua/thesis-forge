@@ -90,6 +90,19 @@ class InconsistentObligationVerdictError(NativeSemanticReviewError):
         )
 
 
+class UnlinkedRepresentedObligationError(NativeSemanticReviewError):
+    """A reviewer claimed coverage without any current requirement selector."""
+
+    code = "represented_obligation_without_requirement"
+
+    def __init__(self, clause_ids: list[str]) -> None:
+        self.clause_ids = tuple(sorted(set(clause_ids)))
+        super().__init__(
+            "independent obligation review claims unlinked coverage for "
+            + ", ".join(self.clause_ids)
+        )
+
+
 # Preserve the public import name used by earlier callers while broadening the
 # invariant from executable requirements to all non-informational clauses.
 MissingExecutableObligationInventoryError = MissingSourceObligationInventoryError
@@ -633,9 +646,7 @@ def validate_obligation_coverage_response(
             if disposition == "represented":
                 represented += 1
                 if not requirement_refs:
-                    raise NativeSemanticReviewError(
-                        f"independent obligation review claims unlinked coverage for {check_id}"
-                    )
+                    raise UnlinkedRepresentedObligationError([check_id])
             elif disposition == "unrepresented":
                 unrepresented += 1
             elif disposition == "external_action_pending":
@@ -1202,6 +1213,13 @@ def _prompt(request: dict[str, Any]) -> str:
             and isinstance(retry_feedback.get("clause_ids"), list)
             else []
         )
+        unlinked_clause_ids = (
+            sorted({value for value in retry_feedback.get("clause_ids", []) if isinstance(value, str)})
+            if isinstance(retry_feedback, dict)
+            and retry_feedback.get("code") == UnlinkedRepresentedObligationError.code
+            and isinstance(retry_feedback.get("clause_ids"), list)
+            else []
+        )
         scope_review_checks = (
             [
                 item for item in retry_feedback.get("checks", [])
@@ -1225,6 +1243,20 @@ def _prompt(request: dict[str, Any]) -> str:
                 "the placeholder's target and whether the linked requirement faithfully represents it. "
                 "Do not change candidate, source, classification, links or obligations to pass. "
                 "If ambiguity or misrepresentation remains, keep it; the original fail-closed contract applies.\n"
+            )
+        elif unlinked_clause_ids:
+            retry_instruction = (
+                "\nThe previous independent response claimed represented coverage without a linked "
+                "requirement for check(s) " + strict_json_dumps(unlinked_clause_ids)
+                + ". This is one corrective review of the identical candidate, not permission to add "
+                "requirements or change classification. Re-read the exact source and the current "
+                "linked_requirements. A mere description, label or statement of row identity is not itself "
+                "an obligation. If no source duty exists, use an empty identified_obligations array and "
+                "retain exact evidence_refs and rationale. If a real duty exists but no current requirement "
+                "represents it, retain that duty as unrepresented with verdict incomplete, or use only an "
+                "independently justified pending/ambiguity disposition. Never infer absence of a duty from "
+                "the primary classification or empty links alone. Do not invent references, delete real "
+                "duties, or change source, candidate, provenance or links to pass. All original checks apply.\n"
             )
         elif external_retry_checks:
             retry_instruction = (
@@ -1323,6 +1355,11 @@ def _prompt(request: dict[str, Any]) -> str:
             "Do not assume primary_obligations is complete or correct. A source obligation is "
             "represented only when a linked requirement property and its verification contract "
             "faithfully preserve its meaning, scope, modality, strength, and qualifiers. "
+            "Every represented obligation must select at least one requirement_ref from this check's "
+            "linked_requirements; recognizing a label, heading or row is not represented coverage. "
+            "If the exact source and proven context establish no duty, leave identified_obligations empty "
+            "and retain evidence_refs and rationale. Do not invent an obligation merely to fill the array, "
+            "and do not assume absence of duties from primary classification or empty links. "
             "Treat an omitted obligation or a materially changed obligation as unrepresented, "
             "even when a linked requirement mentions the same topic or numeric value. In "
             "particular, hardening or weakening source qualifiers such as 'generally', 'usually', "
@@ -1508,6 +1545,7 @@ def run_native_semantic_review(
         source_packet = build_source_reference_packet(request)
         response_schema = source_reference_schema(
             canonical_schema, source_packet, coverage=obligation_coverage_mode,
+            constrain_requirement_links=obligation_coverage_mode,
         )
         provider_response_schema = native_output_schema(response_schema) if adapter_id == "codex" else None
         if provider_response_schema is not None:

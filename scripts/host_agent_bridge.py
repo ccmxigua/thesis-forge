@@ -227,6 +227,7 @@ from native_semantic_review import (  # noqa: E402
     SourceVerificationClassificationCorrectionRequiredError,
     SourceVerificationMislabelledAsAuthoringError,
     TableContextUncertaintyError,
+    UnlinkedRepresentedObligationError,
     RetryableNativeSemanticReviewError,
     _exact_clause_source_text,
     build_obligation_coverage_request,
@@ -10831,6 +10832,7 @@ def _validate_completed_obligation_ledger_chain(
         InconsistentObligationVerdictError.code,
         SourceVerificationMislabelledAsAuthoringError.code,
         TableContextUncertaintyError.code,
+        UnlinkedRepresentedObligationError.code,
     }
     if (
         isinstance(provider_attempt, bool) or not isinstance(provider_attempt, int)
@@ -12068,6 +12070,7 @@ def _run_independent_obligation_coverage_review(
         InconsistentObligationVerdictError,
         SourceVerificationMislabelledAsAuthoringError,
         TableContextUncertaintyError,
+        UnlinkedRepresentedObligationError,
     ) as review_error:
         source_verification_mislabel = isinstance(
             review_error, SourceVerificationMislabelledAsAuthoringError,
@@ -12108,6 +12111,12 @@ def _run_independent_obligation_coverage_review(
             bound_mislabel = bool(review_error.clause_ids) and all(
                 table_context_retry_is_source_bound(checks_by_id.get(clause_id, {}))
                 for clause_id in review_error.clause_ids
+            )
+        if isinstance(review_error, UnlinkedRepresentedObligationError):
+            # The error authorizes only another independent read of this
+            # immutable candidate, not a primary repair or a pass projection.
+            bound_mislabel = bool(review_error.clause_ids) and all(
+                clause_id in checks_by_id for clause_id in review_error.clause_ids
             )
         retryable = (
             _provider_attempt < INDEPENDENT_REVIEW_PROVIDER_MAX_ATTEMPTS

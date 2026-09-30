@@ -684,6 +684,53 @@ class HostAgentBridgeTests(unittest.TestCase):
             })
             self.assertEqual(pointer["candidate_response_sha256"], bridge._response_sha256(response))
 
+    def test_unlinked_represented_review_rereads_same_label_once_and_exhausts(self) -> None:
+        self._independent_review_patch.stop()
+        for exhausted in (False, True):
+            with self.subTest(exhausted=exhausted), tempfile.TemporaryDirectory() as td:
+                review_dir, chunk = self._packet(Path(td) / "requirements", source="论文题目",
+                                                  contract_version="3.0")
+                response = {"contract_version": "3.0", "provenance": chunk["provenance"],
+                    "requirements": [], "clause_reviews": [{"clause_id": "C1",
+                        "classification": "informational", "reason": "Source row label."}],
+                    "unsupported_items": [], "reported_conflicts": []}
+                before = copy.deepcopy(response)
+                calls = []
+
+                def review(request: dict, *, output_dir: Path, **kwargs: object) -> dict:
+                    calls.append(copy.deepcopy(request))
+                    if len(calls) == 1 or exhausted:
+                        raise bridge.UnlinkedRepresentedObligationError(["C1"])
+                    return bind_mock_review_to_source_spans({"status": "completed",
+                        "results": [{"check_id": "C1", "verdict": "consistent",
+                            "rationale": "The source is a label, not a normative duty.",
+                            "evidence_quotes": ["论文题目"], "machine_obligation_ids": [],
+                            "identified_obligations": []}], "summary": {"consistent": 1}},
+                        request, output_dir)
+
+                with patch.object(bridge, "run_native_semantic_review", side_effect=review), \
+                        patch.object(bridge.time, "sleep"):
+                    args = dict(review_dir=review_dir, run_id=chunk["provenance"]["run_id"],
+                        chunk_index=1, attempt=1, host_runtime="codex", model="gpt-5.6-luna",
+                        timeout=10, agent_id="main", runner="exec", binary="codex", config_path=None,
+                        controller=bridge.RunController(), output_policy="review_draft")
+                    if exhausted:
+                        with self.assertRaises(bridge.IndependentObligationReviewError) as caught:
+                            bridge._run_independent_obligation_coverage_review(response, chunk, **args)
+                        self.assertFalse(caught.exception.retryable)
+                    else:
+                        pointer = bridge._run_independent_obligation_coverage_review(response, chunk, **args)
+                        self.assertEqual(pointer["status"], "completed")
+                self.assertEqual(len(calls), 2)
+                self.assertEqual(calls[0]["checks"], calls[1]["checks"])
+                self.assertEqual(calls[0]["provenance"], calls[1]["provenance"])
+                self.assertEqual(calls[1]["retry_feedback"], {
+                    "code": bridge.UnlinkedRepresentedObligationError.code, "clause_ids": ["C1"]})
+                self.assertEqual(response, before)
+                rejected = json.loads((review_dir / "independent-review-chunk-0001-attempt-01/coverage-audit.json").read_text())
+                self.assertEqual(rejected["status"], "rejected")
+                self.assertEqual(rejected["candidate_response_sha256"], bridge._response_sha256(before))
+
     def test_mislabelled_source_verification_rereviews_same_candidate_once(self) -> None:
         self._independent_review_patch.stop()
         source = (

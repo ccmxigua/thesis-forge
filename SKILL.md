@@ -188,6 +188,22 @@ inventory or a claimed covered external action is a contract error.
 
 ## Explicit semantic issue acknowledgements
 
+Independent source-obligation reviews do not invent duties for a mere label,
+heading or description. A source-first conclusion that no duty exists retains
+exact evidence references and rationale with an empty obligation inventory;
+the primary informational classification alone is never proof of that conclusion.
+`represented` always requires at least one current, same-check requirement
+selector. The generated review schema excludes represented status where no
+such selector exists and constrains valid selectors otherwise. Raw responses
+remain immutable; parsing never deletes a supposed obligation to make it pass.
+An unlinked represented claim is rejected with a typed contract error and may
+receive at most one independent corrective read of the unchanged candidate.
+Real omitted duties must stay unrepresented or independently justified pending
+work. The retry does not authorize primary reclassification, invented links,
+new properties, a passing score, or submission readiness. Exhaustion fails closed.
+Native providers that omit unsupported `minItems` still require the local
+non-empty-reference check; schema generation is not proof of semantic completeness.
+
 When a user confirms that an unresolved clause is a real semantic ambiguity but
 does not provide its authoritative interpretation, record that acknowledgement
 in a run-bound `semantic-issue-confirmation` sidecar and pass it with

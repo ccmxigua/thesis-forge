@@ -2070,6 +2070,48 @@ class HostAgentBridgeTests(unittest.TestCase):
         self.assertEqual(bridge.validate_host_agent_response(restored, chunk), [])
         self.assertEqual(len(split_audit["source_keyword_constraint_projections"]), 1)
 
+    def test_native_guidance_check_survives_candidate_boundary_without_empty_check_bypass(self) -> None:
+        source = "关键词一般4～9个"
+        evidence = {"evidence": [{"id": "E_CURRENT", "kind": "paragraph", "text": source}]}
+        clauses = self._bind_test_source_spans([
+            {"id": "C_CURRENT", "text": source, "evidence_ids": ["E_CURRENT"]},
+        ], evidence)
+        chunk = engine.build_llm_request(
+            [], clauses, evidence, {}, "full", contract_version="3.0",
+            runtime_context={"code_fingerprint_sha256": "9" * 64},
+        )
+        chunk = attach_request_provenance(
+            chunk, source_sha256="a" * 64, evidence_doc=evidence,
+            clauses=chunk["clauses"], run_id="current-guidance-check-test",
+        )
+        check = "Verify the keyword count against the source-qualified 4-to-9 guidance and retain independent checks."
+        raw = {
+            "contract_version": "3.0", "requirements": [{
+                "role": "content_constraints", "clause_ids": ["C_CURRENT"], "evidence_ids": ["E_CURRENT"],
+                "reason": "The source states a qualified recommendation, not a hard bound.", "confidence": 0.9,
+                "properties": {"keywords_zh": {"count_guidance": {
+                    "min_count": 4, "max_count": 9, "strength": "general_guidance"}}},
+                "verification": {"mode": "manual", "checks": [check]},
+            }], "clause_reviews": [{
+                "clause_id": "C_CURRENT", "classification": "executable", "normative_basis": "explicit_normative_text",
+                "reason": "The linked property preserves the source recommendation.",
+                "obligations": [{"id": "count-guidance", "status": "covered", "reason": "Bound as general guidance."}],
+            }], "unsupported_items": [], "reported_conflicts": [],
+        }
+        original = copy.deepcopy(raw)
+        accepted, _audit = bridge.prepare_native_response_candidate(raw, chunk)
+        self.assertEqual(raw, original)
+        self.assertEqual(bridge.validate_host_agent_response(accepted, chunk), [])
+        self.assertEqual(accepted["requirements"][0]["verification"]["checks"], [check])
+        self.assertNotIn("min_count", accepted["requirements"][0]["properties"]["keywords_zh"])
+        self.assertEqual(accepted["clause_reviews"], original["clause_reviews"])
+        again, _again_audit = bridge.prepare_native_response_candidate(accepted, chunk)
+        self.assertEqual(again, accepted)
+        invalid = copy.deepcopy(raw)
+        invalid["requirements"][0]["verification"]["checks"] = []
+        with self.assertRaisesRegex(ValueError, "verification.checks"):
+            bridge.prepare_native_response_candidate(invalid, chunk)
+
     def test_ambiguous_conflict_target_is_omitted_without_choosing_a_language(self) -> None:
         sources = {
             "E74": "The following English is not correct.",

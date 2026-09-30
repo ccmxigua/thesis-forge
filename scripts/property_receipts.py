@@ -1,7 +1,68 @@
 """Property-level execution receipts for serialized DOCX verification."""
 from __future__ import annotations
 
+from functools import lru_cache
+from pathlib import Path
 from typing import Any, Callable
+
+try:
+    from .format_spec_validation import validate_instance
+    from .semantic_contract import strict_json_read
+except ImportError:
+    from format_spec_validation import validate_instance
+    from semantic_contract import strict_json_read
+
+
+@lru_cache(maxsize=1)
+def _format_schema() -> dict[str, Any]:
+    return strict_json_read(Path(__file__).resolve().parents[1]
+                            / "schema" / "format-spec.schema.json")
+
+
+def _advisory_prefixes(role: str, properties: dict[str, Any]) -> set[str]:
+    """Exclude only schema-valid, explicitly nonbinding advice from execution.
+
+    Advice stays in the requirement and measured guidance-advisories report;
+    it must not receive a fabricated successful DOCX execution receipt.
+    Unknown paths, malformed guidance and all hard properties stay fail-closed.
+    """
+    if role != "content_constraints":
+        return set()
+    definitions = _format_schema()["$defs"]
+    declared = {
+        ("keywords_zh", "count_guidance"): definitions["keywordConstraint"]["properties"]["count_guidance"],
+        ("keywords_en", "count_guidance"): definitions["keywordConstraint"]["properties"]["count_guidance"],
+        ("abstract_zh", "length_guidance"): definitions["contentConstraintSpec"]["properties"]["abstract_zh"]["properties"]["length_guidance"],
+        ("abstract_zh", "third_person_guidance"): definitions["contentConstraintSpec"]["properties"]["abstract_zh"]["properties"]["third_person_guidance"],
+    }
+    prefixes: set[str] = set()
+    for (key, name), schema in declared.items():
+        parent = properties.get(key)
+        if not isinstance(parent, dict) or name not in parent:
+            continue
+        guidance = parent[name]
+        if validate_instance(guidance, schema):
+            continue
+        if isinstance(guidance, dict):
+            lower, upper = ("min_count", "max_count") if name == "count_guidance" else ("min_chars", "max_chars")
+            if guidance[lower] > guidance[upper]:
+                continue
+        prefixes.add(f"{key}.{name}")
+    return prefixes
+
+
+def _execution_property_items(role: str, properties: dict[str, Any]) -> list[tuple[int, str, Any]]:
+    expected = flatten(properties)
+    if not expected:
+        expected = {"__requirement__": True}
+    advisory = _advisory_prefixes(role, properties)
+    # Keep original indices so adding this policy does not renumber hard
+    # property identities relative to the complete, sorted requirement.
+    return [
+        (index, path, value)
+        for index, (path, value) in enumerate(sorted(expected.items()), start=1)
+        if not any(path == prefix or path.startswith(prefix + ".") for prefix in advisory)
+    ]
 
 
 def flatten(value: Any, prefix: str = "") -> dict[str, Any]:
@@ -54,11 +115,9 @@ def expected_receipt_ids(
             continue
         if applicable_roles is not None and role not in applicable_roles:
             continue
-        if not expected:
-            expected = {"__requirement__": True}
         result.update(
             f"PR-{requirement_id}-{index:04d}"
-            for index, _item in enumerate(sorted(expected.items()), start=1)
+            for index, _path, _value in _execution_property_items(role, properties)
         )
     return result
 
@@ -109,9 +168,7 @@ def build_property_receipts(
             f"style:{mapping.get('style_name')}"
             if mapping.get("style_name") else f"role:{role}"
         )
-        if not expected:
-            expected = {"__requirement__": True}
-        for index, (property_path, expected_value) in enumerate(sorted(expected.items())):
+        for index, property_path, expected_value in _execution_property_items(role, properties):
             actual_value = actual.get(property_path)
             if property_path == "__requirement__":
                 actual_value = bool(role_results.get(role))
@@ -124,7 +181,7 @@ def build_property_receipts(
             else:
                 status = "failed"
             receipts.append({
-                "receipt_id": f"PR-{requirement_id}-{index + 1:04d}",
+                "receipt_id": f"PR-{requirement_id}-{index:04d}",
                 "requirement_id": requirement_id,
                 "clause_ids": list(requirement.get("clause_ids") or []),
                 "role": role,

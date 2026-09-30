@@ -1946,19 +1946,12 @@ def materialize_soft_keyword_count_guidance(
                     if bound in keyword_rule:
                         keyword_rule.pop(bound)
                         removed_hard_bounds.append(bound)
-                verification = requirement.get("verification")
-                if isinstance(verification, dict) and isinstance(verification.get("checks"), list):
-                    verification["checks"] = [
-                        check for check in verification["checks"]
-                        if not (
-                            isinstance(check, str)
-                            and re.search(r"keyword\s+count|关键词.{0,12}(?:数量|个数)", check, re.I)
-                            and re.search(
-                                rf"\b{guidance['min_count']}\b.{{0,16}}\b{guidance['max_count']}\b",
-                                check,
-                            )
-                        )
-                    ]
+                # Verification prose is not an executable numeric bound.
+                # Keep it verbatim: a check can describe this recommendation
+                # or contain another independent duty in the same sentence.
+                # Deleting it can both lose an obligation and manufacture an
+                # invalid empty checks list. Only structured bounds above are
+                # demoted; contract and independent review remain mandatory.
             if (
                 keyword_rule != before
                 or requirement.get("verification") != verification_before
@@ -1983,6 +1976,7 @@ def materialize_soft_keyword_count_guidance(
                     "mandatory_count_signal_present": mandatory_signal_present,
                     "mandatory_count_signal_fully_compiled": independently_mandatory,
                     "removed_hard_bounds": removed_hard_bounds,
+                    "verification_preserved": requirement.get("verification") == verification_before,
                     "before_sha256": hashlib.sha256(before_bytes).hexdigest(),
                     "after_sha256": hashlib.sha256(after_bytes).hexdigest(),
                     "authorization": "source_qualified_keyword_range_projection_v1",
@@ -2134,19 +2128,9 @@ def materialize_complete_abstract_source_constraints(
                     and properties.get(field) == length_guidance.get(field)
                 ):
                     properties.pop(field, None)
-            verification = requirement.get("verification")
-            if isinstance(verification, dict) and isinstance(verification.get("checks"), list):
-                minimum = length_guidance.get("min_chars")
-                maximum = length_guidance.get("max_chars")
-                verification["checks"] = [
-                    check for check in verification["checks"]
-                    if not (
-                        isinstance(check, str)
-                        and re.search(r"abstract|摘要", check, re.I)
-                        and re.search(r"length|count|字数|字符", check, re.I)
-                        and re.search(rf"\b{minimum}\b.{{0,20}}\b{maximum}\b", check)
-                    )
-                ]
+            # Preserve verification prose for the same reason as keyword
+            # guidance: structured constraints control enforcement, and a
+            # composite check cannot safely be split or deleted by regex.
         clause_ids = requirement.get("clause_ids")
         if not isinstance(clause_ids, list):
             clause_ids = []

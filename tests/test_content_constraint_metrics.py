@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sys
+import io
 import unittest
 from pathlib import Path
 
@@ -12,6 +13,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from apply_format_spec import (  # noqa: E402
     audit_content_constraints,
     audit_nonblocking_guidance,
+    _receipt_semantic_actuals,
     manual_review_receipt_items,
     manual_review_validation_items,
     normalize_keyword_separators,
@@ -19,6 +21,7 @@ from apply_format_spec import (  # noqa: E402
     semantic_content_review_items,
 )
 from format_spec_validation import load_and_validate  # noqa: E402
+from property_receipts import build_property_receipts, expected_receipt_ids, audit_property_receipts  # noqa: E402
 
 
 class ContentConstraintMetricTests(unittest.TestCase):
@@ -70,6 +73,45 @@ class ContentConstraintMetricTests(unittest.TestCase):
         self.assertTrue(all(item["policy"] == "non_blocking_general_guidance" for item in advisories))
         self.assertTrue(all(item["within_guidance"] is False for item in advisories))
         self.assertEqual(findings, [])
+
+    def test_serialized_advice_outside_range_does_not_block_hard_format_receipts(self) -> None:
+        document = self._doc("短文", "关键词：甲；乙")
+        stream = io.BytesIO()
+        document.save(stream)
+        stream.seek(0)
+        serialized = Document(stream)
+        constraints = {"keywords_zh": {
+            "count_guidance": {"min_count": 3, "max_count": 8, "strength": "general_guidance"},
+            "separator": "semicolon", "require_after_role": "abstract_body_zh",
+        }}
+        requirements = [{"id": "R_GUIDANCE", "role": "content_constraints",
+                         "properties": constraints, "clause_ids": ["CURRENT_SOURCE"],
+                         "verification": {"mode": "manual", "checks": ["核对建议数量，不作为强制范围。"]}}]
+        mappings = {"abstract_body_zh": {"style_name": "AbstractBodyCN"},
+                    "keywords_zh": {"style_name": "KeywordsFixture"}}
+        actuals, methods = _receipt_semantic_actuals(
+            serialized, {"content_constraints": constraints}, mappings, requirements, {}, [], {},
+        )
+        receipts = build_property_receipts(requirements, mappings, actuals,
+            serialized_docx_sha256="a" * 64, verification_methods=methods)
+        self.assertEqual(len(receipts), 2)
+        self.assertTrue(audit_property_receipts(receipts,
+            expected_receipt_ids=expected_receipt_ids(requirements))["valid"])
+        advice = audit_nonblocking_guidance(serialized, constraints, mappings)
+        self.assertEqual((advice[0]["actual"], advice[0]["within_guidance"]), (2, False))
+        self.assertEqual(audit_content_constraints(serialized, constraints, mappings), [])
+        self.assertEqual(manual_review_receipt_items(receipts), [])
+        # A real separator failure still produces failed technical receipts;
+        # advice cannot excuse it or turn it into an author red marker.
+        serialized.paragraphs[1].text = "关键词：甲，乙"
+        actuals, methods = _receipt_semantic_actuals(
+            serialized, {"content_constraints": constraints}, mappings, requirements, {}, [], {},
+        )
+        receipts = build_property_receipts(requirements, mappings, actuals,
+            serialized_docx_sha256="b" * 64, verification_methods=methods)
+        self.assertFalse(audit_property_receipts(receipts,
+            expected_receipt_ids=expected_receipt_ids(requirements))["valid"])
+        self.assertTrue(audit_content_constraints(serialized, constraints, mappings))
 
     def test_keyword_item_limit_reports_item_without_truncation(self) -> None:
         document = self._doc("摘要", "关键词：甲乙丙丁戊己庚辛")

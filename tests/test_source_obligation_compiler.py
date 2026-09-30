@@ -1218,7 +1218,8 @@ class SourceObligationCompilerTests(unittest.TestCase):
         self.assertNotIn("min_count", english_rule)
         self.assertNotIn("max_count", english_rule)
         self.assertEqual(english_rule["count_guidance"]["strength"], "general_guidance")
-        self.assertEqual(projected["requirements"][1]["verification"]["checks"], [])
+        self.assertEqual(projected["requirements"][1]["verification"],
+                         response["requirements"][1]["verification"])
         self.assertEqual(len(audit), 2)
         again, second_audit = materialize_soft_keyword_count_guidance(projected, clauses)
         self.assertEqual(again, projected)
@@ -1244,7 +1245,72 @@ class SourceObligationCompilerTests(unittest.TestCase):
         self.assertNotIn("min_count", rule)
         self.assertNotIn("max_count", rule)
         self.assertFalse(audit[0]["independently_mandatory_range_present"])
-        self.assertEqual(projected["requirements"][0]["verification"]["checks"], [])
+        self.assertEqual(projected["requirements"][0]["verification"],
+                         response["requirements"][0]["verification"])
+
+    def test_soft_guidance_preserves_simple_and_composite_checks_verbatim(self) -> None:
+        for language, text, check in (
+            ("zh", "关键词一般4～9个", "关键词数量通常4到9个，同时核对关键词在论文中的出处。"),
+            ("en", "Keywords generally 4~9", "Verify the keyword count is 4 to 9 and confirm each keyword is traceable to the thesis."),
+            ("zh", "关键词一般3～8个", "Verify the Chinese keyword count against the source-qualified 3-to-8 guidance."),
+        ):
+            with self.subTest(language=language, check=check):
+                key = f"keywords_{language}"
+                response = {"requirements": [{
+                    "role": "content_constraints", "clause_ids": ["CURRENT"],
+                    "evidence_ids": ["SOURCE"], "reason": "Current source guidance",
+                    "properties": {key: {"min_count": 3, "max_count": 8}},
+                    "verification": {"mode": "manual", "checks": [check], "checker_ids": []},
+                }]}
+                original = copy.deepcopy(response)
+                clauses = [{"id": "CURRENT", "text": text, "evidence_ids": ["SOURCE"]}]
+                projected, audit = materialize_soft_keyword_count_guidance(response, clauses)
+                self.assertEqual(response, original)
+                self.assertEqual(projected["requirements"][0]["verification"],
+                                 original["requirements"][0]["verification"])
+                self.assertNotIn("min_count", projected["requirements"][0]["properties"][key])
+                self.assertTrue(audit[0]["verification_preserved"])
+                self.assertNotEqual(audit[0]["before_sha256"], audit[0]["after_sha256"])
+                again, second_audit = materialize_soft_keyword_count_guidance(projected, clauses)
+                self.assertEqual((again, second_audit), (projected, []))
+
+    def test_guidance_projection_does_not_invent_missing_verification(self) -> None:
+        for verification in (None, {"mode": "manual", "checks": []}):
+            with self.subTest(verification=verification):
+                response = {"requirements": [{
+                    "role": "content_constraints", "clause_ids": ["CURRENT"],
+                    "properties": {"keywords_zh": {"min_count": 3, "max_count": 8}},
+                    "verification": verification,
+                }]}
+                projected, _audit = materialize_soft_keyword_count_guidance(response, [
+                    {"id": "CURRENT", "text": "关键词一般3～8个", "evidence_ids": ["SOURCE"]},
+                ])
+                self.assertEqual(projected["requirements"][0]["verification"], verification)
+
+    def test_abstract_guidance_preserves_composite_verification(self) -> None:
+        source = (
+            "中文摘要是论文内容的简要陈述，一般以第三人称语气撰写，"
+            "300～1000字（如遇特殊需要字数可以略多），不加评论和解释，"
+            "是一篇具有独立性和完整性的短文，能准确反映论文的中心思想，"
+            "规范的学术用语，逻辑性强、结构严谨，体现出论文的新理论、新方法、新技术等"
+        )
+        check = "Verify abstract length is 300 to 1000 characters and that commentary is absent."
+        response = {"contract_version": "3.0", "requirements": [{
+            "role": "content_constraints", "clause_ids": ["CURRENT"], "evidence_ids": ["SOURCE"],
+            "properties": {"abstract_zh": {"min_chars": 300, "max_chars": 1000}},
+            "verification": {"mode": "manual", "checks": [check]},
+        }], "clause_reviews": [{"clause_id": "CURRENT", "classification": "executable",
+                                 "reason": "Source bundle", "obligations": [{"id": "bundle", "status": "covered"}]}]}
+        projected, _audit = materialize_complete_abstract_source_constraints(response, [
+            {"id": "CURRENT", "text": source, "evidence_ids": ["SOURCE"]},
+        ])
+        self.assertEqual(projected["requirements"][0]["verification"],
+                         response["requirements"][0]["verification"])
+        self.assertEqual(projected["clause_reviews"], response["clause_reviews"])
+        properties = projected["requirements"][0]["properties"]["abstract_zh"]
+        self.assertNotIn("min_chars", properties)
+        self.assertNotIn("max_chars", properties)
+        self.assertEqual(properties["length_guidance"]["strength"], "general_guidance")
 
     def test_soft_projection_preserves_hard_bounds_when_subject_is_in_full_evidence(self) -> None:
         clauses = [

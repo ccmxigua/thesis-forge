@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+import copy
 
 from scripts.property_receipts import (
     audit_property_receipts,
@@ -10,6 +11,75 @@ from scripts.property_receipts import (
 
 
 class PropertyReceiptTests(unittest.TestCase):
+    def test_guidance_is_not_a_fabricated_execution_receipt(self) -> None:
+        requirements = [{"id": "R_GUIDANCE", "role": "content_constraints", "properties": {
+            "keywords_zh": {"count_guidance": {"min_count": 3, "max_count": 8,
+                "strength": "general_guidance"}, "separator": "semicolon"},
+        }}]
+        original = copy.deepcopy(requirements)
+        receipts = build_property_receipts(requirements, {}, {"content_constraints": {
+            "keywords_zh": {"separator": "semicolon"},
+        }}, serialized_docx_sha256="a" * 64)
+        self.assertEqual(requirements, original)
+        self.assertEqual([item["property_path"] for item in receipts], ["keywords_zh.separator"])
+        self.assertEqual(receipts[0]["receipt_id"], "PR-R_GUIDANCE-0004")
+        expected = expected_receipt_ids(requirements)
+        self.assertTrue(audit_property_receipts(receipts, expected_receipt_ids=expected)["valid"])
+        self.assertFalse(audit_property_receipts([], expected_receipt_ids=expected)["valid"])
+        self.assertFalse(audit_property_receipts(receipts + receipts,
+            expected_receipt_ids=expected)["valid"])
+        extra = dict(receipts[0], receipt_id="PR-R_GUIDANCE-0001",
+                     property_path="keywords_zh.count_guidance.min_count")
+        self.assertFalse(audit_property_receipts(receipts + [extra],
+            expected_receipt_ids=expected)["valid"])
+
+    def test_guidance_only_does_not_manufacture_a_requirement_pass(self) -> None:
+        requirements = [{"id": "R_GUIDANCE", "role": "content_constraints", "properties": {
+            "abstract_zh": {"length_guidance": {"min_chars": 300, "max_chars": 1000,
+                "length_metric": "cjk_characters", "strength": "general_guidance", "exception_text": ""},
+                "third_person_guidance": "general_guidance"},
+            "keywords_en": {"count_guidance": {"min_count": 3, "max_count": 8,
+                "strength": "general_guidance"}},
+        }}]
+        self.assertEqual(expected_receipt_ids(requirements), set())
+        self.assertEqual(build_property_receipts(requirements, {}, {},
+            serialized_docx_sha256="b" * 64), [])
+
+    def test_guidance_does_not_demote_independent_hard_bounds(self) -> None:
+        requirements = [{"id": "R_MIXED", "role": "content_constraints", "properties": {
+            "keywords_zh": {"count_guidance": {"min_count": 3, "max_count": 8,
+                "strength": "general_guidance"}, "min_count": 4, "max_count": 6},
+        }}]
+        for measured, valid in ((2, False), (5, True), (9, False)):
+            with self.subTest(measured=measured):
+                receipts = build_property_receipts(requirements, {}, {"content_constraints": {
+                    "keywords_zh": {"min_count": measured, "max_count": measured},
+                }}, serialized_docx_sha256="c" * 64)
+                self.assertEqual(len(receipts), 2)
+                self.assertEqual(audit_property_receipts(receipts,
+                    expected_receipt_ids=expected_receipt_ids(requirements))["valid"], valid)
+
+    def test_unknown_or_malformed_guidance_is_not_exempted(self) -> None:
+        base = {"min_count": 3, "max_count": 8, "strength": "general_guidance"}
+        cases = [
+            ("content_constraints", "keywords_zh", dict(base, strength="mandatory")),
+            ("content_constraints", "keywords_zh", dict(base, min_count=True)),
+            ("content_constraints", "keywords_zh", dict(base, max_count=0)),
+            ("content_constraints", "keywords_zh", dict(base, min_count=9)),
+            ("content_constraints", "keywords_zh", dict(base, hidden_requirement=True)),
+            ("content_constraints", "unknown_role", base),
+            ("body_text", "keywords_zh", base),
+        ]
+        for role, key, guidance in cases:
+            with self.subTest(role=role, key=key, guidance=guidance):
+                requirements = [{"id": "R_INVALID", "role": role,
+                                 "properties": {key: {"count_guidance": guidance}}}]
+                receipts = build_property_receipts(requirements, {}, {}, serialized_docx_sha256="d" * 64)
+                self.assertTrue(receipts)
+                self.assertTrue(expected_receipt_ids(requirements))
+                self.assertFalse(audit_property_receipts(receipts,
+                    expected_receipt_ids=expected_receipt_ids(requirements))["valid"])
+
     def test_style_properties_are_verified_at_property_level(self) -> None:
         requirements = [{
             "id": "R1", "role": "body_text", "clause_ids": ["C1"],

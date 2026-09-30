@@ -1188,7 +1188,7 @@ class HostAgentBridgeTests(unittest.TestCase):
             "id": "C1", "text": source, "evidence_ids": ["E1"],
             "source_kind": "paragraph", "location": {}, "part_index": 0,
         }]
-        evidence = {"evidence": [{"id": "E1", "text": source, "kind": "paragraph"}]}
+        evidence = {"evidence": [{"id": "E1", "text": source, "kind": "paragraph", "location": {}}]}
         clauses = self._bind_test_source_spans(clauses, evidence)
         if contract_version is None:
             request = engine.build_llm_request(
@@ -1585,7 +1585,7 @@ class HostAgentBridgeTests(unittest.TestCase):
             self.assertEqual(bridge.validate_host_agent_response(accepted, chunk), [])
             self.assertEqual(
                 audit["source_verification_classification_policy_version"],
-                "source-verification-classification-v1",
+                "source-verification-classification-v3",
             )
             self.assertEqual(
                 accepted["clause_reviews"][0]["classification"],
@@ -1832,6 +1832,110 @@ class HostAgentBridgeTests(unittest.TestCase):
         }], contract_version="3.0")
         self.assertIn("content_constraints requirement", structured)
         self.assertIn("only explicit mandatory ranges", structured)
+
+    def test_current_source_compiles_missing_keyword_and_retains_ambiguous_heading(self) -> None:
+        heading = "摘  要"
+        keyword = "关键词在摘要内容后另起一行，一般3～8个，之间用分号分开"
+        evidence_doc = {"evidence": [
+            {"id": "E_ANCHOR", "kind": "paragraph", "text": "摘要",
+             "style_name": "Abstract Title CN",
+             "location": {"part": "document", "child_index": 1}},
+            {"id": "E_HEADING", "kind": "paragraph", "text": heading,
+             "style_name": "Heading 1",
+             "location": {"part": "document", "child_index": 2}},
+            {"id": "E_KEYWORD", "kind": "paragraph", "text": keyword,
+             "location": {"part": "document", "child_index": 3}},
+        ]}
+        clauses = [
+            {"id": "C_HEADING", "text": "摘 要", "source_text_full": "摘 要",
+             "evidence_ids": ["E_HEADING"], "source_kind": "paragraph",
+             "location": evidence_doc["evidence"][1]["location"],
+             "source_span": {"evidence_id": "E_HEADING", "start_offset": 0,
+                             "end_offset": len(heading), "text": heading,
+                             "source_sha256": hashlib.sha256(heading.encode()).hexdigest()}},
+            {"id": "C_KEYWORD", "text": keyword, "source_text_full": keyword,
+             "evidence_ids": ["E_KEYWORD"], "source_kind": "paragraph",
+             "location": evidence_doc["evidence"][2]["location"],
+             "source_span": {"evidence_id": "E_KEYWORD", "start_offset": 0,
+                             "end_offset": len(keyword), "text": keyword,
+                             "source_sha256": hashlib.sha256(keyword.encode()).hexdigest()}},
+        ]
+        anchor_inventory = {
+            "status": "verified", "source": {"sha256": "a" * 64},
+            "anchors": {"abstract_title_zh": {
+                "anchor_type": "semantic_role", "binding_status": "verified",
+                "match_count": 1,
+                "matches": [{"evidence_id": "E_ANCHOR", "text": "摘要"}],
+            }},
+        }
+        chunk = engine.build_llm_request(
+            [], clauses, evidence_doc, {}, "full", contract_version="3.0",
+            runtime_context={
+                "code_fingerprint_sha256": "9" * 64,
+                "runtime_inventory": {"anchor_inventory": anchor_inventory},
+            },
+        )
+        chunk = attach_request_provenance(
+            chunk, source_sha256="a" * 64, evidence_doc=evidence_doc,
+            clauses=chunk["clauses"], run_id="dynamic-source-projection-test",
+        )
+        raw = {
+            "contract_version": "3.0", "requirements": [],
+            "clause_reviews": [{
+                "clause_id": clause_id, "classification": "executable",
+                "normative_basis": "explicit_normative_text", "reason": "Model claim.",
+                "obligations": [{"id": duty, "status": "covered", "reason": "Model claim."}],
+            } for clause_id, duty in (
+                ("C_HEADING", "heading"), ("C_KEYWORD", "keyword"),
+            )],
+            "unsupported_items": [], "reported_conflicts": [],
+        }
+        candidate, audit = bridge.prepare_native_response_candidate(raw, chunk)
+        self.assertEqual(len(candidate["requirements"]), 1)
+        requirement = candidate["requirements"][0]
+        self.assertEqual(requirement["clause_ids"], ["C_KEYWORD"])
+        self.assertEqual(requirement["properties"]["keywords_zh"]["separator"], "semicolon")
+        self.assertEqual(candidate["clause_reviews"][0]["classification"], "unresolved")
+        self.assertEqual(audit["source_heading_binding_projections"][0]["action"],
+                         "retain_unresolved_heading_binding")
+        self.assertEqual(audit["source_keyword_constraint_projections"][0]["authorization"],
+                         "verified_complete_current_source_without_parent_v1")
+        self.assertEqual(raw["requirements"], [])
+
+        # A later model attempt may omit a prior requirement. Recompilation
+        # must be audited, and raw retry authorization must still see the
+        # model's deletion rather than silently treating it as unchanged.
+        parent_raw = copy.deepcopy(raw)
+        parent_raw["requirements"] = copy.deepcopy(candidate["requirements"])
+        error, changed = bridge._retry_semantic_change_error(
+            parent_raw, raw,
+            [{"code": "missing_derived_requirement",
+              "json_pointer": "$.clause_reviews[0]",
+              "raw_error": "$.clause_reviews[0]: executable_review_requires_derived_requirement"}],
+            contract_version=bridge.HOST_REVIEW_CONTRACT_V3, chunk=chunk,
+        )
+        self.assertIsNotNone(error)
+        self.assertIn("$.requirements", changed)
+
+        # A distinct invalid field may reject the candidate after the
+        # source-driven projections. Their audit must survive the exception.
+        invalid_raw = copy.deepcopy(raw)
+        invalid_raw["clause_reviews"][1]["normative_basis"] = "informational"
+        with self.assertRaises(ValueError) as rejected:
+            bridge.prepare_native_response_candidate(invalid_raw, chunk)
+        failure = rejected.exception
+        self.assertEqual(
+            failure.source_keyword_constraint_projections[0]["authorization"],
+            "verified_complete_current_source_without_parent_v1",
+        )
+        self.assertEqual(
+            failure.source_heading_binding_projections[0]["action"],
+            "retain_unresolved_heading_binding",
+        )
+        self.assertEqual(
+            failure.source_keyword_constraint_projection_policy_version,
+            bridge.SOURCE_KEYWORD_CONSTRAINT_PROJECTION_POLICY_VERSION,
+        )
 
     def test_keyword_source_constraints_pass_the_production_candidate_boundary(self) -> None:
         evidence_doc = {"evidence": [
@@ -3284,6 +3388,26 @@ class HostAgentBridgeTests(unittest.TestCase):
             )
         self.assertIsNone(unsafe_repair)
 
+        unresolved_parent = copy.deepcopy(authoring_parent)
+        unresolved_parent["clause_reviews"][0]["classification"] = "unresolved"
+        unresolved_parent["clause_reviews"][0]["obligations"][0]["status"] = "unresolved"
+        unresolved_candidate = copy.deepcopy(unresolved_parent)
+        unresolved_candidate["clause_reviews"][0]["classification"] = "requires_source_verification"
+        unresolved_record = {
+            **record, "baseline_classification": "unresolved",
+            "candidate_response_sha256": bridge._response_sha256(
+                bridge._bind_current_invocation_provenance(unresolved_parent, provenance)
+            ),
+            "candidate_semantic_sha256": bridge._response_sha256(
+                bridge._semantic_retry_view(unresolved_parent)
+            ),
+        }
+        with patch.object(bridge, "validate_host_agent_response", return_value=[]):
+            rejected, _ = bridge._v3_source_verification_reclassification_response(
+                unresolved_parent, unresolved_candidate, [unresolved_record], chunk=chunk,
+            )
+        self.assertIsNone(rejected)
+
         changed_reason = copy.deepcopy(candidate)
         changed_reason["clause_reviews"][0]["reason"] = "A second semantic edit."
         bad_evidence = {**record, "evidence_ids": ["E2"]}
@@ -3490,6 +3614,44 @@ class HostAgentBridgeTests(unittest.TestCase):
             self.assertIsNone(failure_audit["error_records"][0]["source_reference_compilation_sha256"])
 
     def test_source_verification_correction_reaches_bound_red_release_marker(self) -> None:
+        self._source_verification_red_marker_roundtrip(project_unresolved=False)
+
+    def test_unresolved_source_check_reaches_bound_red_marker_without_primary_retry(self) -> None:
+        self._source_verification_red_marker_roundtrip(project_unresolved=True)
+
+    def test_unresolved_projection_remains_audited_after_independent_failure(self) -> None:
+        source = "关键词须源自论文并有明确出处。"
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            review_dir, chunk = self._packet(root / "requirements", contract_version="3.0", source=source)
+            raw = {
+                "contract_version": "3.0", "provenance": chunk["provenance"],
+                "requirements": [], "unsupported_items": [], "reported_conflicts": [],
+                "clause_reviews": [{
+                    "clause_id": "C1", "classification": "unresolved",
+                    "normative_basis": "explicit_normative_text", "reason": "Cannot verify.",
+                    "obligations": [{"id": "O1", "status": "unresolved", "reason": "Verify origin."}],
+                }],
+            }
+            envelope = {"runId": "offline-failure", "status": "ok", "provider": "openai",
+                        "model": "gpt-5.6-luna", "result": {"payloads": [{"text": json.dumps(raw)}]}}
+            result = subprocess.CompletedProcess(["openclaw"], 0, json.dumps(envelope), "")
+            with patch.object(bridge, "_run_command", return_value=result), \
+                    patch.object(bridge, "_run_independent_obligation_coverage_review",
+                                 side_effect=RuntimeError("independent source review unavailable")):
+                with self.assertRaisesRegex(ValueError, "independent source review unavailable"):
+                    bridge.run_bridge(review_dir, response_out=root / "response.json",
+                                      agent_id="main", timeout=1, max_attempts=1,
+                                      openclaw_bin="openclaw", model="openai/gpt-5.6-luna",
+                                      host_runtime="openclaw")
+            audit = json.loads((review_dir / "host-agent-run.json").read_text())
+            attempt = audit["chunk_lifecycle"][0]["attempts"][0]
+            projection = attempt["source_verification_classification_projections"][0]
+            self.assertEqual(projection["original_primary_review"], raw["clause_reviews"][0])
+            self.assertFalse(projection["submission_ready"])
+            self.assertFalse((root / "response.json").exists())
+
+    def _source_verification_red_marker_roundtrip(self, *, project_unresolved: bool) -> None:
         """Exercise conflict, authorized retry, accepted receipt, and visible non-release marker offline."""
         source = "论文中的关键词须源自论文，并可追溯至对应原文。"
         with tempfile.TemporaryDirectory() as td:
@@ -3508,6 +3670,13 @@ class HostAgentBridgeTests(unittest.TestCase):
                 "unsupported_items": [], "reported_conflicts": [],
             }
             corrected = copy.deepcopy(misclassified_as_author_input)
+            if project_unresolved:
+                review = misclassified_as_author_input["clause_reviews"][0]
+                review.update({
+                    "classification": "unresolved", "normative_basis": "explicit_normative_text",
+                    "obligations": [{"id": "origin-check", "status": "unresolved",
+                                     "reason": "The backend cannot verify thesis origin."}],
+                })
             corrected["clause_reviews"][0]["classification"] = "requires_source_verification"
             envelopes = [
                 {"runId": "offline-source-verification-1", "status": "ok",
@@ -3531,7 +3700,7 @@ class HostAgentBridgeTests(unittest.TestCase):
                 request_path = output_dir / "request.json"
                 compiled_path = output_dir / "compiled-response.json"
                 compilation_path = output_dir / "source-reference-compilation.json"
-                if native_calls == 1:
+                if native_calls == 1 and not project_unresolved:
                     # Reproduce the production failure lifecycle: persist the
                     # source-bound pre-validation compilation, then let the
                     # validator raise the narrow classification correction.
@@ -3582,6 +3751,9 @@ class HostAgentBridgeTests(unittest.TestCase):
                 compiled_response, compilation = compile_source_reference_response(
                     raw_response, request, bridge.OBLIGATION_COVERAGE_SCHEMA, coverage=True,
                 )
+                bridge.validate_obligation_coverage_response(
+                    copy.deepcopy(compiled_response), request["checks"],
+                )
                 packet_path = output_dir / "source-reference-packet.json"
                 raw_path = output_dir / "raw-response.json"
                 response_path = output_dir / "response.json"
@@ -3628,24 +3800,32 @@ class HostAgentBridgeTests(unittest.TestCase):
                     host_runtime="openclaw",
                 )
 
-            self.assertEqual(primary_call.call_count, 2)
-            self.assertEqual(native_calls, 2)
+            self.assertEqual(primary_call.call_count, 1 if project_unresolved else 2)
+            self.assertEqual(native_calls, 1 if project_unresolved else 2)
             self.assertEqual(bridge_audit["status"], "merged")
             chunk_audit = bridge_audit["chunk_runs"][0]
             self.assertEqual(chunk_audit["candidate_status"], "accepted_after_independent_review")
-            retry_authorization = chunk_audit["semantic_retry_authorizations"]
-            self.assertEqual(
-                retry_authorization["status"],
-                "accepted_after_provenance_and_contract_validation",
-            )
-            self.assertEqual(
-                retry_authorization["paths"][0]["rule_id"],
-                "v3_source_bound_existing_content_verification_reclassification",
-            )
-            self.assertEqual(
-                retry_authorization["paths"][0]["authorized_changed_paths"],
-                ["$.clause_reviews[0].classification"],
-            )
+            if project_unresolved:
+                projection = chunk_audit["source_verification_classification_projections"][0]
+                self.assertEqual(projection["before_classification"], "unresolved")
+                self.assertTrue(projection["current_evidence_binding_verified"])
+                self.assertEqual(projection["original_primary_review"],
+                                 misclassified_as_author_input["clause_reviews"][0])
+                self.assertFalse(projection["submission_ready"])
+            else:
+                retry_authorization = chunk_audit["semantic_retry_authorizations"]
+                self.assertEqual(
+                    retry_authorization["status"],
+                    "accepted_after_provenance_and_contract_validation",
+                )
+                self.assertEqual(
+                    retry_authorization["paths"][0]["rule_id"],
+                    "v3_source_bound_existing_content_verification_reclassification",
+                )
+                self.assertEqual(
+                    retry_authorization["paths"][0]["authorized_changed_paths"],
+                    ["$.clause_reviews[0].classification"],
+                )
             merged = json.loads(response_path.read_text(encoding="utf-8"))
             self.assertEqual(merged["clause_reviews"][0]["classification"], "requires_source_verification")
             self.assertEqual(merged["requirements"], misclassified_as_author_input["requirements"])
@@ -4282,6 +4462,20 @@ class HostAgentBridgeTests(unittest.TestCase):
         for attempt in record["attempts"][1:]:
             self.assertEqual(attempt["remote_operation_state"], "unknown")
             self.assertEqual(attempt["termination_reason"], "operator interrupted")
+
+    def test_interruption_preserves_completed_failed_attempt_before_retry(self) -> None:
+        completed = {
+            "attempt": 1, "status": "retrying", "finished_at": "2026-09-29T12:00:00+00:00",
+            "error": "local contract failed", "error_records": [{"code": "contract_validation_error"}],
+        }
+        record = {"attempts": [completed, {"attempt": 2, "status": "running"}]}
+        bridge._finalize_interrupted_attempts(record, "sibling failed")
+        self.assertEqual(completed["status"], "failed")
+        self.assertEqual(completed["finished_at"], "2026-09-29T12:00:00+00:00")
+        self.assertEqual(completed["error"], "local contract failed")
+        self.assertEqual(completed["subsequent_retry_cancelled_reason"], "sibling failed")
+        self.assertNotIn("termination_reason", completed)
+        self.assertEqual(record["attempts"][1]["status"], "terminated")
 
     def test_completed_sibling_is_harvested_before_concurrent_failure_audit(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -6431,6 +6625,121 @@ class HostAgentBridgeTests(unittest.TestCase):
         self.assertIsNone(bridge._apply_safe_mechanical_repairs_one_rule(
             response, unrelated_error,
         )[0])
+
+    def test_unbound_cover_schema_shell_is_pruned_with_independent_errors(self) -> None:
+        chunk = {"requirement_contract": {
+            "role_properties_schema": {"cover": {"$ref": "#/$defs/coverSpec"}},
+            "$defs": {"coverSpec": {
+                "type": "object", "additionalProperties": False,
+                "required": ["institution", "fields"],
+                "properties": {
+                    "institution": {"type": "string"}, "fields": {"type": "array"},
+                    "non_public_administration": {"type": "object"},
+                    "before_role": {"enum": ["document_start"]},
+                    "missing_value_policy": {"const": "placeholder"},
+                    "missing_value_placeholder": {"type": "string"},
+                    "layout_id": {"enum": ["linear"]},
+                },
+            }},
+        }}
+        shell = {
+            "role": "cover", "properties": {
+                "institution": "", "fields": [], "non_public_administration": None,
+                "before_role": None, "missing_value_policy": None,
+                "missing_value_placeholder": None, "layout_id": None,
+            },
+            "clause_ids": [], "evidence_ids": [], "confidence": 0.0,
+            "reason": "", "verification": None,
+        }
+        response = {
+            "requirements": [
+                {"role": "cover", "properties": {"institution": "", "fields": [{"order": 0}]},
+                 "clause_ids": ["C1"], "evidence_ids": ["E1"]},
+                shell,
+            ],
+            "clause_reviews": [{"clause_id": "C1", "classification": "covered"}],
+        }
+        sha = bridge._response_sha256(response)
+        records = [{
+            "code": "contract_validation_error", "json_pointer": "$.requirements[0]",
+            "response_sha256": sha, "raw_error": "independent cover error",
+        }, {
+            "code": "cover_institution_placeholder",
+            "json_pointer": "$.requirements[1].properties.institution",
+            "response_sha256": sha, "raw_error": "empty institution",
+        }, {
+            "code": "requirement_relation_mismatch",
+            "json_pointer": "$.requirements[1]", "requirement_index": 1,
+            "raw_error": "requirements_not_referenced_by_clause_review:1",
+            "response_sha256": sha, "relation_category": "missing_clause_relation",
+            "mechanically_removable": True,
+            "mechanical_removal_basis": "no_clause_or_evidence_binding",
+        }]
+        pruned, audit = bridge._prune_unbound_empty_schema_shells(response, records, chunk)
+        self.assertEqual(pruned["requirements"], response["requirements"][:1])
+        self.assertEqual(audit[0]["rule_id"], "remove_source_unbound_empty_schema_shell_v1")
+        self.assertEqual(response["requirements"][1], shell)
+
+        for change in (
+            {"properties": {**shell["properties"], "approved": False}},
+            {"properties": {**shell["properties"], "limit": 0}},
+            {"properties": {"fields": []}},
+            {"properties": {**shell["properties"], "before_role": ""}},
+            {"clause_ids": ["C1"]}, {"reason": "human decision"},
+        ):
+            changed = copy.deepcopy(response)
+            changed["requirements"][1].update(change)
+            bound_records = copy.deepcopy(records)
+            bound_sha = bridge._response_sha256(changed)
+            for record in bound_records:
+                record["response_sha256"] = bound_sha
+            self.assertIsNone(bridge._prune_unbound_empty_schema_shells(
+                changed, bound_records, chunk,
+            )[0])
+        tampered = copy.deepcopy(records)
+        tampered[-1]["response_sha256"] = "0" * 64
+        self.assertIsNone(bridge._prune_unbound_empty_schema_shells(response, tampered, chunk)[0])
+        mixed_external = copy.deepcopy(records) + [{
+            "code": "non_requirement_classification_relation",
+            "json_pointer": "$.requirements[0]", "response_sha256": sha,
+        }]
+        self.assertIsNone(bridge._prune_unbound_empty_schema_shells(
+            response, mixed_external, chunk,
+        )[0])
+
+    def test_exact_duplicate_requirements_only_collapse_identical_v3_items(self) -> None:
+        item = {
+            "role": "cover", "properties": {"fields": [{"id": "title_zh"}]},
+            "clause_ids": ["C1"], "evidence_ids": ["E1"],
+            "confidence": 0.9, "reason": "Same source-bound cover rule.",
+        }
+        response = {
+            "contract_version": "3.0", "requirements": [copy.deepcopy(item), copy.deepcopy(item)],
+            "clause_reviews": [{"clause_id": "C1", "classification": "covered"}],
+        }
+        original = copy.deepcopy(response)
+        projected, audit = bridge._project_exact_duplicate_requirements(response)
+        self.assertEqual(projected["requirements"], [item])
+        self.assertEqual(audit["removed"][0]["removed_index"], 1)
+        self.assertFalse(audit["accepted"])
+        self.assertEqual(response, original)
+
+        for change in (
+            {"clause_ids": ["C2"]},
+            {"evidence_ids": ["E2"]},
+            {"properties": {"fields": [{"id": "security_marking"}]}},
+        ):
+            distinct = copy.deepcopy(response)
+            distinct["requirements"][1].update(change)
+            unchanged, no_audit = bridge._project_exact_duplicate_requirements(distinct)
+            self.assertEqual(unchanged, distinct)
+            self.assertIsNone(no_audit)
+        legacy = copy.deepcopy(response)
+        legacy["contract_version"] = "2.1"
+        self.assertIsNone(bridge._project_exact_duplicate_requirements(legacy)[1])
+        indexed = copy.deepcopy(response)
+        indexed["clause_reviews"][0]["requirement_indexes"] = [0, 1]
+        self.assertIsNone(bridge._project_exact_duplicate_requirements(indexed)[1])
 
     def test_unbound_semantic_orphan_is_audited_then_full_contract_is_revalidated(self) -> None:
         source = "北京体育大学学位评定委员会办公室盖章(有效)"
@@ -10170,17 +10479,30 @@ class HostAgentBridgeTests(unittest.TestCase):
             }]
             raw_path.write_text(json.dumps(raw), encoding="utf-8")
             repair_base_path.write_text(json.dumps(repair_base), encoding="utf-8")
+            residual = [{
+                "code": "schema_contract_violation",
+                "response_sha256": bridge._response_sha256(repair_base),
+            }]
             snapshots = [
                 bridge._attempt_stage_snapshot("decoded_raw", raw, path=raw_path, chunk=chunk),
                 bridge._attempt_stage_snapshot(
                     "repair_base", repair_base, path=repair_base_path, chunk=chunk,
-                    projection_audit={"accepted": False}, accepted=False,
+                    projection_audit={
+                        "accepted": False,
+                        "initial_error_records_sha256": bridge._response_sha256([]),
+                        "resolved_error_records_sha256": bridge._response_sha256([]),
+                        "residual_error_records_sha256": bridge._response_sha256(residual),
+                        "repair_authorization_error_records_sha256": bridge._response_sha256(residual),
+                    }, accepted=False,
                 ),
             ]
             attempt = {
                 "retry_input_fingerprints": bridge._retry_input_fingerprints(chunk),
                 "stage_snapshots": snapshots,
-                "error_records": [{"code": "schema_contract_violation"}],
+                "error_records": copy.deepcopy(residual),
+                "initial_error_records": [], "resolved_error_records": [],
+                "residual_error_records": copy.deepcopy(residual),
+                "retry_authorizing_error_records": copy.deepcopy(residual),
             }
             receipt = bridge._validate_retry_attempt_artifact(response_path, 1, attempt)
             repair_receipt = receipt["unaccepted_repair_base_receipt"]
@@ -10188,6 +10510,38 @@ class HostAgentBridgeTests(unittest.TestCase):
             self.assertEqual(repair_receipt["kind"], "unaccepted_repair_base")
             self.assertEqual(receipt["kind"], "decoded_raw")
             self.assertNotEqual(receipt["path"], repair_receipt["path"])
+            selected = bridge._retry_semantic_parent_receipt([receipt])
+            self.assertIsNotNone(selected)
+            self.assertEqual(selected["path"], repair_receipt["path"])
+            self.assertEqual(selected["sha256"], repair_receipt["sha256"])
+            self.assertFalse(selected["accepted"])
+            self.assertEqual(
+                bridge._retry_semantic_parent_receipt([
+                    receipt, {"kind": "no_semantic_response", "attempt": 2, "path": "unused"},
+                ])["path"], repair_receipt["path"],
+            )
+            replay_error = ValueError("remaining local contract errors")
+            replay_error.repair_base_candidate = copy.deepcopy(repair_base)
+            replay_error.retry_authorizing_error_records = copy.deepcopy(residual)
+            with patch.object(
+                bridge, "prepare_native_response_candidate", side_effect=replay_error,
+            ):
+                proof = bridge._prove_retry_repair_base_replay(
+                    selected, chunk, residual,
+                    source_projection_validation_sha256=None,
+                )
+            self.assertFalse(proof["accepted"])
+            self.assertEqual(proof["repair_base_sha256"], bridge._response_sha256(repair_base))
+            replay_error.retry_authorizing_error_records[0]["code"] = "different_issue"
+            with patch.object(
+                bridge, "prepare_native_response_candidate", side_effect=replay_error,
+            ), self.assertRaisesRegex(
+                bridge.RetryRawArtifactIntegrityError, "cannot be replayed",
+            ):
+                bridge._prove_retry_repair_base_replay(
+                    selected, chunk, residual,
+                    source_projection_validation_sha256=None,
+                )
 
             tampered = copy.deepcopy(attempt)
             tampered["stage_snapshots"][1]["accepted"] = True
@@ -10196,6 +10550,82 @@ class HostAgentBridgeTests(unittest.TestCase):
                 "explicitly marked unaccepted",
             ):
                 bridge._validate_retry_attempt_artifact(response_path, 1, tampered)
+
+            missing_digest = copy.deepcopy(attempt)
+            missing_digest["retry_authorizing_error_records"][0]["response_sha256"] = None
+            with self.assertRaisesRegex(
+                bridge.RetryRawArtifactIntegrityError, "authorization records",
+            ):
+                bridge._validate_retry_attempt_artifact(response_path, 1, missing_digest)
+
+            changed_ledger = copy.deepcopy(attempt)
+            changed_ledger["retry_authorizing_error_records"][0]["code"] = "different_issue"
+            with self.assertRaisesRegex(
+                bridge.RetryRawArtifactIntegrityError, "error ledger differs",
+            ):
+                bridge._validate_retry_attempt_artifact(response_path, 1, changed_ledger)
+
+    def test_retry_prompt_and_drift_use_same_verified_repair_baseline(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            review_dir, chunk = self._packet(Path(td) / "requirements")
+            baseline = self._response(chunk)
+            original = copy.deepcopy(baseline)
+            original["requirements"] = [{
+                "role": "body_text", "properties": {}, "clause_ids": [],
+                "evidence_ids": [], "reason": "",
+            }]
+            records = [{
+                "code": "contract_validation_error", "json_pointer": "$.requirements[0]",
+                "raw_error": "empty provider shell",
+                "response_sha256": bridge._response_sha256(baseline),
+            }]
+            actual_prepare = bridge.prepare_native_response_candidate
+            prepare_calls = 0
+
+            def partial_once(value, current_chunk, **kwargs):
+                nonlocal prepare_calls
+                prepare_calls += 1
+                if prepare_calls <= 2:
+                    error = ValueError("local response contract validation failed")
+                    error.error_records = copy.deepcopy(records)
+                    error.initial_error_records = copy.deepcopy(records)
+                    error.resolved_error_records = []
+                    error.residual_error_records = copy.deepcopy(records)
+                    error.retry_authorizing_error_records = copy.deepcopy(records)
+                    error.repair_base_candidate = copy.deepcopy(baseline)
+                    raise error
+                return actual_prepare(value, current_chunk, **kwargs)
+
+            def envelope(payload):
+                return subprocess.CompletedProcess(["openclaw"], 0, json.dumps({
+                    "runId": "offline-retry", "status": "ok",
+                    "provider": "openai", "model": "gpt-5.6-luna",
+                    "result": {"payloads": [{"text": json.dumps(payload)}]},
+                }), "")
+
+            with patch.object(
+                bridge, "_run_command", side_effect=[envelope(original), envelope(baseline)],
+            ), patch.object(
+                bridge, "prepare_native_response_candidate", side_effect=partial_once,
+            ):
+                audit = bridge.run_bridge(
+                    review_dir, response_out=Path(td) / "accepted.json",
+                    agent_id="main", timeout=1, max_attempts=2,
+                    openclaw_bin="openclaw", model="openai/gpt-5.6-luna",
+                )
+
+            self.assertEqual(audit["status"], "merged")
+            lifecycle = audit["chunk_lifecycle"][0]
+            self.assertEqual(lifecycle["retry_parent_stage"], "unaccepted_repair_base")
+            repair = lifecycle["attempts"][0]["repair_base_snapshot"]
+            prompt = (review_dir / "host-agent-prompts" / "prompt-0001-attempt-02.txt").read_text()
+            self.assertIn(repair["file_bytes_sha256"], prompt)
+            self.assertIn('"requirements": []', prompt)
+            self.assertNotIn('"reason": ""', prompt)
+            comparison = audit["chunk_runs"][0]["retry_stage_comparison"]
+            self.assertEqual(comparison["semantic_parent_stage"], "unaccepted_repair_base")
+            self.assertEqual(comparison["raw_parent_file_sha256"], repair["file_bytes_sha256"])
+            self.assertFalse(comparison["original_raw_observation"]["authorization_basis"])
 
     def test_completed_chunk_set_rejects_non_integer_and_duplicate_indexes(self) -> None:
         with tempfile.TemporaryDirectory() as td:

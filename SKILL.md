@@ -542,12 +542,17 @@ reports model-capacity exhaustion may trigger one bounded retry after a
 five-second backoff. The retry uses the same requested model, run, candidate
 response, and provenance, but a fresh attempt directory recorded in the audit.
 Each response representation is stage-labeled and separately hashed (decoded
-raw, normalized raw, projected candidate, validated candidate, accepted
-response). Semantic retry drift is compared raw-to-raw before any candidate
-comparison; projected candidates are compared only to projected candidates.
-Neither comparison may substitute for the other, because a code projection can
-hide a genuine model-side change. A retry-parent digest must identify the exact
-raw sidecar file that the prompt reads; a mismatch fails closed. Stop a retry
+raw, normalized raw, unaccepted repair base when partial mechanical repairs
+leave residual errors, projected candidate, validated candidate, accepted
+response). A retry uses the latest receipt-verified semantic baseline whose
+validator feedback it actually receives. When that is an unaccepted repair
+base, the prompt, parent file digest, error ledger, and semantic-change
+authorization all bind to that same repair base; the decoded raw response is
+preserved and compared separately as an observation, never silently promoted
+to the authorized parent. Otherwise decoded raw is the parent. Projected
+candidates are compared only to projected candidates, and neither comparison
+may conceal a model-side change. A retry-parent digest must identify the exact
+sidecar file that the prompt reads; a mismatch fails closed. Stop a retry
 without another model call only when the normalized raw response, blocker/repair
 plan, candidate state, and complete source/clause/evidence/run/case/chunk/schema/code
 invocation fingerprints are all unchanged. Missing or malformed fingerprints do
@@ -556,13 +561,53 @@ decoded raw sidecar. If an undecodable attempt intervenes, semantic change
 authorization comes from the most recent earlier decoded attempt that actually
 failed review; the parse failure remains separate retry feedback and cannot
 replace that semantic blocker.
+In v3, code may collapse requirements that are exactly identical in every
+field, including all source edges, before local validation. The original raw
+response and an index/hash audit remain intact. The same deterministic
+projection must yield the identical validated candidate whether applied to
+the raw response or its already-collapsed form before it can narrow a retry
+comparison; any differing payload or indexed clause review stays rejected.
+The source compiler may also create a keyword-content requirement without a
+model-created parent only when the current evidence verifies the complete
+source span and that whole sentence uniquely states the keyword placement,
+semicolon separator, and qualified count guidance. “Generally” or “usually”
+is recorded as nonmandatory guidance, never as a hard minimum or maximum.
+Different or conflicting source wording is not completed by guesswork. For a
+standalone heading, the compiler may bind a text requirement only when its
+current evidence occurrence is the unique verified semantic-role anchor and
+the role schema permits a text property. Matching heading words at another
+source occurrence are not sufficient: the review remains unresolved for a
+fresh source-grounded decision. Neither clause IDs nor school names authorize
+these projections. The original model response, exact source and anchor
+hashes, before/after response hashes, and projection policy are retained for
+accepted and rejected attempts. Code compilation does not certify DOCX
+compliance or make a draft submission-ready.
 When source-first review identifies only a human verification duty for existing
 content, a bounded primary retry may change `informational` or an unsubstantiated
 `requires_source_content` classification to `requires_source_verification` only
 when exact current-source quotes, evidence, run bindings, and an unchanged
 requirement graph authorize that single-field correction. A `requires_source_content`
 classification with any explicit authoring obligation is never eligible; the
-verification remains pending and blocks submission.
+verification remains pending and blocks submission. A model may split one
+registered source-origin check into several `requires_source_content`
+sub-obligations; their count alone does not create an authoring instruction.
+Code may retain every original sub-obligation in the projection audit and
+classify the current source as human verification only when all statuses and
+identities are well formed, no executable requirement is linked, and the
+source has no explicit authoring cue. Independent review still re-reads that
+same source, and a mistaken multi-item authoring disposition receives only a
+bounded re-review, never automatic approval.
+An `unresolved` primary review caused by backend inability to check a registered
+keyword-origin duty may use the v3 deterministic classification projection only
+when the entire exact current evidence span matches a closed pure-verification
+grammar, the normative basis is explicit, all primary obligations are unresolved,
+and no linked requirement or reported conflict exists. Additional formatting,
+authoring, conditions, or unknown wording disable this projection. The full
+original review and obligations, current evidence hash/span, run provenance,
+and sequential before/after hashes are retained in success and failure audits.
+Independent review must still identify the source-bound pending human duty;
+validated receipts carry it into the manual ledger and visible red draft marker.
+Neither this projection nor a confidence/priority score authorizes submission.
 For a text property rejected only because its literal differs from the uniquely
 bound current source span by Unicode whitespace, the native bridge may copy the
 exact source text into that candidate field. It must validate current
@@ -572,6 +617,19 @@ the full validator. This projection cannot change punctuation or any
 non-whitespace character. Missing, stale, foreign, or ambiguous source bindings
 remain failures; the rule does not normalize source evidence or weaken the
 exact-literal contract.
+Repeated fixed literals at distinct source locations are separate content
+instances, not competing global role values. Emit one text requirement per
+occurrence and use its own fragment selector; omit/null the literal when code
+can materialize it. The native bridge may partition an aggregated relation
+only when every cited clause independently carries the same complete fixed
+wording (ignoring whitespace only), has an executable fixed/template review
+with covered obligations, and its current primary evidence proves a distinct,
+non-adjacent paragraph occurrence. Every instance keeps its own exact literal,
+location, offsets and source hash. Styled/conditional payloads, reused existing
+IDs, extra evidence, changed lexical text, reported conflicts, and ambiguous
+bindings are not eligible. The bridge does not infer outer/inner-cover roles,
+create new semantic duties, or weaken coverage or submission gates. Projection
+receipts preserve the aggregate and every partitioned source occurrence.
 For the narrowly authorized v3 missing-obligation-inventory correction, the
 bridge constructs the candidate from the receipt-bound parent and copies only
 the exact `clause_reviews[i].obligations` fields named by matching
@@ -585,8 +643,10 @@ the bridge may proceed only with a structured no-response record and the exact
 persisted raw-envelope artifact whose current SHA-256 matches the recorded
 receipt. Before every subsequent host call, the bridge revalidates the artifact
 receipt for every prior attempt. A successful retry compares against the most
-recent prior decoded raw response even if an intervening attempt could not be
-decoded; only a history with no decoded semantic response may state that semantic
+recent prior verified semantic baseline (its unaccepted repair base when
+residual feedback is bound there, otherwise its decoded raw response), even
+if an intervening attempt could not be decoded; only a history with no decoded
+semantic response may state that semantic
 comparison was not possible. Any missing or changed artifact stops the chunk
 before another host call and preserves the original semantic blocker separately
 from the integrity failure.

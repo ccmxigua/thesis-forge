@@ -1661,6 +1661,8 @@ class HostReviewV3Tests(unittest.TestCase):
             for branch in branches:
                 props = branch["properties"]
                 self.assertEqual(props["clause_ids"]["items"]["enum"], ["C1"])
+                self.assertIn("at least one", props["clause_ids"]["description"])
+                self.assertIn("at least one", props["evidence_ids"]["description"])
                 fragment = props["source_fragment_clause_ids"]
                 if "anyOf" in fragment:
                     fragment = next(item for item in fragment["anyOf"] if item.get("type") == "array")

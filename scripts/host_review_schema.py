@@ -8,6 +8,7 @@ placeholder from silently reaching a strict provider.
 from __future__ import annotations
 
 import copy
+import json
 from typing import Any
 
 from compliance import classification_requires_requirement
@@ -83,6 +84,22 @@ def _project_native_schema(node: Any) -> Any:
         for key, value in node.items()
         if key not in _NATIVE_UNSUPPORTED_KEYWORDS
     }
+    # The provider cannot enforce these keywords, but it can see their
+    # meaning. This annotation never replaces the unchanged local validator.
+    local_constraints = {
+        key: node[key] for key in sorted(_NATIVE_UNSUPPORTED_KEYWORDS) if key in node
+    }
+    if local_constraints:
+        guidance = (
+            "Local validator also requires: "
+            + json.dumps(local_constraints, ensure_ascii=False, sort_keys=True)
+            + ". These constraints remain mandatory after native decoding."
+        )
+        description = projected.get("description")
+        projected["description"] = (
+            f"{description}\n{guidance}" if isinstance(description, str) and description
+            else guidance
+        )
     # ``enum`` is supported by the native subset and is a portable equivalent
     # for a single-value ``const`` assertion.
     if "const" in projected and "enum" not in projected:
@@ -391,13 +408,19 @@ def build_host_review_response_schema(
     requirement_common_properties = {
         "existing_requirement_id": {"type": "string", "minLength": 1},
         "field_key": {"type": "string", "minLength": 1},
-        "clause_ids": {"type": "array", "items": copy.deepcopy(clause_id_schema)},
+        "clause_ids": {
+            "type": "array", "items": copy.deepcopy(clause_id_schema),
+            "description": "Must contain at least one current source clause ID; the local relation validator rejects an empty array.",
+        },
         "source_fragment_clause_ids": {
             "type": "array", "items": {**copy.deepcopy(clause_id_schema), "minLength": 1},
             "minItems": 1, "uniqueItems": True,
-            "description": "Ordered references to source clauses whose exact literal fragments are materialized by code.",
+            "description": "Ordered, structurally adjacent references for one literal occurrence. Code materializes exact text; repeated text at distinct locations requires separate requirements, not concatenation.",
         },
-        "evidence_ids": {"type": "array", "items": {"type": "string"}},
+        "evidence_ids": {
+            "type": "array", "items": {"type": "string"},
+            "description": "Must contain at least one evidence ID backed by the cited current clauses; the local relation validator rejects an empty array.",
+        },
         "confidence": {"type": "number"},
         "reason": {"type": "string", "minLength": 1},
         "applicability": {"$ref": "#/$defs/applicabilitySpec"},

@@ -80,6 +80,13 @@ def _finalize_interrupted_attempts(record: dict[str, Any], reason: str) -> None:
     for attempt in attempts:
         if not isinstance(attempt, dict) or attempt.get("status") not in {"running", "retrying"}:
             continue
+        if attempt.get("status") == "retrying" and attempt.get("finished_at"):
+            # The provider response and its failed local validation already
+            # ended.  Only the *next* attempt was cancelled by the sibling
+            # failure; do not overwrite this attempt's result or timestamp.
+            attempt["status"] = "failed"
+            attempt["subsequent_retry_cancelled_reason"] = reason
+            continue
         attempt.update(
             status="terminated",
             finished_at=finished_at,
@@ -247,6 +254,7 @@ from semantic_contract import (  # noqa: E402
 from source_obligation_compiler import (  # noqa: E402
     SOURCE_VERIFICATION_CLASSIFICATION_POLICY_VERSION,
     SOURCE_KEYWORD_CONSTRAINT_PROJECTION_POLICY_VERSION,
+    SOURCE_HEADING_BINDING_POLICY_VERSION,
     compile_continuation_caption_requirement,
     compile_known_source_obligation_ids,
     compile_source_content_verification_codes,
@@ -256,6 +264,7 @@ from source_obligation_compiler import (  # noqa: E402
     materialize_known_source_verification,
     materialize_source_verification_classifications,
     materialize_source_keyword_constraints,
+    materialize_structural_heading_clauses,
     materialize_publication_default_policy,
     materialize_soft_keyword_count_guidance,
 )
@@ -1459,6 +1468,46 @@ def _validate_retry_attempt_artifact(
                 repair_base_path_text,
                 "repair-base canonical or semantic digest differs from its receipt",
             )
+        error_state = {
+            field: attempt_record.get(field)
+            for field in (
+                "initial_error_records", "resolved_error_records",
+                "residual_error_records", "retry_authorizing_error_records",
+            )
+        }
+        if any(not isinstance(records, list) for records in error_state.values()):
+            fail(
+                "retry_repair_base_error_receipt_missing", "repair_base",
+                repair_base_path_text, "repair-base error ledger is incomplete",
+            )
+        authorization = error_state["retry_authorizing_error_records"]
+        if not authorization or any(
+            not isinstance(record, dict)
+            or record.get("response_sha256") != snapshot["canonical_json_sha256"]
+            for record in authorization
+        ):
+            fail(
+                "retry_repair_base_error_receipt_mismatch", "repair_base",
+                repair_base_path_text,
+                "authorization records do not identify this repair-base response",
+            )
+        expected_projection_fingerprint = _response_sha256({
+            "projection_rule_version": "host_agent_candidate_projection_v1",
+            "code_fingerprint_sha256": retry_inputs["code_fingerprint_sha256"],
+            "projection_audit": {
+                "accepted": False,
+                "initial_error_records_sha256": _response_sha256(error_state["initial_error_records"]),
+                "resolved_error_records_sha256": _response_sha256(error_state["resolved_error_records"]),
+                "residual_error_records_sha256": _response_sha256(error_state["residual_error_records"]),
+                "repair_authorization_error_records_sha256": _response_sha256(authorization),
+            },
+        })
+        if snapshot.get("projection_fingerprint_sha256") != expected_projection_fingerprint:
+            fail(
+                "retry_repair_base_error_receipt_mismatch", "repair_base",
+                repair_base_path_text,
+                "repair-base error ledger differs from its creation receipt",
+            )
         return {
             "kind": "unaccepted_repair_base",
             "attempt": attempt_number,
@@ -1682,6 +1731,81 @@ def _original_retry_blocker_records(
         ):
             return copy.deepcopy(records)
     return copy.deepcopy(fallback)
+
+
+def _retry_semantic_parent_receipt(
+    receipts: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Choose the last verified model-facing semantic baseline.
+
+    A repair base remains unaccepted, but when its residual validator records
+    authorize a retry it is the only baseline whose content matches those
+    records.  A later parse-only failure does not erase that earlier baseline.
+    """
+    for receipt in reversed(receipts):
+        if receipt.get("kind") != "decoded_raw":
+            continue
+        repair = receipt.get("unaccepted_repair_base_receipt")
+        if isinstance(repair, dict):
+            if (
+                repair.get("accepted") is not False
+                or repair.get("attempt") != receipt.get("attempt")
+                or repair.get("kind") != "unaccepted_repair_base"
+            ):
+                raise RetryRawArtifactIntegrityError(
+                    "retry stopped: verified repair-base receipt is malformed"
+                )
+            return {**repair, "decoded_raw_receipt": receipt}
+        return receipt
+    return None
+
+
+def _prove_retry_repair_base_replay(
+    parent_receipt: dict[str, Any], chunk: dict[str, Any],
+    authorizing_records: list[dict[str, Any]], *,
+    source_projection_validation_sha256: str | None,
+) -> dict[str, Any] | None:
+    """Prove the unaccepted prompt stage is reproducible from its captured raw.
+
+    A hash-bound stage and error ledger establish storage integrity, not that
+    current deterministic code would derive that stage. A code or source
+    change must stop the retry rather than silently reusing an old repair.
+    """
+    if parent_receipt.get("kind") != "unaccepted_repair_base":
+        return None
+    raw_receipt = parent_receipt.get("decoded_raw_receipt")
+    if not isinstance(raw_receipt, dict):
+        raise RetryRawArtifactIntegrityError(
+            "retry stopped: repair base has no verified decoded-raw parent"
+        )
+    raw = _read_json(Path(raw_receipt["path"]), label="verified retry raw parent")
+    try:
+        prepare_native_response_candidate(
+            copy.deepcopy(raw), chunk,
+            source_projection_validation_sha256=source_projection_validation_sha256,
+        )
+    except (ValueError, TypeError, KeyError) as exc:
+        reproduced = getattr(exc, "repair_base_candidate", None)
+        reproduced_records = getattr(exc, "retry_authorizing_error_records", None)
+    else:
+        reproduced = None
+        reproduced_records = None
+    if (
+        not isinstance(reproduced, dict)
+        or not isinstance(reproduced_records, list)
+        or _response_sha256(reproduced) != parent_receipt.get("canonical_json_sha256")
+        or _response_sha256(reproduced_records) != _response_sha256(authorizing_records)
+    ):
+        raise RetryRawArtifactIntegrityError(
+            "retry stopped: persisted repair base or diagnostics cannot be replayed by current code"
+        )
+    return {
+        "protocol": "retry_repair_base_replay_v1",
+        "raw_sha256": _response_sha256(raw),
+        "repair_base_sha256": _response_sha256(reproduced),
+        "authorizing_error_records_sha256": _response_sha256(reproduced_records),
+        "accepted": False,
+    }
 
 
 def _load_normalized_retry_raw_pair(
@@ -8409,6 +8533,201 @@ def _apply_safe_mechanical_repairs_one_rule(
     return repaired, repairs
 
 
+def _prune_unbound_empty_schema_shells(
+    response: dict[str, Any], error_records: list[dict[str, Any]],
+    chunk: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    """Remove only wholly empty, source-unbound schema shells.
+
+    Other, independent validator errors must not prevent this projection, but
+    neither do they become authorized repairs. The caller revalidates the
+    resulting partial candidate and keeps every remaining error blocking.
+    """
+    requirements = response.get("requirements")
+    contract = chunk.get("requirement_contract") if isinstance(chunk, dict) else None
+    if not isinstance(requirements, list) or not isinstance(contract, dict):
+        return None, []
+    role_schemas = contract.get("role_properties_schema")
+    definitions = contract.get("$defs")
+    if not isinstance(role_schemas, dict) or not isinstance(definitions, dict):
+        return None, []
+    # A mixed external-only edge plus an orphan is a fresh semantic split,
+    # not two independent deletion opportunities.
+    if any(
+        isinstance(record, dict)
+        and record.get("code") == "non_requirement_classification_relation"
+        for record in error_records
+    ):
+        return None, []
+    baseline_sha = _response_sha256(response)
+    allowed_keys = {
+        "role", "properties", "clause_ids", "source_fragment_clause_ids",
+        "evidence_ids", "existing_requirement_id", "field_key", "reason",
+        "confidence", "applicability", "input_prerequisites", "verification",
+    }
+
+    def empty(value: Any) -> bool:
+        # An empty object can conceal absent required nested properties.
+        return value is None or value == "" or value == []
+
+    def empty_declared_properties(role: str, properties: dict[str, Any]) -> bool:
+        role_schema = role_schemas.get(role)
+        if not isinstance(role_schema, dict) or set(role_schema) != {"$ref"}:
+            return False
+        reference = role_schema["$ref"]
+        if not isinstance(reference, str) or not reference.startswith("#/$defs/"):
+            return False
+        schema = definitions.get(reference.removeprefix("#/$defs/"))
+        if (
+            not isinstance(schema, dict) or schema.get("type") != "object"
+            or schema.get("additionalProperties") is not False
+            or not isinstance(schema.get("properties"), dict)
+            or not isinstance(schema.get("required"), list)
+        ):
+            return False
+        declared = schema["properties"]
+        required = set(schema["required"])
+        if not required.issubset(properties) or set(properties) - set(declared):
+            return False
+        for name, value in properties.items():
+            child_schema = declared[name]
+            if value is None and name not in required:
+                continue  # Native nullable optional, not a selected policy.
+            if not isinstance(child_schema, dict) or any(
+                key in child_schema for key in ("enum", "const", "default")
+            ):
+                return False
+            if not empty(value):
+                return False
+        return True
+
+    def shell(value: Any) -> bool:
+        if not isinstance(value, dict) or set(value) - allowed_keys:
+            return False
+        properties = value.get("properties")
+        return (
+            isinstance(value.get("role"), str) and bool(value["role"])
+            and isinstance(properties, dict)
+            and empty_declared_properties(value["role"], properties)
+            and all(empty(value.get(key)) for key in (
+                "clause_ids", "source_fragment_clause_ids", "evidence_ids",
+                "existing_requirement_id", "field_key", "reason", "applicability",
+                "input_prerequisites", "verification",
+            ))
+            and type(value.get("confidence")) in {type(None), int, float}
+            and value.get("confidence") in (None, 0, 0.0)
+        )
+
+    removable: set[int] = set()
+    for record in error_records:
+        if not isinstance(record, dict):
+            return None, []
+        index = record.get("requirement_index")
+        if (
+            record.get("code") == "requirement_relation_mismatch"
+            and record.get("relation_category") == "missing_clause_relation"
+            and record.get("mechanically_removable") is True
+            and record.get("mechanical_removal_basis") == "no_clause_or_evidence_binding"
+            and type(index) is int and 0 <= index < len(requirements)
+            and record.get("json_pointer") == f"$.requirements[{index}]"
+            and record.get("raw_error") == f"requirements_not_referenced_by_clause_review:{index}"
+            and record.get("response_sha256") == baseline_sha
+            and shell(requirements[index])
+        ):
+            removable.add(index)
+    if not removable:
+        return None, []
+
+    # Every diagnostic attached to a removed object must describe its empty
+    # schema shape or missing source relation. Unknown errors could name a
+    # semantic payload and must not be discarded by this projection.
+    allowed_codes = {
+        "contract_validation_error", "cover_institution_placeholder",
+        "cover_binding_violation", "schema_contract_violation",
+        "requirement_relation_mismatch", "empty_requirement_properties",
+    }
+    for record in error_records:
+        pointer = str(record.get("json_pointer") or "")
+        match = re.match(r"^\$\.requirements\[(\d+)\](?:\.|$)", pointer)
+        if match is None or int(match.group(1)) not in removable:
+            continue
+        if record.get("response_sha256") != baseline_sha or record.get("code") not in allowed_codes:
+            return None, []
+
+    repaired = copy.deepcopy(response)
+    original_count = len(requirements)
+    removed_hashes = {
+        str(index): _response_sha256(requirements[index]) for index in sorted(removable)
+    }
+    repaired["requirements"] = [
+        item for index, item in enumerate(repaired["requirements"])
+        if index not in removable
+    ]
+    index_map: dict[str, int | None] = {}
+    next_index = 0
+    for index in range(original_count):
+        index_map[str(index)] = None if index in removable else next_index
+        if index not in removable:
+            next_index += 1
+    return repaired, [{
+        "code": "requirement_relation_mismatch",
+        "rule_id": "remove_source_unbound_empty_schema_shell_v1",
+        "removed_requirement_indexes": sorted(removable),
+        "removed_requirement_sha256": removed_hashes,
+        "original_index_to_repaired_index": index_map,
+        "source_response_sha256": baseline_sha,
+        "repaired_response_sha256": _response_sha256(repaired),
+        "partial_candidate_only": True,
+    }]
+
+
+def _project_exact_duplicate_requirements(
+    response: Any,
+) -> tuple[Any, dict[str, Any] | None]:
+    """Collapse only byte-equivalent semantic requirements in v3 responses.
+
+    The raw response remains on disk. No clause review may carry an index into
+    this array, and every retained item must be identical to its removed copy.
+    Distinct source edges or even one differing field are never merged here.
+    """
+    if not isinstance(response, dict) or response.get("contract_version") != "3.0":
+        return response, None
+    items = response.get("requirements")
+    reviews = response.get("clause_reviews")
+    if (
+        not isinstance(items, list) or not isinstance(reviews, list)
+        or any(not isinstance(item, dict) for item in items)
+        or any(
+            not isinstance(review, dict) or "requirement_indexes" in review
+            for review in reviews
+        )
+    ):
+        return response, None
+    first_by_hash: dict[str, int] = {}
+    removed: list[dict[str, Any]] = []
+    retained: list[dict[str, Any]] = []
+    for index, item in enumerate(items):
+        digest = _response_sha256(item)
+        first = first_by_hash.get(digest)
+        if first is not None and item == items[first]:
+            removed.append({"removed_index": index, "retained_index": first, "sha256": digest})
+            continue
+        first_by_hash[digest] = index
+        retained.append(copy.deepcopy(item))
+    if not removed:
+        return response, None
+    projected = copy.deepcopy(response)
+    projected["requirements"] = retained
+    return projected, {
+        "rule_id": "project_exact_duplicate_requirements_v1",
+        "removed": removed,
+        "source_response_sha256": _response_sha256(response),
+        "projected_response_sha256": _response_sha256(projected),
+        "clause_reviews_sha256": _response_sha256(reviews),
+        "accepted": False,
+    }
+
+
 def _apply_safe_mechanical_repairs(
     response: Any, error_records: list[dict[str, Any]],
     *, chunk: dict[str, Any] | None = None,
@@ -8422,6 +8741,10 @@ def _apply_safe_mechanical_repairs(
     """
     if not isinstance(response, dict) or not error_records:
         return None, []
+
+    pruned, prune_audit = _prune_unbound_empty_schema_shells(response, error_records, chunk)
+    if pruned is not None:
+        return pruned, prune_audit
 
     external_records = [
         record for record in error_records
@@ -8753,6 +9076,138 @@ def _source_literal_whitespace_key(value: str) -> str:
     return "".join(character for character in value if not character.isspace())
 
 
+def _project_repeated_literal_occurrences(
+    response: dict[str, Any], chunk: dict[str, Any], *,
+    source_projection_validation_sha256: str | None,
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Separate an aggregate of independently cited, identical fixed literals.
+
+    This does not assign outer/inner-cover semantics. The primary response has
+    already assigned the same text role to every cited occurrence; code only
+    partitions that relation and restores each occurrence's exact whitespace.
+    Adjacent fragments, conditional or styled payloads, existing IDs, changed
+    lexical text and incomplete source inventories are never eligible.
+    """
+    identity = _retry_input_fingerprints(chunk)
+    if (
+        response.get("contract_version") != "3.0"
+        or source_projection_validation_sha256 != _response_sha256(chunk)
+        or not _retry_fingerprints_complete(identity)
+        or response.get("reported_conflicts")
+    ):
+        return response, []
+    clauses = chunk.get("clauses")
+    evidence = chunk.get("evidence_context")
+    requirements = response.get("requirements")
+    reviews = response.get("clause_reviews")
+    if not isinstance(clauses, list) or not isinstance(evidence, dict) or not isinstance(requirements, list) or not isinstance(reviews, list):
+        return response, []
+    clause_map = {c["id"]: c for c in clauses if isinstance(c, dict) and isinstance(c.get("id"), str)}
+    review_map = {r["clause_id"]: r for r in reviews if isinstance(r, dict) and isinstance(r.get("clause_id"), str)}
+    if len(clause_map) != len(clauses) or len(review_map) != len(reviews):
+        return response, []
+    candidate = copy.deepcopy(response)
+    output: list[Any] = []
+    audits: list[dict[str, Any]] = []
+    for index, requirement in enumerate(requirements):
+        properties = requirement.get("properties") if isinstance(requirement, dict) else None
+        clause_ids = requirement.get("clause_ids") if isinstance(requirement, dict) else None
+        selector = requirement.get("source_fragment_clause_ids") if isinstance(requirement, dict) else None
+        text = properties.get("text") if isinstance(properties, dict) else None
+        applicability = requirement.get("applicability") if isinstance(requirement, dict) else None
+        eligible = (
+            isinstance(clause_ids, list) and len(clause_ids) > 1
+            and all(isinstance(cid, str) for cid in clause_ids)
+            and len(set(clause_ids)) == len(clause_ids)
+            and isinstance(selector, list) and bool(selector)
+            and all(isinstance(cid, str) for cid in selector)
+            and len(set(selector)) == len(selector) and set(selector) <= set(clause_ids)
+            and isinstance(text, str) and bool(text.strip())
+            and _role_supports_exact_text(requirement, chunk)
+            and not requirement.get("existing_requirement_id")
+            and not requirement.get("input_prerequisites")
+            and all(value is None for key, value in properties.items() if key != "text")
+            and (applicability is None or applicability == {} or (
+                isinstance(applicability, dict) and applicability.get("status") == "always"
+                and all(value is None for key, value in applicability.items() if key != "status")
+            ))
+        )
+        fragments: list[dict[str, Any]] = []
+        if eligible:
+            for cid in clause_ids:
+                clause, review = clause_map.get(cid), review_map.get(cid)
+                if (
+                    not isinstance(clause, dict) or not isinstance(review, dict)
+                    or review.get("classification") not in {"covered", "executable"}
+                    or review.get("normative_basis") not in {"fixed_statement", "template_structure"}
+                    or not isinstance(review.get("obligations"), list) or not review["obligations"]
+                    or any(not isinstance(o, dict) or o.get("status") != "covered" for o in review["obligations"])
+                ):
+                    fragments = []
+                    break
+                try:
+                    bound = compose_source_fragments(
+                        [cid], clause_map, evidence,
+                        requirement_clause_ids=clause_ids,
+                        requirement_evidence_ids=requirement.get("evidence_ids"),
+                        literal_role=requirement.get("role"),
+                    )["source_fragments"][0]
+                except SourceFragmentBindingError:
+                    fragments = []
+                    break
+                source = evidence.get(bound["evidence_id"], {})
+                location = bound["location"]
+                if (
+                    source.get("id") != bound["evidence_id"]
+                    or clause.get("evidence_ids") != [bound["evidence_id"]]
+                    or bound["start_offset"] != 0 or bound["end_offset"] != len(source.get("text", ""))
+                    or _source_literal_whitespace_key(bound["text"]) != _source_literal_whitespace_key(text)
+                    or bound.get("source_kind") != "paragraph" or location.get("part") != "document"
+                    or any(isinstance(location.get(key), bool) or not isinstance(location.get(key), int) for key in ("child_index", "order"))
+                ):
+                    fragments = []
+                    break
+                fragments.append(bound)
+        ordered = sorted(fragments, key=lambda f: f["location"]["child_index"])
+        cited = requirement.get("evidence_ids") if isinstance(requirement, dict) else None
+        if (
+            not eligible or len(fragments) != len(clause_ids)
+            or not isinstance(cited, list) or any(not isinstance(eid, str) for eid in cited)
+            or len(cited) != len(set(cited))
+            or len({f["evidence_id"] for f in fragments}) != len(fragments)
+            or set(cited) != {f["evidence_id"] for f in fragments}
+            or any(b["location"]["child_index"] <= a["location"]["child_index"] + 1
+                   or b["location"]["order"] <= a["location"]["order"] + 1
+                   for a, b in zip(ordered, ordered[1:]))
+        ):
+            output.append(copy.deepcopy(requirement))
+            continue
+        projected: list[dict[str, Any]] = []
+        for fragment in ordered:
+            item = copy.deepcopy(requirement)
+            item["clause_ids"] = [fragment["clause_id"]]
+            item["evidence_ids"] = [fragment["evidence_id"]]
+            item["source_fragment_clause_ids"] = [fragment["clause_id"]]
+            item["properties"]["text"] = fragment["text"]
+            projected.append(item)
+        before = _response_sha256({**candidate, "requirements": output + requirements[index:]})
+        output.extend(projected)
+        audits.append({
+            "rule_id": "repeated_fixed_literal_occurrences_v1",
+            "requirement_index": index,
+            "output_requirement_indexes": list(range(len(output) - len(projected), len(output))),
+            "input_requirement": copy.deepcopy(requirement),
+            "source_fragments": copy.deepcopy(ordered),
+            "input_fingerprints": copy.deepcopy(identity),
+            "source_projection_validation_sha256": source_projection_validation_sha256,
+            "response_before_sha256": before,
+            "response_after_sha256": _response_sha256({**candidate, "requirements": output + requirements[index + 1:]}),
+            "change_kind": "partition_existing_fixed_literal_relations",
+        })
+    candidate["requirements"] = output
+    return candidate, audits
+
+
 def _source_literal_fringe(source: str, start: int, end: int) -> tuple[str, str]:
     """Return bounded adjacent punctuation, excluding whitespace-only fringes."""
     left_chars: list[str] = []
@@ -8815,7 +9270,8 @@ def _project_source_literal_whitespace_only(
         exact_error = (
             f"{pointer}: must_be_exact_substring_of_cited_source_span"
         )
-        if exact_error not in error_set or not isinstance(requirement, dict):
+        fragment_error = f"{pointer}:source_fragment_literal_conflict"
+        if not {exact_error, fragment_error} & error_set or not isinstance(requirement, dict):
             continue
         properties = requirement.get("properties")
         original_text = properties.get("text") if isinstance(properties, dict) else None
@@ -8832,7 +9288,33 @@ def _project_source_literal_whitespace_only(
             continue
         cited_evidence = set(requirement_evidence_ids)
         bindings: list[dict[str, Any]] = []
-        for clause_id in clause_ids:
+        selector = requirement.get("source_fragment_clause_ids")
+        if selector is not None:
+            # An explicit selector is authoritative: never fall back to a
+            # similarly worded, unselected occurrence if this binding fails.
+            try:
+                selected = compose_source_fragments(
+                    selector, clause_map, evidence_context,
+                    requirement_clause_ids=clause_ids,
+                    requirement_evidence_ids=requirement_evidence_ids,
+                    literal_role=requirement.get("role"),
+                )
+            except SourceFragmentBindingError:
+                continue
+            if not _role_supports_exact_text(requirement, chunk) or (
+                _source_literal_whitespace_key(selected["text"])
+                != _source_literal_whitespace_key(original_text)
+            ) or selected["text"] == original_text:
+                continue
+            first = selected["source_fragments"][0]
+            bindings.append({
+                **first, "canonical_text": selected["text"],
+                "source_span_start_offset": first["start_offset"],
+                "source_span_end_offset": first["end_offset"],
+                "source_span_text": first["text"],
+                "source_fragments": copy.deepcopy(selected["source_fragments"]),
+            })
+        for clause_id in ([] if selector is not None else clause_ids):
             clause = clause_map.get(clause_id)
             span = clause.get("source_span") if isinstance(clause, dict) else None
             clause_evidence_ids = clause.get("evidence_ids") if isinstance(clause, dict) else None
@@ -8936,6 +9418,8 @@ def _project_source_literal_whitespace_only(
             "response_before_sha256": before_sha256,
             "response_after_sha256": after_sha256,
             "change_kind": "unicode_whitespace_only",
+            **({"source_fragments": copy.deepcopy(binding["source_fragments"])}
+               if "source_fragments" in binding else {}),
         })
     return candidate, audits
 
@@ -8955,6 +9439,13 @@ def prepare_native_response_candidate(
     if not isinstance(response_schema, dict):
         raise ValueError("current Host Agent chunk has no local response schema")
     response = normalize_native_response(raw_response, response_schema)
+    response, source_literal_occurrence_projections = _project_repeated_literal_occurrences(
+        response, chunk,
+        source_projection_validation_sha256=source_projection_validation_sha256,
+    )
+    response, exact_duplicate_requirement_projection = (
+        _project_exact_duplicate_requirements(response)
+    )
     response, source_fragment_projections, source_fragment_projection_errors = (
         materialize_source_fragment_literals(
             response, chunk.get("clauses", []), chunk.get("evidence_context"),
@@ -8987,6 +9478,7 @@ def prepare_native_response_candidate(
         materialize_source_verification_classifications(
             response, chunk.get("clauses"),
             provenance=chunk.get("provenance"),
+            evidence_context=chunk.get("evidence_context"),
         )
     )
     response, abstract_source_projections = materialize_complete_abstract_source_constraints(
@@ -8994,6 +9486,38 @@ def prepare_native_response_candidate(
     )
     response, source_keyword_constraint_projections = materialize_source_keyword_constraints(
         response, chunk.get("clauses"),
+        evidence_context=chunk.get("evidence_context"), allow_standalone=True,
+    )
+    requirement_contract = chunk.get("requirement_contract")
+    runtime_context = chunk.get("runtime_context")
+    runtime_inventory = (
+        runtime_context.get("runtime_inventory")
+        if isinstance(runtime_context, dict) else None
+    )
+    response, source_heading_binding_projections = materialize_structural_heading_clauses(
+        response, chunk.get("clauses"),
+        evidence_context=chunk.get("evidence_context"),
+        anchor_inventory=(
+            runtime_inventory.get("anchor_inventory")
+            if isinstance(runtime_inventory, dict) else None
+        ),
+        allowed_roles=(
+            chunk.get("allowed_roles")
+            or (requirement_contract.get("allowed_roles")
+                if isinstance(requirement_contract, dict) else None)
+        ),
+        role_properties_schema=(
+            requirement_contract.get("role_properties_schema")
+            if isinstance(requirement_contract, dict) else None
+        ),
+        contract_defs=(
+            requirement_contract.get("$defs")
+            if isinstance(requirement_contract, dict) else None
+        ),
+        expected_source_sha256=(
+            chunk["provenance"].get("source_sha256")
+            if isinstance(chunk.get("provenance"), dict) else None
+        ),
     )
     response, publication_default_projections = materialize_publication_default_policy(
         response, chunk.get("clauses"), chunk.get("evidence_context"),
@@ -9008,6 +9532,32 @@ def prepare_native_response_candidate(
         "remaining_error_count": 0,
         "remaining_error_codes": [],
     }
+
+    def attach_source_projection_failure_audit(error: ValueError) -> None:
+        # A later, unrelated contract failure must not erase the provenance
+        # of source-bound changes already made to this rejected candidate.
+        error.source_keyword_constraint_projection_policy_version = (  # type: ignore[attr-defined]
+            SOURCE_KEYWORD_CONSTRAINT_PROJECTION_POLICY_VERSION
+        )
+        error.source_keyword_constraint_projections = copy.deepcopy(  # type: ignore[attr-defined]
+            source_keyword_constraint_projections
+        )
+        error.source_heading_binding_policy_version = (  # type: ignore[attr-defined]
+            SOURCE_HEADING_BINDING_POLICY_VERSION
+        )
+        error.source_heading_binding_projections = copy.deepcopy(  # type: ignore[attr-defined]
+            source_heading_binding_projections
+        )
+        error.source_verification_classification_policy_version = (  # type: ignore[attr-defined]
+            SOURCE_VERIFICATION_CLASSIFICATION_POLICY_VERSION
+        )
+        error.source_verification_classification_projections = copy.deepcopy(  # type: ignore[attr-defined]
+            source_verification_classification_projections
+        )
+        error.source_literal_occurrence_projections = copy.deepcopy(  # type: ignore[attr-defined]
+            source_literal_occurrence_projections
+        )
+
     contract_errors = validate_host_agent_response(response, chunk)
     if contract_errors:
         response, source_literal_whitespace_projections = (
@@ -9054,12 +9604,43 @@ def prepare_native_response_candidate(
                     for item in original_error_records if isinstance(item, dict)
                 }),
             }
+            if source_literal_occurrence_projections:
+                # Partitioning changes requirement indexes. Residual feedback
+                # must address this exact unaccepted candidate, not the raw
+                # aggregate with its old indexes. The ordinary retry-artifact
+                # receipt and replay proof remain responsible for authorizing
+                # any later model correction; this is not an accepted response.
+                error.repair_base_candidate = copy.deepcopy(response)  # type: ignore[attr-defined]
             error.source_literal_whitespace_projections = copy.deepcopy(  # type: ignore[attr-defined]
                 source_literal_whitespace_projections
             )
+            attach_source_projection_failure_audit(error)
             raise error
 
         remaining_errors = validate_host_agent_response(repaired_response, chunk)
+        seen_repair_states = {_response_sha256(response), _response_sha256(repaired_response)}
+        # Independent failures can require disjoint corrections (for example
+        # pruning an unbound schema shell and then fixing a source-bound cover
+        # field). Revalidate after *each* bounded projection so an error from
+        # one representation is never used to authorize an edit to another.
+        for _ in range(4):
+            if not remaining_errors:
+                break
+            round_records = contract_error_records(
+                remaining_errors, response=repaired_response, chunk=chunk,
+            )
+            next_response, next_repairs = _apply_safe_mechanical_repairs(
+                repaired_response, round_records, chunk=chunk,
+            )
+            if next_response is None or not next_repairs:
+                break
+            next_sha = _response_sha256(next_response)
+            if next_sha in seen_repair_states:
+                break
+            seen_repair_states.add(next_sha)
+            mechanical_repairs.extend(next_repairs)
+            repaired_response = next_response
+            remaining_errors = validate_host_agent_response(repaired_response, chunk)
         remaining_error_records = contract_error_records(
             remaining_errors, response=repaired_response, chunk=chunk,
         ) if remaining_errors else []
@@ -9129,6 +9710,7 @@ def prepare_native_response_candidate(
             error.source_literal_whitespace_projections = copy.deepcopy(  # type: ignore[attr-defined]
                 source_literal_whitespace_projections
             )
+            attach_source_projection_failure_audit(error)
             raise error
         response = repaired_response
 
@@ -9139,9 +9721,11 @@ def prepare_native_response_candidate(
         "source_keyword_constraint_projection_policy_version": (
             SOURCE_KEYWORD_CONSTRAINT_PROJECTION_POLICY_VERSION
         ),
+        "source_heading_binding_policy_version": SOURCE_HEADING_BINDING_POLICY_VERSION,
         "existing_requirement_payload_projections": existing_payload_projections,
         "complete_abstract_source_projections": abstract_source_projections,
         "source_keyword_constraint_projections": source_keyword_constraint_projections,
+        "source_heading_binding_projections": source_heading_binding_projections,
         "publication_default_projections": publication_default_projections,
         "soft_keyword_count_guidance_projections": soft_keyword_guidance_projections,
         "source_obligation_verification_projections": source_verification_projections,
@@ -9151,8 +9735,10 @@ def prepare_native_response_candidate(
         "declaration_source_text_projections": declaration_source_text_projections,
         "source_fragment_projections": source_fragment_projections,
         "source_fragment_projection_errors": source_fragment_projection_errors,
+        "source_literal_occurrence_projections": source_literal_occurrence_projections,
         "source_literal_whitespace_projections": source_literal_whitespace_projections,
         "mechanical_repairs": mechanical_repairs,
+        "exact_duplicate_requirement_projection": exact_duplicate_requirement_projection,
         "mechanical_repair_revalidation": mechanical_revalidation,
     }
 
@@ -10050,12 +10636,18 @@ def run_host_agent_chunk(
         "source_keyword_constraint_projection_policy_version": candidate_audit[
             "source_keyword_constraint_projection_policy_version"
         ],
+        "source_heading_binding_policy_version": candidate_audit[
+            "source_heading_binding_policy_version"
+        ],
         "existing_requirement_payload_projections": existing_payload_projections,
         "complete_abstract_source_projections": candidate_audit[
             "complete_abstract_source_projections"
         ],
         "source_keyword_constraint_projections": candidate_audit[
             "source_keyword_constraint_projections"
+        ],
+        "source_heading_binding_projections": candidate_audit[
+            "source_heading_binding_projections"
         ],
         "publication_default_projections": candidate_audit[
             "publication_default_projections"
@@ -10071,6 +10663,9 @@ def run_host_agent_chunk(
         "source_fragment_projections": candidate_audit[
             "source_fragment_projections"
         ],
+        "source_literal_occurrence_projections": candidate_audit[
+            "source_literal_occurrence_projections"
+        ],
         "source_literal_whitespace_projections": source_literal_whitespace_projections,
         "mechanical_repair_policy": (
             "bounded-source-bound-projections-v3"
@@ -10082,6 +10677,9 @@ def run_host_agent_chunk(
             ]),
             "source_keyword_constraints": len(candidate_audit[
                 "source_keyword_constraint_projections"
+            ]),
+            "source_heading_binding": len(candidate_audit[
+                "source_heading_binding_projections"
             ]),
             "publication_default": len(candidate_audit[
                 "publication_default_projections"
@@ -10098,6 +10696,7 @@ def run_host_agent_chunk(
                 "source_fragment_projections"
             ]),
             "source_literal_whitespace": len(source_literal_whitespace_projections),
+            "source_literal_occurrences": len(candidate_audit["source_literal_occurrence_projections"]),
             "mechanical_repairs": len(mechanical_repairs),
         },
         "authorization_policy": "every_nonlisted_semantic_change_requires_retry_authorization",
@@ -12029,6 +12628,10 @@ def run_bridge(
                     )
                 retry_parent_response_path = None
                 retry_artifact_receipts: list[dict[str, Any]] = []
+                retry_semantic_parent_receipt: dict[str, Any] | None = None
+                retry_semantic_parent_record: dict[str, Any] = {}
+                retry_parent_error_records = copy.deepcopy(retry_error_records)
+                retry_parent_hint_error = failures[-1] if failures else None
                 if attempt > 1:
                     with lifecycle_lock:
                         prior_attempt_records = copy.deepcopy(
@@ -12060,12 +12663,61 @@ def run_bridge(
                             raise
                         retry_artifact_receipts.append(receipt)
                     if retry_artifact_receipts:
-                        immediate_parent_receipt = retry_artifact_receipts[-1]
-                        retry_parent_response_path = Path(immediate_parent_receipt["path"])
+                        retry_semantic_parent_receipt = _retry_semantic_parent_receipt(
+                            retry_artifact_receipts
+                        )
+                        parent_receipt = (
+                            retry_semantic_parent_receipt or retry_artifact_receipts[-1]
+                        )
+                        retry_parent_response_path = Path(parent_receipt["path"])
+                        if retry_semantic_parent_receipt is not None:
+                            retry_semantic_parent_record = next((
+                                record for record in prior_attempt_records
+                                if isinstance(record, dict)
+                                and record.get("attempt") == retry_semantic_parent_receipt["attempt"]
+                            ), {})
+                            retry_parent_error_records = copy.deepcopy(
+                                retry_semantic_parent_record.get("retry_authorizing_error_records")
+                                or retry_semantic_parent_record.get("error_records")
+                                or []
+                            )
+                            retry_parent_hint_error = retry_semantic_parent_record.get("error")
+                            if not isinstance(retry_parent_error_records, list):
+                                raise RetryRawArtifactIntegrityError(
+                                    "retry stopped: semantic parent error records are malformed"
+                                )
+                            parent_digest = retry_semantic_parent_receipt.get("canonical_json_sha256")
+                            if (
+                                retry_semantic_parent_receipt.get("kind") == "unaccepted_repair_base"
+                                and any(
+                                    not isinstance(item, dict)
+                                    or (
+                                        item.get("response_sha256") is not None
+                                        and item.get("response_sha256") != parent_digest
+                                    )
+                                    for item in retry_parent_error_records
+                                )
+                            ):
+                                raise RetryRawArtifactIntegrityError(
+                                    "retry stopped: validator feedback does not identify its semantic parent"
+                                )
+                            replay_proof = _prove_retry_repair_base_replay(
+                                retry_semantic_parent_receipt, chunk,
+                                retry_parent_error_records,
+                                source_projection_validation_sha256=(
+                                    source_projection_validation_sha256
+                                ),
+                            )
+                            if replay_proof is not None:
+                                with lifecycle_lock:
+                                    chunk_lifecycle[index]["retry_repair_base_replay_proof"] = (
+                                        replay_proof
+                                    )
                         with lifecycle_lock:
                             chunk_lifecycle[index]["retry_parent_response_sha256"] = (
-                                immediate_parent_receipt["sha256"]
+                                parent_receipt["sha256"]
                             )
+                            chunk_lifecycle[index]["retry_parent_stage"] = parent_receipt["kind"]
                 audit = run_host_agent_chunk(
                     request_path=request_path,
                     chunk_path=chunks_path,
@@ -12092,12 +12744,12 @@ def run_bridge(
                         chunk_lifecycle[index].get("retry_parent_response_sha256")
                     ),
                     retry_parent_response_path=retry_parent_response_path,
-                    retry_error_records=copy.deepcopy(retry_error_records),
+                    retry_error_records=copy.deepcopy(retry_parent_error_records),
                     source_projection_validation_sha256=source_projection_validation_sha256,
                     retry_hint=(
                         "local contract validation failed; repair the response: "
-                        + failures[-1]
-                        if failures else None
+                        + str(retry_parent_hint_error)
+                        if retry_parent_hint_error else None
                     ),
                 )
                 with lifecycle_lock:
@@ -12116,23 +12768,9 @@ def run_bridge(
                         chunk.get("response_schema")
                         if isinstance(chunk.get("response_schema"), dict) else {}
                     )
-                    semantic_parent_receipt = next((
-                        receipt for receipt in reversed(retry_artifact_receipts)
-                        if receipt.get("kind") == "decoded_raw"
-                    ), None)
-                    semantic_parent_attempt_record = next((
-                        record for record in prior_attempt_records
-                        if isinstance(record, dict)
-                        and isinstance(semantic_parent_receipt, dict)
-                        and record.get("attempt") == semantic_parent_receipt.get("attempt")
-                    ), {})
-                    semantic_parent_error_records = (
-                        semantic_parent_attempt_record.get("retry_authorizing_error_records")
-                        or semantic_parent_attempt_record.get("error_records")
-                        or []
-                    )
-                    if not isinstance(semantic_parent_error_records, list):
-                        semantic_parent_error_records = []
+                    semantic_parent_receipt = retry_semantic_parent_receipt
+                    semantic_parent_attempt_record = retry_semantic_parent_record
+                    semantic_parent_error_records = retry_parent_error_records
                     previous_raw_path = (
                         Path(semantic_parent_receipt["path"])
                         if isinstance(semantic_parent_receipt, dict)
@@ -12198,7 +12836,7 @@ def run_bridge(
                             current_raw_path,
                             response_schema,
                             parent_label=(
-                                f"Host Agent previous decoded raw response {index} attempt "
+                                f"Host Agent verified retry baseline {index} attempt "
                                 f"{semantic_parent_receipt['attempt']}"
                             ),
                             candidate_label=(
@@ -12206,16 +12844,43 @@ def run_bridge(
                             ),
                         )
                         retry_parent_response = previous_raw
-                        retry_candidate_response = current_raw
+                        raw_model_semantic_changes = _retry_change_paths(
+                            previous_raw, current_raw,
+                        )
+                        current_for_authorization, exact_duplicate_projection = (
+                            _project_exact_duplicate_requirements(current_raw)
+                        )
+                        if exact_duplicate_projection is not None:
+                            if audit.get("candidate_status") != "locally_validated_pending_independent_review":
+                                raise RetryRawArtifactIntegrityError(
+                                    "retry stopped: duplicate projection has no locally validated candidate"
+                                )
+                            raw_candidate, _ = prepare_native_response_candidate(
+                                current_raw, chunk,
+                                source_projection_validation_sha256=(
+                                    source_projection_validation_sha256
+                                ),
+                            )
+                            projected_candidate, _ = prepare_native_response_candidate(
+                                current_for_authorization, chunk,
+                                source_projection_validation_sha256=(
+                                    source_projection_validation_sha256
+                                ),
+                            )
+                            if raw_candidate != projected_candidate:
+                                raise RetryRawArtifactIntegrityError(
+                                    "retry stopped: exact-duplicate projection changes the validated candidate"
+                                )
+                        retry_candidate_response = current_for_authorization
                         previous_retry_comparison, previous_declaration_projection = (
                             _materialize_fixed_declaration_source_text(previous_raw, chunk)
                         )
                         current_retry_comparison, current_declaration_projection = (
-                            _materialize_fixed_declaration_source_text(current_raw, chunk)
+                            _materialize_fixed_declaration_source_text(current_for_authorization, chunk)
                         )
                         change_error, semantic_changes = _retry_semantic_change_error(
                             previous_raw,
-                            current_raw,
+                            current_for_authorization,
                             semantic_parent_error_records,
                             contract_version=contract_version,
                             chunk=chunk,
@@ -12223,7 +12888,7 @@ def run_bridge(
                             comparison_previous_response=previous_retry_comparison,
                             comparison_current_response=current_retry_comparison,
                         )
-                        model_semantic_changes = list(semantic_changes)
+                        model_semantic_changes = raw_model_semantic_changes
                         retry_field_projection: dict[str, Any] | None = None
                         if change_error is not None:
                             obligation_projection_records = [
@@ -12237,7 +12902,7 @@ def run_bridge(
                             projected_raw, projection_audit = (
                                 _project_validator_targeted_obligation_fields(
                                     previous_raw,
-                                    current_raw,
+                                    current_for_authorization,
                                     semantic_parent_error_records,
                                 )
                             )
@@ -12271,7 +12936,8 @@ def run_bridge(
                             else:
                                 retry_field_projection = projection_audit
                         comparison_audit: dict[str, Any] = {
-                            "policy": "same_stage_raw_to_raw_plus_candidate_to_candidate_v1",
+                            "policy": "model_facing_parent_to_raw_plus_candidate_to_candidate_v2",
+                            "semantic_parent_stage": semantic_parent_receipt["kind"],
                             "raw_parent_attempt": semantic_parent_receipt["attempt"],
                             "raw_candidate_attempt": attempt,
                             "intervening_attempt_receipts": [
@@ -12284,6 +12950,9 @@ def run_bridge(
                             "raw_parent_canonical_sha256": _response_sha256(previous_raw),
                             "raw_candidate_canonical_sha256": _response_sha256(current_raw),
                             "raw_semantic_changed_paths": model_semantic_changes,
+                            "exact_duplicate_requirement_projection": copy.deepcopy(
+                                exact_duplicate_projection
+                            ),
                             "authorized_projected_changed_paths": list(semantic_changes),
                             "authorization_parent_attempt": semantic_parent_receipt["attempt"],
                             "authorization_error_records_sha256": _response_sha256(
@@ -12301,6 +12970,22 @@ def run_bridge(
                             },
                             "candidate_comparison_status": "not_attempted",
                         }
+                        decoded_parent_receipt = semantic_parent_receipt.get(
+                            "decoded_raw_receipt"
+                        )
+                        if isinstance(decoded_parent_receipt, dict):
+                            decoded_parent, _ = _load_normalized_retry_raw_pair(
+                                Path(decoded_parent_receipt["path"]), current_raw_path,
+                                response_schema,
+                                parent_label="receipt-verified original decoded raw",
+                                candidate_label="current decoded raw",
+                            )
+                            comparison_audit["original_raw_observation"] = {
+                                "parent_file_sha256": decoded_parent_receipt["sha256"],
+                                "parent_canonical_sha256": _response_sha256(decoded_parent),
+                                "changed_paths": _retry_change_paths(decoded_parent, current_raw),
+                                "authorization_basis": False,
+                            }
                         if retry_field_projection is not None:
                             comparison_audit["validator_targeted_field_projection"] = copy.deepcopy(
                                 retry_field_projection
@@ -12410,14 +13095,17 @@ def run_bridge(
                                 "existing_requirement_payload_projections",
                                 "complete_abstract_source_projections",
                                 "source_keyword_constraint_projections",
+                                "source_heading_binding_projections",
                                 "publication_default_projections",
                                 "soft_keyword_count_guidance_projections",
                                 "source_obligation_verification_projections",
                                 "source_verification_classification_projections",
                                 "source_verification_classification_policy_version",
                                 "source_keyword_constraint_projection_policy_version",
+                                "source_heading_binding_policy_version",
                                 "declaration_source_text_projections",
                                 "source_literal_whitespace_projections",
+                                "source_literal_occurrence_projections",
                                 "mechanical_repairs",
                                 "mechanical_repair_revalidation",
                             ):
@@ -12761,6 +13449,50 @@ def run_bridge(
                 raise
             except (OSError, ValueError, RuntimeError) as exc:
                 controller.check()
+                if isinstance(getattr(exc, "source_keyword_constraint_projections", None), list):
+                    source_projection_failure_audit = {
+                        "source_keyword_constraint_projection_policy_version": getattr(
+                            exc, "source_keyword_constraint_projection_policy_version", None
+                        ),
+                        "source_keyword_constraint_projections": copy.deepcopy(
+                            exc.source_keyword_constraint_projections
+                        ),
+                        "source_heading_binding_policy_version": getattr(
+                            exc, "source_heading_binding_policy_version", None
+                        ),
+                        "source_heading_binding_projections": copy.deepcopy(
+                            getattr(exc, "source_heading_binding_projections", [])
+                        ),
+                        "source_verification_classification_policy_version": getattr(
+                            exc, "source_verification_classification_policy_version", None
+                        ),
+                        "source_verification_classification_projections": copy.deepcopy(
+                            getattr(exc, "source_verification_classification_projections", [])
+                        ),
+                    }
+                    with lifecycle_lock:
+                        if chunk_lifecycle[index].get("attempts"):
+                            chunk_lifecycle[index]["attempts"][-1].update(
+                                source_projection_failure_audit
+                            )
+                elif audit:
+                    # Independent-review and retry failures occur after the
+                    # candidate has been compiled. Preserve that attempt's
+                    # projection audit even when no chunk is accepted.
+                    projection_fields = (
+                        "source_keyword_constraint_projection_policy_version",
+                        "source_keyword_constraint_projections",
+                        "source_heading_binding_policy_version",
+                        "source_heading_binding_projections",
+                        "source_verification_classification_policy_version",
+                        "source_verification_classification_projections",
+                    )
+                    with lifecycle_lock:
+                        if chunk_lifecycle[index].get("attempts"):
+                            chunk_lifecycle[index]["attempts"][-1].update({
+                                field: copy.deepcopy(audit[field])
+                                for field in projection_fields if field in audit
+                            })
                 if isinstance(exc, RetryRawArtifactIntegrityError):
                     error_records = copy.deepcopy(getattr(exc, "error_records", []))
                     primary_records = copy.deepcopy(
@@ -13087,6 +13819,9 @@ def run_bridge(
                             ),
                             source_literal_whitespace_projections=copy.deepcopy(
                                 getattr(exc, "source_literal_whitespace_projections", [])
+                            ),
+                            source_literal_occurrence_projections=copy.deepcopy(
+                                getattr(exc, "source_literal_occurrence_projections", [])
                             ),
                             independent_obligation_review=copy.deepcopy(
                                 getattr(exc, "independent_review_audit", None)

@@ -3022,7 +3022,7 @@ b&=2\notag
                              "--analysis-mode", "llm_primary", "--compliance-mode", "full",
                              "--output-policy", "review_draft",
                              "--allow-offline-review")
-            self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
             manifest = json.loads((work / "pipeline-manifest.json").read_text())
             self.assertEqual(manifest["output_policy"], "review_draft")
             self.assertEqual(manifest["capability_backend_gaps"], 1)
@@ -3030,6 +3030,18 @@ b&=2\notag
             self.assertFalse(report["docx_fully_compliant"])
             self.assertFalse(report["submission_ready"])
             self.assertTrue((td / "output.docx").is_file())
+            self.assertTrue(report["review_draft_ready"])
+            self.assertTrue(report["draft_scorecard_audit"]["valid"])
+            self.assertGreater(report["draft_scorecard"]["unmet_or_pending_count"], 0)
+            self.assertFalse(report["draft_scorecard"]["submission_ready"])
+            self.assertTrue(any(item["kind"] == "capability" for item in report["draft_scorecard"]["entries"]))
+            self.assertIn("自动核验评分", "\n".join(p.text for p in Document(td / "output.docx").paragraphs))
+            self.assertEqual(json.loads(Path(manifest["draft_scorecard"]).read_text()), report["draft_scorecard"])
+            current_spec = json.loads(Path(manifest["format_spec"]).read_text())
+            current_map = json.loads(Path(manifest["style_map"]).read_text())
+            self.assertEqual(set(report["property_receipt_audit"]["expected_receipt_ids"]),
+                apply_format_spec.current_expected_property_receipt_ids(
+                    Document(td / "output.docx"), current_spec, current_map.get("mappings", current_map)))
 
     def test_offline_review_cannot_use_submission_output_policy(self) -> None:
         with tempfile.TemporaryDirectory() as td:

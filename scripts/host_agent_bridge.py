@@ -233,6 +233,7 @@ from native_semantic_review import (  # noqa: E402
     is_explicit_authoring_content_quote,
     run_native_semantic_review,
     validate_obligation_coverage_response,
+    validate_draft_dispute_envelope,
 )
 from obligation_workflow import OBLIGATION_ANALYSIS_LEDGER_PROTOCOL, work_type_for_disposition
 from table_source_context import table_context_retry_is_source_bound, table_retry_feedback_is_source_bound
@@ -10772,6 +10773,7 @@ def _validate_completed_obligation_ledger_chain(
     *,
     chunk_index: int,
     attempt: int,
+    output_policy: str = "submission",
 ) -> None:
     """Rebuild the source-reference review and AO ledger from current artifacts."""
     review_audit = independent_envelope.get("review_audit")
@@ -10870,6 +10872,10 @@ def _validate_completed_obligation_ledger_chain(
     )
     expected_request["attempt"] = attempt
     expected_request["provider_attempt"] = provider_attempt
+    if review_request.get("output_policy") is not None:
+        if review_request["output_policy"] != output_policy:
+            raise ValueError("independent review output policy mismatch")
+        expected_request["output_policy"] = output_policy
     if retry_feedback is not None:
         expected_request["retry_feedback"] = copy.deepcopy(retry_feedback)
     expected_source_packet = build_source_reference_packet(expected_request)
@@ -10877,6 +10883,7 @@ def _validate_completed_obligation_ledger_chain(
         raise ValueError(
             f"Host Agent chunk {chunk_index} source-review request is not reconstructed from its accepted response"
         )
+    validate_draft_dispute_envelope(independent_envelope, review_request, output_policy=output_policy)
 
     reconstructed_response, reconstructed_compilation = compile_source_reference_response(
         raw_response, review_request, OBLIGATION_COVERAGE_SCHEMA, coverage=True,
@@ -10892,7 +10899,9 @@ def _validate_completed_obligation_ledger_chain(
         raise ValueError(f"Host Agent chunk {chunk_index} source review lacks checks")
     if compilation.get("canonicalization_protocol") == "validated_source_reference_projection_v1":
         normalized_response = copy.deepcopy(reconstructed_response)
-        normalized_results = validate_obligation_coverage_response(normalized_response, checks)
+        normalized_results = validate_obligation_coverage_response(
+            normalized_response, checks, allow_draft_disputes=output_policy == "review_draft",
+        )
         reconstructed_compilation = bind_validated_source_reference_selections(
             reconstructed_compilation, reconstructed_response, normalized_response,
             review_request,
@@ -11061,6 +11070,7 @@ def _validate_completed_chunk_set(
     chunk_lifecycle: dict[int, dict[str, Any]],
     chunk_audits: list[dict[str, Any]],
     chunks: list[dict[str, Any]] | None = None,
+    *, output_policy: str = "submission",
 ) -> None:
     """Prove every declared chunk completed and its accepted bytes are present."""
     expected_indexes = set(range(1, len(response_files) + 1))
@@ -11105,7 +11115,8 @@ def _validate_completed_chunk_set(
         if Path(str(audit.get("response_path") or "")).resolve() != response_path.resolve():
             raise ValueError(f"Host Agent chunk {index} receipt points to a different response path")
         independent = audit.get("independent_obligation_review")
-        if not isinstance(independent, dict) or independent.get("status") != "completed":
+        allowed_statuses = {"completed", "completed_with_disputes"} if output_policy == "review_draft" else {"completed"}
+        if not isinstance(independent, dict) or independent.get("status") not in allowed_statuses:
             raise ValueError(f"Host Agent chunk {index} has no completed independent obligation review")
         independent_path = _bound_path(
             review_dir, str(independent.get("audit_path") or ""),
@@ -11122,7 +11133,8 @@ def _validate_completed_chunk_set(
         if (
             not isinstance(independent_envelope, dict)
             or independent_envelope.get("protocol") != OBLIGATION_COVERAGE_PROTOCOL
-            or independent_envelope.get("status") != "completed"
+            or independent_envelope.get("status") not in allowed_statuses
+            or independent_envelope.get("status") != independent.get("status")
             or independent_envelope.get("run_id") != (
                 response_provenance.get("run_id") if isinstance(response_provenance, dict) else None
             )
@@ -11154,7 +11166,7 @@ def _validate_completed_chunk_set(
             if isinstance(item, dict) and isinstance(item.get("check_id"), str)
         } if isinstance(findings, list) else set()
         if not isinstance(findings, list) or any(
-            not isinstance(item, dict) or item.get("verdict") == "incomplete"
+            not isinstance(item, dict) or (item.get("verdict") == "incomplete" and output_policy != "review_draft")
             for item in findings
         ) or reviewed_clause_ids != expected_clause_ids:
             raise ValueError(f"Host Agent chunk {index} independent review contains incomplete coverage")
@@ -11202,6 +11214,7 @@ def _validate_completed_chunk_set(
             chunks[index - 1],
             chunk_index=index,
             attempt=attempt,
+            output_policy=output_policy,
         )
 
 
@@ -11475,6 +11488,7 @@ def _run_independent_obligation_coverage_review(
     binary: str | None,
     config_path: Path | None,
     controller: RunController,
+    output_policy: str = "submission",
     _provider_attempt: int = 1,
     _provider_attempt_history: list[dict[str, Any]] | None = None,
     _retry_feedback: dict[str, Any] | None = None,
@@ -11485,6 +11499,8 @@ def _run_independent_obligation_coverage_review(
     )
     coverage_request["attempt"] = attempt
     coverage_request["provider_attempt"] = _provider_attempt
+    if output_policy == "review_draft":
+        coverage_request["output_policy"] = output_policy
     if _retry_feedback is not None:
         coverage_request["retry_feedback"] = copy.deepcopy(_retry_feedback)
     if not coverage_request.get("checks"):
@@ -11525,7 +11541,9 @@ def _run_independent_obligation_coverage_review(
         envelope = {
             "schema_version": "1.0",
             "protocol": OBLIGATION_COVERAGE_PROTOCOL,
-            "status": "rejected" if incomplete_results else "completed",
+            "status": ("completed_with_disputes" if output_policy == "review_draft" else "rejected") if incomplete_results else "completed",
+            "coverage_complete": not bool(incomplete_results),
+            "submission_ready": False,
             "run_id": run_id,
             "chunk_index": chunk_index,
             "attempt": attempt,
@@ -11560,7 +11578,7 @@ def _run_independent_obligation_coverage_review(
             "obligation_analysis_ledger_sha256": ledger_pointer["sha256"],
             "obligation_analysis_ledger_status": ledger_pointer["status"],
         }
-        if incomplete_results:
+        if incomplete_results and output_policy != "review_draft":
             clause_map = {
                 str(item.get("id")): item for item in chunk.get("clauses", [])
                 if isinstance(item, dict) and isinstance(item.get("id"), str)
@@ -11749,6 +11767,7 @@ def _run_independent_obligation_coverage_review(
                     config_path=config_path,
                     controller=controller,
                     _provider_attempt=_provider_attempt + 1,
+                    output_policy=output_policy,
                     _provider_attempt_history=attempt_history,
                     _retry_feedback=retry_feedback,
                 )
@@ -11804,6 +11823,7 @@ def _run_independent_obligation_coverage_review(
                     validate_obligation_coverage_response(
                         copy.deepcopy(reconstructed_response),
                         coverage_request.get("checks", []),
+                        allow_draft_disputes=output_policy == "review_draft",
                     )
                 except SourceVerificationClassificationCorrectionRequiredError as replayed_error:
                     replayed_corrections_match = (
@@ -12014,6 +12034,7 @@ def _run_independent_obligation_coverage_review(
                 config_path=config_path,
                 controller=controller,
                 _provider_attempt=_provider_attempt + 1,
+                output_policy=output_policy,
                 _provider_attempt_history=attempt_history,
                 _retry_feedback=retry_feedback,
             )
@@ -12150,6 +12171,7 @@ def _run_independent_obligation_coverage_review(
                 config_path=config_path,
                 controller=controller,
                 _provider_attempt=_provider_attempt + 1,
+                output_policy=output_policy,
                 _provider_attempt_history=attempt_history,
                 _retry_feedback=retry_feedback,
             )
@@ -12230,6 +12252,7 @@ def _run_independent_obligation_coverage_review(
                 config_path=config_path,
                 controller=controller,
                 _provider_attempt=_provider_attempt + 1,
+                output_policy=output_policy,
                 _provider_attempt_history=attempt_history,
                 _retry_feedback=_retry_feedback,
             )
@@ -12320,7 +12343,10 @@ def run_bridge(
     host_runtime: str | None = None,
     codex_model: str | None = None,
     allow_prompt_only: bool = False,
+    output_policy: str = "submission",
 ) -> dict[str, Any]:
+    if output_policy not in {"submission", "review_draft"}:
+        raise ValueError("invalid host review output policy")
     host_context = require_host_runtime(host_runtime)
     adapter_id = automatic_adapter_id(host_context)
     if adapter_id == "codex":
@@ -13508,6 +13534,7 @@ def run_bridge(
                         binary=openclaw_bin if adapter_id == "openclaw" else codex_binary,
                         config_path=openclaw_config,
                         controller=controller,
+                        output_policy=output_policy,
                     )
                 )
                 if pending_retry_authorizations:
@@ -13536,7 +13563,7 @@ def run_bridge(
                             },
                         )
                     )
-                    audit["candidate_status"] = "accepted_after_independent_review"
+                    audit["candidate_status"] = ("draft_with_coverage_disputes" if audit["independent_obligation_review"]["status"] == "completed_with_disputes" else "accepted_after_independent_review")
                     audit["response_path"] = str(response_path.resolve())
                     audit["accepted_response_sha256"] = _response_sha256(response)
                     audit["attempt_failures"] = failures
@@ -14096,6 +14123,7 @@ def run_bridge(
             lifecycle_snapshot = copy.deepcopy(chunk_lifecycle)
         _validate_completed_chunk_set(
             review_dir, response_files, lifecycle_snapshot, chunk_audits, chunks,
+            output_policy=output_policy,
         )
         merged, merge_metadata = merge_host_agent_review_packets(
             review_dir, response_out=response_out,
@@ -14167,6 +14195,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--response-out", type=Path,
                         help="merged response path; defaults outside review_dir")
     parser.add_argument("--run-id", help="optional run id; must match request provenance")
+    parser.add_argument("--output-policy", choices=("submission", "review_draft"), default="submission")
     parser.add_argument(
         "--host-runtime",
         help="expected native host runtime; it must match "
@@ -14236,6 +14265,7 @@ def main(argv: list[str] | None = None) -> int:
             runner=args.runner,
             host_runtime=args.host_runtime,
             allow_prompt_only=args.allow_prompt_only,
+            output_policy=args.output_policy,
         )
     except (OSError, ValueError, RuntimeError, json.JSONDecodeError) as exc:
         print(f"host-agent bridge failed: {exc}", file=sys.stderr)

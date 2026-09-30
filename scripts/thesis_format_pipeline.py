@@ -44,6 +44,7 @@ from native_semantic_review import (
     OBLIGATION_COVERAGE_PROTOCOL,
     build_obligation_coverage_request,
     validate_obligation_coverage_response,
+    validate_draft_dispute_envelope,
 )
 from offline_review_receipt import validate_offline_merge_receipt
 from obligation_workflow import OBLIGATION_ANALYSIS_LEDGER_PROTOCOL, work_type_for_disposition
@@ -366,6 +367,7 @@ def _validate_independent_obligation_receipts(
 
     seen_indexes: set[int] = set()
     validated: list[dict[str, Any]] = []
+    allowed_review_statuses = {"completed", "completed_with_disputes"} if output_policy == "review_draft" else {"completed"}
     for chunk_audit in chunk_runs:
         if not isinstance(chunk_audit, dict):
             raise ValueError("host-agent audit contains an invalid chunk audit")
@@ -395,7 +397,7 @@ def _validate_independent_obligation_receipts(
         independent = chunk_audit.get("independent_obligation_review")
         if (
             not isinstance(independent, dict)
-            or independent.get("status") != "completed"
+            or independent.get("status") not in allowed_review_statuses
             or independent.get("protocol") != OBLIGATION_COVERAGE_PROTOCOL
             or independent.get("run_id") != expected_run_id
             or independent.get("chunk_index") != index
@@ -414,7 +416,8 @@ def _validate_independent_obligation_receipts(
         if (
             not isinstance(envelope, dict)
             or envelope.get("protocol") != OBLIGATION_COVERAGE_PROTOCOL
-            or envelope.get("status") != "completed"
+            or envelope.get("status") not in allowed_review_statuses
+            or envelope.get("status") != independent.get("status")
             or envelope.get("run_id") != expected_run_id
             or envelope.get("chunk_index") != index
             or envelope.get("candidate_response_sha256") != candidate_sha
@@ -499,6 +502,10 @@ def _validate_independent_obligation_receipts(
         )
         expected_review_request["attempt"] = attempt
         expected_review_request["provider_attempt"] = provider_attempt
+        if review_request.get("output_policy") is not None:
+            if review_request["output_policy"] != output_policy:
+                raise ValueError("independent review output policy mismatch")
+            expected_review_request["output_policy"] = output_policy
         if retry_feedback is not None:
             expected_review_request["retry_feedback"] = copy.deepcopy(retry_feedback)
         if sha256_json(review_request) != sha256_json(expected_review_request):
@@ -506,11 +513,14 @@ def _validate_independent_obligation_receipts(
                 f"independent obligation review {index} request is not reconstructed "
                 "from the canonical source packet and accepted response"
             )
-        normalized_results = validate_obligation_coverage_response(review_response, checks)
+        normalized_results = validate_obligation_coverage_response(
+            review_response, checks, allow_draft_disputes=output_policy == "review_draft",
+        )
+        validate_draft_dispute_envelope(envelope, review_request, output_policy=output_policy)
         if (
             normalized_results != envelope.get("results")
             or normalized_results != review_audit.get("results")
-            or any(item.get("verdict") == "incomplete" for item in normalized_results)
+            or (output_policy != "review_draft" and any(item.get("verdict") == "incomplete" for item in normalized_results))
         ):
             raise ValueError(f"independent obligation review {index} is incomplete or inconsistent")
 
@@ -581,7 +591,9 @@ def _validate_independent_obligation_receipts(
             )
         if compilation.get("canonicalization_protocol") == "validated_source_reference_projection_v1":
             canonical_replay = copy.deepcopy(reconstructed_response)
-            canonical_results = validate_obligation_coverage_response(canonical_replay, checks)
+            canonical_results = validate_obligation_coverage_response(
+                canonical_replay, checks, allow_draft_disputes=output_policy == "review_draft",
+            )
             reconstructed_compilation = bind_validated_source_reference_selections(
                 reconstructed_compilation, reconstructed_response, canonical_replay,
                 review_request,
@@ -999,6 +1011,7 @@ def _validate_independent_obligation_receipts(
             })
         validated.append({
             "chunk_index": index,
+            "coverage_disputes": [copy.deepcopy(item) for item in normalized_results if item.get("verdict") == "incomplete"],
             "run_id": expected_run_id,
             "case_id": review_request.get("case_id"),
             "attempt": attempt,
@@ -1153,14 +1166,13 @@ def enforce_obligation_review_output_policy(
     """Permit irreducible ambiguity only in an explicitly non-release draft."""
     if output_policy not in {"review_draft", "submission"}:
         raise ValueError(f"unsupported output policy for independent review: {output_policy!r}")
-    # Incomplete is a valid diagnostic response, not accepted coverage. Keep
-    # this rejection at the consumer too: a claimed completed receipt cannot
-    # turn an unrepresented duty into a draft or submission pass.
+    # Incomplete remains a diagnostic dispute, never accepted coverage. Only
+    # an explicitly non-release draft may carry it forward for human review.
     incomplete_clause_ids = sorted({
         str(item.get("check_id")) for item in results
         if isinstance(item, dict) and item.get("verdict") == "incomplete"
     })
-    if incomplete_clause_ids:
+    if incomplete_clause_ids and output_policy != "review_draft":
         raise ValueError(
             "independent obligation review is incomplete for clause(s) "
             + ", ".join(incomplete_clause_ids)
@@ -1208,7 +1220,7 @@ def enforce_obligation_review_output_policy(
             + ", ".join(manual_review_clause_ids)
             + "; submission output is blocked (use an explicit review_draft for a non-release artifact)"
         )
-    return manual_review_clause_ids
+    return sorted(set(manual_review_clause_ids + incomplete_clause_ids))
 
 
 def _independent_obligation_producer_record(
@@ -3037,6 +3049,22 @@ def _main(argv: list[str]) -> int:
             host_review_receipts.get("independent_obligation_reviews", [])
             if isinstance(host_review_receipts, dict) else []
         )
+        for independent_review in independent_reviews:
+            for dispute in independent_review.get("coverage_disputes", []):
+                cid = dispute["check_id"]
+                source_clause = next(item for item in clauses if item.get("id") == cid)
+                manual_review_release_gates.append({
+                    "source_code": "coverage_dispute:" + cid,
+                    "category": "semantic_content_review",
+                    "clause_ids": [cid], "evidence_ids": source_clause.get("evidence_ids", []),
+                    "source_text": source_clause.get("source_span", {}).get("text", source_clause["text"]),
+                    "reason": dispute["rationale"],
+                    "action": "自动核验得分0/100（语义覆盖未确认）。逐项核对来源义务和主审记录；未确认前不可提交。",
+                    "producer_records": [{"producer": "independent_coverage_dispute", "record": {
+                        "review": copy.deepcopy(independent_review), "original_result": copy.deepcopy(dispute),
+                        "execution_authorized": False,
+                    }}],
+                })
         manual_review_release_gates.extend(
             _source_content_verification_release_gates(
                 independent_reviews, clauses=clauses, evidence_doc=evidence_doc,
@@ -3345,6 +3373,12 @@ def _main(argv: list[str]) -> int:
     application_failed = bool(result.returncode or not report)
     if report:
         if args.output_policy == "review_draft":
+            manifest["draft_scorecard"] = str(apply_dir / "draft-scorecard.json")
+            manifest["draft_scorecard_audit"] = str(apply_dir / "draft-scorecard-audit.json")
+            manifest["draft_scoring_summary"] = {
+                key: (report.get("draft_scorecard") or {}).get(key)
+                for key in ("policy", "score", "item_count", "verified_count", "unmet_or_pending_count")
+            }
             application_failed = application_failed or report.get("review_draft_ready") is not True
         else:
             application_failed = application_failed or report.get("valid") is not True

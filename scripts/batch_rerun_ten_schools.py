@@ -31,6 +31,7 @@ DEFAULT_MANIFEST = Path("inputs/ten-school-template-manifest.json")
 if str(ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(ROOT / "scripts"))
 from artifact_io import atomic_write_text  # noqa: E402
+from draft_scorecard import audit_scorecard, validate_bound_scorecard  # noqa: E402
 from host_adapters import codex as codex_adapter  # noqa: E402
 from host_runtime import (  # noqa: E402
     HostRuntimeError,
@@ -47,6 +48,7 @@ from manual_review_display import audit_manual_review_markers  # noqa: E402
 from native_semantic_review import NativeSemanticReviewError, validate_response  # noqa: E402
 from apply_format_spec import (  # noqa: E402
     build_semantic_content_checks,
+    current_expected_property_receipt_ids,
     resolve_profile_constraints,
 )
 from format_spec_validation import load_and_validate  # noqa: E402
@@ -856,6 +858,7 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
 
         capability_path = case_artifact("capability_preflight", manifest.get("capability_preflight"))
         capability = None
+        capability_needs_scorecard = False
         if capability_path is None or not capability_path.is_file():
             blockers.append("capability_artifact_missing")
         else:
@@ -888,11 +891,12 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
                             human_input_count += 1
                         else:
                             technical_blocking_count += 1
-                if technical_blocking_count:
-                    blockers.append("capability_technical_blocking_findings")
-                if (capability.get("status") == "blocked"
-                        and (not human_input_count or blocking_count != human_input_count)):
-                    blockers.append("capability_blocked_without_human_only_basis")
+                # Defer known capability shortfalls only when the current
+                # draft scorecard below accounts for their exact payloads.
+                capability_needs_scorecard = bool(technical_blocking_count or (
+                    capability.get("status") == "blocked"
+                    and (not human_input_count or blocking_count != human_input_count)
+                ))
                 marker_count = (
                     len(markers.get("markers", []))
                     if isinstance(markers, dict) and isinstance(markers.get("markers"), list)
@@ -962,13 +966,61 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
                 if validation.get("diagnostic_draft_generated") is not True:
                     blockers.append("review_draft_not_generated_in_validation")
                 validation_findings = validation.get("findings")
+                scored_draft_ok = False
+                card = validation.get("draft_scorecard")
+                if card is not None:
+                    try:
+                        card_path = case_artifact("draft_scorecard", manifest.get("draft_scorecard"))
+                        card_audit_path = case_artifact("draft_scorecard_audit", manifest.get("draft_scorecard_audit"))
+                        if not card_path or not card_audit_path or not output_path or not isinstance(manual_ledger, dict):
+                            raise ValueError("scorecard artifacts or bound ledger missing")
+                        scoring_findings = validation.get("scoring_findings")
+                        if scoring_findings != validation_findings:
+                            raise ValueError("scorecard omitted or changed validation findings")
+                        current_spec_path = case_artifact("format_spec", manifest.get("format_spec"))
+                        current_map_path = case_artifact("style_map", manifest.get("style_map"))
+                        current_spec = strict_json_loads(current_spec_path.read_text(encoding="utf-8"))
+                        current_map = strict_json_loads(current_map_path.read_text(encoding="utf-8"))
+                        expected_receipts = current_expected_property_receipt_ids(
+                            Document(output_path), current_spec, current_map.get("mappings", current_map),
+                        )
+                        receipt_payload_path = validation_path.parent / "property-receipts.json"
+                        receipt_payload = strict_json_loads(receipt_payload_path.read_text(encoding="utf-8"))
+                        if (set(validation["property_receipt_audit"]["expected_receipt_ids"]) != expected_receipts
+                                or receipt_payload.get("receipts") != validation["property_receipt_audit"]["receipts"]):
+                            raise ValueError("scorecard receipt inventory differs from current requirements or receipt artifact")
+                        scored_draft_ok = (
+                            strict_json_loads(card_path.read_text(encoding="utf-8")) == card
+                            and validate_bound_scorecard(
+                                card, binding=manual_ledger["binding"],
+                                receipt_audit=validation["property_receipt_audit"],
+                                manual_items=manual_ledger["items"], findings=scoring_findings,
+                                capability_findings=capability.get("findings", []) if isinstance(capability, dict) else [],
+                                output=output_path,
+                            )
+                            and strict_json_loads(card_audit_path.read_text(encoding="utf-8"))
+                            == validation.get("draft_scorecard_audit")
+                            == audit_scorecard(output_path, card)
+                        )
+                    except (OSError, ValueError, TypeError, KeyError, AttributeError):
+                        scored_draft_ok = False
+                    if not scored_draft_ok:
+                        blockers.append("review_draft_scorecard_invalid_or_unbound")
+                else:
+                    blockers.append("review_draft_scorecard_missing")
+                checks["draft_scorecard"] = {
+                    "valid": scored_draft_ok,
+                    "score": card.get("score") if isinstance(card, dict) else None,
+                    "human_check_required": True,
+                }
+                if isinstance(capability, dict) and capability_needs_scorecard and not scored_draft_ok:
+                    blockers.append("capability_technical_blocking_findings")
+                    blockers.append("capability_blocked_without_human_only_basis")
                 technical_validation_ok = (
-                    validation.get("valid") is True
-                    and validation.get("format_ready") is True
-                    and validation.get("diagnostic_draft_generated") is True
+                    validation.get("diagnostic_draft_generated") is True
                     and validation.get("review_draft_package_valid") is True
                     and isinstance(validation_findings, list)
-                    and not validation_findings
+                    and scored_draft_ok
                 )
                 checks["technical_validation"] = technical_validation_ok
                 if not technical_validation_ok:
@@ -1038,19 +1090,21 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
                         and set(receipt_ids) == set(expected_ids)
                         and len(receipt_ids) == len(expected_ids)
                         and receipt_audit.get("receipt_count") == len(receipts)
-                        and all(item.get("status") == "verified" for item in receipts)
+                        and all(item.get("status") in (
+                            {"verified", "failed", "unverified"} if scored_draft_ok else {"verified"}
+                        ) for item in receipts)
                         and all(item.get("serialized_docx_sha256") == output_sha for item in receipts)
                         and all(receipt_audit.get(key) == value for key, value in status_counts.items())
                         and receipt_audit.get("missing_count") == 0
                         and receipt_audit.get("unexpected_count") == 0
                         and receipt_audit.get("duplicate_count") == 0
-                        and receipt_audit.get("valid") is True
+                        and (scored_draft_ok or receipt_audit.get("valid") is True)
                     )
                 if not receipt_integrity_ok:
                     blockers.append("review_draft_property_receipts_not_verified")
                 checks["property_receipts"] = {
                     "integrity_bound_to_output": receipt_integrity_ok,
-                    "all_expected_receipts_verified": receipt_integrity_ok,
+                    "all_expected_receipts_verified": receipt_integrity_ok and all(value == "verified" for value in receipt_statuses),
                     "verified": receipt_audit.get("verified_count") if isinstance(receipt_audit, dict) else None,
                     "failed": receipt_audit.get("failed_count") if isinstance(receipt_audit, dict) else None,
                     "unverified": receipt_audit.get("unverified_count") if isinstance(receipt_audit, dict) else None,
@@ -1554,6 +1608,7 @@ def run_case(base: Path, source: Path, case: dict[str, Any], *, prepare_host_rev
                 "--timeout", str(host_agent_timeout),
                 "--max-concurrency", str(host_agent_max_concurrency),
                 "--max-attempts", str(host_agent_max_attempts),
+                "--output-policy", output_policy,
             ]
             if host_runtime:
                 bridge_command.extend(["--host-runtime", host_runtime])

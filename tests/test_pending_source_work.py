@@ -165,7 +165,7 @@ class PendingSourceWorkTests(unittest.TestCase):
         self.assertEqual(candidate, before)
         self.assertEqual(candidate["requirements"], [])
 
-    def test_incomplete_is_preserved_for_diagnosis_but_never_accepted_output(self):
+    def test_incomplete_is_preserved_for_scored_draft_but_never_submission(self):
         chunk, candidate, response = fixture(CHOICE_SOURCE)
         result = response["results"][0]
         result["verdict"] = "incomplete"
@@ -176,9 +176,11 @@ class PendingSourceWorkTests(unittest.TestCase):
         results = native.validate_obligation_coverage_response(response, checks)
         self.assertEqual(results[0]["verdict"], "incomplete")
         self.assertEqual(results[0]["identified_obligations"][0]["disposition"], "unrepresented")
-        for policy in ("submission", "review_draft"):
-            with self.subTest(policy=policy), self.assertRaisesRegex(ValueError, "is incomplete"):
-                pipeline.enforce_obligation_review_output_policy(results, output_policy=policy)
+        with self.assertRaisesRegex(ValueError, "is incomplete"):
+            pipeline.enforce_obligation_review_output_policy(results, output_policy="submission")
+        self.assertEqual(pipeline.enforce_obligation_review_output_policy(
+            results, output_policy="review_draft"), [results[0]["check_id"]])
+        self.assertEqual(results[0]["verdict"], "incomplete")
 
     def test_valid_inventory_verdict_retry_is_bounded_and_changes_no_candidate_fields(self):
         chunk, candidate, first = fixture()

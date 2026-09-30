@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import copy
+import hashlib
 import sys
 import tempfile
 import unittest
@@ -14,6 +16,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import batch_rerun_ten_schools as batch  # noqa: E402
 from manual_review import build_manual_review_ledger  # noqa: E402
+from draft_scorecard import append_scorecard, audit_scorecard, build_scorecard  # noqa: E402
 from manual_review_display import (  # noqa: E402
     append_manual_review_markers,
     audit_manual_review_markers,
@@ -339,9 +342,12 @@ class BatchAcceptanceTests(unittest.TestCase):
             Document().save(output)
             output_sha256 = __import__("hashlib").sha256(output.read_bytes()).hexdigest()
             format_spec = requirements / "format-spec.json"
-            format_spec.write_text("{}\n", encoding="utf-8")
+            format_spec.write_text(json.dumps({
+                "roles": {"body_text": {"font": {"size_pt": 12}}},
+                "requirements": [{"id": "R00001", "role": "body_text", "properties": {"font": {"size_pt": 12}}}],
+            }), encoding="utf-8")
             style_map = work / "style-map.json"
-            style_map.write_text("{}\n", encoding="utf-8")
+            style_map.write_text(json.dumps({"mappings": {"body_text": {"style_name": "Normal"}}}), encoding="utf-8")
             application_input = case_root / "application-input.docx"
             Document().save(application_input)
             binding = {
@@ -472,9 +478,131 @@ class BatchAcceptanceTests(unittest.TestCase):
                     "pipeline_manifest": str(manifest),
                 },
             }
+            initial_validation = json.loads(validation.read_text(encoding="utf-8"))
+            initial_validation["scoring_findings"] = []
+            initial_capability = json.loads(capability.read_text(encoding="utf-8"))
+            initial_card = build_scorecard(binding, initial_validation["property_receipt_audit"],
+                                          ledger_value["items"], [], initial_capability["findings"])
+            initial_doc = Document(output)
+            append_scorecard(initial_doc, initial_card)
+            initial_doc.save(output)
+            initial_validation["property_receipt_audit"]["receipts"][0]["serialized_docx_sha256"] = hashlib.sha256(output.read_bytes()).hexdigest()
+            initial_audit = audit_scorecard(output, initial_card)
+            initial_validation.update(draft_scorecard=initial_card, draft_scorecard_audit=initial_audit)
+            validation.write_text(json.dumps(initial_validation), encoding="utf-8")
+            score_path, score_audit_path = apply_dir / "draft-scorecard.json", apply_dir / "draft-scorecard-audit.json"
+            score_path.write_text(json.dumps(initial_card), encoding="utf-8")
+            score_audit_path.write_text(json.dumps(initial_audit), encoding="utf-8")
+            property_path = apply_dir / "property-receipts.json"
+            property_path.write_text(json.dumps({"receipts": initial_validation["property_receipt_audit"]["receipts"]}), encoding="utf-8")
+            initial_manifest = json.loads(manifest.read_text(encoding="utf-8"))
+            initial_manifest.update(draft_scorecard=str(score_path), draft_scorecard_audit=str(score_audit_path))
+            manifest.write_text(json.dumps(initial_manifest), encoding="utf-8")
+            initial_markers = json.loads(markers.read_text(encoding="utf-8"))
+            initial_markers["serialized_marker_audit"] = audit_manual_review_markers(output, ledger_value)
+            markers.write_text(json.dumps(initial_markers), encoding="utf-8")
             accepted = batch.case_acceptance(result, root=root)
             self.assertTrue(accepted["accepted"], accepted)
             self.assertEqual(accepted["status"], "accepted_review_draft")
+            # The new draft-only policy accepts honestly failed checks only
+            # with an exact, current-run-bound, visibly serialized scorecard.
+            original_output = output.read_bytes()
+            original_validation = validation.read_text(encoding="utf-8")
+            original_manifest = manifest.read_text(encoding="utf-8")
+            original_markers = markers.read_text(encoding="utf-8")
+            scored_validation = json.loads(original_validation)
+            scored_validation.update(valid=False, format_ready=False, findings=[{
+                "role": "keywords", "property": "separator", "template_value": "，",
+                "required_value": "；", "reason": "分隔符不满足要求",
+            }])
+            scored_validation["scoring_findings"] = copy.deepcopy(scored_validation["findings"])
+            receipts = scored_validation["property_receipt_audit"]
+            receipts.update(valid=False, verified_count=0, failed_count=1)
+            receipts["receipts"][0].update(status="failed", actual="，", expected="；")
+            cap_value = json.loads(capability.read_text(encoding="utf-8"))
+            cap_value["findings"].append({"code": "format.backend_gap", "blocking": True,
+                "evidence": [{"kind": "category", "value": "backend_capability_gap"}]})
+            capability.write_text(json.dumps(cap_value), encoding="utf-8")
+            card = build_scorecard(binding, receipts, ledger_value["items"],
+                                   scored_validation["findings"], cap_value["findings"])
+            scored_doc = Document(output)
+            for paragraph in list(scored_doc.paragraphs):
+                if paragraph.text.startswith(("【SC-", "自动核验评分（")):
+                    paragraph._p.getparent().remove(paragraph._p)
+            append_scorecard(scored_doc, card)
+            scored_doc.save(output)
+            receipts["receipts"][0]["serialized_docx_sha256"] = hashlib.sha256(output.read_bytes()).hexdigest()
+            property_path.write_text(json.dumps({"receipts": receipts["receipts"]}), encoding="utf-8")
+            scored_audit = audit_scorecard(output, card)
+            scored_validation.update(draft_scorecard=card, draft_scorecard_audit=scored_audit)
+            score_path, score_audit_path = apply_dir / "draft-scorecard.json", apply_dir / "draft-scorecard-audit.json"
+            score_path.write_text(json.dumps(card), encoding="utf-8")
+            score_audit_path.write_text(json.dumps(scored_audit), encoding="utf-8")
+            validation.write_text(json.dumps(scored_validation), encoding="utf-8")
+            scored_manifest = json.loads(original_manifest)
+            scored_manifest.update(draft_scorecard=str(score_path), draft_scorecard_audit=str(score_audit_path))
+            manifest.write_text(json.dumps(scored_manifest), encoding="utf-8")
+            scored_markers = json.loads(original_markers)
+            scored_markers["serialized_marker_audit"] = audit_manual_review_markers(output, ledger_value)
+            markers.write_text(json.dumps(scored_markers), encoding="utf-8")
+            scored_accepted = batch.case_acceptance(result, root=root)
+            self.assertTrue(scored_accepted["accepted"], scored_accepted)
+            self.assertEqual(scored_accepted["checks"]["draft_scorecard"]["score"], 0)
+            self.assertFalse(scored_accepted["checks"]["property_receipts"]["all_expected_receipts_verified"])
+            for mutation in ("score", "remove_item", "old_run", "omit_finding", "omit_capability", "submission"):
+                with self.subTest(mutation=mutation):
+                    forged_validation = copy.deepcopy(scored_validation)
+                    forged_card = forged_validation["draft_scorecard"]
+                    if mutation == "score": forged_card["score"] = 100
+                    if mutation == "remove_item": forged_card["entries"].pop()
+                    if mutation == "old_run": forged_card["binding"]["run_id"] = "old-run"
+                    if mutation == "omit_finding": forged_validation["scoring_findings"] = []
+                    if mutation == "omit_capability": forged_card["entries"] = [i for i in forged_card["entries"] if i["kind"] != "capability"]
+                    if mutation == "submission": forged_card["submission_ready"] = True
+                    score_path.write_text(json.dumps(forged_card), encoding="utf-8")
+                    validation.write_text(json.dumps(forged_validation), encoding="utf-8")
+                    forged_result = batch.case_acceptance(result, root=root)
+                    self.assertFalse(forged_result["accepted"], forged_result)
+                    self.assertIn("review_draft_scorecard_invalid_or_unbound", forged_result["blockers"])
+            # Missing scorecards cannot fall back to the old all-passed flags.
+            no_card = copy.deepcopy(scored_validation)
+            no_card.pop("draft_scorecard")
+            no_card.update(valid=True, format_ready=True, findings=[])
+            validation.write_text(json.dumps(no_card), encoding="utf-8")
+            self.assertIn("review_draft_scorecard_missing", batch.case_acceptance(result, root=root)["blockers"])
+
+            # Delete both sides of receipt self-accounting and coherently
+            # rebuild the visible card. The current format spec still requires
+            # the missing ID, so this must fail independent inventory replay.
+            omitted = copy.deepcopy(scored_validation)
+            omitted_audit = omitted["property_receipt_audit"]
+            omitted_audit.update(receipts=[], expected_receipt_ids=[], receipt_count=0, failed_count=0, valid=True)
+            omitted_card = build_scorecard(binding, omitted_audit, ledger_value["items"],
+                omitted["findings"], cap_value["findings"])
+            omitted_doc = Document(output)
+            for paragraph in list(omitted_doc.paragraphs):
+                if paragraph.text.startswith(("【SC-", "自动核验评分（")):
+                    paragraph._p.getparent().remove(paragraph._p)
+            append_scorecard(omitted_doc, omitted_card)
+            omitted_doc.save(output)
+            omitted_score_audit = audit_scorecard(output, omitted_card)
+            omitted.update(draft_scorecard=omitted_card, draft_scorecard_audit=omitted_score_audit)
+            validation.write_text(json.dumps(omitted), encoding="utf-8")
+            score_path.write_text(json.dumps(omitted_card), encoding="utf-8")
+            score_audit_path.write_text(json.dumps(omitted_score_audit), encoding="utf-8")
+            property_path.write_text(json.dumps({"receipts": []}), encoding="utf-8")
+            scored_markers["serialized_marker_audit"] = audit_manual_review_markers(output, ledger_value)
+            markers.write_text(json.dumps(scored_markers), encoding="utf-8")
+            self.assertIn("review_draft_scorecard_invalid_or_unbound", batch.case_acceptance(result, root=root)["blockers"])
+            output.write_bytes(original_output)
+            validation.write_text(original_validation, encoding="utf-8")
+            manifest.write_text(original_manifest, encoding="utf-8")
+            markers.write_text(original_markers, encoding="utf-8")
+            score_path.write_text(json.dumps(initial_card), encoding="utf-8")
+            score_audit_path.write_text(json.dumps(initial_audit), encoding="utf-8")
+            property_path.write_text(json.dumps({"receipts": initial_validation["property_receipt_audit"]["receipts"]}), encoding="utf-8")
+            cap_value["findings"].pop()
+            capability.write_text(json.dumps(cap_value), encoding="utf-8")
             marker_payload = json.loads(markers.read_text(encoding="utf-8"))
             marker_payload["markers"][0]["ledger_item_sha256"] = "f" * 64
             markers.write_text(json.dumps(marker_payload), encoding="utf-8")

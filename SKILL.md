@@ -372,13 +372,14 @@ contains them. A red marker never means that a requirement passed.
 keeps `format_ready=false` when any technical finding remains, defers the strict
 official-template comparison and Word/PDF release audit, and records
 `draft_manual_review`/`review_draft_pending`. A diagnostic draft may be emitted
-as an inspectable artifact (`diagnostic_draft_generated`), but it is not an
-accepted review draft unless deterministic validation is clean, `format_ready`
-is true, and every expected property receipt is verified against the serialized
-DOCX. Technical failure stops the current case and a fail-fast batch; only
-genuinely unresolved human inputs/decisions may remain as red markers while a
-technically valid review draft is accepted. This is not a formatting or release
-pass. The ten-school batch runner defaults to this policy. Use
+as an inspectable artifact (`diagnostic_draft_generated`). An accepted review
+draft requires a current-input-bound scorecard, complete receipt identities,
+valid DOCX package, completed native checks and visible review markers.
+Formatting shortfalls and source-bound semantic disputes may remain explicitly
+unmet/pending for human review; `valid`/`format_ready` are not rewritten to true.
+Safety, identity, invocation and serialization failures stop the current case
+and a fail-fast batch. Draft acceptance is not a formatting or release pass.
+The ten-school batch runner defaults to this policy. Use
 `--output-policy submission` only after the red items are resolved and the
 submission-mode run has been started fresh; that mode retains the full
 fail-closed capability, render, and final audit gates.
@@ -433,6 +434,27 @@ hash. This is a work-queue score only: unresolved/unreviewed items come first,
 informational items last. It is **not** a school's normative importance score,
 does not assert source-obligation completeness, and has no effect on
 requirement coverage, capability, human-review, or submission gates.
+Separately, explicit `review_draft` runs use
+`evidence_based_draft_scorecard_v1` for **score-first draft triage**. Code grades
+each recorded property/check: verified = 100 verified points; failed,
+unverified and human-pending = 0 verified points. The equal-weight average is
+only the percentage of *observed checks verified*, not normative importance,
+model confidence, complete source coverage, or permission to submit. Every
+item retains its expected/actual values, sources and original result in
+`draft-scorecard.json`; the DOCX contains a readable numbered score section
+and asks for human review of unmet/pending items. Counts and scores are
+recomputed at batch acceptance against the current ledger and serialized DOCX.
+Known capability shortfalls and actual formatting failures may remain in this
+non-release draft only when accounted for by its bound scorecard. Source-bound
+independent coverage disputes stay `incomplete` in the raw response and AO
+ledger, with `completed_with_disputes` describing the review operation, not
+successful coverage. Such disputes are human-review items, never invented
+requirements or semantic reclassifications. Missing/duplicate references,
+invalid schema, stale provenance, incomplete receipt inventories, invisible
+markers, corrupt packages and failed native invocation still fail closed.
+Submission/full gates remain unchanged; even 100/100 cannot promote a draft.
+Always keep `submission_ready=false` and perform real Word visual acceptance
+before describing the scored artifact as visually verified.
 The graph is validated against `obligation-shadow-graph.schema.json` before it
 is persisted. The manual-review ledger separately records an AO→MO→MR
 crosswalk plus clause/requirement/question/evidence IDs copied from each same

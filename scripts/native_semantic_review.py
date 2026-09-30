@@ -475,8 +475,22 @@ def _project_registered_source_correction_to_manual_review(
     }]
 
 
+def validate_draft_dispute_envelope(envelope: dict[str, Any], request: dict[str, Any], *, output_policy: str) -> None:
+    """A completed operation is not a certificate of complete source coverage."""
+    disputed = any(item.get("verdict") == "incomplete" for item in envelope.get("results", []))
+    if envelope.get("status") == "completed_with_disputes" or disputed:
+        if not (
+            disputed and output_policy == "review_draft"
+            and request.get("output_policy") == "review_draft"
+            and envelope.get("status") == "completed_with_disputes"
+            and envelope.get("coverage_complete") is False
+            and envelope.get("submission_ready") is False
+        ):
+            raise ValueError("coverage dispute lacks an explicit current non-release policy")
+
+
 def validate_obligation_coverage_response(
-    response: Any, checks: list[dict[str, Any]],
+    response: Any, checks: list[dict[str, Any]], *, allow_draft_disputes: bool = False,
 ) -> list[dict[str, Any]]:
     """Validate exact clause coverage, source quotes, links, and known-fact IDs."""
     schema_errors = validate_instance(response, OBLIGATION_COVERAGE_SCHEMA)
@@ -732,6 +746,17 @@ def validate_obligation_coverage_response(
                     f"external_compliance source combines a locally expressible document action "
                     f"with a real-world action and must be split before it can remain external: {check_id}"
                 )
+            # A source-bound decomposition disagreement is not compliant
+            # coverage. Preserve the original incomplete/unrepresented result
+            # solely for a scored, non-submission draft. Schema, source quotes,
+            # code-owned facts and reference checks above remain mandatory.
+            if (allow_draft_disputes and verdict == "incomplete"
+                    and context.get("requires_requirement") is False and not linked
+                    and identified_obligations and unrepresented == len(identified_obligations)
+                    and all(not item.get("requirement_refs") for item in identified_obligations)
+                    and all(isinstance(item, dict) and item.get("status") == "unverifiable"
+                            for item in primary_obligations)):
+                continue
             if (
                 context.get("requires_requirement") is False
                 and not linked
@@ -1628,7 +1653,9 @@ def run_native_semantic_review(
             strict_json_dumps(compilation, ensure_ascii=False, indent=2) + "\n",
         )
         compiled_response = copy.deepcopy(response)
-        results = response_validator(response, checks)
+        results = (validate_obligation_coverage_response(
+            response, checks, allow_draft_disputes=request.get("output_policy") == "review_draft",
+        ) if obligation_coverage_mode else response_validator(response, checks))
         if obligation_coverage_mode:
             _validate_external_compliance_retry_result(response, request)
             compilation = bind_validated_source_reference_selections(

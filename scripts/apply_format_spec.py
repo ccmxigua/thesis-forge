@@ -63,6 +63,7 @@ from native_semantic_review import (
     NativeSemanticReviewError,
     run_native_semantic_review,
 )
+from draft_scorecard import build_scorecard, append_scorecard, audit_scorecard
 from semantic_issue_confirmation import validate_bound_ledger_for_spec
 from compliance import annotate_satisfied_inputs, finalize_records, report as compliance_report
 from role_registry import find_existing_style, generated_style, role_config, role_names, structural_detector, style_aliases
@@ -2787,6 +2788,30 @@ def manual_review_constraint_items(constraints: dict[str, Any]) -> list[dict[str
     return items
 
 
+def current_expected_property_receipt_ids(doc: Any, spec: dict[str, Any], mappings: dict[str, Any]) -> set[str]:
+    """Reconstruct receipt identities from current requirements, not a report."""
+    coverage = role_coverage(doc, spec.get("roles", {}), mappings)
+    applicable = {item["role"] for item in coverage
+                  if item.get("status") == "present" or item.get("expectation") == "required"}
+    for key, role in (("page", "page"), ("tables", "table"), ("objects", "objects"),
+                      ("document_structure", "document_structure"), ("appendices", "appendices"),
+                      ("equations", "equations"), ("cover", "cover"), ("declarations", "declarations")):
+        if spec.get(key):
+            applicable.add(role)
+    if spec.get("content_constraints") or spec.get("conditional_constraints"):
+        applicable.update({"content_constraints", "conditional_constraints"})
+    requirements = []
+    for source in spec.get("requirements", []):
+        if not isinstance(source, dict):
+            raise ValueError("current requirement inventory is invalid")
+        item = copy.deepcopy(source)
+        mapping = mappings.get(item.get("role"))
+        if mapping and isinstance(item.get("properties"), dict):
+            item["properties"] = normalized_expected(doc.styles[mapping["style_name"]], item["properties"])
+        requirements.append(item)
+    return expected_receipt_ids(requirements, applicable_roles=applicable)
+
+
 def build_semantic_content_checks(
     doc: Document,
     spec: dict[str, Any],
@@ -4573,6 +4598,9 @@ def main(argv: list[str]) -> int:
     )
     if args.output_policy == "review_draft":
         late_review_items = manual_review_validation_items(raw_validation_findings, spec)
+        scoring_capability_findings = (
+            load_json(args.capability_report).get("findings", []) if args.capability_report else []
+        )
         late_review_items.extend(semantic_uncertainty_items)
         manual_review_receipts = manual_review_receipt_items(property_receipts)
         late_review_items.extend(manual_review_receipts)
@@ -4604,6 +4632,13 @@ def main(argv: list[str]) -> int:
         manual_review_markers = append_manual_review_markers(
             check, manual_review_document_ledger, inline_manual_review_locations,
         )
+        if not isinstance(manual_review_document_ledger, dict):
+            raise SystemExit("scored draft requires a current-run-bound manual ledger")
+        draft_scorecard = build_scorecard(
+            manual_review_document_ledger["binding"], property_receipt_audit,
+            manual_review_document_ledger["items"], raw_validation_findings, scoring_capability_findings,
+        )
+        append_scorecard(check, draft_scorecard)
         staged_output = sibling_temp(args.output)
         try:
             check.save(staged_output)
@@ -4614,6 +4649,9 @@ def main(argv: list[str]) -> int:
             if not manual_review_marker_audit["valid"]:
                 write("manual-review-marker-audit.json", manual_review_marker_audit)
                 raise SystemExit("review draft marker coverage or visibility failed")
+            draft_scorecard_audit = audit_scorecard(staged_output, draft_scorecard)
+            if not draft_scorecard_audit["valid"]:
+                raise SystemExit("scored draft report is missing, duplicated or invisible")
             commit_files([(staged_output, args.output)])
         finally:
             staged_output.unlink(missing_ok=True)
@@ -4655,6 +4693,15 @@ def main(argv: list[str]) -> int:
             ),
         )
         property_receipt_audit["review_draft_diagnostic_only"] = True
+        draft_scorecard = build_scorecard(
+            manual_review_document_ledger["binding"], property_receipt_audit,
+            manual_review_document_ledger["items"], raw_validation_findings, scoring_capability_findings,
+        )
+        draft_scorecard_audit = audit_scorecard(args.output, draft_scorecard)
+        if not draft_scorecard_audit["valid"]:
+            raise SystemExit("final scorecard does not reproduce from current receipts")
+        write("draft-scorecard.json", draft_scorecard)
+        write("draft-scorecard-audit.json", draft_scorecard_audit)
         property_receipt_audit["review_draft_failed_or_unverified_ids"] = [
             str(item.get("receipt_id"))
             for item in property_receipts
@@ -4733,8 +4780,8 @@ def main(argv: list[str]) -> int:
     review_draft_ready = bool(
         diagnostic_draft_generated
         and semantic_review_complete
-        and not findings
-        and format_ready
+        and draft_scorecard_audit.get("valid") is True
+        and all(property_receipt_audit.get(key) == 0 for key in ("missing_count", "unexpected_count", "duplicate_count"))
     )
     report = {"valid": not findings, "fully_covered": (compliance["docx_fully_compliant"] if source_clause_records else legacy_role_coverage),
               "pipeline_valid": not findings,
@@ -4745,6 +4792,9 @@ def main(argv: list[str]) -> int:
               "submission_ready": effective_submission_ready,
               "diagnostic_draft_generated": diagnostic_draft_generated,
               "review_draft_ready": review_draft_ready,
+              "draft_scorecard": draft_scorecard if args.output_policy == "review_draft" else None,
+              "draft_scorecard_audit": draft_scorecard_audit if args.output_policy == "review_draft" else None,
+              "scoring_findings": raw_validation_findings if args.output_policy == "review_draft" else [],
               "review_draft_package_valid": bool(
                   submission_audit.get("evidence", {}).get("opc_package_valid") is True
               ),

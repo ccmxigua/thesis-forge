@@ -591,6 +591,10 @@ def validate_obligation_coverage_response(
             elif disposition == "external_action_pending":
                 external_pending += 1
             elif disposition == "authoring_content_pending":
+                if requirement_refs:
+                    raise NativeSemanticReviewError(
+                        f"pending author content cannot claim a requirement reference for {check_id}"
+                    )
                 if not is_explicit_authoring_content_quote(quote, source_text=source_text):
                     if (
                         live_source_verification_codes
@@ -882,21 +886,31 @@ def validate_obligation_coverage_response(
             )
         if (
             verdict == "incomplete"
-            and classification == "informational"
+            and classification in {"informational", "requires_source_content"}
             and context.get("requires_requirement") is False
             and not linked
             and not context.get("primary_obligations")
             and not expected_machine_ids
+            and not live_manual_codes
+            and not live_source_verification_codes
             and authoring_pending > 0
-            and authoring_pending == len(result.get("identified_obligations", []))
+            and authoring_pending + unrepresented == len(result.get("identified_obligations", []))
+            and (classification == "informational" or unrepresented > 0)
         ):
-            # An independent reviewer may correctly identify an exact author-input
-            # instruction that the primary reviewer mislabeled informational. This
-            # remains incomplete and can only enter the source-bound primary retry;
-            # it is never accepted as a completed authoring obligation here.
+            # Keep mixed pending / genuinely unrepresented duties intact. This is
+            # a rejected analysis result, not accepted coverage. Only informational
+            # classification can authorize a bounded source-owned primary repair;
+            # after that repair, any unrepresented duty must still block acceptance.
             by_id[check_id] = result
             continue
         if authoring_pending:
+            if (
+                verdict == "incomplete" and not unrepresented
+                and classification == "requires_source_content"
+                and context.get("requires_requirement") is False and not linked
+                and authoring_pending == len(result.get("identified_obligations", []))
+            ):
+                raise InconsistentObligationVerdictError([check_id])
             raise NativeSemanticReviewError(
                 f"authoring-content disposition requires source_content_pending verdict for {check_id}"
             )
@@ -1165,6 +1179,9 @@ def _prompt(request: dict[str, Any]) -> str:
                 + ". Re-read each exact source span and the entire linked requirement, including top-level "
                 "hard properties and nested guidance or advisory properties. Do not assume a rule is missing "
                 "because one nested guidance field is non-mandatory; a separate hard property may cover it. "
+                "For requires_source_content, when all exact-source duties remain unlinked author work, "
+                "use source_content_pending with authoring_content_pending entries; that is outstanding "
+                "input, never represented or consistent coverage. Preserve every inventory entry. "
                 "If a source obligation truly is absent or weakened, identify that exact obligation as "
                 "unrepresented and use incomplete. If it is fully preserved, use represented and consistent. "
                 "Use ambiguous/uncertain only for genuine ambiguity in the source itself. This feedback does "
@@ -1266,7 +1283,11 @@ def _prompt(request: dict[str, Any]) -> str:
             "is still pending, not that the content was written or a requirement satisfied. If the primary response "
             "instead classifies that explicit authoring instruction as informational, use incomplete with an "
             "authoring_content_pending disposition and no requirement_refs so the bounded primary retry can "
-            "correct only that classification. This is not a completed result. Never draft the missing thesis content. When "
+            "correct only that classification. Preserve distinct quality, prohibition and verification duties; "
+            "do not call an unrepresented duty pending merely to pass. Pending author work may coexist with "
+            "unrepresented duties under incomplete, before or after a classification repair; the whole result "
+            "still blocks acceptance. Do not omit or merge inventory entries during a corrective review. "
+            "This is not a completed result. Never draft the missing thesis content. When "
             "an exact source obligation requires existing thesis/paper content, data, figures, or citations to be "
             "traceable to an artifact not included in this review request, "
             "use verdict source_content_verification_pending and disposition source_content_verification_pending "

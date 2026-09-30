@@ -3173,13 +3173,73 @@ class HostAgentBridgeTests(unittest.TestCase):
                         agent_id="main", runner="exec", binary="codex", config_path=None,
                         controller=bridge.RunController(),
                     )
-        self.assertEqual([item["provider_attempt"] for item in calls], [1, 2])
+        self.assertEqual([item["provider_attempt"] for item in calls], [1])
         self.assertTrue(caught.exception.retryable)
         error_record = caught.exception.error_records[0]
         self.assertEqual(
             error_record["primary_retry_authorization"],
             "source_bound_authoring_content_reclassification_v1",
         )
+
+    def test_authoring_primary_retry_rechecks_complete_candidate_and_keeps_quality_gap(self) -> None:
+        self._independent_review_patch.stop()
+        source = "本部分主要撰写国内的研究现状，不能是文献资料的简单摘录，需要分类、总结、归纳"
+        review_calls = []
+        with tempfile.TemporaryDirectory() as td:
+            review_dir, chunk = self._packet(Path(td) / "requirements", source=source, contract_version="3.0")
+            parent = {
+                "contract_version": "3.0", "provenance": chunk["provenance"],
+                "requirements": [], "clause_reviews": [{
+                    "clause_id": "C1", "classification": "informational", "reason": "Primary interpretation.",
+                }], "unsupported_items": [], "reported_conflicts": [],
+            }
+            corrected = copy.deepcopy(parent)
+            corrected["clause_reviews"][0]["classification"] = "requires_source_content"
+
+            def primary_envelope(payload):
+                return subprocess.CompletedProcess(["offline-adapter-double"], 0, json.dumps({
+                    "runId": "offline-authoring-retry", "status": "ok", "provider": "openai",
+                    "model": "gpt-5.6-luna", "result": {"payloads": [{"text": json.dumps(payload)}]},
+                }), "")
+
+            def source_reviewer(request, **kwargs):
+                review_calls.append(copy.deepcopy(request))
+                obligations = [
+                    {"source_quote": source, "disposition": "authoring_content_pending",
+                     "obligation_summary": "Write the research-status section.", "requirement_refs": []},
+                    {"source_quote": source, "disposition": "authoring_content_pending"
+                     if request["attempt"] == 1 else "unrepresented",
+                     "obligation_summary": "Synthesize rather than copy literature.", "requirement_refs": []},
+                ]
+                result = {"protocol": bridge.OBLIGATION_COVERAGE_PROTOCOL, "status": "completed",
+                          "response_sha256": bridge.sha256_json(obligations), "summary": {}, "results": [{
+                              "check_id": "C1", "verdict": "incomplete", "rationale": "Source duties remain.",
+                              "identified_obligations": obligations, "evidence_quotes": [source],
+                              "machine_obligation_ids": [],
+                          }]}
+                bound = bind_mock_review_to_source_spans(result, request, kwargs["output_dir"])
+                bridge.validate_obligation_coverage_response({"results": bound["results"]}, request["checks"])
+                return bound
+
+            with patch.object(bridge, "_run_command", side_effect=[primary_envelope(parent), primary_envelope(corrected)]) as primary, \
+                    patch.object(bridge, "run_native_semantic_review", side_effect=source_reviewer), \
+                    patch.object(bridge.time, "sleep"):
+                with self.assertRaises(bridge.IndependentObligationReviewError):
+                    bridge.run_bridge(review_dir, response_out=Path(td) / "accepted.json", agent_id="main",
+                                      timeout=1, max_attempts=2, openclaw_bin="openclaw",
+                                      model="openai/gpt-5.6-luna")
+            self.assertEqual(primary.call_count, 2)
+            self.assertEqual([call["attempt"] for call in review_calls], [1, 2, 2])
+            self.assertEqual([call["checks"][0]["review_context"]["classification"] for call in review_calls],
+                             ["informational", "requires_source_content", "requires_source_content"])
+            self.assertFalse((Path(td) / "accepted.json").exists())
+            failure = json.loads((review_dir / "host-agent-run.json").read_text())
+            self.assertEqual(failure["status"], "failed")
+            self.assertEqual(failure["chunk_lifecycle"][0]["attempts"][1]["status"], "failed")
+            ledger = json.loads(next(review_dir.glob("*attempt-02/obligation-analysis-ledger.json")).read_text())
+            self.assertFalse(ledger["submission_ready"])
+            self.assertEqual({entry["disposition"] for entry in ledger["obligations"]},
+                             {"authoring_content_pending", "unrepresented"})
 
     def test_author_content_reclassification_retry_is_exactly_source_bound(self) -> None:
         source = "以下示例内容是编写的，请作者根据需要自行撰写真实研究内容。"

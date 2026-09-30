@@ -15,6 +15,7 @@ from collections import Counter
 from pathlib import Path
 
 from artifact_io import atomic_write_text
+from document_text_font import audit_document_font
 from typing import Any
 
 from docx import Document
@@ -325,6 +326,10 @@ def build_report(generated_docx: Path, official_docx: Path, format_spec: Path,
                          "note": "Page-number fields and rendered sequences are validated by submission/render audits."})
     else:
         rows.extend(compare_page(spec.get("page", {}), official_docx, generated_docx))
+    for finding in audit_document_font(generated_docx, spec):
+        rows.append({**finding, "status": "not_observable" if finding.get("failure_type")
+                     == "document_font_not_observable" else "fail", "blocking": True,
+                     "authoritative_source": "written_requirement"})
     counts = Counter(row["status"] for row in rows)
     blocking = [row for row in rows if row.get("blocking")]
     return {

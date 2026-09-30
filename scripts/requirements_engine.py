@@ -21,6 +21,7 @@ from uuid import uuid4
 import xml.etree.ElementTree as ET
 
 from artifact_io import atomic_write_text
+from document_text_font import TEXT_FONT_ROLES, document_font_policy, materialize_document_font_references
 from existing_requirement_contract import (
     existing_reference_errors,
     normalized_source_text,
@@ -155,17 +156,7 @@ AMBIGUOUS_ROLES = {
     "参考文献": ["bibliography_heading", "bibliography_entry"],
 }
 
-ALL_TEXT_ROLES = (
-    "thesis_title_zh", "thesis_title_en", "heading_1", "heading_2", "heading_3", "heading_4",
-    "heading_acknowledgments", "heading_appendix", "heading_conclusion",
-    "heading_publications", "heading_references",
-    "body_text", "figure_caption", "table_caption", "table_text",
-    "abstract_title_zh", "abstract_body_zh", "abstract_title_en", "abstract_body_en",
-    "keywords_zh", "keywords_en", "bibliography_heading", "bibliography_entry",
-    "equation", "footnote", "header", "footer", "toc", "toc_title",
-    "thesis_type_zh", "thesis_type_en", "thesis_author", "thesis_author_en",
-    "thesis_affiliation_date", "thesis_classified_index",
-)
+ALL_TEXT_ROLES = TEXT_FONT_ROLES
 
 TOP_LEVEL_REQUIREMENT_ROLES = {
     "page", "table", "objects", "content_constraints", "conditional_constraints",
@@ -3807,6 +3798,7 @@ def merge_host_agent_review_packets(
         aggregate, existing_requirement_map,
         {str(item["id"]): item for item in full_clauses},
     )
+    aggregate, document_font_projections = materialize_document_font_references(aggregate, full_request)
     aggregate, abstract_source_projections = materialize_complete_abstract_source_constraints(
         aggregate, full_clauses,
     )
@@ -3871,6 +3863,7 @@ def merge_host_agent_review_packets(
         "semantic_review_ledger_sha256": sha256_json(ledger),
         "merge_commit_path": str(merge_commit_path.resolve()),
         "existing_requirement_payload_projection": existing_payload_repairs,
+        "document_font_projection": document_font_projections,
         "complete_abstract_source_projection": abstract_source_projections,
         "source_keyword_constraint_projection": source_keyword_constraint_projections,
         "publication_default_projection": publication_default_projections,
@@ -3952,6 +3945,10 @@ def merge_llm(spec: dict[str, Any], questions: list[dict[str, Any]], clauses: li
 def validate_spec(spec: dict[str, Any], evidence_ids: set[str]) -> list[str]:
     schema_path = Path(__file__).resolve().parents[1] / "schema" / "format-spec.schema.json"
     errors = load_and_validate(spec, schema_path)
+    try:
+        document_font_policy(spec)
+    except ValueError as error:
+        errors.append(str(error))
     for key in ("schema_version", "source_document", "roles", "requirements", "status"):
         if key not in spec: errors.append(f"missing required key: {key}")
     if spec.get("schema_version") != "1.0": errors.append("schema_version must be 1.0")

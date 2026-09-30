@@ -25,6 +25,7 @@ from docx.text.paragraph import Paragraph
 from docx.text.run import Run
 
 from artifact_io import atomic_write_text, commit_files, sibling_temp
+from document_text_font import apply_document_font, audit_document_font
 from docx_semantics import (
     all_body_paragraphs,
     all_story_paragraphs,
@@ -4240,6 +4241,7 @@ def main(argv: list[str]) -> int:
                             "superseded_by": "cover_compiler"})
     staged_output = sibling_temp(args.output)
     try:
+        document_font_execution = apply_document_font(doc, spec)
         doc.save(staged_output)
         canonicalize_docx_zip(staged_output)
         commit_files([(staged_output, args.output)])
@@ -4273,6 +4275,14 @@ def main(argv: list[str]) -> int:
     write("execution-receipts.json", {"schema_version": "1.0", "receipts": execution_receipts})
     # Re-open the serialized file before validation to catch OOXML round-trip errors.
     check = Document(args.output); findings = []; coverage_warnings = []
+    document_font_findings = audit_document_font(args.output, spec)
+    findings.extend(document_font_findings)
+    write("document-font-audit.json", {
+        "schema_version": "1.0", "execution": document_font_execution,
+        "serialized_docx_sha256": hashlib.sha256(args.output.read_bytes()).hexdigest(),
+        "status": "failed" if document_font_findings else "passed",
+        "findings": document_font_findings,
+    })
     render_report = load_json(args.render_report) if args.render_report else None
     serialized_nodes = {node.node_id: node for node in iter_document_nodes(check)}
     receipt_audit = []

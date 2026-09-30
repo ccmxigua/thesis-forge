@@ -59,6 +59,29 @@ the ID to disguise a mismatch, or turning that integrity error into a red
 manual-review placeholder. Semantic uncertainty remains eligible for explicit
 review-draft markers under the separate policy below.
 
+### Document-wide English font scope
+
+An explicitly document-wide English-font rule must not be narrowed to
+`body_text` alone. For the narrowly recognized unconditional wording, code may
+complete the current source-bound catalog's text-role references only when all
+catalog roles, exact properties, source spans and evidence match. It never
+changes a manual classification, fabricates missing catalog values, or guesses
+which clause/occurrence a model meant. Preserve the immutable native response
+and separate `document_font_projections` hashes; the completed candidate still
+requires the ordinary contract and a fresh independent obligation review.
+
+The formatter applies the bound Latin font directly to editable WordprocessingML
+English runs, including tables, headers, footers, hyperlinks, text boxes and
+note parts. It leaves the East Asian font slots and text unchanged. The
+serialized `document-font-audit.json` and final post-Word format comparison
+check the actual run properties, not just the paragraph style. This wording
+does not itself authorize changing standalone numbers, symbols, or mathematical
+fonts. Latin text in OMML/DrawingML that this executor cannot validate remains
+an explicit technical verification blocker, not a successful font check or a
+red author TODO. OOXML font values also do not prove that the required font is
+installed or that Word rendered the expected glyphs: real renderer acceptance
+is still required.
+
 For contract 3.0, a requirement linked only to clauses classified
 `external_compliance` is not a DOCX requirement. The bridge may remove that
 invalid requirement object only when the exact current validator records,

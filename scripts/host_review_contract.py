@@ -8,6 +8,7 @@ import copy
 from typing import Any
 
 from compliance import classification_requires_requirement
+from document_text_font import document_font_scope_errors
 from evidence_context_guards import sample_content_guard
 from format_spec_validation import schema_support_errors, validate_instance
 from format_contract_guards import cover_binding_errors
@@ -1578,6 +1579,7 @@ def validate_response(response: Any, chunk: dict[str, Any]) -> list[str]:
     )
     errors: list[str] = []
     errors.extend(source_fragment_errors)
+    errors.extend(document_font_scope_errors(response, chunk))
     errors.extend(_security_marking_qualifier_binding_errors(
         response, chunk.get("clauses"),
     ))

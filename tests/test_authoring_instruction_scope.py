@@ -10,6 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 
 from source_obligation_compiler import is_explicit_authoring_content_quote
 from native_semantic_review import NativeSemanticReviewError, validate_obligation_coverage_response
+from pending_source_work import compile_pending_source_work
 
 
 class AuthoringInstructionScopeTests(unittest.TestCase):
@@ -97,16 +98,26 @@ class AuthoringInstructionScopeTests(unittest.TestCase):
     def test_full_source_quote_is_accepted_only_as_unchanged_pending_work(self):
         source = "本部分主要撰写国内的研究现状，不能是文献资料的简单摘录，计算在重复率内，需要分类、总结、归纳"
         check, response = self.pending_case(source)
+        facts = compile_pending_source_work(source)
+        check["review_context"]["pending_source_work"] = facts
+        response["results"][0]["identified_obligations"].extend({
+            "source_quote": source, "disposition": "source_content_verification_pending",
+            "pending_work_code": fact["code"], "obligation_summary": fact["source_quote"],
+            "requirement_refs": [],
+        } for fact in facts)
         original = copy.deepcopy((check, response))
         validated = validate_obligation_coverage_response(response, [check])
         self.assertEqual(validated[0]["verdict"], "source_content_pending")
-        self.assertEqual(len(validated[0]["identified_obligations"]), 2)
+        self.assertEqual(len(validated[0]["identified_obligations"]), 4)
         self.assertEqual((check, response), original)
         self.assertNotIn("requirements", response)
-        for obligation in validated[0]["identified_obligations"]:
+        for obligation in validated[0]["identified_obligations"][:2]:
             self.assertEqual(obligation["disposition"], "authoring_content_pending")
             self.assertEqual(obligation["source_quote"], source)
             self.assertEqual(obligation["requirement_refs"], [])
+        for obligation in validated[0]["identified_obligations"][2:]:
+            self.assertEqual(obligation["disposition"], "source_content_verification_pending")
+            self.assertFalse(obligation["requirement_refs"])
 
     def test_pending_authoring_still_rejects_false_completion_and_forged_source(self):
         source = "本节应当撰写研究方法，不得照抄文献。"

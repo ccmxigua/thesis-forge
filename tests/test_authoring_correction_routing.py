@@ -21,7 +21,8 @@ from test_host_agent_bridge import bind_mock_review_to_source_spans
 class AuthoringCorrectionRoutingTests(unittest.TestCase):
     @staticmethod
     def fixture(classification="informational", mixed=True, source=None):
-        source = source or "本部分主要撰写国内的研究现状，不能是文献资料的简单摘录，需要分类、总结、归纳"
+        source = source or ("本部分主要撰写国内的研究现状，不能是文献资料的简单摘录，需要分类、总结、归纳"
+                            if mixed else "本部分主要撰写国内的研究现状，需要分类、总结、归纳")
         evidence = {"E-dynamic": {"id": "E-dynamic", "text": source}}
         clause = {
             "id": "dynamic-clause", "text": source, "evidence_ids": list(evidence),

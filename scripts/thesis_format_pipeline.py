@@ -61,6 +61,7 @@ from artifact_io import atomic_write_text, paths_alias
 from process_runner import run_process
 from source_obligation_compiler import compile_source_content_verification_codes
 from table_source_context import TABLE_CONTEXT_RETRY_CODE, table_retry_feedback_is_source_bound
+from pending_source_work import compile_pending_source_work, pending_work_action
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -699,6 +700,7 @@ def _validate_independent_obligation_receipts(
                     "source_end": span.get("end"),
                     "source_text_sha256": span.get("source_sha256"),
                     "obligation_summary": obligation.get("obligation_summary") or span.get("text"),
+                    **({"pending_work_code": obligation["pending_work_code"]} if obligation.get("pending_work_code") is not None else {}),
                     "disposition": obligation.get("disposition"),
                     "work_type": work_type_for_disposition(obligation.get("disposition")),
                     "scope_dependency_codes": copy.deepcopy(obligation.get("scope_dependency_codes") or []),
@@ -1151,6 +1153,19 @@ def enforce_obligation_review_output_policy(
     """Permit irreducible ambiguity only in an explicitly non-release draft."""
     if output_policy not in {"review_draft", "submission"}:
         raise ValueError(f"unsupported output policy for independent review: {output_policy!r}")
+    # Incomplete is a valid diagnostic response, not accepted coverage. Keep
+    # this rejection at the consumer too: a claimed completed receipt cannot
+    # turn an unrepresented duty into a draft or submission pass.
+    incomplete_clause_ids = sorted({
+        str(item.get("check_id")) for item in results
+        if isinstance(item, dict) and item.get("verdict") == "incomplete"
+    })
+    if incomplete_clause_ids:
+        raise ValueError(
+            "independent obligation review is incomplete for clause(s) "
+            + ", ".join(incomplete_clause_ids)
+            + "; output is blocked until complete source coverage is independently reviewed"
+        )
     manual_review_clause_ids = sorted({
         str(item.get("check_id")) for item in results
         if isinstance(item, dict)
@@ -1460,6 +1475,7 @@ def _source_content_verification_release_gates(
             source_location = pending.get("source_location")
             analysis_identity = pending.get("analysis_obligation_identity")
             external_action = pending.get("work_type") == "external_action"
+            pending_work_code = pending.get("pending_work_code")
             if from_mixed_review and not external_action:
                 raise ValueError("mixed external review item is not an external action")
             if isinstance(obligation_id, str) and obligation_id in seen_obligation_ids:
@@ -1523,6 +1539,12 @@ def _source_content_verification_release_gates(
                 raise ValueError(
                     "existing-content verification obligation, evidence, range, or hash is not bound to current source"
                 )
+            if pending_work_code is not None:
+                matching_facts = [fact for fact in compile_pending_source_work(span_text)
+                                  if fact["code"] == pending_work_code
+                                  and start <= fact["start"] and end >= fact["end"]]
+                if external_action or len(matching_facts) != 1:
+                    raise ValueError("pending human-work code is not bound to the current source atom")
             obligation_index = (
                 analysis_identity.get("obligation_index")
                 if isinstance(analysis_identity, dict) else None
@@ -1596,7 +1618,7 @@ def _source_content_verification_release_gates(
                 ),
                 "source_text": quote,
                 "reason": summary,
-                "action": (
+                "action": pending_work_action(pending_work_code) or (
                     "请人工核对真实审批、同意或其他外部行动的完成证据并记录结论；"
                     "文档中的文字或占位不能替代该证据，重新绑定复核前不得提交。"
                     if external_action else
@@ -1609,6 +1631,7 @@ def _source_content_verification_release_gates(
                 "analysis_obligation_id": obligation_id,
                 "analysis_obligation_identity": copy.deepcopy(analysis_identity),
                 "work_type": pending["work_type"],
+                **({"pending_work_code": pending_work_code} if pending_work_code is not None else {}),
                 "obligation_summary": summary,
                 "source_ref": source_ref,
                 "source_start": start,

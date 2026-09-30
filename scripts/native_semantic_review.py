@@ -46,6 +46,9 @@ from source_obligation_compiler import (
 from table_source_context import (
     TABLE_CONTEXT_RETRY_CODE, build_table_structure_context, table_context_retry_is_source_bound,
 )
+from pending_source_work import (
+    PENDING_WORK_CODES, compile_pending_source_work, pending_work_inventory_is_bound,
+)
 
 
 class NativeSemanticReviewError(RuntimeError):
@@ -260,6 +263,7 @@ _NON_SCOPE_OBLIGATION_SCHEMA: dict[str, Any] = {
     "required": ["source_quote", "disposition", "requirement_refs"],
     "properties": {
         **copy.deepcopy(_OBLIGATION_BASE_PROPERTIES),
+        "pending_work_code": {"enum": list(PENDING_WORK_CODES)},
         "disposition": {"enum": [
             "represented", "unrepresented", "ambiguous",
             "external_action_pending", "authoring_content_pending", "backend_unsupported",
@@ -408,6 +412,7 @@ def build_obligation_coverage_request(
                 "source_content_verification_codes": (
                     compile_source_content_verification_codes(source_text)
                 ),
+                "pending_source_work": compile_pending_source_work(source_text),
             },
         })
         try:
@@ -508,6 +513,15 @@ def validate_obligation_coverage_response(
             )
         context = check.get("review_context") if isinstance(check.get("review_context"), dict) else {}
         classification = context.get("classification")
+        pending_facts = compile_pending_source_work(source_text)
+        if context.get("pending_source_work", []) != pending_facts:
+            raise NativeSemanticReviewError(f"pending human-work source authorization is stale for {check_id}")
+        identified = result.get("identified_obligations", [])
+        has_pending_code = any(item.get("pending_work_code") is not None for item in identified)
+        mixed_author_work = pending_work_inventory_is_bound(source_text, identified, authoring=True)
+        conditional_work = pending_work_inventory_is_bound(source_text, identified, authoring=False)
+        if has_pending_code and not (mixed_author_work or conditional_work):
+            raise NativeSemanticReviewError(f"pending human-work inventory is not source-bound or complete for {check_id}")
         if (
             classification not in {"informational", "not_applicable"}
             and not result.get("identified_obligations")
@@ -686,7 +700,18 @@ def validate_obligation_coverage_response(
                     f"scope dependency metadata is only valid for scope_unresolved obligations: {check_id}"
                 )
         verdict = result.get("verdict")
-        if source_verification_pending and verdict != "source_content_verification_pending":
+        if pending_facts and verdict == "consistent":
+            raise NativeSemanticReviewError(
+                f"registered human work cannot be omitted or marked compliant for {check_id}"
+            )
+        if (mixed_author_work and verdict == "incomplete" and not unrepresented
+                and classification == "requires_source_content"
+                and context.get("requires_requirement") is False and not linked):
+            raise InconsistentObligationVerdictError([check_id])
+        if source_verification_pending and not (
+            verdict == "source_content_verification_pending"
+            or (verdict == "source_content_pending" and mixed_author_work)
+        ):
             raise NativeSemanticReviewError(
                 f"existing-content verification must remain a human-verification disposition for {check_id}"
             )
@@ -813,9 +838,11 @@ def validate_obligation_coverage_response(
                 or context.get("requires_requirement") is not False
                 or linked
                 or not obligations
-                or authoring_pending != len(obligations)
+                or (authoring_pending != len(obligations) and not mixed_author_work)
                 or represented or unrepresented or ambiguous or external_pending
-                or source_verification_pending or scope_unresolved
+                or (source_verification_pending and not mixed_author_work) or scope_unresolved
+                or backend_unsupported or expected_machine_ids
+                or (pending_facts and not mixed_author_work)
                 or any(item.get("requirement_refs") for item in obligations)
             ):
                 raise NativeSemanticReviewError(
@@ -825,6 +852,8 @@ def validate_obligation_coverage_response(
             continue
         if verdict == "source_content_verification_pending":
             obligations = result.get("identified_obligations", [])
+            if pending_facts and not conditional_work:
+                raise NativeSemanticReviewError(f"source-bound conditional human decision is incomplete for {check_id}")
             only_verification_or_represented = (
                 not unrepresented and not ambiguous and not external_pending
                 and not authoring_pending and not scope_unresolved and not backend_unsupported
@@ -1319,9 +1348,23 @@ def _prompt(request: dict[str, Any]) -> str:
             "action, never DOCX satisfaction. Never use the external_compliance_pending verdict for executable DOCX work or to hide a missing "
             "requirement. "
             "For executable_with_external_check, use mixed_execution_external_pending only if each covered primary obligation is independently represented by an exact linked DOCX requirement and each unverifiable primary obligation is a real-world action with external_action_pending, no requirement_refs, and its matching primary_obligation_id. Map every primary obligation exactly once; preserve a distinct pending action even when the DOCX rule is valid. This state never authorizes submission. "
+            "The code-owned pending_source_work inventory records human-only source atoms, not completed checks. "
+            "For explicit authoring instructions with registered anti-excerpt or repetition-scope atoms, "
+            "use source_content_pending with separate authoring_content_pending entries for writing/synthesis "
+            "and separate source_content_verification_pending entries for each registered human check. "
+            "Set pending_work_code to the matching registered code, one entry per atom; retain its exact source "
+            "range and original summary. Do not request a DOCX property or treat this as represented compliance. "
+            "For conditional_section_omission_verification, retain the complete condition AND permission in "
+            "one unlinked source_content_verification_pending entry with that pending_work_code and verdict "
+            "source_content_verification_pending. The condition is not verified and the decision belongs to "
+            "the author; never infer absence of materials or delete a chapter. An informational primary "
+            "classification must receive the existing bounded classification correction, not be accepted. "
+            "Do not attach pending_work_code to other dispositions or unknown work. Additional executable, "
+            "external or unknown obligations remain separate and blocking; the registered inventory is only a floor. "
             "For a clause classified requires_source_content, use source_content_pending only when "
             "the exact source explicitly requires the author to provide genuine thesis content; identify each such "
-            "source passage as authoring_content_pending and use no requirement_refs. This means the source input "
+            "writing/synthesis passage as authoring_content_pending; registered human checks use the separate "
+            "pending entries described above. Use no requirement_refs. This means the source input "
             "is still pending, not that the content was written or a requirement satisfied. If the primary response "
             "instead classifies that explicit authoring instruction as informational, use incomplete with an "
             "authoring_content_pending disposition and no requirement_refs so the bounded primary retry can "

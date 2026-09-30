@@ -10976,6 +10976,7 @@ def _validate_completed_obligation_ledger_chain(
                 "source_end": span.get("end"),
                 "source_text_sha256": span.get("source_sha256"),
                 "obligation_summary": obligation.get("obligation_summary") or span.get("text"),
+                **({"pending_work_code": obligation["pending_work_code"]} if obligation.get("pending_work_code") is not None else {}),
                 "disposition": obligation.get("disposition"),
                 "work_type": work_type_for_disposition(obligation.get("disposition")),
                 "scope_dependency_codes": copy.deepcopy(
@@ -11325,6 +11326,7 @@ def _write_obligation_analysis_ledger(
                 "source_end": span["end"],
                 "source_text_sha256": span["source_sha256"],
                 "obligation_summary": obligation.get("obligation_summary") or span["text"],
+                **({"pending_work_code": obligation["pending_work_code"]} if obligation.get("pending_work_code") is not None else {}),
                 "disposition": obligation.get("disposition"),
                 "work_type": work_type_for_disposition(obligation.get("disposition")),
                 "scope_dependency_codes": copy.deepcopy(

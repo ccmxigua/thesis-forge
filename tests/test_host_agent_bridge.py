@@ -1188,6 +1188,52 @@ class HostAgentBridgeTests(unittest.TestCase):
             )
             self.assertEqual(accepted_audit["candidate_response_sha256"], initial_response_sha)
 
+    def test_typed_external_disposition_correction_keeps_candidate_and_two_call_limit(self):
+        self._independent_review_patch.stop()
+        from test_native_semantic_review import NativeSemanticReviewTests
+        import native_semantic_review as native
+        for outcome in ("accepted", "repeat", "foreign_quote"):
+            chunk, response, accepted_review, _ = self._external_compliance_review_case()
+            check, rejected, pending = NativeSemanticReviewTests._typed_external_disposition_case()
+            source = check["document_text"]
+            chunk["clauses"][0].update(text=source, source_span={
+                "evidence_id": "E1", "start_offset": 0, "end_offset": len(source), "text": source,
+                "source_sha256": hashlib.sha256(source.encode()).hexdigest()})
+            chunk["evidence_context"]["E1"]["text"] = source
+            response["clause_reviews"][0]["obligations"] = copy.deepcopy(check["review_context"]["primary_obligations"])
+            for payload in (rejected, pending): payload["results"][0]["check_id"] = "C00037"
+            accepted_review["results"] = copy.deepcopy(pending["results"])
+            frozen = copy.deepcopy((chunk, response))
+            calls = []
+            def review(request, **kwargs):
+                calls.append(copy.deepcopy(request))
+                body = copy.deepcopy(rejected if len(calls) == 1 or outcome == "repeat" else pending)
+                if len(calls) == 2 and outcome == "foreign_quote":
+                    body["results"][0]["identified_obligations"][0]["source_quote"] = "foreign source"
+                native.validate_obligation_coverage_response(body, request["checks"])
+                native._validate_external_compliance_retry_result(body, request)
+                return bind_mock_review_to_source_spans(accepted_review, request, kwargs["output_dir"])
+            with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as td:
+                review_dir = Path(td)
+                with patch.object(bridge, "run_native_semantic_review", side_effect=review), patch.object(bridge.time, "sleep"):
+                    kwargs = dict(review_dir=review_dir, run_id="run-external-correction", chunk_index=2,
+                        attempt=1, host_runtime="codex", model="gpt-5.6-luna", timeout=10,
+                        agent_id="main", runner="exec", binary="codex", config_path=None,
+                        controller=bridge.RunController())
+                    if outcome == "accepted":
+                        pointer = bridge._run_independent_obligation_coverage_review(response, chunk, **kwargs)
+                        self.assertEqual(pointer["provider_attempt"], 2)
+                        self.assertEqual(pointer["status"], "completed")
+                    else:
+                        with self.assertRaises(bridge.IndependentObligationReviewError):
+                            bridge._run_independent_obligation_coverage_review(response, chunk, **kwargs)
+                        self.assertFalse(list(review_dir.glob("**/obligation-analysis-ledger.json")))
+                self.assertEqual(len(calls), 2)
+                self.assertEqual(calls[0]["checks"], calls[1]["checks"])
+                self.assertEqual(calls[0]["provenance"], calls[1]["provenance"])
+                self.assertEqual((chunk, response), frozen)
+                self.assertEqual(calls[1]["retry_feedback"]["checks"][0]["rejected_result"], rejected["results"][0])
+
     def test_external_compliance_correction_exhaustion_fails_closed(self) -> None:
         self._independent_review_patch.stop()
         chunk, response, _, source = self._external_compliance_review_case()

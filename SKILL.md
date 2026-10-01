@@ -980,7 +980,19 @@ pipeline; it must enumerate that action as `external_action_pending` with no
 requirement reference and preserve the exact source-quote inventory that
 triggered the correction. The bridge never creates an obligation or changes
 the candidate, and the ordinary external-pending validator remains
-authoritative.
+authoritative. A pending total verdict paired with only unrepresented atoms
+may use this same two-call budget when every observation already exactly
+matches one complete, distinct, current unverifiable primary atom and there
+are no linked or code-known local DOCX duties. Missing/duplicate/foreign atoms,
+changed typed semantics, unknown force, or mixed local work cannot use it.
+The rejected result and current primary inventory hashes stay in correction
+feedback. The fresh reviewer must explicitly select pending dispositions and
+one-to-one primary IDs; code does not fill those fields or assert an approval.
+This eligibility match is not proof of a complete source inventory. The fresh
+review must read the entire selected clause and identify additional local or
+external duties even if both prior inventories missed them. Source-first
+semantic review, not a matching hash or lack of compiler cues, assesses that
+coverage. An omission or any changed inventory still rejects the correction.
 For a clause already classified `unsupported_backend`, the independent review
 may instead record `verdict=backend_unsupported` only when it enumerates every
 identified source obligation with `disposition=backend_unsupported`, the

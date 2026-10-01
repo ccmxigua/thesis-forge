@@ -683,6 +683,43 @@ def validate_draft_dispute_envelope(envelope: dict[str, Any], request: dict[str,
             raise ValueError("coverage dispute lacks an explicit current non-release policy")
 
 
+def _external_pending_disposition_mismatch(result, primary_obligations):
+    """Recognize a rejected routing shape, not proof that an approval occurred.
+
+    No semantic field is filled here. Each unrepresented observation must
+    already faithfully match exactly one complete current pending primary atom.
+    The independent reviewer must explicitly propose the missing pending route
+    and mapping on a fresh read; all ordinary validators still apply.
+    """
+    identified = result.get("identified_obligations")
+    fields = ("actor", "action", "target", "source_quote", "force", "applicability", "condition")
+    if (result.get("verdict") != "external_compliance_pending"
+            or not primary_obligations or not isinstance(identified, list)
+            or len(identified) != len(primary_obligations)):
+        return False
+    ids = [p.get("id") for p in primary_obligations if isinstance(p, dict)]
+    if (len(ids) != len(primary_obligations) or any(not isinstance(i, str) or not i for i in ids)
+            or len(set(ids)) != len(ids)):
+        return False
+    for primary in primary_obligations:
+        if (primary.get("status") != "unverifiable"
+                or primary.get("force") not in {"required", "recommended", "optional", "prohibited"}
+                or not all(isinstance(primary.get(k), str) and primary[k].strip()
+                           and primary[k] != "unknown" for k in ("actor", "action", "target", "source_quote"))):
+            return False
+    matched = []
+    for atom in identified:
+        if (not isinstance(atom, dict) or atom.get("disposition") != "unrepresented"
+                or atom.get("requirement_refs") or atom.get("primary_obligation_id") is not None):
+            return False
+        matches = [p["id"] for p in primary_obligations
+                   if all(atom.get(k) == p.get(k) for k in fields)]
+        if len(matches) != 1:
+            return False
+        matched.extend(matches)
+    return len(set(matched)) == len(ids) and set(matched) == set(ids)
+
+
 def validate_obligation_coverage_response(
     response: Any, checks: list[dict[str, Any]], *, allow_draft_disputes: bool = False,
 ) -> list[dict[str, Any]]:
@@ -964,6 +1001,19 @@ def validate_obligation_coverage_response(
                     and all(not item.get("requirement_refs") for item in identified_obligations)
                     and all(isinstance(item, dict) and item.get("status") == "unverifiable"
                             for item in primary_obligations)):
+                continue
+            if (context.get("requires_requirement") is False and not linked
+                    and _external_pending_disposition_mismatch(result, primary_obligations)):
+                # This response remains rejected. Only the existing bounded
+                # same-candidate source-action re-review can repair its route.
+                external_compliance_corrections.append({
+                    "check_id": check_id,
+                    "source_quotes": [item["source_quote"] for item in identified_obligations],
+                    "reason": "pending_verdict_with_faithful_unrepresented_atoms",
+                    "primary_obligations_sha256": sha256_json(primary_obligations),
+                    "rejected_result": copy.deepcopy(result),
+                    "rejected_result_sha256": sha256_json(result),
+                })
                 continue
             if (
                 context.get("requires_requirement") is False
@@ -1305,6 +1355,19 @@ def _validate_external_compliance_retry_result(
                 "external-compliance correction feedback is not bound to current source checks"
             )
         seen_check_ids.add(check_id)
+        primaries = (check.get("review_context") or {}).get("primary_obligations")
+        if primaries or any(key in correction for key in (
+            "reason", "primary_obligations_sha256", "rejected_result", "rejected_result_sha256",
+        )):
+            rejected = correction.get("rejected_result")
+            if (correction.get("reason") != "pending_verdict_with_faithful_unrepresented_atoms"
+                    or not isinstance(primaries, list) or not isinstance(rejected, dict)
+                    or rejected.get("check_id") != check_id
+                    or correction.get("primary_obligations_sha256") != sha256_json(primaries)
+                    or correction.get("rejected_result_sha256") != sha256_json(rejected)
+                    or not _external_pending_disposition_mismatch(rejected, primaries)
+                    or source_quotes != [a["source_quote"] for a in rejected["identified_obligations"]]):
+                raise NativeSemanticReviewError("external pending correction lost its current rejected inventory binding")
         obligations = result.get("identified_obligations")
         pending_quotes = [
             item.get("source_quote") for item in obligations
@@ -1497,11 +1560,17 @@ def _prompt(request: dict[str, Any]) -> str:
                 "deterministic local check. For these external_compliance checks, it identified the following "
                 "exact source-bound passages as unrepresented: "
                 + strict_json_dumps(external_retry_checks, ensure_ascii=False, sort_keys=True)
-                + ". Re-read each passage in the current run-bound source spans and compare it with the unchanged "
+                + ". Re-read the entire current selected clause, not just these passages or the primary inventory, "
+                "and compare all its duties with the unchanged "
                 "candidate. This is one corrective review only. Use external_compliance_pending and list an "
                 "external_action_pending disposition with no requirement_refs only if the source itself clearly "
                 "requires a real-world action that cannot be satisfied by the DOCX pipeline. Do not infer an "
-                "external action from the classification alone. If a passage is a DOCX-representable obligation, "
+                "external action from the total verdict either: every atom must explicitly use the pending "
+                "disposition and, when a current primary inventory exists, independently select exactly one "
+                "faithfully matching primary_obligation_id. A pending total verdict with unrepresented atoms "
+                "is not a valid pending inventory. Do not copy or force a semantic mapping to satisfy this check. "
+                "Nor infer an external action from the classification alone. Look for additional DOCX duties "
+                "that both prior inventories may have missed. If a passage is a DOCX-representable obligation, "
                 "keep it incomplete; if its meaning is genuinely unclear, use the permitted uncertainty path. "
                 "Never alter the candidate, source, classification, provenance, or requirement links, and never "
                 "invent, merge, or omit an obligation. Any result that still fails the original local contract "

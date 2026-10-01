@@ -1515,6 +1515,67 @@ class NativeSemanticReviewTests(unittest.TestCase):
             with self.subTest(broken_ids=broken_ids), self.assertRaises(NativeSemanticReviewError):
                 validate_obligation_coverage_response(broken, [check])
 
+    @staticmethod
+    def _typed_external_disposition_case():
+        source = "须经导师同意、作者申请和学院批准。"
+        primaries = [{"id": identifier, "status": "unverifiable", "reason": "Human action remains pending.",
+                      "actor": actor, "action": action, "target": "论文标注", "condition": None,
+                      "source_quote": actor + action, "force": "required", "applicability": "applicable"}
+                     for identifier, actor, action in (("consent", "导师", "同意"),
+                         ("application", "作者", "申请"), ("approval", "学院", "批准"))]
+        check = {"check_id": "C-typed-external", "document_text": source,
+                 "review_context": {"classification": "external_compliance", "requires_requirement": False,
+                                    "primary_obligations": primaries, "linked_requirements": [],
+                                    "machine_obligation_ids": []}}
+        observations = [{k:v for k,v in p.items() if k not in {"id", "status", "reason"} and v is not None}
+                        | {"disposition": "unrepresented", "requirement_refs": []} for p in primaries]
+        rejected = {"results": [{"check_id": check["check_id"], "verdict": "external_compliance_pending",
+                    "rationale": "Real-world actions remain pending; this route inventory is malformed.",
+                    "evidence_quotes": [source], "machine_obligation_ids": [], "identified_obligations": observations}]}
+        pending = copy.deepcopy(rejected)
+        for atom, primary in zip(pending["results"][0]["identified_obligations"], primaries):
+            atom.update(disposition="external_action_pending", primary_obligation_id=primary["id"])
+        return check, rejected, pending
+
+    def test_pending_verdict_with_faithful_unrepresented_atoms_requests_reread_not_pass(self):
+        check, rejected, pending = self._typed_external_disposition_case()
+        frozen = copy.deepcopy((check, rejected))
+        with self.assertRaises(ExternalComplianceCorrectionRequiredError) as caught:
+            validate_obligation_coverage_response(rejected, [check])
+        correction = caught.exception.corrections[0]
+        self.assertEqual(correction["rejected_result"], rejected["results"][0])
+        self.assertEqual((check, rejected), frozen)
+        request = {"checks": [check], "retry_feedback": {
+            "code": ExternalComplianceCorrectionRequiredError.code, "checks": [correction]}}
+        validate_obligation_coverage_response(pending, [check])
+        native_review._validate_external_compliance_retry_result(pending, request)
+        for damaged_field in ("primary_obligations_sha256", "rejected_result_sha256", "reason", "downgrade"):
+            damaged = copy.deepcopy(request)
+            if damaged_field == "downgrade":
+                damaged["retry_feedback"]["checks"][0] = {
+                    "check_id": check["check_id"], "source_quotes": correction["source_quotes"]}
+            else:
+                damaged["retry_feedback"]["checks"][0][damaged_field] = "0" * 64
+            with self.subTest(field=damaged_field), self.assertRaises(NativeSemanticReviewError):
+                native_review._validate_external_compliance_retry_result(pending, damaged)
+
+    def test_pending_routing_correction_never_hides_semantic_or_inventory_changes(self):
+        for defect in ("missing", "duplicate", "actor", "condition", "quote", "foreign_id", "linked", "covered", "mixed_source"):
+            check, rejected, _ = self._typed_external_disposition_case()
+            atoms = rejected["results"][0]["identified_obligations"]
+            if defect == "missing": atoms.pop()
+            elif defect == "duplicate": atoms[1] = copy.deepcopy(atoms[0])
+            elif defect == "actor": atoms[0]["actor"] = "其他人"
+            elif defect == "condition": atoms[0]["condition"] = "new meaning"
+            elif defect == "quote": atoms[0]["source_quote"] = "not from this source"
+            elif defect == "foreign_id": atoms[0]["primary_obligation_id"] = "foreign"
+            elif defect == "linked": check["review_context"]["linked_requirements"] = [{"requirement_ref": "RR-local"}]
+            elif defect == "covered": check["review_context"]["primary_obligations"][0]["status"] = "covered"
+            else: check["document_text"] += "封面应有学号，并由导师签字盖章。"
+            with self.subTest(defect=defect), self.assertRaises(NativeSemanticReviewError) as caught:
+                validate_obligation_coverage_response(rejected, [check])
+            self.assertNotIsInstance(caught.exception, ExternalComplianceCorrectionRequiredError)
+
     def test_external_unrepresented_source_action_requests_only_a_bounded_re_review(self) -> None:
         source = "学位论文作者签名： 年 月 日"
         check = {

@@ -1,0 +1,180 @@
+{
+  "note": "One exact check and rejected canonical result from the fresh run; tests regenerate request/source references, never reuse old invocation bindings.",
+  "check": {
+    "check_id": "C00070",
+    "document_text": "关键词是为了便于做文献索引和检索工作而从论文中选取出来用以表示全文主题内容信息的单词或术语，在论文中有明确出处",
+    "review_context": {
+      "semantic_clause_text": "关键词是为了便于做文献索引和检索工作而从论文中选取出来用以表示全文主题内容信息的单词或术语，在论文中有明确出处",
+      "classification": "requires_source_verification",
+      "requires_requirement": false,
+      "reason": "The clause requires keywords to be selected from the thesis, represent the full-topic information, and have a clear source; this substantive provenance and correspondence cannot be established from the formatting artifact alone.",
+      "primary_obligations": [
+        {
+          "id": "keyword-source-correspondence",
+          "status": "unresolved",
+          "reason": "Human verification of keyword selection, topic representation, and clear thesis provenance is required.",
+          "actor": "author or reviewer",
+          "action": "verify",
+          "target": "Chinese keyword source and topic correspondence",
+          "source_quote": "关键词是为了便于做文献索引和检索工作而从论文中选取出来用以表示全文主题内容信息的单词或术语，在论文中有明确出处",
+          "force": "required",
+          "applicability": "applicable",
+          "route": "human"
+        }
+      ],
+      "primary_obligation_quote_bindings": [
+        {
+          "primary_obligation_id": "keyword-source-correspondence",
+          "original_source_quote": "关键词是为了便于做文献索引和检索工作而从论文中选取出来用以表示全文主题内容信息的单词或术语，在论文中有明确出处",
+          "review_source_quote": "关键词是为了便于做文献索引和检索工作而从论文中选取出来用以表示全文主题内容信息的单词或术语，在论文中有明确出处",
+          "source_binding": {
+            "policy": "current_source_occurrence_quote_v1",
+            "clause_binding": {
+              "text": "关键词是为了便于做文献索引和检索工作而从论文中选取出来用以表示全文主题内容信息的单词或术语，在论文中有明确出处",
+              "source_fragments": [
+                {
+                  "clause_id": "C00070",
+                  "evidence_id": "E00060",
+                  "start_offset": 0,
+                  "end_offset": 55,
+                  "source_sha256": "0516d447cdd25926da0a8201b3e2bb7406725d0cfe89d01503a06a55ed3e253e",
+                  "text": "关键词是为了便于做文献索引和检索工作而从论文中选取出来用以表示全文主题内容信息的单词或术语，在论文中有明确出处",
+                  "source_kind": "paragraph",
+                  "separator_before": "",
+                  "location": {
+                    "part": "document",
+                    "child_index": 66,
+                    "order": 59
+                  }
+                }
+              ]
+            },
+            "quote_start_offset": 0,
+            "quote_end_offset": 55,
+            "quote_sha256": "06e38a31d73af2366346016c1162be6931578555b8f52e0513de74fc96a18dab",
+            "context_is_not_execution_scope": true
+          },
+          "original_quote_sha256": "06e38a31d73af2366346016c1162be6931578555b8f52e0513de74fc96a18dab",
+          "review_quote_sha256": "06e38a31d73af2366346016c1162be6931578555b8f52e0513de74fc96a18dab",
+          "semantic_dimensions_unchanged": true
+        }
+      ],
+      "linked_requirements": [],
+      "source_clause_support": [],
+      "cited_evidence": {
+        "E00060": {
+          "id": "E00060",
+          "kind": "paragraph",
+          "text": "关键词是为了便于做文献索引和检索工作而从论文中选取出来用以表示全文主题内容信息的单词或术语，在论文中有明确出处，关键词在摘要内容后另起一行，一般3～8个，之间用分号分开。",
+          "style_id": null,
+          "runs": [
+            {
+              "text": "关键词是为了便于做文献索引和检索工作而从论文中选取出来用以表示全文主题内容信息的单词或术语，在论文中有明确出处",
+              "format": {
+                "fonts": {
+                  "eastAsia": "宋体",
+                  "ascii": "宋体",
+                  "hAnsi": "宋体"
+                },
+                "size_pt": 12.0
+              }
+            },
+            {
+              "text": "，",
+              "format": {
+                "fonts": {
+                  "eastAsia": "宋体",
+                  "ascii": "宋体",
+                  "hAnsi": "宋体"
+                },
+                "size_pt": 12.0
+              }
+            },
+            {
+              "text": "关键词在摘要内容后另起一行，一般3～",
+              "format": {
+                "fonts": {
+                  "eastAsia": "宋体",
+                  "ascii": "宋体",
+                  "hAnsi": "宋体"
+                },
+                "size_pt": 12.0
+              }
+            },
+            {
+              "text": "8",
+              "format": {
+                "fonts": {
+                  "eastAsia": "宋体",
+                  "ascii": "宋体",
+                  "hAnsi": "宋体"
+                },
+                "size_pt": 12.0
+              }
+            },
+            {
+              "text": "个，之间用分号分开。",
+              "format": {
+                "fonts": {
+                  "eastAsia": "宋体",
+                  "ascii": "宋体",
+                  "hAnsi": "宋体"
+                },
+                "size_pt": 12.0
+              }
+            }
+          ],
+          "location": {
+            "part": "document",
+            "child_index": 66,
+            "order": 59
+          },
+          "context_before": [
+            "这部分是论文的摘要",
+            "中文摘要是论文内容的简要陈述，一般以第三人称语气撰写，300～1000字（如遇特殊需要字数可以略多），不加评论和解释,是一篇具有独立性和完整性的短文，能准确反映论文的中心思想，规范的学术用语，逻辑性强、结构严谨，体现出论文的新理论、新方法、新技术等。其内容包括：目的意义、研究方法、研究成果和结论，应与论文等同的主要信息，要突出本论文的创造性成果，不可出现图、表、化学方程式、非公知公用的符号和术语。"
+          ],
+          "context_after": [
+            "关键词：术语；最多7个汉字；最少3组，最多8组",
+            "ABSTRACT"
+          ],
+          "style_name": null,
+          "xml_locator": {
+            "part": "document",
+            "child_index": 66,
+            "order": 59
+          }
+        }
+      },
+      "machine_obligation_ids": [],
+      "manual_review_codes": [],
+      "source_content_verification_codes": [
+        "keyword_source_traceability_verification"
+      ],
+      "pending_source_work": []
+    }
+  },
+  "result": {
+    "check_id": "C00070",
+    "verdict": "source_content_verification_pending",
+    "rationale": "The source requires human verification that keywords represent the thesis topic, originate in the thesis, and have clear provenance; no executable DOCX requirement is linked.",
+    "identified_obligations": [
+      {
+        "force": "required",
+        "applicability": "applicable",
+        "actor": "author or reviewer",
+        "action": "verify",
+        "target": "Chinese keyword source and topic correspondence",
+        "obligation_summary": "Verify keyword selection, full-topic representation, and clear thesis provenance.",
+        "primary_obligation_id": "keyword-source-correspondence",
+        "requirement_refs": [],
+        "pending_work_code": "authoring_anti_excerpt_verification",
+        "disposition": "source_content_verification_pending",
+        "source_quote": "关键词是为了便于做文献索引和检索工作而从论文中选取出来用以表示全文主题内容信息的单词或术语，在论文中有明确出处"
+      }
+    ],
+    "evidence_quotes": [
+      "关键词是为了便于做文献索引和检索工作而从论文中选取出来用以表示全文主题内容信息的单词或术语，在论文中有明确出处"
+    ],
+    "machine_obligation_ids": []
+  }
+}

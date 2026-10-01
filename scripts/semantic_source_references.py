@@ -13,6 +13,7 @@ from typing import Any
 from format_spec_validation import validate_instance
 from host_review_schema import normalize_native_response
 from semantic_contract import sha256_json
+from pending_source_work import compile_pending_source_work
 
 
 REFERENCE_PROTOCOL = "semantic_source_references_v2"
@@ -251,6 +252,48 @@ def source_reference_schema(
                     unmatched["properties"]["disposition"] = {"enum": ["unrepresented"]}
                     unmatched["properties"]["requirement_refs"]["maxItems"] = 0
                     compiled_obligation_branches.append(unmatched)
+            # A registered pending-work code is a source-grammar selector,
+            # not a generic human-review category. Keep generic verification
+            # open without a code; do not expose unrelated codes on this check.
+            # Recompute from exact source, never from model-authored inventory.
+            source_pending_facts = compile_pending_source_work(check["document_text"])
+            source_pending_codes = {fact["code"] for fact in source_pending_facts}
+            pending_scoped = []
+            for obligation in compiled_obligation_branches:
+                code_schema = obligation["properties"].get("pending_work_code")
+                if not isinstance(code_schema, dict):
+                    pending_scoped.append(obligation)
+                    continue
+                generic = copy.deepcopy(obligation)
+                generic["properties"]["pending_work_code"] = {
+                    "type": "null",
+                    "description": "No registered source-grammar code applies to this generic obligation. Omit (native: null); retain the human duty and exact source reference.",
+                }
+                pending_scoped.append(generic)
+                permitted = sorted(source_pending_codes & set(code_schema.get("enum", [])))
+                # External/mixed primary mappings accept only represented
+                # DOCX atoms and actual external actions, not authoring or
+                # content-verification codes. A discovered mismatched duty
+                # stays reportable as unrepresented without a borrowed ID.
+                if (permitted and not external_mapping and "source_content_verification_pending"
+                        in obligation["properties"]["disposition"].get("enum", [])):
+                    for code in permitted:
+                        bound_refs = [span["ref_id"] for span in check["source_spans"]
+                            if any(fact["code"] == code and span["start"] <= fact["start"]
+                                   and span["end"] >= fact["end"] for fact in source_pending_facts)]
+                        if not bound_refs:
+                            continue
+                        registered = copy.deepcopy(obligation)
+                        registered["properties"]["pending_work_code"] = {"enum": [code]}
+                        registered["properties"]["source_ref"] = {"type": "string", "enum": bound_refs}
+                        registered["properties"]["disposition"] = {
+                            "enum": ["source_content_verification_pending"]
+                        }
+                        if "pending_work_code" not in registered["required"]:
+                            registered["required"].append("pending_work_code")
+                        registered["properties"]["requirement_refs"]["maxItems"] = 0
+                        pending_scoped.append(registered)
+            compiled_obligation_branches = pending_scoped
             if constrain_requirement_links:
                 # Generation-time constraint mirrors the canonical coverage
                 # validator. Parsing still preserves invalid raw output for a

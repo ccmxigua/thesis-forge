@@ -297,6 +297,17 @@ new properties, a passing score, or submission readiness. Exhaustion fails close
 Native providers that omit unsupported `minItems` still require the local
 non-empty-reference check; schema generation is not proof of semantic completeness.
 
+`pending_work_code` identifies a registered exact-source human-work atom,
+not every task that needs a person. Its per-check wire alternatives are derived
+from the current source grammar, never copied from another clause's inventory.
+Only a source-content-verification pending item with no requirement link and
+a selected current span covering that code's exact source atom may select it.
+Generic provenance/topic checks and other duties omit
+the field (native: `null`) and keep their exact quotation and human disposition.
+They are not deleted or converted to executable work. A wrong code is rejected
+by the immutable source-reference contract and can receive only its existing
+bounded independent corrective read; no automatic relabeling or release waiver.
+
 Source-atom coverage uses a complete one-to-one assignment when exact quotations
 overlap; a greedy first match must not consume the only atom for another duty.
 One represented atom can never cover two distinct source facts. Typed-primary

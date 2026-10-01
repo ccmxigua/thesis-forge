@@ -30,6 +30,8 @@ from semantic_source_references import (
     build_source_reference_packet,
     compile_source_reference_response,
     source_reference_schema,
+    SourceReferenceResponseError,
+    source_reference_result_issues,
 )
 from source_obligation_compiler import (
     compile_known_source_obligation_ids,
@@ -117,6 +119,63 @@ class TypedSourceAtomAlignmentError(NativeSemanticReviewError):
             f"independent typed-primary mapping missing, duplicate, or source-atom "
             f"modality/applicability/condition disagreement for {clause_id}: {', '.join(fields)}"
         )
+
+
+class SourceReferenceContractError(NativeSemanticReviewError):
+    """Invalid independent wire selections may receive one fresh corrective read."""
+
+    code = "independent_source_reference_contract_rejected"
+
+    def __init__(self, error: SourceReferenceResponseError):
+        self.issues = copy.deepcopy(error.issues)
+        self.schema_sha256 = error.schema_sha256
+        self.clause_ids = tuple(sorted(item["check_id"] for item in self.issues))
+        super().__init__(str(error))
+
+
+def source_reference_retry_feedback_is_bound(request: dict[str, Any]) -> bool:
+    feedback = request.get("retry_feedback")
+    if (not isinstance(feedback, dict) or feedback.get("code") != SourceReferenceContractError.code
+            or request.get("provider_attempt") != 2
+            or feedback.get("checks_sha256") != sha256_json(request.get("checks"))
+            or feedback.get("run_id") != request.get("run_id")
+            or feedback.get("provenance") != request.get("provenance")):
+        return False
+    prior = copy.deepcopy(request)
+    prior.pop("retry_feedback", None)
+    prior["provider_attempt"] = 1
+    if feedback.get("rejected_request_sha256") != sha256_json(prior):
+        return False
+    try:
+        schema = source_reference_schema(OBLIGATION_COVERAGE_SCHEMA,
+            build_source_reference_packet(prior), coverage=True)
+        issues = feedback.get("issues")
+        if not isinstance(issues, list) or not issues or feedback.get("schema_sha256") != sha256_json(schema):
+            return False
+        by_id = {b["properties"]["check_id"]["enum"][0]: b
+                 for b in schema["properties"]["results"]["items"]["anyOf"]}
+        seen = set()
+        indexes = set()
+        for issue in issues:
+            cid = issue.get("check_id") if isinstance(issue, dict) else None
+            if not isinstance(cid, str) or cid not in by_id or cid in seen:
+                return False
+            seen.add(cid)
+            # Replay this rejected result against its exact old request span IDs.
+            single_schema = copy.deepcopy(schema)
+            single_schema["properties"]["results"]["items"]["anyOf"] = [by_id[cid]]
+            replay = source_reference_result_issues({"results": [issue.get("rejected_result")]}, single_schema)
+            if not replay:
+                return False
+            replay[0]["result_index"] = issue.get("result_index")
+            if (isinstance(issue.get("result_index"), bool) or not isinstance(issue.get("result_index"), int)
+                    or not 0 <= issue["result_index"] < len(by_id)
+                    or issue["result_index"] in indexes or replay[0] != issue):
+                return False
+            indexes.add(issue["result_index"])
+        return sorted(seen) == feedback.get("clause_ids")
+    except (ValueError, TypeError, KeyError, AttributeError):
+        return False
 
 
 def typed_alignment_retry_feedback_is_bound(request: dict[str, Any]) -> bool:
@@ -1357,7 +1416,23 @@ def _prompt(request: dict[str, Any]) -> str:
             else []
         )
         retry_instruction = ""
-        if isinstance(retry_feedback, dict) and retry_feedback.get("code") == TypedSourceAtomAlignmentError.code:
+        if isinstance(retry_feedback, dict) and retry_feedback.get("code") == SourceReferenceContractError.code:
+            if not source_reference_retry_feedback_is_bound(request):
+                raise NativeSemanticReviewError("source-reference correction feedback is not current-source bound")
+            retry_instruction = (
+                "\nThe prior independent response failed the unchanged wire contract: "
+                + strict_json_dumps(retry_feedback["issues"])
+                + ". Review the identical candidate independently again, preserving every source duty. "
+                "The rejected source_ref selectors belong to the old invocation: select only IDs from "
+                "this new packet. Mapped primary duties must identify their current primary_obligation_id. "
+                "An unrepresented duty has no requirement_refs; a represented duty must cite a faithful "
+                "current requirement. If the candidate genuinely omits a duty, report incomplete with "
+                "that unrepresented duty rather than changing its meaning or claiming coverage. "
+                "Never turn an external attestation into DOCX compliance. Do not change the candidate, "
+                "source, provenance or requirements, copy to pass, or delete obligations. All original "
+                "schema, source and semantic checks still apply; persistent errors still block.\n"
+            )
+        elif isinstance(retry_feedback, dict) and retry_feedback.get("code") == TypedSourceAtomAlignmentError.code:
             if not typed_alignment_retry_feedback_is_bound(request):
                 raise NativeSemanticReviewError("typed alignment retry feedback is not current-source bound")
             retry_instruction = (
@@ -1850,6 +1925,8 @@ def run_native_semantic_review(
             compilation_path,
             strict_json_dumps(compilation, ensure_ascii=False, indent=2) + "\n",
         )
+    except SourceReferenceResponseError as exc:
+        raise SourceReferenceContractError(exc) from exc
     except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
         raise NativeSemanticReviewError(f"native semantic response rejected: {exc}") from exc
     _write_fresh(response_path, strict_json_dumps(response, ensure_ascii=False, indent=2) + "\n")

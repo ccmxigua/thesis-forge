@@ -17,6 +17,49 @@ from semantic_contract import sha256_json
 
 REFERENCE_PROTOCOL = "semantic_source_references_v2"
 
+
+class SourceReferenceResponseError(ValueError):
+    """Known current checks failed wire validation; never a repaired response."""
+
+    def __init__(self, issues: list[dict[str, Any]], schema: dict[str, Any]):
+        self.issues = copy.deepcopy(issues)
+        self.schema_sha256 = sha256_json(schema)
+        super().__init__("source reference response rejected: " + "; ".join(
+            f"{item['check_id']}: {'; '.join(item['errors'])}" for item in issues))
+
+
+def source_reference_result_issues(response: Any, schema: dict[str, Any]) -> list[dict[str, Any]]:
+    """Locate schema failures only in a complete uniquely mapped current check set."""
+    branches = schema["properties"]["results"]["items"]["anyOf"]
+    by_id = {b["properties"]["check_id"]["enum"][0]: b for b in branches}
+    if (not isinstance(response, dict) or set(response) != {"results"}
+            or not isinstance(response["results"], list)
+            or any(not isinstance(r, dict) or not isinstance(r.get("check_id"), str)
+                   for r in response["results"])):
+        return []
+    ids = [r["check_id"] for r in response["results"]]
+    if len(set(ids)) != len(ids) or set(ids) != set(by_id):
+        return []
+    issues = []
+    for index, result in enumerate(response["results"]):
+        branch = by_id[result["check_id"]]
+        errors = validate_instance(result, branch)
+        if errors:
+            details = []
+            atom_schema = branch["properties"].get("identified_obligations", {}).get("items", {})
+            atoms = result.get("identified_obligations")
+            atoms = atoms if isinstance(atoms, list) else []
+            for atom_index, atom in enumerate(atoms):
+                if validate_instance(atom, atom_schema):
+                    alternatives = atom_schema.get("anyOf", [atom_schema])
+                    details.append({"obligation_index": atom_index, "alternatives": [
+                        validate_instance(atom, option) for option in alternatives]})
+            issues.append({"check_id": result["check_id"], "result_index": index,
+                           "rejected_result": copy.deepcopy(result), "errors": errors,
+                           "obligation_errors": details})
+    return issues
+
+
 _ENGLISH_ABBREVIATIONS = {
     "e.g.", "i.e.", "etc.", "vs.", "dr.", "mr.", "mrs.", "ms.",
     "prof.", "fig.", "no.", "approx.", "al.", "ph.",
@@ -273,6 +316,9 @@ def compile_source_reference_response(
     )
     errors = validate_instance(canonical_input, validation_schema)
     if errors:
+        issues = source_reference_result_issues(canonical_input, validation_schema) if coverage else []
+        if issues:
+            raise SourceReferenceResponseError(issues, validation_schema)
         raise ValueError("source reference response rejected: " + "; ".join(errors[:8]))
     checks = {check["check_id"]: check for check in packet["checks"]}
     seen: set[str] = set()

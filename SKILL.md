@@ -232,6 +232,20 @@ representation only after reassessing the source; code never fills semantic
 fields from the primary answer. Both failed and corrected artifacts are retained,
 and persistent disagreement or changed inputs fail closed without a success ledger.
 
+An independent response whose current, complete, unique check set fails the
+source-reference wire schema may receive one fresh corrective read of the same
+candidate. Feedback preserves the rejected result, per-check/atom diagnostics,
+original request and schema hashes, current checks, provenance and candidate
+identity. Replaying that feedback cannot authorize semantic edits or passing
+projections. Unknown, duplicate or missing checks do not use this correction
+route; unchanged local and semantic validators still reject invalid results.
+Old source selectors belong only to the rejected invocation, never to its retry.
+
+Fixed declaration text can be materialized for a source-bound mixed clause only
+with distinct automatic/covered and human/unverifiable atoms and exact quotation
+bindings, while retaining the original clause classifications and all atom fields.
+The source-selected prose is not evidence that an author attestation occurred.
+
 When a user confirms that an unresolved clause is a real semantic ambiguity but
 does not provide its authoritative interpretation, record that acknowledgement
 in a run-bound `semantic-issue-confirmation` sidecar and pass it with

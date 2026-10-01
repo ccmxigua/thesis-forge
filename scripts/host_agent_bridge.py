@@ -231,6 +231,8 @@ from native_semantic_review import (  # noqa: E402
     UnlinkedRepresentedObligationError,
     TypedSourceAtomAlignmentError,
     typed_alignment_retry_feedback_is_bound,
+    SourceReferenceContractError,
+    source_reference_retry_feedback_is_bound,
     RetryableNativeSemanticReviewError,
     _exact_clause_source_text,
     build_obligation_coverage_request,
@@ -513,9 +515,31 @@ def _materialize_fixed_declaration_source_text(
             or candidate.get("heading_clause_id") not in raw_clause_ids
         ):
             continue
-        if any(
+        mixed_valid = True
+        for clause_id in raw_clause_ids:
+            review = reviews_by_id.get(clause_id, {})
+            if review.get("classification") != "executable_with_external_check":
+                continue
+            atoms = review.get("obligations")
+            if (not isinstance(atoms, list) or len(atoms) < 2
+                    or any(not isinstance(atom, dict) or not isinstance(atom.get("id"), str)
+                           or not atom["id"] for atom in atoms)
+                    or len({atom["id"] for atom in atoms}) != len(atoms)
+                    or not any(atom.get("status") == "covered" and atom.get("route") == "automatic" for atom in atoms)
+                    or not any(atom.get("status") == "unverifiable" and atom.get("route") == "human" for atom in atoms)
+                    or any((atom.get("status"), atom.get("route")) not in {
+                        ("covered", "automatic"), ("unverifiable", "human")} for atom in atoms)):
+                mixed_valid = False
+                break
+            try:
+                for atom in atoms:
+                    bind_atom_quote(atom.get("source_quote"), clause_id, clause_by_id, evidence_context)
+            except (ValueError, TypeError, KeyError):
+                mixed_valid = False
+                break
+        if not mixed_valid or any(
             reviews_by_id.get(clause_id, {}).get("classification")
-            not in {"covered", "executable", "verify_existing"}
+            not in {"covered", "executable", "verify_existing", "executable_with_external_check"}
             for clause_id in raw_clause_ids
         ):
             continue
@@ -10981,6 +11005,7 @@ def _validate_completed_obligation_ledger_chain(
         TableContextUncertaintyError.code,
         UnlinkedRepresentedObligationError.code,
         TypedSourceAtomAlignmentError.code,
+        SourceReferenceContractError.code,
     }
     if (
         isinstance(provider_attempt, bool) or not isinstance(provider_attempt, int)
@@ -11001,6 +11026,9 @@ def _validate_completed_obligation_ledger_chain(
             and not table_retry_feedback_is_source_bound(review_request))
         or (isinstance(retry_feedback, dict) and retry_feedback.get("code") == TypedSourceAtomAlignmentError.code
             and (not typed_alignment_retry_feedback_is_bound(review_request)
+                 or retry_feedback.get("candidate_response_sha256") != _response_sha256(accepted_response)))
+        or (isinstance(retry_feedback, dict) and retry_feedback.get("code") == SourceReferenceContractError.code
+            and (not source_reference_retry_feedback_is_bound(review_request)
                  or retry_feedback.get("candidate_response_sha256") != _response_sha256(accepted_response)))
         or request_sha != review_audit.get("request_sha256")
         or request_sha != independent_envelope.get("review_request_sha256")
@@ -11669,6 +11697,10 @@ def _run_independent_obligation_coverage_review(
             and (not typed_alignment_retry_feedback_is_bound(coverage_request)
                  or _retry_feedback.get("candidate_response_sha256") != response_sha)):
         raise IndependentObligationReviewError("typed alignment retry is not bound to the immutable candidate")
+    if (_retry_feedback is not None and _retry_feedback.get("code") == SourceReferenceContractError.code
+            and (not source_reference_retry_feedback_is_bound(coverage_request)
+                 or _retry_feedback.get("candidate_response_sha256") != response_sha)):
+        raise IndependentObligationReviewError("source-reference retry is not bound to the immutable candidate")
     base_output_dir = review_dir / f"independent-review-chunk-{chunk_index:04d}-attempt-{attempt:02d}"
     output_dir = base_output_dir if _provider_attempt == 1 else base_output_dir.with_name(
         f"{base_output_dir.name}-provider-attempt-{_provider_attempt:02d}"
@@ -12231,6 +12263,7 @@ def _run_independent_obligation_coverage_review(
         TableContextUncertaintyError,
         UnlinkedRepresentedObligationError,
         TypedSourceAtomAlignmentError,
+        SourceReferenceContractError,
     ) as review_error:
         source_verification_mislabel = isinstance(
             review_error, SourceVerificationMislabelledAsAuthoringError,
@@ -12297,6 +12330,21 @@ def _run_independent_obligation_coverage_review(
             })
             bound_mislabel = typed_alignment_retry_feedback_is_bound({
                 **coverage_request, "retry_feedback": retry_feedback,
+            })
+            retryable = retryable and bound_mislabel
+        if isinstance(review_error, SourceReferenceContractError):
+            retry_feedback.update({
+                "issues": copy.deepcopy(review_error.issues),
+                "schema_sha256": review_error.schema_sha256,
+                "rejected_request_sha256": sha256_json(coverage_request),
+                "checks_sha256": sha256_json(coverage_request["checks"]),
+                "candidate_response_sha256": response_sha,
+                "run_id": run_id,
+                "provenance": copy.deepcopy(coverage_request.get("provenance")),
+            })
+            bound_mislabel = source_reference_retry_feedback_is_bound({
+                **coverage_request, "provider_attempt": _provider_attempt + 1,
+                "retry_feedback": retry_feedback,
             })
             retryable = retryable and bound_mislabel
         failure_envelope = {

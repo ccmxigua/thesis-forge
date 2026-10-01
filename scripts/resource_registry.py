@@ -12,7 +12,9 @@ import copy
 import hashlib
 import re
 import unicodedata
+import json
 from typing import Any
+from fixed_declaration_source import is_blank_signature_line
 
 
 SCHEMA_VERSION = "1.0"
@@ -121,15 +123,59 @@ def _promote_exact_source_heading(
     return promoted
 
 
-def _resource_digest(run_id: str, item_id: str, heading: str, body_parts: list[str]) -> str:
+def _signature_lines(item: dict[str, Any], evidence: dict[str, Any] | None = None) -> list[dict]:
+    lines = item.get("source_signature_lines") or []
+    if not isinstance(lines, list):
+        raise ValueError("source signature lines must be an array")
+    records = _source_evidence_map(evidence) if isinstance(evidence, dict) else None
+    seen = set()
+    prior = None
+    if lines and records is not None:
+        source_ids = item.get("source_evidence_ids") or []
+        body_records = [records[eid] for eid in source_ids if eid in records
+            and records[eid].get("text") in _body_parts(item)]
+        if not body_records:
+            raise ValueError("source signature lines need a bound preceding declaration body")
+        locations = [record.get("location", {}) for record in body_records]
+        if any(type(loc.get("child_index")) is not int for loc in locations):
+            raise ValueError("source signature lines need current physical paragraph locations")
+        prior = max(body_records, key=lambda record: record["location"]["child_index"])
+    for line in lines:
+        if (not isinstance(line, dict) or set(line) != {"text", "source_evidence_id", "source_sha256", "attestation_scope"}
+                or not is_blank_signature_line(line.get("text"))
+                or line.get("attestation_scope") != "placeholder_presence_only"
+                or not isinstance(line.get("source_evidence_id"), str)
+                or not line["source_evidence_id"] or line["source_evidence_id"] in seen
+                or line.get("source_sha256") != hashlib.sha256(line["text"].encode("utf-8")).hexdigest()):
+            raise ValueError("invalid source signature line binding")
+        if records is not None and records.get(line["source_evidence_id"], {}).get("text") != line["text"]:
+            raise ValueError("source signature line differs from current evidence")
+        if records is not None:
+            record = records[line["source_evidence_id"]]
+            loc, prev = record.get("location", {}), prior.get("location", {})
+            if (record.get("kind") != "paragraph" or prior.get("kind") != "paragraph"
+                    or loc.get("part") != prev.get("part")
+                    or loc.get("child_index") != prev["child_index"] + 1):
+                raise ValueError("source signature line is not adjacent to its declaration body")
+            prior = record
+        seen.add(line["source_evidence_id"])
+    return copy.deepcopy(lines)
+
+
+def _resource_digest(run_id: str, item_id: str, heading: str, body_parts: list[str], signature_lines: list | None = None) -> str:
     material = "\0".join([run_id, item_id, heading, *body_parts])
+    if signature_lines:
+        material += "\0" + json.dumps(signature_lines, ensure_ascii=False, sort_keys=True)
     return hashlib.sha256(material.encode("utf-8")).hexdigest()
 
 
-def _resource_sha256(heading: str, body_parts: list[str]) -> str:
+def _resource_sha256(heading: str, body_parts: list[str], signature_lines: list | None = None) -> str:
     # The digest covers the complete fixed resource, while the executor audits
     # each body paragraph separately after serialization.
-    return fixed_text_sha256("\n".join([heading, *body_parts]))
+    digest = fixed_text_sha256("\n".join([heading, *body_parts]))
+    if signature_lines:
+        return hashlib.sha256((digest + "\0" + json.dumps(signature_lines, ensure_ascii=False, sort_keys=True)).encode("utf-8")).hexdigest()
+    return digest
 
 
 def _validate_existing_registry(
@@ -184,7 +230,10 @@ def _validate_existing_registry(
             raise ValueError(f"resource {resource_id!r} has invalid body_parts")
         if all(_normalized(part) == _normalized(heading) for part in body_parts):
             raise ValueError(f"resource {resource_id!r} repeats its heading as the entire body")
-        if resource.get("sha256") != _resource_sha256(heading.strip(), [part.strip() for part in body_parts]):
+        lines = _signature_lines(resource, evidence)
+        if "source_signature_lines" in item and item["source_signature_lines"] != lines:
+            raise ValueError("materialized declaration signature lines differ from bound resource")
+        if resource.get("sha256") != _resource_sha256(heading.strip(), [part.strip() for part in body_parts], lines):
             raise ValueError(f"resource {resource_id!r} sha256 does not match its fixed text")
         source_evidence_ids = resource.get("source_evidence_ids")
         if (not isinstance(source_evidence_ids, list)
@@ -372,7 +421,10 @@ def materialize_declaration_resources(
             _verify_source_texts(item_id, raw, source_evidence_ids, evidence)
         seen_ids.add(item_id)
 
-        digest = _resource_digest(run_id, item_id, heading.strip(), body_parts)
+        lines = _signature_lines(raw, evidence)
+        if lines and evidence is None:
+            raise ValueError("source signature lines require current evidence")
+        digest = _resource_digest(run_id, item_id, heading.strip(), body_parts, lines)
         resource_id = f"runtime_{digest[:24]}"
         version = f"run-{run_id}"
         resource = {
@@ -381,9 +433,11 @@ def materialize_declaration_resources(
             "version": version,
             "heading": heading.strip(),
             "body_parts": body_parts,
-            "sha256": _resource_sha256(heading.strip(), body_parts),
+            "sha256": _resource_sha256(heading.strip(), body_parts, lines),
             "source_evidence_ids": source_evidence_ids,
         }
+        if lines:
+            resource["source_signature_lines"] = lines
         registry["items"][resource_id] = resource
         materialized.append({
             "id": item_id,

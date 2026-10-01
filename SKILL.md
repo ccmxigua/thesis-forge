@@ -269,6 +269,23 @@ with distinct automatic/covered and human/unverifiable atoms and exact quotation
 bindings, while retaining the original clause classifications and all atom fields.
 The source-selected prose is not evidence that an author attestation occurred.
 
+An exactly blank author/supervisor signature or date paragraph immediately
+following one uniquely selected complete declaration may be preserved in that
+declaration's `source_signature_lines`. Each line carries its exact current
+evidence ID, byte hash and `placeholder_presence_only` scope. It is not added
+to the declaration's executable clause edges and does not change external
+signature/date obligations into covered duties. Signed/filled text, ambiguous
+ownership, other physical regions or altered source bindings are ineligible.
+The run-scoped resource digest includes the exact lines; serialization audits
+check their text and position after the body. Legacy neutral placeholders
+continue to work, including additional labels not represented by source lines.
+A validator-rejected separate signature-only declaration can be removed only
+when the complete current feedback and exact adjacent source group prove that
+one retained declaration already prints every line, with no unique instance,
+condition or DOCX operation lost. Preserve the removed payload and pending
+reviews in the repair audit; full validation and fresh independent review are
+still mandatory. This is not a general external-requirement deletion rule.
+
 When a user confirms that an unresolved clause is a real semantic ambiguity but
 does not provide its authoritative interpretation, record that acknowledgement
 in a run-bound `semantic-issue-confirmation` sidecar and pass it with

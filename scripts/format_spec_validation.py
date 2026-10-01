@@ -15,13 +15,13 @@ from typing import Any
 
 try:
     from .semantic_contract import strict_json_read
-    from .resource_registry import fixed_text_sha256
+    from .resource_registry import fixed_text_sha256, _resource_sha256, _signature_lines
     from .format_contract_guards import (
         cover_binding_errors, input_prerequisite_errors, verification_checker_errors,
     )
 except ImportError:  # direct script execution
     from semantic_contract import strict_json_read
-    from resource_registry import fixed_text_sha256
+    from resource_registry import fixed_text_sha256, _resource_sha256, _signature_lines
     from format_contract_guards import (
         cover_binding_errors, input_prerequisite_errors, verification_checker_errors,
     )
@@ -356,7 +356,12 @@ def load_and_validate(
                 heading = resource.get("heading")
                 body_parts = resource.get("body_parts")
                 if isinstance(heading, str) and isinstance(body_parts, list) and all(isinstance(part, str) for part in body_parts):
-                    expected_hash = fixed_text_sha256("\n".join([heading, *body_parts]))
+                    try:
+                        lines = _signature_lines(resource)
+                    except ValueError as exc:
+                        errors.append(f"$.resource_registry.items.{resource_id}.source_signature_lines: {exc}")
+                        lines = []
+                    expected_hash = _resource_sha256(heading, body_parts, lines)
                     if resource.get("sha256") != expected_hash:
                         errors.append(f"$.resource_registry.items.{resource_id}.sha256: does not match fixed resource text")
         for i, item in enumerate(items):
@@ -369,6 +374,9 @@ def load_and_validate(
             for field in ("version", "sha256"):
                 if item.get(field) != resource.get(field):
                     errors.append(f"$.declarations.items[{i}].{field}: does not match bound resource")
+            if ("source_signature_lines" in item
+                    and item["source_signature_lines"] != (resource.get("source_signature_lines") or [])):
+                errors.append(f"$.declarations.items[{i}].source_signature_lines: does not match bound resource")
             if resource.get("kind") != "fixed_text":
                 errors.append(f"$.declarations.items[{i}].resource_id: resource kind must be fixed_text")
             placeholders = item.get("signature_placeholders", [])

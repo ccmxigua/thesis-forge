@@ -919,6 +919,9 @@ def apply_declarations(doc: Document, declarations: dict[str, Any],
         resource = resources.get(resource_id) if isinstance(resource_id, str) else None
         if not isinstance(resource, dict):
             raise ValueError(f"declaration resource {resource_id!r} is not registered in this run")
+        if ("source_signature_lines" in item
+                and item["source_signature_lines"] != (resource.get("source_signature_lines") or [])):
+            raise ValueError("declaration signature lines differ from bound resource")
         body_parts = _resource_body_parts(resource)
         if not body_parts:
             raise ValueError(f"declaration resource {resource_id!r} has no fixed body text")
@@ -927,7 +930,15 @@ def apply_declarations(doc: Document, declarations: dict[str, Any],
         for body in body_parts:
             _insert_paragraph_before(anchor, body, styles["body"])
         counts["items_written"] += 1
+        source_lines = resource.get("source_signature_lines") or []
+        if source_lines:
+            for line in source_lines:
+                _insert_paragraph_before(anchor, line["text"], styles["author"])
+                counts["placeholders_written"] += 1
         for placeholder in item.get("signature_placeholders", []):
+            if source_lines and re.sub(r"\s+", "", placeholder["label"]) in re.sub(
+                    r"\s+", "", "".join(line["text"] for line in source_lines)):
+                continue
             role = placeholder["role"]
             style = styles[role]
             _insert_paragraph_before(anchor, f"{placeholder['label']}：________________", style)
@@ -1048,6 +1059,13 @@ def audit_declarations(doc: Document, declarations: dict[str, Any],
                 body_indices.append(found)
                 cursor = found + 1
             if body_indices:
+                for line in resource.get("source_signature_lines") or []:
+                    if cursor >= boundary or paragraphs[cursor].text != line["text"]:
+                        body_indices = []
+                        break
+                    body_indices.append(cursor)
+                    cursor += 1
+            if body_indices:
                 matches.append((heading_index, body_indices))
         if len(matches) != 1:
             findings.append({"role": "declarations", "property": f"{item['id']}.fixed_text",
@@ -1058,9 +1076,15 @@ def audit_declarations(doc: Document, declarations: dict[str, Any],
                              "template_value": [matches[0][0], *matches[0][1], boundary],
                              "required_value": "fixed text must precede the declared anchor role"})
     before_texts = [p.text.strip() for p in paragraphs[:boundary]]
-    expected_placeholders = [f"{placeholder['label']}：________________"
-                             for item in declarations.get("items", [])
-                             for placeholder in item.get("signature_placeholders", [])]
+    expected_placeholders = []
+    for item in declarations.get("items", []):
+        resource = resources.get(item.get("resource_id"), {})
+        lines = resource.get("source_signature_lines") or []
+        expected_placeholders.extend(line["text"].strip() for line in lines)
+        compact = re.sub(r"\s+", "", "".join(line["text"] for line in lines))
+        expected_placeholders.extend(f"{p['label']}：________________"
+            for p in item.get("signature_placeholders", [])
+            if not lines or re.sub(r"\s+", "", p["label"]) not in compact)
     for text in sorted(set(expected_placeholders)):
         expected_count = expected_placeholders.count(text)
         actual_count = before_texts.count(text)

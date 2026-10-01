@@ -178,7 +178,7 @@ from existing_requirement_contract import (  # noqa: E402
 )
 from format_contract_guards import normalize_label  # noqa: E402
 from fixed_declaration_source import (  # noqa: E402
-    derive_fixed_declaration_candidates,
+    derive_fixed_declaration_candidates, bound_signature_lines,
 )
 
 from host_adapters import codex as codex_adapter  # noqa: E402
@@ -248,6 +248,7 @@ from administrative_relation_projection import (
     project_administrative_copies, project_copied_administrative_qualifiers,
 )
 from responsibility_projection import project_redundant_render_entities
+from declaration_signature_projection import project_signature_only_declarations
 from responsibility_ledger import canonical_review_atom
 from repair_transaction import repair_receipt
 from source_atom_metadata import project_atom_metadata, bind_atom_quote
@@ -626,13 +627,28 @@ def _materialize_fixed_declaration_source_text(
         ):
             continue
 
+        signature_lines = bound_signature_lines(candidate, evidence_context)
+        signature_reviews = [reviews_by_id.get(cid, {}) for cid in candidate.get("signature_clause_ids", [])]
+        if not signature_reviews or any(
+            review.get("classification") != "external_compliance"
+            or not isinstance(review.get("obligations"), list) or not review["obligations"]
+            or any(atom.get("status") != "unverifiable" or atom.get("route") != "human"
+                   for atom in review["obligations"] if isinstance(atom, dict))
+            for review in signature_reviews
+        ):
+            signature_lines = []
+        if item.get("source_signature_lines") not in (None, [], signature_lines):
+            continue
         before_heading = supplied_heading
         before_body_parts = copy.deepcopy(supplied_body_parts)
-        if before_heading == expected_heading and before_body_parts == expected_body_parts:
+        if (before_heading == expected_heading and before_body_parts == expected_body_parts
+                and (not signature_lines or item.get("source_signature_lines") == signature_lines)):
             continue
         before_sha256 = _response_sha256(projected)
         item["heading"] = expected_heading
         item["body_parts"] = expected_body_parts
+        if signature_lines:
+            item["source_signature_lines"] = signature_lines
         after_sha256 = _response_sha256(projected)
         audits.append({
             "rule_id": "fixed_declaration_source_text_materialization_v1",
@@ -652,6 +668,7 @@ def _materialize_fixed_declaration_source_text(
             ],
             "heading_evidence_ids": heading_evidence_ids,
             "body_evidence_ids": body_evidence_ids,
+            "source_signature_lines": copy.deepcopy(signature_lines),
             "evidence_text_sha256": evidence_text_hashes,
             "input_heading_sha256": (
                 hashlib.sha256(before_heading.encode("utf-8")).hexdigest()
@@ -698,6 +715,7 @@ def _summarize_contract_errors(errors: list[str], *, limit: int = 12) -> str:
 
 
 _BASE_CONTRACT_REPAIR_RULES = (
+    "A blank author/supervisor signature or date line adjacent to a complete fixed declaration is not a separate declarations requirement. Keep real signing and dating as distinct external_compliance obligations with unverifiable/human status. Select the complete heading/body candidate; code preserves its uniquely adjacent blank source lines through source_signature_lines. Do not prefill names, dates or signatures, or invent a standalone signature declaration. Source_signature_lines is source-bound printing only, not attestation.",
     "Never add unknown properties or invent role names; emit only fields and nested properties present in response_schema and requirement_contract.",
     "classification and normative_basis are different fields: classification is a review status; normative_basis must be one of the declared enum values and must never be the word informational.",
     "If classification is informational, use requirement_indexes: [] and omit normative_basis unless a declared normative basis is explicitly supported by the cited evidence; never copy classification into normative_basis.",
@@ -8927,6 +8945,11 @@ def _apply_safe_mechanical_repairs(
         current_records = contract_error_records(current_errors, response=response, chunk=chunk)
         if (current_records and sorted(_response_sha256(item) for item in current_records)
                 == sorted(_response_sha256(item) for item in error_records)):
+            signatures, signatures_audit = project_signature_only_declarations(
+                response, chunk, validate=validate_host_agent_response,
+            )
+            if signatures is not None:
+                return signatures, signatures_audit
             metadata, metadata_audit = project_atom_metadata(response, error_records, chunk)
             if metadata is not None:
                 return metadata, metadata_audit

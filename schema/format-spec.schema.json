@@ -2119,6 +2119,17 @@
       },
       "additionalProperties": false
     },
+    "sourceSignatureLine": {
+      "type": "object",
+      "required": ["text", "source_evidence_id", "source_sha256", "attestation_scope"],
+      "properties": {
+        "text": {"type": "string", "minLength": 1},
+        "source_evidence_id": {"type": "string", "minLength": 1},
+        "source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "attestation_scope": {"const": "placeholder_presence_only"}
+      },
+      "additionalProperties": false
+    },
     "signaturePlaceholder": {
       "type": "object",
       "required": [
@@ -2151,6 +2162,10 @@
         "signature_placeholders"
       ],
       "properties": {
+        "source_signature_lines": {
+          "type": "array", "uniqueItems": true,
+          "items": {"$ref": "#/$defs/sourceSignatureLine"}
+        },
         "id": {
           "type": "string",
           "minLength": 1
@@ -2238,6 +2253,10 @@
         "source_evidence_ids"
       ],
       "properties": {
+        "source_signature_lines": {
+          "type": "array", "uniqueItems": true,
+          "items": {"$ref": "#/$defs/sourceSignatureLine"}
+        },
         "id": {
           "type": "string",
           "minLength": 1

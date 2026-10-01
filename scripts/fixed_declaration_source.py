@@ -6,6 +6,7 @@ do not classify clauses or authorize a declaration requirement on their own.
 from __future__ import annotations
 
 import re
+import hashlib
 from typing import Any
 
 
@@ -51,6 +52,37 @@ def is_fixed_declaration_boundary(value: Any) -> bool:
     return is_source_region_heading(text) or bool(_SECTION_BOUNDARY.match(text))
 
 
+def is_blank_signature_line(value: Any) -> bool:
+    """Recognize a blank printed line, never a person's completed signature."""
+    if not isinstance(value, str):
+        return False
+    blank = r"[\s_＿]*"
+    date = rf"(?:日期[：:]?{blank})?(?:年{blank}月{blank}日{blank})?"
+    return bool(re.fullmatch(
+        rf"(?:(?:学位论文)?(?:作者|研究生|导师|指导教师)(?:签名|签字)[：:]?{blank}{date}"
+        rf"|日期[：:]?{blank}|年{blank}月{blank}日{blank})", value.strip()))
+
+
+def bound_signature_lines(group: dict, evidence_context: dict) -> list[dict]:
+    """Exact adjacent blank paragraphs attached to one complete source group."""
+    previous = evidence_context.get((group.get("body_evidence_ids") or [None])[-1], {})
+    lines = []
+    for eid in group.get("signature_evidence_ids", []):
+        record = evidence_context.get(eid, {})
+        location, prior = record.get("location", {}), previous.get("location", {})
+        if (record.get("kind") != "paragraph" or previous.get("kind") != "paragraph"
+                or not is_blank_signature_line(record.get("text"))
+                or location.get("part") != prior.get("part")
+                or type(prior.get("child_index")) is not int
+                or location.get("child_index") != prior["child_index"] + 1):
+            return []
+        lines.append({"text": record["text"], "source_evidence_id": eid,
+            "source_sha256": hashlib.sha256(record["text"].encode("utf-8")).hexdigest(),
+            "attestation_scope": "placeholder_presence_only"})
+        previous = record
+    return lines
+
+
 def derive_fixed_declaration_candidates(
     clauses: Any, evidence_context: dict[str, Any], *, anchor: Any,
 ) -> list[dict[str, Any]]:
@@ -68,6 +100,7 @@ def derive_fixed_declaration_candidates(
         heading_kind = clause.get("source_kind")
         heading_location = clause.get("location") if isinstance(clause.get("location"), dict) else {}
         body_clauses: list[dict[str, Any]] = []
+        signature_clauses: list[dict[str, Any]] = []
         for following in clauses[start + 1:]:
             if not isinstance(following, dict):
                 continue
@@ -95,6 +128,11 @@ def derive_fixed_declaration_candidates(
             ]
             source_text = evidence_texts[0] if evidence_texts else text
             if signature_pattern.search(source_text):
+                if body_clauses and is_blank_signature_line(source_text):
+                    signature_clauses.append(following)
+                    continue
+                break
+            if signature_clauses:
                 break
             if text.strip():
                 body_clauses.append(following)
@@ -114,6 +152,9 @@ def derive_fixed_declaration_candidates(
                 str(value) for item in body_clauses for value in item.get("evidence_ids", [])
             )),
             "evidence_ids": list(dict.fromkeys(evidence_ids)),
+            "signature_clause_ids": [item.get("id") for item in signature_clauses],
+            "signature_evidence_ids": list(dict.fromkeys(
+                str(value) for item in signature_clauses for value in item.get("evidence_ids", []))),
             "before_role": anchor,
             "policy": "source grouping only; host materializes each unique cited paragraph once",
         })

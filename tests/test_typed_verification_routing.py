@@ -178,7 +178,19 @@ class TypedVerificationRoutingTests(unittest.TestCase):
         check["review_context"]["source_content_verification_codes"] = []
         wire = source_reference_schema(native.OBLIGATION_COVERAGE_SCHEMA,
             build_source_reference_packet(request), coverage=True, constrain_requirement_links=True)
-        self.assertNotIn("anyOf", wire["properties"]["results"]["items"]["anyOf"][0])
+        # Verdict-shape coupling may use anyOf without closing author work.
+        # Assert the channel's actual behavior, not the old schema topology.
+        packet = build_source_reference_packet(request)
+        ref = packet["checks"][0]["source_spans"][0]["ref_id"]
+        for verdict in ("source_content_pending", "incomplete"):
+            raw = {"results": [{"check_id": check["check_id"], "verdict": verdict,
+                "rationale": "The explicit authoring instruction remains reportable.",
+                "evidence_refs": [ref], "identified_obligations": [{
+                    "source_ref": ref, "disposition": "authoring_content_pending",
+                    "requirement_refs": []}]}]}
+            with self.subTest(verdict=verdict):
+                self.assertEqual(validate_instance(raw, wire), [])
+        self.assertEqual(native_schema_support_errors(native_output_schema(wire)), [])
 
     def test_captured_typed_inventory_only_changes_pending_responsibility(self):
         response, chunk, _ = fixture(); frozen = copy.deepcopy(response)

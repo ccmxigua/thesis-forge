@@ -1515,10 +1515,25 @@ def _prompt(request: dict[str, Any]) -> str:
         elif isinstance(retry_feedback, dict) and retry_feedback.get("code") == TypedSourceAtomAlignmentError.code:
             if not typed_alignment_retry_feedback_is_bound(request):
                 raise NativeSemanticReviewError("typed alignment retry feedback is not current-source bound")
+            # Presentation only: preserve the immutable request/source packet,
+            # but show a typed correction next to its own check rather than as
+            # a batch-wide instruction that can contaminate unrelated headings.
+            packet.pop("retry_feedback", None)
+            for check in packet.get("checks", []):
+                disagreements = [
+                    item for item in retry_feedback["disagreements"]
+                    if item["check_id"] == check["check_id"]
+                ]
+                if disagreements:
+                    scoped = copy.deepcopy(retry_feedback)
+                    scoped["clause_ids"] = [check["check_id"]]
+                    scoped["disagreements"] = disagreements
+                    check["review_retry_feedback"] = scoped
             retry_instruction = (
-                "\nThe previous independent review disagreed with typed primary atom fields: "
-                + strict_json_dumps(retry_feedback["disagreements"])
-                + ". This is one corrective review of the identical candidate and exact source. "
+                "\nThe previous independent review disagreed with typed primary atom fields listed "
+                "only in the affected check's review_retry_feedback. That feedback applies ONLY to "
+                "that check_id, not to other checks or neighboring source paragraphs. "
+                "This is one corrective review of the identical candidate and exact source. "
                 "Re-assess each interpretation independently, not by copying to pass. A source_ref "
                 "selects a precise code-owned range: choose the specific atomic range rather than a "
                 "larger contextual span when it states the same duty. Where the primary typed dimensions "
@@ -1608,6 +1623,9 @@ def _prompt(request: dict[str, Any]) -> str:
                 "input, never represented or consistent coverage. Preserve every inventory entry. "
                 "If a source obligation truly is absent or weakened, identify that exact obligation as "
                 "unrepresented and use incomplete. If it is fully preserved, use represented and consistent. "
+                "If your independent reading establishes no source duty, use consistent with an empty "
+                "identified_obligations inventory and exact evidence_refs; do not invent a duty or "
+                "request a classification correction merely because the primary is informational. "
                 "Use ambiguous/uncertain only for genuine ambiguity in the source itself. This feedback does "
                 "not authorize changing the candidate, source, provenance, or links, and never authorizes "
                 "inventing or relabeling an obligation solely to pass validation.\n"
@@ -1654,19 +1672,22 @@ def _prompt(request: dict[str, Any]) -> str:
             "location, not field meaning: do not assume adjacency always means a particular field. "
             "Missing or non-unique geometry is not authority to guess. Neighbor text is context only; "
             "source_refs still select only this check's document_text. "
-            "Do not assume primary_obligations is complete or correct. A source obligation is "
+            "Do not assume primary_obligations is complete or correct. "
             "If a primary obligation proposes typed actor/action/target/source_quote and a known force, "
             "independently assess those dimensions and applicability from the source, return them with "
             "its primary_obligation_id, and report any disagreement rather than copying to pass validation. "
             "If those typed dimensions and condition are independently confirmed faithful, retain their "
             "exact representation; do not paraphrase a confirmed condition or select a wider contextual "
             "source_ref where a precise atomic source span is available. "
-            "represented only when a linked requirement property and its verification contract "
+            "A source obligation is represented only when a linked requirement property and its verification contract "
             "faithfully preserve its meaning, scope, modality, strength, and qualifiers. "
             "Every represented obligation must select at least one requirement_ref from this check's "
             "linked_requirements; recognizing a label, heading or row is not represented coverage. "
             "If the exact source and proven context establish no duty, leave identified_obligations empty "
-            "and retain evidence_refs and rationale. Do not invent an obligation merely to fill the array, "
+            "and use verdict=consistent with exact evidence_refs and a source-first rationale. "
+            "Informational is a valid primary classification, not itself an error or a correction trigger. "
+            "Never return incomplete with an empty inventory or cite a classification correction for a "
+            "mere heading, label or description that establishes no duty. Do not invent an obligation merely to fill the array, "
             "and do not assume absence of duties from primary classification or empty links. "
             "Treat an omitted obligation or a materially changed obligation as unrepresented, "
             "even when a linked requirement mentions the same topic or numeric value. In "
@@ -1729,7 +1750,9 @@ def _prompt(request: dict[str, Any]) -> str:
             "one unlinked source_content_verification_pending entry with that pending_work_code and verdict "
             "source_content_verification_pending. The condition is not verified and the decision belongs to "
             "the author; never infer absence of materials or delete a chapter. An informational primary "
-            "classification must receive the existing bounded classification correction, not be accepted. "
+            "classification may require the bounded correction ONLY when THIS check's exact source "
+            "supports its registered conditional_section_omission_verification atom. This rule does not "
+            "apply to informational headings, labels or checks with no such source duty. "
             "For every generic verification, including keyword provenance/topic correspondence, omit "
             "pending_work_code (emit null in native output) unless that exact source supports a registered "
             "pending_source_work atom. A human task does not by itself authorize an anti-excerpt, repetition "

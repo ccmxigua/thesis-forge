@@ -429,6 +429,37 @@ def source_reference_schema(
                     disposition_statuses={"source_content_verification_pending": "unresolved"},
                     excluded_verdicts={"source_content_pending", "source_content_verification_pending"},
                 )
+            if constrain_requirement_links:
+                # A diagnostic verdict must identify something to diagnose.
+                # Keep typed mismatches, author work and mixed omissions
+                # reportable: the canonical semantic validator, not this
+                # generation shape, decides whether the inventory justifies
+                # incomplete. Never project an empty result to consistent.
+                alternatives = branch.get("anyOf") or [copy.deepcopy(branch)]
+                nonempty_diagnostics = []
+                for alternative in alternatives:
+                    verdicts = alternative["properties"]["verdict"].get("enum", [])
+                    if "incomplete" not in verdicts:
+                        continue
+                    diagnostic = copy.deepcopy(alternative)
+                    diagnostic["properties"]["verdict"] = {"enum": ["incomplete"]}
+                    diagnostic["properties"]["identified_obligations"].update({
+                        "minItems": 1,
+                        "description": (
+                            "Incomplete must enumerate at least one exact-source diagnostic obligation. "
+                            "No source duty: consistent with an empty inventory, not incomplete. "
+                            "A known typed mismatch or authorized pending classification correction "
+                            "still needs its explicit source atom; never invent one to satisfy this shape."
+                        ),
+                    })
+                    alternative["properties"]["verdict"] = {
+                        "enum": [value for value in verdicts if value != "incomplete"]
+                    }
+                    nonempty_diagnostics.append(diagnostic)
+                branch["anyOf"] = [
+                    alternative for alternative in alternatives
+                    if alternative["properties"]["verdict"].get("enum")
+                ] + nonempty_diagnostics
         branches.append(branch)
     schema["properties"]["results"]["items"] = {"anyOf": branches}
     return schema

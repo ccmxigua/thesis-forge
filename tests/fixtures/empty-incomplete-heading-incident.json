@@ -1,0 +1,28 @@
+{
+  "run_id": "0e814500-7dff-412f-a9d9-4cbe965d6506",
+  "origin": "independent-review-chunk-0003-attempt-01-provider-attempt-02",
+  "request_file_sha256": "826424fd2149df71d24a8fab9ee0e56ca092adfefe5dd165427660dbfd247d2f",
+  "compiled_file_sha256": "5857af69a7659e4093cc8196cb76a227c16f0a3ab3c789a2c212ea8317887a44",
+  "check": {
+    "check_id": "C00039",
+    "document_text": "非公开学位论文标注说明",
+    "review_context": {
+      "classification": "informational",
+      "requires_requirement": false,
+      "primary_obligations": [],
+      "linked_requirements": [],
+      "machine_obligation_ids": [],
+      "pending_source_work": [],
+      "manual_review_codes": [],
+      "source_content_verification_codes": []
+    }
+  },
+  "rejected_result": {
+    "check_id": "C00039",
+    "verdict": "incomplete",
+    "rationale": "The source is a heading only and establishes no separate duty. The informational classification still requires the bounded classification correction.",
+    "identified_obligations": [],
+    "evidence_quotes": ["非公开学位论文标注说明"],
+    "machine_obligation_ids": []
+  }
+}

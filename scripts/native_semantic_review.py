@@ -39,6 +39,7 @@ from source_obligation_compiler import (
     PUBLICATION_DEFAULT_OBLIGATION_ID,
     PUBLIC_ADMIN_BLANK_OBLIGATION_ID,
     compile_source_content_verification_codes,
+    typed_source_verification_inventory_is_bound,
     compile_unresolved_manual_review_codes,
     has_explicit_authoring_action_cue,
     has_mixed_external_document_action_signal,
@@ -855,7 +856,12 @@ def validate_obligation_coverage_response(
                         }
                         and context.get("requires_requirement") is False
                         and not linked
-                        and not context.get("primary_obligations")
+                        and (not context.get("primary_obligations") or (
+                            classification == "requires_source_verification"
+                            and typed_source_verification_inventory_is_bound(
+                                source_text, context.get("primary_obligations"),
+                            )
+                        ))
                         and not expected_machine_ids
                         and not live_manual_codes
                         and not has_explicit_authoring_action_cue(source_text)
@@ -1684,6 +1690,10 @@ def _prompt(request: dict[str, Any]) -> str:
             "informational or the source obligation is otherwise not represented. It remains pending and blocks "
             "submission. Do not rely on keyword-specific wording or a lexical allowlist outside those "
             "code-owned codes. "
+            "A typed primary inventory in requires_source_verification may retain the original model's "
+            "actor/action/target wording while code routes its status as unresolved and responsibility as human. "
+            "This preserves observations, not proof of their semantic correctness or a request to author content. "
+            "Re-read the source independently and map each atom; actual semantic disagreement must remain rejected. "
             "If the same clause has separately represented executable "
             "obligations, list those as represented with exact valid refs and keep verification obligations unlinked. "
             "If the primary classification is informational, report the verification finding anyway; the bridge may "

@@ -393,7 +393,7 @@ class RequirementsPipelineTest(unittest.TestCase):
         )
         self.assertEqual(
             projection["projection_policy_version"],
-            "source-verification-classification-v3",
+            "source-verification-classification-v4",
         )
         self.assertEqual(projection["repairs"][0]["provenance"], expected_provenance)
         self.assertEqual(projection["repairs"][0]["before_classification"], "requires_source_content")

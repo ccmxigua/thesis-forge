@@ -1632,7 +1632,7 @@ class HostAgentBridgeTests(unittest.TestCase):
             self.assertEqual(bridge.validate_host_agent_response(accepted, chunk), [])
             self.assertEqual(
                 audit["source_verification_classification_policy_version"],
-                "source-verification-classification-v3",
+                "source-verification-classification-v4",
             )
             self.assertEqual(
                 accepted["clause_reviews"][0]["classification"],

@@ -843,6 +843,20 @@ identities are well formed, no executable requirement is linked, and the
 source has no explicit authoring cue. Independent review still re-reads that
 same source, and a mistaken multi-item authoring disposition receives only a
 bounded re-review, never automatic approval.
+For typed inventories this projection additionally requires the exact current
+evidence binding, explicit normative basis, a complete pure-verification source
+grammar, conservative verification actor/action/target grammars, and no
+conflicting or executable edge. Unknown typed wording does not take this
+code-projection path; it retains the ordinary semantic review path. It retains every typed atom
+and all semantic dimensions; only the classification and responsibility
+status/route become `requires_source_verification`, `unresolved` and `human`.
+Display reasons are code-owned pending-verification explanations; contradictory
+model reasons stay in the original raw/audit rather than becoming author TODOs.
+Original and projected inventories remain separately hashed in the audit.
+An incorrect typed action is not thereby proven correct: fresh independent
+review must still map and assess every atom. A mislabelled authoring disposition
+may receive the same bounded unchanged-candidate reread for this proven typed
+pending shape; actual semantic disagreements and retry exhaustion still reject.
 For source-owned author work items, an explicit positive section-writing or
 research-summary instruction may coexist with a separate quality prohibition
 such as not copying literature. Code recognizes the positive instruction in

@@ -281,6 +281,7 @@ from source_obligation_compiler import (  # noqa: E402
     compile_continuation_caption_requirement,
     compile_known_source_obligation_ids,
     compile_source_content_verification_codes,
+    typed_source_verification_inventory_is_bound,
     has_explicit_authoring_action_cue,
     has_mixed_external_document_action_signal,
     materialize_complete_abstract_source_constraints,
@@ -12576,7 +12577,13 @@ def _run_independent_obligation_coverage_review(
                 checks_by_id[clause_id]["document_text"],
             )
             and not checks_by_id[clause_id]["review_context"].get("linked_requirements")
-            and not checks_by_id[clause_id]["review_context"].get("primary_obligations")
+            and (not checks_by_id[clause_id]["review_context"].get("primary_obligations") or (
+                checks_by_id[clause_id]["review_context"].get("classification") == "requires_source_verification"
+                and typed_source_verification_inventory_is_bound(
+                    checks_by_id[clause_id]["document_text"],
+                    checks_by_id[clause_id]["review_context"].get("primary_obligations"),
+                )
+            ))
             and not checks_by_id[clause_id]["review_context"].get("machine_obligation_ids")
             and not checks_by_id[clause_id]["review_context"].get("manual_review_codes")
             for clause_id in review_error.clause_ids

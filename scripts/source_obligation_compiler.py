@@ -13,7 +13,7 @@ import re
 from typing import Any
 
 
-SOURCE_VERIFICATION_CLASSIFICATION_POLICY_VERSION = "source-verification-classification-v3"
+SOURCE_VERIFICATION_CLASSIFICATION_POLICY_VERSION = "source-verification-classification-v4"
 SOURCE_KEYWORD_CONSTRAINT_PROJECTION_POLICY_VERSION = "source-keyword-constraints-v3"
 SOURCE_HEADING_BINDING_POLICY_VERSION = "source-heading-binding-v1"
 
@@ -2471,6 +2471,71 @@ _PURE_KEYWORD_ORIGIN_CHECK = re.compile(
     r"用以表示全文主题内容信息的单词或术语[，,]在论文中有明确出处)[。.]?$"
 )
 
+# A source-owned routing projection is not a generic typed-semantic repair.
+# These closed role/action grammars exclude authoring and unrelated targets.
+# Unknown model wording still uses the ordinary independent semantic path.
+_KEYWORD_VERIFICATION_TARGET = re.compile(
+    r"(?:(?:Chinese|English|thesis|paper|selected|keywords?|list|terms?|source|origin|"
+    r"provenance|topic|topical|correspondence|traceability|and|full-topic|clear|in|the|of|"
+    r"locations?|content|choices|information|selection)\s*)+\Z|"
+    r"(?:中文|英文|论文|的|关键词|关键字|列表|术语|来源|出处|主题|对应关系|溯源|及|与|和|可追溯性)+\Z",
+    re.IGNORECASE,
+)
+_KEYWORD_VERIFICATION_ACTION = re.compile(
+    r"(?:(?:provide\s+and\s+)?(?:verify|check|confirm|audit|review|trace|validate))\s+"
+    r"(?:(?:Chinese|English|thesis|paper|selected|keywords?|list|terms?|source|origin|"
+    r"provenance|topic|topical|correspondence|traceability|and|full-topic|clear|in|the|of|"
+    r"locations?|content|choices|information|selection|with|from)\s*)+\Z|"
+    r"(?:核验|核对|检查|验证|确认)(?:中文|英文|论文|的|关键词|关键字|列表|术语|来源|出处|主题|对应关系|溯源|及|与|和|可追溯性)+\Z",
+    re.IGNORECASE,
+)
+_KEYWORD_VERIFICATION_ACTOR = re.compile(
+    r"(?:author|reviewer|student|writer)(?:\s+(?:or|and)\s+(?:author|reviewer|student|writer))*\Z|"
+    r"(?:作者|审查人|审核人|学生)(?:(?:或|和|与)(?:作者|审查人|审核人|学生))*\Z", re.IGNORECASE,
+)
+
+
+def typed_source_verification_inventory_is_bound(
+    source_text: Any, obligations: Any, *, expected_status: str = "unresolved",
+) -> bool:
+    """Authorize responsibility routing, never a rewrite of typed semantics.
+
+    A registered code alone is insufficient: the whole selected source must
+    be a pure verification instruction. Retain every typed atom, quotation,
+    modality and applicability for fresh independent semantic assessment.
+    """
+    allowed = {"id", "status", "reason", "actor", "action", "target",
+               "condition", "source_quote", "force", "applicability", "route"}
+    if (not isinstance(source_text, str)
+            or _PURE_KEYWORD_ORIGIN_CHECK.fullmatch(source_text) is None
+            or not compile_source_content_verification_codes(source_text)
+            or _CONTEXT_UNSAFE.search(source_text)
+            or not isinstance(obligations, list) or not obligations):
+        return False
+    ids = []
+    for atom in obligations:
+        if (not isinstance(atom, dict) or not set(atom) <= allowed
+                or not all(isinstance(atom.get(k), str) and atom[k].strip()
+                           and atom[k] != "unknown"
+                           for k in ("id", "reason", "actor", "action", "target", "source_quote"))
+                or atom.get("status") != expected_status
+                or atom.get("condition") is not None
+                or _KEYWORD_VERIFICATION_ACTOR.fullmatch(atom["actor"]) is None
+                or _KEYWORD_VERIFICATION_ACTION.fullmatch(atom["action"]) is None
+                or _KEYWORD_VERIFICATION_TARGET.fullmatch(atom["target"]) is None
+                or re.search(r"关键词|关键字|\bkeywords?\b", atom["target"], re.IGNORECASE) is None
+                or not isinstance(atom.get("force"), str)
+                or atom.get("force") != "required"
+                or not isinstance(atom.get("applicability"), str)
+                or atom.get("applicability") not in {"applicable", "not_applicable", "unknown", "conflicted"}
+                or atom["source_quote"] not in source_text
+                or compile_source_content_verification_codes(atom["source_quote"])
+                    != compile_source_content_verification_codes(source_text)
+                or atom.get("route") not in (None, "input" if expected_status == "requires_source_content" else "human")):
+            return False
+        ids.append(atom["id"])
+    return len(ids) == len(set(ids))
+
 
 def materialize_source_verification_classifications(
     response: Any, clauses: Any, *, provenance: Any = None,
@@ -2491,6 +2556,9 @@ def materialize_source_verification_classifications(
     An unresolved model claim can take this route only with an exact current
     evidence binding, explicit normative basis, exclusively unresolved primary
     duties, and no source ambiguity, condition, executable rule, or conflict.
+    Typed inventories use that stronger current-evidence/pure-source boundary
+    too, and remain intact: only responsibility status/route change to pending
+    human verification. Typed semantics never disappear into an empty list.
     """
     if (
         not isinstance(response, dict)
@@ -2538,9 +2606,16 @@ def materialize_source_verification_classifications(
         )
         source_binding = None
         expected_obligation_status = "requires_source_content"
-        if baseline_classification == "unresolved":
+        typed_inventory = typed_source_verification_inventory_is_bound(
+            source_text, obligations, expected_status=(
+                "unresolved" if baseline_classification == "unresolved" else "requires_source_content"
+            ),
+        )
+        if baseline_classification == "unresolved" or typed_inventory:
             source_binding = verified_current_source_span(clause, evidence_context)
-            expected_obligation_status = "unresolved"
+            expected_obligation_status = (
+                "unresolved" if baseline_classification == "unresolved" else "requires_source_content"
+            )
             if (
                 source_binding is None
                 or source_binding[1] != source_text
@@ -2561,7 +2636,7 @@ def materialize_source_verification_classifications(
             or baseline_classification not in {"requires_source_content", "unresolved"}
             or not isinstance(obligations, list)
             or not obligations
-            or any(
+            or (not typed_inventory and any(
                 not isinstance(item, dict)
                 or set(item) != {"id", "status", "reason"}
                 or not isinstance(item.get("id"), str)
@@ -2570,7 +2645,7 @@ def materialize_source_verification_classifications(
                 or not item["reason"]
                 or item.get("status") != expected_obligation_status
                 for item in obligations
-            )
+            ))
             or len({item["id"] for item in obligations}) != len(obligations)
             or any(
                 isinstance(requirement, dict)
@@ -2585,7 +2660,17 @@ def materialize_source_verification_classifications(
         ).encode("utf-8")).hexdigest()
         before_review = copy.deepcopy(review)
         review["classification"] = "requires_source_verification"
-        review["obligations"] = []
+        if typed_inventory:
+            # Reasons are presentation metadata, not a typed source action.
+            # Keep the model's prose in the immutable raw/audit; do not reuse a
+            # contradictory request to author content as the human-work label.
+            review["reason"] = "The current source requires human verification of existing keyword provenance; this routing does not assert missing author content or verified compliance."
+            for atom in review["obligations"]:
+                atom["status"] = "unresolved"
+                atom["route"] = "human"
+                atom["reason"] = "Verify the existing keyword source and topic correspondence against the thesis; no verification result is asserted."
+        else:
+            review["obligations"] = []
         after_response_sha256 = hashlib.sha256(json.dumps(
             projected, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
         ).encode("utf-8")).hexdigest()
@@ -2609,6 +2694,8 @@ def materialize_source_verification_classifications(
             "current_evidence_binding_verified": source_binding is not None,
             "original_primary_review": before_review,
             "original_primary_obligations": copy.deepcopy(obligations),
+            "typed_inventory_preserved": typed_inventory,
+            "projected_primary_obligations": copy.deepcopy(review["obligations"]),
             "original_review_sha256": hashlib.sha256(json.dumps(
                 before_review, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
             ).encode("utf-8")).hexdigest(),

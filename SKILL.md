@@ -850,6 +850,15 @@ effects on its source-linked cover requirement:
 `non_public_administration.publication_default_policy="unapproved_is_public"`
 and `public_policy="blank"`. The two effects need separate obligation entries.
 This source rule does not establish whether a real approval was granted.
+The condition “unapproved” does not itself instruct anyone to obtain approval.
+For the complete, source-bound two-effect policy recognized by the compiler,
+an added unverifiable approval atom is rejected locally. A bounded primary
+retry may propose removing only the unsupported atoms, preserving both covered
+policies, the requirement graph, and neighboring approval duties verbatim.
+That proposal is not a code deletion or proof of equivalence: its complete
+current-source feedback, full contract validation and fresh source-first
+independent review are required before acceptance. Quoted, incomplete, extended
+or unrecognized prose remains on the ordinary semantic-review path.
 
 An administrative approval/marking sentence is not an administrative field
 table. If the current source does not name exact fields such as an approval

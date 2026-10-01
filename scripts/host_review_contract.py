@@ -9,6 +9,7 @@ from typing import Any
 
 from compliance import classification_requires_requirement
 from source_atom_metadata import bind_atom_quote
+from publication_policy_inventory import policy_inventory_errors, CODE as POLICY_INVENTORY_CODE
 from document_text_font import document_font_scope_errors
 from evidence_context_guards import sample_content_guard
 from format_spec_validation import schema_support_errors, validate_instance
@@ -382,6 +383,8 @@ def contract_error_records(
             "clause_id": clause_id,
             "raw_error": text,
             "response_sha256": _response_sha256(response) if response is not None else None,
+            **({"source_chunk_sha256": _response_sha256(chunk)}
+               if code == POLICY_INVENTORY_CODE else {}),
             "allowed_values": (
                 [
                     "explicit_normative_text", "template_structure", "fixed_statement",
@@ -391,6 +394,7 @@ def contract_error_records(
             "matching_requirement_indexes": matching,
             "requirement_count": len(requirements) if isinstance(requirements, list) else None,
             "semantic_review_required": code in {
+                POLICY_INVENTORY_CODE,
                 "partial_clause_coverage", "requirement_relation_mismatch",
                 "missing_derived_requirement", "informational_requirement_forbidden",
                 "mixed_execution_classification_relation", "missing_clause_review",
@@ -515,6 +519,8 @@ def contract_error_records(
             or "source_fragment_literal_conflict" in lowered
         ):
             code = "source_fragment_binding_violation"
+        elif POLICY_INVENTORY_CODE in lowered:
+            code = POLICY_INVENTORY_CODE
         elif "normative_basis" in lowered:
             code = "normative_basis_invalid"
         elif "requirement_index_not_backed_by_clause" in lowered:
@@ -1589,6 +1595,7 @@ def validate_response(response: Any, chunk: dict[str, Any]) -> list[str]:
     errors.extend(_publication_default_policy_binding_errors(
         response, chunk.get("clauses"),
     ))
+    errors.extend(policy_inventory_errors(response, chunk))
     if contract_version not in SUPPORTED_HOST_REVIEW_CONTRACTS:
         errors.append(f"contract_version_unsupported:{contract_version!r}")
     response_schema = chunk.get("response_schema")

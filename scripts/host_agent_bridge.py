@@ -253,6 +253,10 @@ from declaration_signature_projection import project_signature_only_declarations
 from responsibility_ledger import canonical_review_atom
 from repair_transaction import repair_receipt
 from source_atom_metadata import project_atom_metadata, bind_atom_quote
+from publication_policy_inventory import (
+    policy_inventory_retry_ledger, CODE as POLICY_INVENTORY_CODE,
+    RULE_ID as POLICY_INVENTORY_RULE,
+)
 from source_quote_reassessment import quote_context_reassessment, RULE_ID as QUOTE_REASSESSMENT_RULE
 from source_condition_reassessment import (
     source_atom_feedback, condition_reassessment, CODE as CONDITION_REASSESSMENT_CODE,
@@ -743,6 +747,7 @@ _BASE_CONTRACT_REPAIR_RULES = (
     "For a cover requirement with an empty required institution string and the declared neutral placeholder policy, preserve the cover structure and use '——'; never copy a school name or infer an institution identity from nearby evidence.",
     "Do not fabricate evidence or guess a semantic classification. Make only the mechanical schema corrections required by the supplied error, then regenerate the complete response from the current chunk.",
     "Administrative approval/marking tables belong under cover.non_public_administration, must be conditional on thesis_profile.security_level with an equals or in condition selecting restricted/classified theses, and must be blank for public theses. When the current source explicitly says both unapproved theses are public and the item is blank for public theses, preserve TWO atomic obligations: publication_default_policy='unapproved_is_public' and public_policy='blank', each represented in the clause review. Never treat missing approval evidence as not_approved. If the current chunk contains only this administrative region, cover.fields may be an empty array; never duplicate administrative fields into ordinary cover.fields. Do not use not_equals as the executable binding. Bind approval-number and approval-date labels to approval_number and approval_date; never substitute classification_number or completion_date. When one visible 保密期限 label describes an explicit two-ended date range, preserve two distinct fields in source order: first embargo_start, then embargo_until; do not collapse both endpoints into embargo_until.",
+    "In a complete two-effect publication policy, 'unapproved' is the condition for default-public handling, not a third action instructing someone to obtain approval. Keep real consent/application/approval instructions on their own operative source clauses; context and a short condition quote must not duplicate those actions on the policy clause. If the current source actually contains another action or an exception, preserve it for semantic review rather than applying this two-effect interpretation.",
     "conditional_constraints has abstract-language and degree-dependent abstract fields only; it cannot represent a public-blank cover condition. Keep that duty on a current-source-bound cover.non_public_administration.public_policy='blank' requirement, and never add a second all-null conditional_constraints requirement. Preserve an independent unrepresentable duty as unresolved instead of inventing a payload.",
     "fixed_declaration_candidates group source text only; they do not classify every grouped clause as executable. A declarations requirement may link only executable/covered/verify_existing clauses and their backing evidence. Leave real-world consent, application, approval, signature, and seal clauses external and unlinked, even when their wording is printed. Use the candidate's exact source_evidence_ids for text materialization; never create an empty or title-only declaration. Administrative approval/marking regions belong to cover.non_public_administration, not declarations.",
     "Input prerequisite keys are namespace-bound by kind: metadata uses registered thesis_profile. paths or the exact aggregate key thesis_profile for the whole supplied profile; source_content uses source_inventory., template_resource uses template_profile., and runtime uses runtime. Whole-profile presence is not completeness or confirmation of nested fields: declare specific required fields separately. thesis_profile and thesis_profile.cover_metadata are distinct inputs, not interchangeable aliases. Never emit runtime_context.* or invent an unregistered path.",
@@ -1003,6 +1008,18 @@ def _structured_contract_repair_guidance(
                 "or change role, clause_ids, evidence_ids or classification. Preserve the parent and fail closed "
                 "if the identity is wrong. New requirements use an omitted/null existing_requirement_id on the initial "
                 "response, never a self-allocated or incremented ID."
+            )
+        elif code == POLICY_INVENTORY_CODE:
+            rule = (
+                f"At {pointer}, the exact complete source states two publication/blank-item policies, "
+                "not an instruction to obtain approval. Re-read that clause, never its neighboring "
+                "approval sentence as an executable scope. Propose removing only that clause's "
+                "unsupported unverifiable atoms and use a non-mixed executable classification; "
+                "preserve its two covered policy atoms verbatim and every requirement, source edge "
+                "and neighboring approval obligation. Only this clause's explanatory reason may "
+                "also change. No code deletion or approval is inferred; full validation and a fresh "
+                "source-first independent review must pass. If that constrained correction is "
+                "not supported by the selected source, return unchanged and fail closed."
             )
         elif code == "normative_basis_invalid":
             rule = (
@@ -5696,6 +5713,14 @@ def _retry_semantic_change_error(
         if comparison_current_response is not None else current_response
     )
     changed_paths = _retry_change_paths(comparison_previous, comparison_current)
+    policy_ledger = policy_inventory_retry_ledger(
+        comparison_previous, comparison_current, records, changed_paths, chunk,
+        validate=validate_host_agent_response, make_records=contract_error_records,
+    )
+    if policy_ledger is not None:
+        if authorization_out is not None:
+            authorization_out.extend(copy.deepcopy(policy_ledger))
+        return None, changed_paths
     selector_ledger = _declaration_selector_retry_ledger(
         previous_response, current_response,
         model_retry_response if model_retry_response is not None else current_response,
@@ -10529,6 +10554,16 @@ minimum change. The embedded payload excludes bridge-owned provenance:
         )
     if retry_parent_response_path is None:
         retry_invariant = ""
+    elif retry_codes == {POLICY_INVENTORY_CODE}:
+        retry_invariant = """\nFINAL RETRY INVARIANT: source-bound publication-policy inventory proposal only.
+The exact selected policy clause is not the neighboring approval instruction.
+Only remove the named clause's unsupported unverifiable atoms, select a
+non-mixed executable classification and correct that review's reason. Preserve
+both covered policy atoms verbatim, all neighboring reviews, all requirements,
+conditions, properties, source links and provenance. Never fabricate approval
+or move an external duty across clause boundaries. This is a primary proposal,
+not mechanical equivalence; complete validation and fresh source-first
+independent review remain mandatory."""
     elif target_retry:
         retry_invariant = """\nFINAL RETRY INVARIANT: this is a source-bound PRIMARY TARGET REASSESSMENT,
 not an instruction to copy the independent reviewer's wording or force agreement.
@@ -14130,7 +14165,10 @@ def run_bridge(
                         audit["retry_stage_comparison"] = comparison_audit
                         if semantic_changes:
                             audit["semantic_retry_changes"] = semantic_changes
-                            if any(item.get("rule_id") == QUOTE_REASSESSMENT_RULE
+                            if any(item.get("rule_id") == POLICY_INVENTORY_RULE
+                                   for item in pending_retry_authorizations):
+                                audit["semantic_retry_change_policy"] = POLICY_INVENTORY_RULE
+                            elif any(item.get("rule_id") == QUOTE_REASSESSMENT_RULE
                                    for item in pending_retry_authorizations):
                                 audit["semantic_retry_change_policy"] = QUOTE_REASSESSMENT_RULE
                             elif any(item.get("rule_id") == TARGET_REASSESSMENT_RULE

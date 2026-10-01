@@ -1,0 +1,2318 @@
+{
+  "origin": {
+    "commit": "220c73f37138d34377e4f6289ec7e86c16f79351",
+    "run": "fresh-bsu-codex-6luna-20261001T120944Z-220c73f",
+    "chunk_index": 3,
+    "boundary": "captured source and primary proposal; not accepted semantic truth"
+  },
+  "clauses": [
+    {
+      "id": "C00039",
+      "text": "非公开学位论文标注说明",
+      "evidence_ids": [
+        "E00036"
+      ],
+      "source_kind": "paragraph",
+      "location": {
+        "part": "document",
+        "child_index": 43,
+        "order": 35
+      },
+      "part_index": 0,
+      "source_span": {
+        "evidence_id": "E00036",
+        "start_offset": 0,
+        "end_offset": 11,
+        "text": "非公开学位论文标注说明",
+        "source_sha256": "a82ce21492118786e1a0748e83eb48abe0b690207b53e7544d5adc8a5b776fd6",
+        "location": {
+          "part": "document",
+          "child_index": 43,
+          "order": 35
+        }
+      },
+      "source_text_full": "非公开学位论文标注说明",
+      "deterministic_obligation_keys": []
+    },
+    {
+      "id": "C00040",
+      "text": "根据北京体育大学有关规定，非公开学位论文须经指导教师同意、作者本人申请和相关部门批准方能标注",
+      "evidence_ids": [
+        "E00037"
+      ],
+      "source_kind": "paragraph",
+      "location": {
+        "part": "document",
+        "child_index": 44,
+        "order": 36
+      },
+      "part_index": 0,
+      "source_span": {
+        "evidence_id": "E00037",
+        "start_offset": 0,
+        "end_offset": 46,
+        "text": "根据北京体育大学有关规定，非公开学位论文须经指导教师同意、作者本人申请和相关部门批准方能标注",
+        "source_sha256": "f3818f81346ef81482f4a42671b3042f4241b2497af569a26e22e9553305d834",
+        "location": {
+          "part": "document",
+          "child_index": 44,
+          "order": 36
+        }
+      },
+      "source_text_full": "根据北京体育大学有关规定，非公开学位论文须经指导教师同意、作者本人申请和相关部门批准方能标注。未经批准的均为公开学位论文（公开的学位论文本项为空白）。",
+      "deterministic_obligation_keys": []
+    },
+    {
+      "id": "C00041",
+      "text": "未经批准的均为公开学位论文（公开的学位论文本项为空白）",
+      "evidence_ids": [
+        "E00037"
+      ],
+      "source_kind": "paragraph",
+      "location": {
+        "part": "document",
+        "child_index": 44,
+        "order": 36
+      },
+      "part_index": 1,
+      "source_span": {
+        "evidence_id": "E00037",
+        "start_offset": 47,
+        "end_offset": 74,
+        "text": "未经批准的均为公开学位论文（公开的学位论文本项为空白）",
+        "source_sha256": "f3818f81346ef81482f4a42671b3042f4241b2497af569a26e22e9553305d834",
+        "location": {
+          "part": "document",
+          "child_index": 44,
+          "order": 36
+        }
+      },
+      "source_text_full": "根据北京体育大学有关规定，非公开学位论文须经指导教师同意、作者本人申请和相关部门批准方能标注。未经批准的均为公开学位论文（公开的学位论文本项为空白）。",
+      "deterministic_obligation_keys": [
+        "cover.publication_default.public_blank",
+        "cover.publication_default.unapproved_is_public"
+      ]
+    },
+    {
+      "id": "C00042",
+      "text": "论文题目",
+      "evidence_ids": [
+        "E00038"
+      ],
+      "source_kind": "table_cell",
+      "location": {
+        "part": "document",
+        "table_child_index": 45,
+        "row": 0,
+        "column": 0,
+        "paragraph": 0,
+        "order": 37
+      },
+      "part_index": 0,
+      "source_span": {
+        "evidence_id": "E00038",
+        "start_offset": 0,
+        "end_offset": 4,
+        "text": "论文题目",
+        "source_sha256": "d052ec08edf9b29d00cc744b10e61a4854b3abb79bea12d8b7204ea7ed156a92",
+        "location": {
+          "part": "document",
+          "table_child_index": 45,
+          "row": 0,
+          "column": 0,
+          "paragraph": 0,
+          "order": 37
+        }
+      },
+      "source_text_full": "论文题目",
+      "deterministic_obligation_keys": []
+    },
+    {
+      "id": "C00043",
+      "text": "申请密级",
+      "evidence_ids": [
+        "E00039"
+      ],
+      "source_kind": "table_cell",
+      "location": {
+        "part": "document",
+        "table_child_index": 45,
+        "row": 1,
+        "column": 0,
+        "paragraph": 0,
+        "order": 38
+      },
+      "part_index": 0,
+      "source_span": {
+        "evidence_id": "E00039",
+        "start_offset": 0,
+        "end_offset": 4,
+        "text": "申请密级",
+        "source_sha256": "01858a301947d7afbedee2c69d058706110864005fab28d134df0a28e6271726",
+        "location": {
+          "part": "document",
+          "table_child_index": 45,
+          "row": 1,
+          "column": 0,
+          "paragraph": 0,
+          "order": 38
+        }
+      },
+      "source_text_full": "申请密级",
+      "deterministic_obligation_keys": []
+    },
+    {
+      "id": "C00044",
+      "text": "□限制(≤2年) □秘密(≤10年) □机密(≤20年)",
+      "evidence_ids": [
+        "E00040"
+      ],
+      "source_kind": "table_cell",
+      "location": {
+        "part": "document",
+        "table_child_index": 45,
+        "row": 1,
+        "column": 1,
+        "paragraph": 0,
+        "order": 39
+      },
+      "part_index": 0,
+      "source_span": {
+        "evidence_id": "E00040",
+        "start_offset": 0,
+        "end_offset": 36,
+        "text": "□限制(≤2年)     □秘密(≤10年)     □机密(≤20年)",
+        "source_sha256": "dd6b0df2ff75f7457c5c672a3db675e6a7958b681a581b357e02ca4794edf0c3",
+        "location": {
+          "part": "document",
+          "table_child_index": 45,
+          "row": 1,
+          "column": 1,
+          "paragraph": 0,
+          "order": 39
+        }
+      },
+      "source_text_full": "□限制(≤2年) □秘密(≤10年) □机密(≤20年)",
+      "deterministic_obligation_keys": [
+        "cover.security_marking_options"
+      ]
+    },
+    {
+      "id": "C00045",
+      "text": "保密期限",
+      "evidence_ids": [
+        "E00041"
+      ],
+      "source_kind": "table_cell",
+      "location": {
+        "part": "document",
+        "table_child_index": 45,
+        "row": 2,
+        "column": 0,
+        "paragraph": 0,
+        "order": 40
+      },
+      "part_index": 0,
+      "source_span": {
+        "evidence_id": "E00041",
+        "start_offset": 0,
+        "end_offset": 4,
+        "text": "保密期限",
+        "source_sha256": "f5ddae09be82b19357fdc3eae5262cf088368f725cc90ff31dbae6a5f14ad472",
+        "location": {
+          "part": "document",
+          "table_child_index": 45,
+          "row": 2,
+          "column": 0,
+          "paragraph": 0,
+          "order": 40
+        }
+      },
+      "source_text_full": "保密期限",
+      "deterministic_obligation_keys": []
+    },
+    {
+      "id": "C00046",
+      "text": "年 月 日 至 年 月 日",
+      "evidence_ids": [
+        "E00042"
+      ],
+      "source_kind": "table_cell",
+      "location": {
+        "part": "document",
+        "table_child_index": 45,
+        "row": 2,
+        "column": 1,
+        "paragraph": 0,
+        "order": 41
+      },
+      "part_index": 0,
+      "source_span": {
+        "evidence_id": "E00042",
+        "start_offset": 0,
+        "end_offset": 35,
+        "text": "年    月    日  至        年     月     日",
+        "source_sha256": "6e1ba84453081720a6882333fa12fcec66f71e31792e9a97aa638fcfcd4e1c0d",
+        "location": {
+          "part": "document",
+          "table_child_index": 45,
+          "row": 2,
+          "column": 1,
+          "paragraph": 0,
+          "order": 41
+        }
+      },
+      "source_text_full": "年 月 日 至 年 月 日",
+      "deterministic_obligation_keys": []
+    },
+    {
+      "id": "C00047",
+      "text": "审批表编号",
+      "evidence_ids": [
+        "E00043"
+      ],
+      "source_kind": "table_cell",
+      "location": {
+        "part": "document",
+        "table_child_index": 45,
+        "row": 3,
+        "column": 0,
+        "paragraph": 0,
+        "order": 42
+      },
+      "part_index": 0,
+      "source_span": {
+        "evidence_id": "E00043",
+        "start_offset": 0,
+        "end_offset": 5,
+        "text": "审批表编号",
+        "source_sha256": "15c964fede2e7a4cfce70eb5e37b0c54d487a5399db47e4af2f334d04e760a98",
+        "location": {
+          "part": "document",
+          "table_child_index": 45,
+          "row": 3,
+          "column": 0,
+          "paragraph": 0,
+          "order": 42
+        }
+      },
+      "source_text_full": "审批表编号",
+      "deterministic_obligation_keys": []
+    },
+    {
+      "id": "C00048",
+      "text": "批准日期",
+      "evidence_ids": [
+        "E00044"
+      ],
+      "source_kind": "table_cell",
+      "location": {
+        "part": "document",
+        "table_child_index": 45,
+        "row": 3,
+        "column": 2,
+        "paragraph": 0,
+        "order": 43
+      },
+      "part_index": 0,
+      "source_span": {
+        "evidence_id": "E00044",
+        "start_offset": 0,
+        "end_offset": 4,
+        "text": "批准日期",
+        "source_sha256": "4be4f9575be6846530d0097d05f7a9d491f30346e0d4b3ed87becf997677a4fc",
+        "location": {
+          "part": "document",
+          "table_child_index": 45,
+          "row": 3,
+          "column": 2,
+          "paragraph": 0,
+          "order": 43
+        }
+      },
+      "source_text_full": "批准日期",
+      "deterministic_obligation_keys": []
+    },
+    {
+      "id": "C00049",
+      "text": "年 月 日",
+      "evidence_ids": [
+        "E00045"
+      ],
+      "source_kind": "table_cell",
+      "location": {
+        "part": "document",
+        "table_child_index": 45,
+        "row": 3,
+        "column": 3,
+        "paragraph": 0,
+        "order": 44
+      },
+      "part_index": 0,
+      "source_span": {
+        "evidence_id": "E00045",
+        "start_offset": 0,
+        "end_offset": 11,
+        "text": "年    月    日",
+        "source_sha256": "0da3d421c0f772c4e7b3dda8540d93a3bcef1b278db8b568e6548d7e54c49fad",
+        "location": {
+          "part": "document",
+          "table_child_index": 45,
+          "row": 3,
+          "column": 3,
+          "paragraph": 0,
+          "order": 44
+        }
+      },
+      "source_text_full": "年 月 日",
+      "deterministic_obligation_keys": []
+    },
+    {
+      "id": "C00050",
+      "text": "北京体育大学学位评定委员会办公室盖章(有效)",
+      "evidence_ids": [
+        "E00046"
+      ],
+      "source_kind": "paragraph",
+      "location": {
+        "part": "document",
+        "child_index": 46,
+        "order": 45
+      },
+      "part_index": 0,
+      "source_span": {
+        "evidence_id": "E00046",
+        "start_offset": 0,
+        "end_offset": 22,
+        "text": "北京体育大学学位评定委员会办公室盖章(有效)",
+        "source_sha256": "54e366a3ca2007c60f1d0fed60c2fc108982165ab094564b113e2e14dce0e198",
+        "location": {
+          "part": "document",
+          "child_index": 46,
+          "order": 45
+        }
+      },
+      "source_text_full": "北京体育大学学位评定委员会办公室盖章(有效)",
+      "deterministic_obligation_keys": []
+    },
+    {
+      "id": "C00051",
+      "text": "注：限制★2年(可少于2年)",
+      "evidence_ids": [
+        "E00047"
+      ],
+      "source_kind": "paragraph",
+      "location": {
+        "part": "document",
+        "child_index": 48,
+        "order": 46
+      },
+      "part_index": 0,
+      "source_span": {
+        "evidence_id": "E00047",
+        "start_offset": 0,
+        "end_offset": 14,
+        "text": "注：限制★2年(可少于2年)",
+        "source_sha256": "0fe8fd702e99f1d50ddbd5ca7d5da3a3b30b338029f05f16e601ff790d064364",
+        "location": {
+          "part": "document",
+          "child_index": 48,
+          "order": 46
+        }
+      },
+      "source_text_full": "注：限制★2年(可少于2年);秘密★10年(可少于10年);机密★20年(可少于20年)",
+      "deterministic_obligation_keys": [
+        "cover.security_marking_options.shorter_duration_allowed"
+      ]
+    },
+    {
+      "id": "C00052",
+      "text": "秘密★10年(可少于10年)",
+      "evidence_ids": [
+        "E00047"
+      ],
+      "source_kind": "paragraph",
+      "location": {
+        "part": "document",
+        "child_index": 48,
+        "order": 46
+      },
+      "part_index": 1,
+      "source_span": {
+        "evidence_id": "E00047",
+        "start_offset": 15,
+        "end_offset": 29,
+        "text": "秘密★10年(可少于10年)",
+        "source_sha256": "0fe8fd702e99f1d50ddbd5ca7d5da3a3b30b338029f05f16e601ff790d064364",
+        "location": {
+          "part": "document",
+          "child_index": 48,
+          "order": 46
+        }
+      },
+      "source_text_full": "注：限制★2年(可少于2年);秘密★10年(可少于10年);机密★20年(可少于20年)",
+      "deterministic_obligation_keys": [
+        "cover.security_marking_options.shorter_duration_allowed"
+      ]
+    },
+    {
+      "id": "C00053",
+      "text": "机密★20年(可少于20年)",
+      "evidence_ids": [
+        "E00047"
+      ],
+      "source_kind": "paragraph",
+      "location": {
+        "part": "document",
+        "child_index": 48,
+        "order": 46
+      },
+      "part_index": 2,
+      "source_span": {
+        "evidence_id": "E00047",
+        "start_offset": 30,
+        "end_offset": 44,
+        "text": "机密★20年(可少于20年)",
+        "source_sha256": "0fe8fd702e99f1d50ddbd5ca7d5da3a3b30b338029f05f16e601ff790d064364",
+        "location": {
+          "part": "document",
+          "child_index": 48,
+          "order": 46
+        }
+      },
+      "source_text_full": "注：限制★2年(可少于2年);秘密★10年(可少于10年);机密★20年(可少于20年)",
+      "deterministic_obligation_keys": [
+        "cover.security_marking_options.shorter_duration_allowed"
+      ]
+    }
+  ],
+  "evidence_context": {
+    "E00036": {
+      "id": "E00036",
+      "kind": "paragraph",
+      "text": "非公开学位论文标注说明",
+      "style_id": null,
+      "runs": [
+        {
+          "text": "非公开学位论文标注说明",
+          "format": {
+            "fonts": {
+              "eastAsia": "黑体"
+            },
+            "size_pt": 16.0,
+            "bold": true
+          }
+        }
+      ],
+      "location": {
+        "part": "document",
+        "child_index": 43,
+        "order": 35
+      },
+      "context_before": [
+        "本人郑重声明：所呈交的学位论文，是本人在导师指导下进行研究工作所取得的研究成果。除文中已经注明引用的内容外，本学位论文的研究成果不包含任何他人创作的、已公开发表或者没有公开发表的作品的内容。对本论文所涉及的研究工作做出贡献的其他个人和集体，均已在文中以明确方式标明。本学位论文原创性声明的法律责任由本人承担。",
+        "学位论文作者签名：                       年    月    日"
+      ],
+      "context_after": [
+        "根据北京体育大学有关规定，非公开学位论文须经指导教师同意、作者本人申请和相关部门批准方能标注。未经批准的均为公开学位论文（公开的学位论文本项为空白）。",
+        "论文题目"
+      ],
+      "style_name": null,
+      "xml_locator": {
+        "part": "document",
+        "child_index": 43,
+        "order": 35
+      }
+    },
+    "E00037": {
+      "id": "E00037",
+      "kind": "paragraph",
+      "text": "根据北京体育大学有关规定，非公开学位论文须经指导教师同意、作者本人申请和相关部门批准方能标注。未经批准的均为公开学位论文（公开的学位论文本项为空白）。",
+      "style_id": null,
+      "runs": [
+        {
+          "text": "根据北京体育大学有关规定，非公开学位论文须经指导教师同意、作者本人申请和相关部门批准方能标注。未经批准的均为公开学位论文（公开",
+          "format": {
+            "fonts": {
+              "eastAsia": "宋体",
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            },
+            "size_pt": 14.0
+          }
+        },
+        {
+          "text": "的",
+          "format": {
+            "fonts": {
+              "eastAsia": "宋体",
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            },
+            "size_pt": 14.0
+          }
+        },
+        {
+          "text": "学位论文本",
+          "format": {
+            "fonts": {
+              "eastAsia": "宋体",
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            },
+            "size_pt": 14.0
+          }
+        },
+        {
+          "text": "项",
+          "format": {
+            "fonts": {
+              "eastAsia": "宋体",
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            },
+            "size_pt": 14.0
+          }
+        },
+        {
+          "text": "为空白）。",
+          "format": {
+            "fonts": {
+              "eastAsia": "宋体",
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            },
+            "size_pt": 14.0
+          }
+        }
+      ],
+      "location": {
+        "part": "document",
+        "child_index": 44,
+        "order": 36
+      },
+      "context_before": [
+        "学位论文作者签名：                       年    月    日",
+        "非公开学位论文标注说明"
+      ],
+      "context_after": [
+        "论文题目",
+        "申请密级"
+      ],
+      "style_name": null,
+      "xml_locator": {
+        "part": "document",
+        "child_index": 44,
+        "order": 36
+      }
+    },
+    "E00038": {
+      "id": "E00038",
+      "kind": "table_cell",
+      "text": "论文题目",
+      "style_id": null,
+      "runs": [
+        {
+          "text": "论文题目",
+          "format": {
+            "fonts": {
+              "eastAsia": "黑体",
+              "ascii": "黑体"
+            },
+            "size_pt": 12.0
+          }
+        }
+      ],
+      "location": {
+        "part": "document",
+        "table_child_index": 45,
+        "row": 0,
+        "column": 0,
+        "paragraph": 0,
+        "order": 37
+      },
+      "table_row_context": {
+        "protocol": "current-source-table-row/v1",
+        "part": "document",
+        "table_child_index": 45,
+        "row": 0,
+        "table_grid_columns": 4,
+        "bidi_visual": false,
+        "grid_before": 0,
+        "grid_after": 0,
+        "cells": [
+          {
+            "column": 0,
+            "paragraphs": [
+              {
+                "paragraph": 0,
+                "text": "论文题目",
+                "text_sha256": "d052ec08edf9b29d00cc744b10e61a4854b3abb79bea12d8b7204ea7ed156a92",
+                "evidence_id": "E00038"
+              }
+            ],
+            "grid_span": 1,
+            "vertical_merge": null,
+            "horizontal_merge": null,
+            "has_nested_table": false
+          },
+          {
+            "column": 1,
+            "paragraphs": [
+              {
+                "paragraph": 0,
+                "text": "",
+                "text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "evidence_id": null
+              }
+            ],
+            "grid_span": 3,
+            "vertical_merge": null,
+            "horizontal_merge": null,
+            "has_nested_table": false
+          }
+        ],
+        "row_sha256": "f26b0a8c3a20e41eb39a75c24b7f86371fd169bb12e432531e1fa4425f8f6d93"
+      },
+      "context_before": [
+        "非公开学位论文标注说明",
+        "根据北京体育大学有关规定，非公开学位论文须经指导教师同意、作者本人申请和相关部门批准方能标注。未经批准的均为公开学位论文（公开的学位论文本项为空白）。"
+      ],
+      "context_after": [
+        "申请密级",
+        "□限制(≤2年)     □秘密(≤10年)     □机密(≤20年)"
+      ],
+      "style_name": null,
+      "xml_locator": {
+        "part": "document",
+        "table_child_index": 45,
+        "row": 0,
+        "column": 0,
+        "paragraph": 0,
+        "order": 37
+      }
+    },
+    "E00039": {
+      "id": "E00039",
+      "kind": "table_cell",
+      "text": "申请密级",
+      "style_id": null,
+      "runs": [
+        {
+          "text": "申请密级",
+          "format": {
+            "fonts": {
+              "eastAsia": "黑体",
+              "ascii": "黑体"
+            },
+            "size_pt": 12.0
+          }
+        }
+      ],
+      "location": {
+        "part": "document",
+        "table_child_index": 45,
+        "row": 1,
+        "column": 0,
+        "paragraph": 0,
+        "order": 38
+      },
+      "table_row_context": {
+        "protocol": "current-source-table-row/v1",
+        "part": "document",
+        "table_child_index": 45,
+        "row": 1,
+        "table_grid_columns": 4,
+        "bidi_visual": false,
+        "grid_before": 0,
+        "grid_after": 0,
+        "cells": [
+          {
+            "column": 0,
+            "paragraphs": [
+              {
+                "paragraph": 0,
+                "text": "申请密级",
+                "text_sha256": "01858a301947d7afbedee2c69d058706110864005fab28d134df0a28e6271726",
+                "evidence_id": "E00039"
+              }
+            ],
+            "grid_span": 1,
+            "vertical_merge": null,
+            "horizontal_merge": null,
+            "has_nested_table": false
+          },
+          {
+            "column": 1,
+            "paragraphs": [
+              {
+                "paragraph": 0,
+                "text": "□限制(≤2年)     □秘密(≤10年)     □机密(≤20年)",
+                "text_sha256": "dd6b0df2ff75f7457c5c672a3db675e6a7958b681a581b357e02ca4794edf0c3",
+                "evidence_id": "E00040"
+              }
+            ],
+            "grid_span": 3,
+            "vertical_merge": null,
+            "horizontal_merge": null,
+            "has_nested_table": false
+          }
+        ],
+        "row_sha256": "29ca2f7bc4357e7407a1f96a5923bcd9e2dc8a251d52a3e0bb4b259f44e76114"
+      },
+      "context_before": [
+        "根据北京体育大学有关规定，非公开学位论文须经指导教师同意、作者本人申请和相关部门批准方能标注。未经批准的均为公开学位论文（公开的学位论文本项为空白）。",
+        "论文题目"
+      ],
+      "context_after": [
+        "□限制(≤2年)     □秘密(≤10年)     □机密(≤20年)",
+        "保密期限"
+      ],
+      "style_name": null,
+      "xml_locator": {
+        "part": "document",
+        "table_child_index": 45,
+        "row": 1,
+        "column": 0,
+        "paragraph": 0,
+        "order": 38
+      }
+    },
+    "E00040": {
+      "id": "E00040",
+      "kind": "table_cell",
+      "text": "□限制(≤2年)     □秘密(≤10年)     □机密(≤20年)",
+      "style_id": null,
+      "runs": [
+        {
+          "text": "□",
+          "format": {
+            "fonts": {
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            },
+            "size_pt": 12.0
+          }
+        },
+        {
+          "text": "限制(",
+          "format": {
+            "fonts": {},
+            "size_pt": 12.0
+          }
+        },
+        {
+          "text": "≤",
+          "format": {
+            "fonts": {
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            },
+            "size_pt": 12.0
+          }
+        },
+        {
+          "text": "2",
+          "format": {
+            "fonts": {
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            },
+            "size_pt": 12.0
+          }
+        },
+        {
+          "text": "年)",
+          "format": {
+            "fonts": {},
+            "size_pt": 12.0
+          }
+        },
+        {
+          "text": "□秘密",
+          "format": {
+            "fonts": {
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            },
+            "size_pt": 12.0
+          }
+        },
+        {
+          "text": "(",
+          "format": {
+            "fonts": {},
+            "size_pt": 12.0
+          }
+        },
+        {
+          "text": "≤",
+          "format": {
+            "fonts": {
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            },
+            "size_pt": 12.0
+          }
+        },
+        {
+          "text": "10年)",
+          "format": {
+            "fonts": {},
+            "size_pt": 12.0
+          }
+        },
+        {
+          "text": "□机密",
+          "format": {
+            "fonts": {
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            },
+            "size_pt": 12.0
+          }
+        },
+        {
+          "text": "(",
+          "format": {
+            "fonts": {},
+            "size_pt": 12.0
+          }
+        },
+        {
+          "text": "≤",
+          "format": {
+            "fonts": {
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            },
+            "size_pt": 12.0
+          }
+        },
+        {
+          "text": "20年)",
+          "format": {
+            "fonts": {},
+            "size_pt": 12.0
+          }
+        }
+      ],
+      "location": {
+        "part": "document",
+        "table_child_index": 45,
+        "row": 1,
+        "column": 1,
+        "paragraph": 0,
+        "order": 39
+      },
+      "table_row_context": {
+        "protocol": "current-source-table-row/v1",
+        "part": "document",
+        "table_child_index": 45,
+        "row": 1,
+        "table_grid_columns": 4,
+        "bidi_visual": false,
+        "grid_before": 0,
+        "grid_after": 0,
+        "cells": [
+          {
+            "column": 0,
+            "paragraphs": [
+              {
+                "paragraph": 0,
+                "text": "申请密级",
+                "text_sha256": "01858a301947d7afbedee2c69d058706110864005fab28d134df0a28e6271726",
+                "evidence_id": "E00039"
+              }
+            ],
+            "grid_span": 1,
+            "vertical_merge": null,
+            "horizontal_merge": null,
+            "has_nested_table": false
+          },
+          {
+            "column": 1,
+            "paragraphs": [
+              {
+                "paragraph": 0,
+                "text": "□限制(≤2年)     □秘密(≤10年)     □机密(≤20年)",
+                "text_sha256": "dd6b0df2ff75f7457c5c672a3db675e6a7958b681a581b357e02ca4794edf0c3",
+                "evidence_id": "E00040"
+              }
+            ],
+            "grid_span": 3,
+            "vertical_merge": null,
+            "horizontal_merge": null,
+            "has_nested_table": false
+          }
+        ],
+        "row_sha256": "29ca2f7bc4357e7407a1f96a5923bcd9e2dc8a251d52a3e0bb4b259f44e76114"
+      },
+      "context_before": [
+        "论文题目",
+        "申请密级"
+      ],
+      "context_after": [
+        "保密期限",
+        "年    月    日  至        年     月     日"
+      ],
+      "style_name": null,
+      "xml_locator": {
+        "part": "document",
+        "table_child_index": 45,
+        "row": 1,
+        "column": 1,
+        "paragraph": 0,
+        "order": 39
+      }
+    },
+    "E00041": {
+      "id": "E00041",
+      "kind": "table_cell",
+      "text": "保密期限",
+      "style_id": null,
+      "runs": [
+        {
+          "text": "保密期限",
+          "format": {
+            "fonts": {
+              "eastAsia": "黑体",
+              "ascii": "黑体"
+            },
+            "size_pt": 12.0
+          }
+        }
+      ],
+      "location": {
+        "part": "document",
+        "table_child_index": 45,
+        "row": 2,
+        "column": 0,
+        "paragraph": 0,
+        "order": 40
+      },
+      "table_row_context": {
+        "protocol": "current-source-table-row/v1",
+        "part": "document",
+        "table_child_index": 45,
+        "row": 2,
+        "table_grid_columns": 4,
+        "bidi_visual": false,
+        "grid_before": 0,
+        "grid_after": 0,
+        "cells": [
+          {
+            "column": 0,
+            "paragraphs": [
+              {
+                "paragraph": 0,
+                "text": "保密期限",
+                "text_sha256": "f5ddae09be82b19357fdc3eae5262cf088368f725cc90ff31dbae6a5f14ad472",
+                "evidence_id": "E00041"
+              }
+            ],
+            "grid_span": 1,
+            "vertical_merge": null,
+            "horizontal_merge": null,
+            "has_nested_table": false
+          },
+          {
+            "column": 1,
+            "paragraphs": [
+              {
+                "paragraph": 0,
+                "text": "年    月    日  至        年     月     日",
+                "text_sha256": "6e1ba84453081720a6882333fa12fcec66f71e31792e9a97aa638fcfcd4e1c0d",
+                "evidence_id": "E00042"
+              }
+            ],
+            "grid_span": 3,
+            "vertical_merge": null,
+            "horizontal_merge": null,
+            "has_nested_table": false
+          }
+        ],
+        "row_sha256": "7947701bac2f983eb2cec47d7b36b59e073742362d696d91a2b74b20d0228730"
+      },
+      "context_before": [
+        "申请密级",
+        "□限制(≤2年)     □秘密(≤10年)     □机密(≤20年)"
+      ],
+      "context_after": [
+        "年    月    日  至        年     月     日",
+        "审批表编号"
+      ],
+      "style_name": null,
+      "xml_locator": {
+        "part": "document",
+        "table_child_index": 45,
+        "row": 2,
+        "column": 0,
+        "paragraph": 0,
+        "order": 40
+      }
+    },
+    "E00042": {
+      "id": "E00042",
+      "kind": "table_cell",
+      "text": "年    月    日  至        年     月     日",
+      "style_id": null,
+      "runs": [
+        {
+          "text": "年    月    日",
+          "format": {
+            "fonts": {},
+            "size_pt": 12.0
+          }
+        },
+        {
+          "text": "至",
+          "format": {
+            "fonts": {},
+            "size_pt": 12.0
+          }
+        },
+        {
+          "text": "年     月     日",
+          "format": {
+            "fonts": {},
+            "size_pt": 12.0
+          }
+        }
+      ],
+      "location": {
+        "part": "document",
+        "table_child_index": 45,
+        "row": 2,
+        "column": 1,
+        "paragraph": 0,
+        "order": 41
+      },
+      "table_row_context": {
+        "protocol": "current-source-table-row/v1",
+        "part": "document",
+        "table_child_index": 45,
+        "row": 2,
+        "table_grid_columns": 4,
+        "bidi_visual": false,
+        "grid_before": 0,
+        "grid_after": 0,
+        "cells": [
+          {
+            "column": 0,
+            "paragraphs": [
+              {
+                "paragraph": 0,
+                "text": "保密期限",
+                "text_sha256": "f5ddae09be82b19357fdc3eae5262cf088368f725cc90ff31dbae6a5f14ad472",
+                "evidence_id": "E00041"
+              }
+            ],
+            "grid_span": 1,
+            "vertical_merge": null,
+            "horizontal_merge": null,
+            "has_nested_table": false
+          },
+          {
+            "column": 1,
+            "paragraphs": [
+              {
+                "paragraph": 0,
+                "text": "年    月    日  至        年     月     日",
+                "text_sha256": "6e1ba84453081720a6882333fa12fcec66f71e31792e9a97aa638fcfcd4e1c0d",
+                "evidence_id": "E00042"
+              }
+            ],
+            "grid_span": 3,
+            "vertical_merge": null,
+            "horizontal_merge": null,
+            "has_nested_table": false
+          }
+        ],
+        "row_sha256": "7947701bac2f983eb2cec47d7b36b59e073742362d696d91a2b74b20d0228730"
+      },
+      "context_before": [
+        "□限制(≤2年)     □秘密(≤10年)     □机密(≤20年)",
+        "保密期限"
+      ],
+      "context_after": [
+        "审批表编号",
+        "批准日期"
+      ],
+      "style_name": null,
+      "xml_locator": {
+        "part": "document",
+        "table_child_index": 45,
+        "row": 2,
+        "column": 1,
+        "paragraph": 0,
+        "order": 41
+      }
+    },
+    "E00043": {
+      "id": "E00043",
+      "kind": "table_cell",
+      "text": "审批表编号",
+      "style_id": null,
+      "runs": [
+        {
+          "text": "审批表编号",
+          "format": {
+            "fonts": {
+              "eastAsia": "黑体",
+              "ascii": "黑体"
+            },
+            "size_pt": 12.0
+          }
+        }
+      ],
+      "location": {
+        "part": "document",
+        "table_child_index": 45,
+        "row": 3,
+        "column": 0,
+        "paragraph": 0,
+        "order": 42
+      },
+      "table_row_context": {
+        "protocol": "current-source-table-row/v1",
+        "part": "document",
+        "table_child_index": 45,
+        "row": 3,
+        "table_grid_columns": 4,
+        "bidi_visual": false,
+        "grid_before": 0,
+        "grid_after": 0,
+        "cells": [
+          {
+            "column": 0,
+            "paragraphs": [
+              {
+                "paragraph": 0,
+                "text": "审批表编号",
+                "text_sha256": "15c964fede2e7a4cfce70eb5e37b0c54d487a5399db47e4af2f334d04e760a98",
+                "evidence_id": "E00043"
+              }
+            ],
+            "grid_span": 1,
+            "vertical_merge": null,
+            "horizontal_merge": null,
+            "has_nested_table": false
+          },
+          {
+            "column": 1,
+            "paragraphs": [
+              {
+                "paragraph": 0,
+                "text": "",
+                "text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "evidence_id": null
+              }
+            ],
+            "grid_span": 1,
+            "vertical_merge": null,
+            "horizontal_merge": null,
+            "has_nested_table": false
+          },
+          {
+            "column": 2,
+            "paragraphs": [
+              {
+                "paragraph": 0,
+                "text": "批准日期",
+                "text_sha256": "4be4f9575be6846530d0097d05f7a9d491f30346e0d4b3ed87becf997677a4fc",
+                "evidence_id": "E00044"
+              }
+            ],
+            "grid_span": 1,
+            "vertical_merge": null,
+            "horizontal_merge": null,
+            "has_nested_table": false
+          },
+          {
+            "column": 3,
+            "paragraphs": [
+              {
+                "paragraph": 0,
+                "text": "年    月    日",
+                "text_sha256": "0da3d421c0f772c4e7b3dda8540d93a3bcef1b278db8b568e6548d7e54c49fad",
+                "evidence_id": "E00045"
+              }
+            ],
+            "grid_span": 1,
+            "vertical_merge": null,
+            "horizontal_merge": null,
+            "has_nested_table": false
+          }
+        ],
+        "row_sha256": "c68b5d00137128afd93eb56a17e43ed800a22a66b025d60ceeb786f6cf035136"
+      },
+      "context_before": [
+        "保密期限",
+        "年    月    日  至        年     月     日"
+      ],
+      "context_after": [
+        "批准日期",
+        "年    月    日"
+      ],
+      "style_name": null,
+      "xml_locator": {
+        "part": "document",
+        "table_child_index": 45,
+        "row": 3,
+        "column": 0,
+        "paragraph": 0,
+        "order": 42
+      }
+    },
+    "E00044": {
+      "id": "E00044",
+      "kind": "table_cell",
+      "text": "批准日期",
+      "style_id": null,
+      "runs": [
+        {
+          "text": "批准日期",
+          "format": {
+            "fonts": {
+              "eastAsia": "黑体",
+              "ascii": "黑体"
+            },
+            "size_pt": 12.0
+          }
+        }
+      ],
+      "location": {
+        "part": "document",
+        "table_child_index": 45,
+        "row": 3,
+        "column": 2,
+        "paragraph": 0,
+        "order": 43
+      },
+      "table_row_context": {
+        "protocol": "current-source-table-row/v1",
+        "part": "document",
+        "table_child_index": 45,
+        "row": 3,
+        "table_grid_columns": 4,
+        "bidi_visual": false,
+        "grid_before": 0,
+        "grid_after": 0,
+        "cells": [
+          {
+            "column": 0,
+            "paragraphs": [
+              {
+                "paragraph": 0,
+                "text": "审批表编号",
+                "text_sha256": "15c964fede2e7a4cfce70eb5e37b0c54d487a5399db47e4af2f334d04e760a98",
+                "evidence_id": "E00043"
+              }
+            ],
+            "grid_span": 1,
+            "vertical_merge": null,
+            "horizontal_merge": null,
+            "has_nested_table": false
+          },
+          {
+            "column": 1,
+            "paragraphs": [
+              {
+                "paragraph": 0,
+                "text": "",
+                "text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "evidence_id": null
+              }
+            ],
+            "grid_span": 1,
+            "vertical_merge": null,
+            "horizontal_merge": null,
+            "has_nested_table": false
+          },
+          {
+            "column": 2,
+            "paragraphs": [
+              {
+                "paragraph": 0,
+                "text": "批准日期",
+                "text_sha256": "4be4f9575be6846530d0097d05f7a9d491f30346e0d4b3ed87becf997677a4fc",
+                "evidence_id": "E00044"
+              }
+            ],
+            "grid_span": 1,
+            "vertical_merge": null,
+            "horizontal_merge": null,
+            "has_nested_table": false
+          },
+          {
+            "column": 3,
+            "paragraphs": [
+              {
+                "paragraph": 0,
+                "text": "年    月    日",
+                "text_sha256": "0da3d421c0f772c4e7b3dda8540d93a3bcef1b278db8b568e6548d7e54c49fad",
+                "evidence_id": "E00045"
+              }
+            ],
+            "grid_span": 1,
+            "vertical_merge": null,
+            "horizontal_merge": null,
+            "has_nested_table": false
+          }
+        ],
+        "row_sha256": "c68b5d00137128afd93eb56a17e43ed800a22a66b025d60ceeb786f6cf035136"
+      },
+      "context_before": [
+        "年    月    日  至        年     月     日",
+        "审批表编号"
+      ],
+      "context_after": [
+        "年    月    日",
+        "北京体育大学学位评定委员会办公室盖章(有效)"
+      ],
+      "style_name": null,
+      "xml_locator": {
+        "part": "document",
+        "table_child_index": 45,
+        "row": 3,
+        "column": 2,
+        "paragraph": 0,
+        "order": 43
+      }
+    },
+    "E00045": {
+      "id": "E00045",
+      "kind": "table_cell",
+      "text": "年    月    日",
+      "style_id": null,
+      "runs": [
+        {
+          "text": "年    月    日",
+          "format": {
+            "fonts": {},
+            "size_pt": 12.0
+          }
+        }
+      ],
+      "location": {
+        "part": "document",
+        "table_child_index": 45,
+        "row": 3,
+        "column": 3,
+        "paragraph": 0,
+        "order": 44
+      },
+      "table_row_context": {
+        "protocol": "current-source-table-row/v1",
+        "part": "document",
+        "table_child_index": 45,
+        "row": 3,
+        "table_grid_columns": 4,
+        "bidi_visual": false,
+        "grid_before": 0,
+        "grid_after": 0,
+        "cells": [
+          {
+            "column": 0,
+            "paragraphs": [
+              {
+                "paragraph": 0,
+                "text": "审批表编号",
+                "text_sha256": "15c964fede2e7a4cfce70eb5e37b0c54d487a5399db47e4af2f334d04e760a98",
+                "evidence_id": "E00043"
+              }
+            ],
+            "grid_span": 1,
+            "vertical_merge": null,
+            "horizontal_merge": null,
+            "has_nested_table": false
+          },
+          {
+            "column": 1,
+            "paragraphs": [
+              {
+                "paragraph": 0,
+                "text": "",
+                "text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "evidence_id": null
+              }
+            ],
+            "grid_span": 1,
+            "vertical_merge": null,
+            "horizontal_merge": null,
+            "has_nested_table": false
+          },
+          {
+            "column": 2,
+            "paragraphs": [
+              {
+                "paragraph": 0,
+                "text": "批准日期",
+                "text_sha256": "4be4f9575be6846530d0097d05f7a9d491f30346e0d4b3ed87becf997677a4fc",
+                "evidence_id": "E00044"
+              }
+            ],
+            "grid_span": 1,
+            "vertical_merge": null,
+            "horizontal_merge": null,
+            "has_nested_table": false
+          },
+          {
+            "column": 3,
+            "paragraphs": [
+              {
+                "paragraph": 0,
+                "text": "年    月    日",
+                "text_sha256": "0da3d421c0f772c4e7b3dda8540d93a3bcef1b278db8b568e6548d7e54c49fad",
+                "evidence_id": "E00045"
+              }
+            ],
+            "grid_span": 1,
+            "vertical_merge": null,
+            "horizontal_merge": null,
+            "has_nested_table": false
+          }
+        ],
+        "row_sha256": "c68b5d00137128afd93eb56a17e43ed800a22a66b025d60ceeb786f6cf035136"
+      },
+      "context_before": [
+        "审批表编号",
+        "批准日期"
+      ],
+      "context_after": [
+        "北京体育大学学位评定委员会办公室盖章(有效)",
+        "注：限制★2年(可少于2年);秘密★10年(可少于10年);机密★20年(可少于20年)"
+      ],
+      "style_name": null,
+      "xml_locator": {
+        "part": "document",
+        "table_child_index": 45,
+        "row": 3,
+        "column": 3,
+        "paragraph": 0,
+        "order": 44
+      }
+    },
+    "E00046": {
+      "id": "E00046",
+      "kind": "paragraph",
+      "text": "北京体育大学学位评定委员会办公室盖章(有效)",
+      "style_id": null,
+      "runs": [
+        {
+          "text": "北京体育大学",
+          "format": {
+            "fonts": {
+              "eastAsia": "黑体",
+              "ascii": "黑体"
+            },
+            "size_pt": 12.0
+          }
+        },
+        {
+          "text": "学位",
+          "format": {
+            "fonts": {
+              "eastAsia": "黑体",
+              "ascii": "黑体"
+            },
+            "size_pt": 12.0
+          }
+        },
+        {
+          "text": "评定委员会",
+          "format": {
+            "fonts": {
+              "eastAsia": "黑体",
+              "ascii": "黑体"
+            },
+            "size_pt": 12.0
+          }
+        },
+        {
+          "text": "办公室盖章",
+          "format": {
+            "fonts": {
+              "eastAsia": "黑体",
+              "ascii": "黑体"
+            },
+            "size_pt": 12.0
+          }
+        },
+        {
+          "text": "(有效)",
+          "format": {
+            "fonts": {
+              "eastAsia": "黑体",
+              "ascii": "黑体"
+            },
+            "size_pt": 12.0
+          }
+        }
+      ],
+      "location": {
+        "part": "document",
+        "child_index": 46,
+        "order": 45
+      },
+      "context_before": [
+        "批准日期",
+        "年    月    日"
+      ],
+      "context_after": [
+        "注：限制★2年(可少于2年);秘密★10年(可少于10年);机密★20年(可少于20年)",
+        "北京体育大学学位论文使用授权书"
+      ],
+      "style_name": null,
+      "xml_locator": {
+        "part": "document",
+        "child_index": 46,
+        "order": 45
+      }
+    },
+    "E00047": {
+      "id": "E00047",
+      "kind": "paragraph",
+      "text": "注：限制★2年(可少于2年);秘密★10年(可少于10年);机密★20年(可少于20年)",
+      "style_id": null,
+      "runs": [
+        {
+          "text": "注：",
+          "format": {
+            "fonts": {
+              "eastAsia": "黑体",
+              "ascii": "黑体",
+              "hAnsi": "黑体"
+            }
+          }
+        },
+        {
+          "text": "限制★",
+          "format": {
+            "fonts": {
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            }
+          }
+        },
+        {
+          "text": "2",
+          "format": {
+            "fonts": {
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            }
+          }
+        },
+        {
+          "text": "年",
+          "format": {
+            "fonts": {
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            }
+          }
+        },
+        {
+          "text": "(",
+          "format": {
+            "fonts": {
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            }
+          }
+        },
+        {
+          "text": "可少于",
+          "format": {
+            "fonts": {
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            }
+          }
+        },
+        {
+          "text": "2",
+          "format": {
+            "fonts": {
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            }
+          }
+        },
+        {
+          "text": "年",
+          "format": {
+            "fonts": {
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            }
+          }
+        },
+        {
+          "text": ");",
+          "format": {
+            "fonts": {
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            }
+          }
+        },
+        {
+          "text": "秘密★",
+          "format": {
+            "fonts": {
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            }
+          }
+        },
+        {
+          "text": "10",
+          "format": {
+            "fonts": {
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            }
+          }
+        },
+        {
+          "text": "年",
+          "format": {
+            "fonts": {
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            }
+          }
+        },
+        {
+          "text": "(",
+          "format": {
+            "fonts": {
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            }
+          }
+        },
+        {
+          "text": "可少于",
+          "format": {
+            "fonts": {
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            }
+          }
+        },
+        {
+          "text": "10",
+          "format": {
+            "fonts": {
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            }
+          }
+        },
+        {
+          "text": "年",
+          "format": {
+            "fonts": {
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            }
+          }
+        },
+        {
+          "text": ");",
+          "format": {
+            "fonts": {
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            }
+          }
+        },
+        {
+          "text": "机密★",
+          "format": {
+            "fonts": {
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            }
+          }
+        },
+        {
+          "text": "20",
+          "format": {
+            "fonts": {
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            }
+          }
+        },
+        {
+          "text": "年",
+          "format": {
+            "fonts": {
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            }
+          }
+        },
+        {
+          "text": "(",
+          "format": {
+            "fonts": {
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            }
+          }
+        },
+        {
+          "text": "可少于",
+          "format": {
+            "fonts": {
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            }
+          }
+        },
+        {
+          "text": "2",
+          "format": {
+            "fonts": {
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            }
+          }
+        },
+        {
+          "text": "0",
+          "format": {
+            "fonts": {
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            }
+          }
+        },
+        {
+          "text": "年",
+          "format": {
+            "fonts": {
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            }
+          }
+        },
+        {
+          "text": ")",
+          "format": {
+            "fonts": {
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            }
+          }
+        }
+      ],
+      "location": {
+        "part": "document",
+        "child_index": 48,
+        "order": 46
+      },
+      "context_before": [
+        "年    月    日",
+        "北京体育大学学位评定委员会办公室盖章(有效)"
+      ],
+      "context_after": [
+        "北京体育大学学位论文使用授权书",
+        "本人完全了解学校研究生学位论文收藏和利用的管理规定，同意向北京体育大学提交本人的学位论文电子版及相应的纸质本。"
+      ],
+      "style_name": null,
+      "xml_locator": {
+        "part": "document",
+        "child_index": 48,
+        "order": 46
+      }
+    }
+  },
+  "response": {
+    "contract_version": "3.0",
+    "requirements": [
+      {
+        "existing_requirement_id": null,
+        "field_key": null,
+        "clause_ids": [
+          "C00041",
+          "C00043",
+          "C00044",
+          "C00045",
+          "C00046",
+          "C00047",
+          "C00048",
+          "C00049",
+          "C00051",
+          "C00052",
+          "C00053"
+        ],
+        "source_fragment_clause_ids": null,
+        "evidence_ids": [
+          "E00037",
+          "E00039",
+          "E00040",
+          "E00041",
+          "E00042",
+          "E00043",
+          "E00044",
+          "E00045",
+          "E00047"
+        ],
+        "confidence": 0.97,
+        "reason": "该来源区域明确规定未获批准论文按公开处理且公开论文此项留白，并提供密级选项、保密期限范围及审批信息字段；这些内容构成非公开论文行政封面区域。",
+        "applicability": {
+          "status": "conditional",
+          "conditions": [
+            {
+              "fact": "thesis_profile.security_level",
+              "operator": "in",
+              "value": [
+                "restricted",
+                "classified"
+              ]
+            }
+          ],
+          "exceptions": []
+        },
+        "input_prerequisites": [
+          {
+            "kind": "metadata",
+            "key": "thesis_profile.security_level",
+            "required": true,
+            "reason": "按密级判断非公开行政区域是否适用；公开论文此区域留白。"
+          }
+        ],
+        "verification": {
+          "mode": "static_docx",
+          "checks": [
+            "行政区域位于封面要求的非公开行政区域",
+            "非公开适用条件绑定 restricted 或 classified 密级",
+            "公开论文行政项留白",
+            "申请密级选项及其期限和可缩短说明保留",
+            "保密期限起止日期及审批表编号、批准日期字段对应正确"
+          ],
+          "checker_ids": []
+        },
+        "role": "cover",
+        "properties": {
+          "institution": "——",
+          "fields": [],
+          "non_public_administration": {
+            "applicability": {
+              "status": "conditional",
+              "conditions": [
+                {
+                  "fact": "thesis_profile.security_level",
+                  "operator": "in",
+                  "value": [
+                    "restricted",
+                    "classified"
+                  ]
+                }
+              ],
+              "exceptions": []
+            },
+            "fields": [
+              {
+                "id": "security_marking",
+                "label": "申请密级",
+                "value_from": "thesis_profile.cover_metadata.security_marking",
+                "display_policy": "required",
+                "label_display_policy": "always",
+                "order": 1
+              },
+              {
+                "id": "embargo_start",
+                "label": "保密期限",
+                "value_from": "thesis_profile.cover_metadata.embargo_start",
+                "display_policy": "required",
+                "label_display_policy": "always",
+                "order": 2
+              },
+              {
+                "id": "embargo_until",
+                "label": "保密期限",
+                "value_from": "thesis_profile.cover_metadata.embargo_until",
+                "display_policy": "required",
+                "label_display_policy": "always",
+                "order": 3
+              },
+              {
+                "id": "approval_number",
+                "label": "审批表编号",
+                "value_from": "thesis_profile.cover_metadata.approval_number",
+                "display_policy": "required",
+                "label_display_policy": "always",
+                "order": 4
+              },
+              {
+                "id": "approval_date",
+                "label": "批准日期",
+                "value_from": "thesis_profile.cover_metadata.approval_date",
+                "display_policy": "required",
+                "label_display_policy": "always",
+                "order": 5
+              }
+            ],
+            "public_policy": "blank",
+            "publication_default_policy": "unapproved_is_public",
+            "source_region": "非公开学位论文标注说明",
+            "security_marking_options": [
+              {
+                "label": "限制",
+                "maximum_duration": {
+                  "value": 2,
+                  "unit": "年"
+                },
+                "shorter_duration_allowed": true
+              },
+              {
+                "label": "秘密",
+                "maximum_duration": {
+                  "value": 10,
+                  "unit": "年"
+                },
+                "shorter_duration_allowed": true
+              },
+              {
+                "label": "机密",
+                "maximum_duration": {
+                  "value": 20,
+                  "unit": "年"
+                },
+                "shorter_duration_allowed": true
+              }
+            ]
+          },
+          "before_role": "document_start",
+          "missing_value_policy": "placeholder",
+          "missing_value_placeholder": "——",
+          "layout_id": "linear"
+        }
+      }
+    ],
+    "clause_reviews": [
+      {
+        "clause_id": "C00039",
+        "classification": "informational",
+        "reason": "这是非公开学位论文行政标注说明的标题，标识来源区域，不单独规定格式操作。",
+        "obligations": [],
+        "normative_basis": "insufficient"
+      },
+      {
+        "clause_id": "C00040",
+        "classification": "external_compliance",
+        "reason": "该句规定非公开论文标注前须取得指导教师同意、作者本人申请及相关部门批准，均属需要由相关人员实际完成的外部事项。",
+        "obligations": [
+          {
+            "id": "C00040-teacher-consent",
+            "status": "unverifiable",
+            "reason": "须由指导教师实际同意，文档中的标注或字段不能证明同意已经取得。",
+            "actor": "指导教师",
+            "action": "同意",
+            "target": "非公开学位论文标注",
+            "condition": "申请标注非公开学位论文前",
+            "source_quote": "须经指导教师同意",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "human"
+          },
+          {
+            "id": "C00040-author-application",
+            "status": "unverifiable",
+            "reason": "须由作者本人实际提出申请，文档字段不能证明申请已提交。",
+            "actor": "作者本人",
+            "action": "申请",
+            "target": "非公开学位论文标注",
+            "condition": "标注非公开学位论文前",
+            "source_quote": "作者本人申请",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "human"
+          },
+          {
+            "id": "C00040-department-approval",
+            "status": "unverifiable",
+            "reason": "须由相关部门实际批准，文档中的审批栏不能证明批准已经取得。",
+            "actor": "相关部门",
+            "action": "批准",
+            "target": "非公开学位论文标注",
+            "condition": "标注非公开学位论文前",
+            "source_quote": "相关部门批准方能标注",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "human"
+          }
+        ],
+        "normative_basis": "external_duty"
+      },
+      {
+        "clause_id": "C00041",
+        "classification": "executable",
+        "reason": "明确规定未批准者按公开学位论文处理且公开论文此项为空白；两个独立规则均由封面行政区域要求表示。",
+        "obligations": [
+          {
+            "id": "C00041-public-default",
+            "status": "covered",
+            "reason": "封面行政区域记录未批准论文按公开处理的来源政策，不代表实例审批状态。",
+            "actor": null,
+            "action": "按公开学位论文处理",
+            "target": "未经批准的学位论文",
+            "condition": "未经批准",
+            "source_quote": "未经批准的均为公开学位论文",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "automatic"
+          },
+          {
+            "id": "C00041-public-blank",
+            "status": "covered",
+            "reason": "封面行政区域配置公开论文相关行政项留白。",
+            "actor": null,
+            "action": "留白",
+            "target": "公开学位论文此项",
+            "condition": "论文为公开学位论文",
+            "source_quote": "公开的学位论文本项为空白",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "automatic"
+          }
+        ],
+        "normative_basis": "explicit_normative_text"
+      },
+      {
+        "clause_id": "C00042",
+        "classification": "informational",
+        "reason": "“论文题目”是该表格中的题目标签，不是已声明封面字段之一，也未给出可执行的题目字段要求。",
+        "obligations": [],
+        "normative_basis": "insufficient"
+      },
+      {
+        "clause_id": "C00043",
+        "classification": "executable",
+        "reason": "表格标签“申请密级”支持非公开行政区域中的 security_marking 字段。",
+        "obligations": [
+          {
+            "id": "C00043-security-label",
+            "status": "covered",
+            "reason": "来源明确显示申请密级标签。",
+            "actor": null,
+            "action": "显示字段标签",
+            "target": "申请密级",
+            "condition": "非公开行政区域适用时",
+            "source_quote": "申请密级",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "automatic"
+          }
+        ],
+        "normative_basis": "template_structure"
+      },
+      {
+        "clause_id": "C00044",
+        "classification": "executable",
+        "reason": "来源列出限制、秘密、机密三个密级选项及各自的明确期限上限。",
+        "obligations": [
+          {
+            "id": "C00044-security-options",
+            "status": "covered",
+            "reason": "三个选项及其年限作为行政区域的密级选项保留。",
+            "actor": null,
+            "action": "显示密级选项",
+            "target": "限制（不超过2年）、秘密（不超过10年）、机密（不超过20年）",
+            "condition": "非公开行政区域适用时",
+            "source_quote": "□限制(≤2年) □秘密(≤10年) □机密(≤20年)",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "automatic"
+          }
+        ],
+        "normative_basis": "template_structure"
+      },
+      {
+        "clause_id": "C00045",
+        "classification": "executable",
+        "reason": "来源表格提供保密期限字段标签，并与下一格的双日期范围对应。",
+        "obligations": [
+          {
+            "id": "C00045-embargo-label",
+            "status": "covered",
+            "reason": "来源明确提供保密期限标签；双端日期分别绑定起止字段。",
+            "actor": null,
+            "action": "显示字段标签",
+            "target": "保密期限",
+            "condition": "非公开行政区域适用时",
+            "source_quote": "保密期限",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "automatic"
+          }
+        ],
+        "normative_basis": "template_structure"
+      },
+      {
+        "clause_id": "C00046",
+        "classification": "executable",
+        "reason": "来源显示“至”连接的两个日期端点，支持分别保留 embargo_start 与 embargo_until。",
+        "obligations": [
+          {
+            "id": "C00046-embargo-range",
+            "status": "covered",
+            "reason": "两个日期端点分别映射到开始日期和截止日期字段。",
+            "actor": null,
+            "action": "提供双端日期范围栏",
+            "target": "保密期限起止日期",
+            "condition": "非公开行政区域适用时",
+            "source_quote": "年 月 日 至 年 月 日",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "automatic"
+          }
+        ],
+        "normative_basis": "template_structure"
+      },
+      {
+        "clause_id": "C00047",
+        "classification": "executable",
+        "reason": "来源表格明确包含审批表编号标签，对应 approval_number 字段。",
+        "obligations": [
+          {
+            "id": "C00047-approval-number",
+            "status": "covered",
+            "reason": "字段对应审批表编号，不表示审批已经取得。",
+            "actor": null,
+            "action": "显示字段标签",
+            "target": "审批表编号",
+            "condition": "非公开行政区域适用时",
+            "source_quote": "审批表编号",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "automatic"
+          }
+        ],
+        "normative_basis": "template_structure"
+      },
+      {
+        "clause_id": "C00048",
+        "classification": "executable",
+        "reason": "来源表格明确包含批准日期标签，对应 approval_date 字段。",
+        "obligations": [
+          {
+            "id": "C00048-approval-date",
+            "status": "covered",
+            "reason": "字段对应批准日期，不表示批准已经取得。",
+            "actor": null,
+            "action": "显示字段标签",
+            "target": "批准日期",
+            "condition": "非公开行政区域适用时",
+            "source_quote": "批准日期",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "automatic"
+          }
+        ],
+        "normative_basis": "template_structure"
+      },
+      {
+        "clause_id": "C00049",
+        "classification": "informational",
+        "reason": "该日期占位内容紧邻审批表格，审批日期字段标签及其结构已由 C00048 覆盖；此占位本身没有额外独立规则。",
+        "obligations": [],
+        "normative_basis": "insufficient"
+      },
+      {
+        "clause_id": "C00050",
+        "classification": "external_compliance",
+        "reason": "该句要求学位评定委员会办公室盖章并注明有效，实际盖章是外部行政事项，打印文字不能证明盖章完成。",
+        "obligations": [
+          {
+            "id": "C00050-office-seal",
+            "status": "unverifiable",
+            "reason": "须由办公室实际加盖有效印章，文档中文字不能替代印章。",
+            "actor": "北京体育大学学位评定委员会办公室",
+            "action": "盖章并确认有效",
+            "target": "非公开学位论文行政标注",
+            "condition": null,
+            "source_quote": "盖章(有效)",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "human"
+          }
+        ],
+        "normative_basis": "external_duty"
+      },
+      {
+        "clause_id": "C00051",
+        "classification": "executable",
+        "reason": "来源明确说明限制期限最长2年且可少于2年，补充对应密级选项的可缩短期限说明。",
+        "obligations": [
+          {
+            "id": "C00051-shorter-duration",
+            "status": "covered",
+            "reason": "在限制选项中保留允许短于2年的明示说明。",
+            "actor": null,
+            "action": "注明期限可短于上限",
+            "target": "限制，2年",
+            "condition": "选择限制密级时",
+            "source_quote": "限制★2年(可少于2年)",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "automatic"
+          }
+        ],
+        "normative_basis": "explicit_normative_text"
+      },
+      {
+        "clause_id": "C00052",
+        "classification": "executable",
+        "reason": "来源明确说明秘密期限最长10年且可少于10年，补充对应密级选项的可缩短期限说明。",
+        "obligations": [
+          {
+            "id": "C00052-shorter-duration",
+            "status": "covered",
+            "reason": "在秘密选项中保留允许短于10年的明示说明。",
+            "actor": null,
+            "action": "注明期限可短于上限",
+            "target": "秘密，10年",
+            "condition": "选择秘密密级时",
+            "source_quote": "秘密★10年(可少于10年)",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "automatic"
+          }
+        ],
+        "normative_basis": "explicit_normative_text"
+      },
+      {
+        "clause_id": "C00053",
+        "classification": "executable",
+        "reason": "来源明确说明机密期限最长20年且可少于20年，补充对应密级选项的可缩短期限说明。",
+        "obligations": [
+          {
+            "id": "C00053-shorter-duration",
+            "status": "covered",
+            "reason": "在机密选项中保留允许短于20年的明示说明。",
+            "actor": null,
+            "action": "注明期限可短于上限",
+            "target": "机密，20年",
+            "condition": "选择机密时",
+            "source_quote": "机密★20年(可少于20年)",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "automatic"
+          }
+        ],
+        "normative_basis": "explicit_normative_text"
+      }
+    ],
+    "unsupported_items": [],
+    "reported_conflicts": []
+  }
+}

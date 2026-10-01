@@ -13,12 +13,17 @@ from typing import Any, Callable
 from host_review_contract import analyze_requirement_relations, contract_error_records
 from native_semantic_review import NativeSemanticReviewError, _exact_clause_source_text
 from semantic_contract import sha256_json
+from table_source_context import build_table_structure_context
 from source_obligation_compiler import (
     compile_known_source_obligations, compile_keyword_source_constraints,
     compile_abstract_source_constraints,
 )
 
 POLICY = "zero_duty_context_edge_projection_v1"
+TABLE_POLICY = "source_bound_blank_date_context_edge_v1"
+# Versioned metadata types from coverMetadata, not source/school identifiers.
+# Other field types must remain on the semantic path even beside a date blank.
+DATE_METADATA_FIELDS = frozenset({"completion_date", "approval_date", "embargo_start", "embargo_until"})
 
 
 def _context_heading(clause: dict, evidence: dict) -> bool:
@@ -55,6 +60,71 @@ def _references(value: Any, ids: set[str]) -> bool:
     if isinstance(value, dict):
         return any(key in ids or _references(item, ids) for key, item in value.items())
     return False
+
+
+def _blank_date_field_context(clause: dict, evidence: dict, req: dict,
+                             retained: list[str], by_id: dict) -> dict | None:
+    """Propose context separation, not a date-format or approval verdict.
+
+    A current, complete, unmerged table row must prove a single adjacent
+    label occurrence already selected by a retained field. Neither normalized
+    clause text nor a model's context_before can establish ownership. Source
+    formatting remains available to the mandatory independent review.
+    """
+    span = clause["source_span"]
+    source = evidence[span["evidence_id"]]
+    if (req.get("role") != "cover" or source.get("kind") != "table_cell"
+            or re.fullmatch(r"\s*年\s*月\s*日\s*", span["text"]) is None
+            or span["start_offset"] != 0 or span["end_offset"] != len(source["text"])):
+        return None
+    try:
+        context = build_table_structure_context(clause, evidence)
+    except (ValueError, KeyError, TypeError):
+        return None
+    if not context or context["relationship"] != "same_row_immediate_left_unmerged":
+        return None
+    row = context["source_row"]
+    left = row["cells"][context["immediate_left_column"]]
+    label_parts = [p for p in left["paragraphs"] if p["text"].strip()]
+    if len(label_parts) != 1:
+        return None
+    label = label_parts[0]
+    eid, text = label["evidence_id"], label["text"]
+    if not text.strip() or re.fullmatch(r"\s*年\s*月\s*日\s*", text):
+        return None
+    # Duplicate labels/clauses cannot select a field owner by first-match.
+    if sum(p["text"] == text for cell in row["cells"] for p in cell["paragraphs"]) != 1:
+        return None
+    owners = [cid for cid, c in by_id.items()
+              if c["source_span"]["evidence_id"] == eid]
+    if len(owners) != 1 or owners[0] not in retained or eid not in evidence:
+        return None
+    owner = by_id[owners[0]]["source_span"]
+    if (owner["start_offset"] != 0 or owner["end_offset"] != len(text)
+            or owner["text"] != text):
+        return None
+    props = req.get("properties")
+    if not isinstance(props, dict):
+        return None
+    fields = props.get("fields", [])
+    admin = props.get("non_public_administration", {})
+    if not isinstance(fields, list) or not isinstance(admin, dict):
+        return None
+    admin_fields = admin.get("fields", [])
+    if not isinstance(admin_fields, list):
+        return None
+    fields = fields + admin_fields
+    if any(not isinstance(f, dict) for f in fields):
+        return None
+    selected = [f for f in fields if f.get("label") == text]
+    if (len(selected) != 1 or selected[0].get("id") not in DATE_METADATA_FIELDS
+            or selected[0].get("value_from") != f"thesis_profile.cover_metadata.{selected[0]['id']}"
+            or sum(f.get("id") == selected[0]["id"] for f in fields) != 1):
+        return None
+    return {"policy": TABLE_POLICY, "owner_clause_id": owners[0],
+            "retained_field": copy.deepcopy(selected[0]),
+            "table_structure_context": context,
+            "date_format_confirmed": False, "external_action_confirmed": False}
 
 
 def project_context_edges(
@@ -131,18 +201,21 @@ def project_context_edges(
         retained = [cid for cid in cids if cid not in contexts]
         if not contexts or not retained:
             return None, []
+        context_basis = {}
         for cid in contexts:
             review = review_map[cid]
+            table_basis = _blank_date_field_context(by_id[cid], evidence, req, retained, by_id)
             # A primary informational label cannot erase compiled source
             # facts, an unknown inventory or an explicitly normative duty.
             if (review.get("obligations") != []
                     or review.get("normative_basis") != "insufficient"
-                    or not _context_heading(by_id[cid], evidence)
+                    or not (_context_heading(by_id[cid], evidence) or table_basis is not None)
                     or by_id[cid].get("deterministic_obligation_keys")
                     or compile_known_source_obligations(by_id[cid]["source_span"]["text"])
                     or compile_keyword_source_constraints(by_id[cid])
                     or compile_abstract_source_constraints(by_id[cid]["source_span"]["text"])):
                 return None, []
+            context_basis[cid] = table_basis or {"policy": POLICY, "kind": "nominal_heading"}
         for cid in retained:
             review = review_map[cid]
             obs = review.get("obligations")
@@ -166,6 +239,7 @@ def project_context_edges(
                 "clause_id": cid, "clause": copy.deepcopy(by_id[cid]),
                 "review": copy.deepcopy(review_map[cid]),
                 "evidence": [copy.deepcopy(evidence[eid]) for eid in by_id[cid]["evidence_ids"]],
+                "context_basis": context_basis[cid],
             } for cid in contexts],
             "detached_requirement_evidence_ids": [eid for eid in eids if eid in detached_evidence],
         })

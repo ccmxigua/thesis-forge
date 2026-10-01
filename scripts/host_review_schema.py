@@ -149,8 +149,10 @@ def native_output_schema(response_schema: dict[str, Any]) -> dict[str, Any]:
 
     ``provenance`` is deliberately absent: it is trusted invocation metadata
     bound by the bridge after the provider returns, never authored by the
-    model.  All other optional fields are represented as required nullable
-    fields in the provider projection.
+    model. Declaration signature-line text, references and byte hashes are
+    likewise code-owned: the provider emits only null (the omission sentinel),
+    and the current-source materializer fills the locally validated payload.
+    Other optional fields are required nullable fields in this projection.
     """
     local_schema = copy.deepcopy(response_schema)
     properties = local_schema.get("properties")
@@ -160,6 +162,22 @@ def native_output_schema(response_schema: dict[str, Any]) -> dict[str, Any]:
             name for name in local_schema.get("required", [])
             if name != "provenance"
         ]
+    declaration_item = local_schema.get("$defs", {}).get("declarationItem")
+    if isinstance(declaration_item, dict):
+        item_properties = declaration_item.get("properties")
+        if isinstance(item_properties, dict) and "source_signature_lines" in item_properties:
+            # Restrict only this registered declaration field, not arbitrary
+            # same-named fields or the authoritative format/resource schemas.
+            # Never repair a model-provided hash by stamping current identity.
+            item_properties["source_signature_lines"] = {
+                "type": "null",
+                "description": (
+                    "Code-owned source projection. Emit null; never copy signature "
+                    "text, evidence IDs or hashes here. Code preserves uniquely "
+                    "adjacent blank current-source lines after local validation; "
+                    "actual signing/dating remains pending human verification."
+                ),
+            }
     return _project_native_schema(local_schema)
 
 

@@ -1,0 +1,868 @@
+{
+  "note": "Captured model hash typo; current test packet rebuilt with the six exact declaration/source clauses, no runtime provenance.",
+  "source": {
+    "clauses": [
+      {
+        "id": "C00033",
+        "text": "北京体育大学学位论文原创性声明",
+        "evidence_ids": [
+          "E00033"
+        ],
+        "source_kind": "paragraph",
+        "location": {
+          "part": "document",
+          "child_index": 39,
+          "order": 32
+        },
+        "part_index": 0,
+        "source_span": {
+          "evidence_id": "E00033",
+          "start_offset": 0,
+          "end_offset": 15,
+          "text": "北京体育大学学位论文原创性声明",
+          "source_sha256": "dee65d50fd4d5d8005c286b6a46703d0c73d22949826314586197a67cb836ea5",
+          "location": {
+            "part": "document",
+            "child_index": 39,
+            "order": 32
+          }
+        },
+        "source_text_full": "北京体育大学学位论文原创性声明",
+        "deterministic_obligation_keys": []
+      },
+      {
+        "id": "C00034",
+        "text": "本人郑重声明：所呈交的学位论文，是本人在导师指导下进行研究工作所取得的研究成果",
+        "evidence_ids": [
+          "E00034"
+        ],
+        "source_kind": "paragraph",
+        "location": {
+          "part": "document",
+          "child_index": 40,
+          "order": 33
+        },
+        "part_index": 0,
+        "source_span": {
+          "evidence_id": "E00034",
+          "start_offset": 0,
+          "end_offset": 39,
+          "text": "本人郑重声明：所呈交的学位论文，是本人在导师指导下进行研究工作所取得的研究成果",
+          "source_sha256": "3c772473c3c41981f85b35ecd3f5b5e1eaf06db289dbeb1cce1c9683d6d09e90",
+          "location": {
+            "part": "document",
+            "child_index": 40,
+            "order": 33
+          }
+        },
+        "source_text_full": "本人郑重声明：所呈交的学位论文，是本人在导师指导下进行研究工作所取得的研究成果。除文中已经注明引用的内容外，本学位论文的研究成果不包含任何他人创作的、已公开发表或者没有公开发表的作品的内容。对本论文所涉及的研究工作做出贡献的其他个人和集体，均已在文中以明确方式标明。本学位论文原创性声明的法律责任由本人承担。",
+        "deterministic_obligation_keys": []
+      },
+      {
+        "id": "C00035",
+        "text": "除文中已经注明引用的内容外，本学位论文的研究成果不包含任何他人创作的、已公开发表或者没有公开发表的作品的内容",
+        "evidence_ids": [
+          "E00034"
+        ],
+        "source_kind": "paragraph",
+        "location": {
+          "part": "document",
+          "child_index": 40,
+          "order": 33
+        },
+        "part_index": 1,
+        "source_span": {
+          "evidence_id": "E00034",
+          "start_offset": 40,
+          "end_offset": 94,
+          "text": "除文中已经注明引用的内容外，本学位论文的研究成果不包含任何他人创作的、已公开发表或者没有公开发表的作品的内容",
+          "source_sha256": "3c772473c3c41981f85b35ecd3f5b5e1eaf06db289dbeb1cce1c9683d6d09e90",
+          "location": {
+            "part": "document",
+            "child_index": 40,
+            "order": 33
+          }
+        },
+        "source_text_full": "本人郑重声明：所呈交的学位论文，是本人在导师指导下进行研究工作所取得的研究成果。除文中已经注明引用的内容外，本学位论文的研究成果不包含任何他人创作的、已公开发表或者没有公开发表的作品的内容。对本论文所涉及的研究工作做出贡献的其他个人和集体，均已在文中以明确方式标明。本学位论文原创性声明的法律责任由本人承担。",
+        "deterministic_obligation_keys": []
+      },
+      {
+        "id": "C00036",
+        "text": "对本论文所涉及的研究工作做出贡献的其他个人和集体，均已在文中以明确方式标明",
+        "evidence_ids": [
+          "E00034"
+        ],
+        "source_kind": "paragraph",
+        "location": {
+          "part": "document",
+          "child_index": 40,
+          "order": 33
+        },
+        "part_index": 2,
+        "source_span": {
+          "evidence_id": "E00034",
+          "start_offset": 95,
+          "end_offset": 132,
+          "text": "对本论文所涉及的研究工作做出贡献的其他个人和集体，均已在文中以明确方式标明",
+          "source_sha256": "3c772473c3c41981f85b35ecd3f5b5e1eaf06db289dbeb1cce1c9683d6d09e90",
+          "location": {
+            "part": "document",
+            "child_index": 40,
+            "order": 33
+          }
+        },
+        "source_text_full": "本人郑重声明：所呈交的学位论文，是本人在导师指导下进行研究工作所取得的研究成果。除文中已经注明引用的内容外，本学位论文的研究成果不包含任何他人创作的、已公开发表或者没有公开发表的作品的内容。对本论文所涉及的研究工作做出贡献的其他个人和集体，均已在文中以明确方式标明。本学位论文原创性声明的法律责任由本人承担。",
+        "deterministic_obligation_keys": []
+      },
+      {
+        "id": "C00037",
+        "text": "本学位论文原创性声明的法律责任由本人承担",
+        "evidence_ids": [
+          "E00034"
+        ],
+        "source_kind": "paragraph",
+        "location": {
+          "part": "document",
+          "child_index": 40,
+          "order": 33
+        },
+        "part_index": 3,
+        "source_span": {
+          "evidence_id": "E00034",
+          "start_offset": 133,
+          "end_offset": 153,
+          "text": "本学位论文原创性声明的法律责任由本人承担",
+          "source_sha256": "3c772473c3c41981f85b35ecd3f5b5e1eaf06db289dbeb1cce1c9683d6d09e90",
+          "location": {
+            "part": "document",
+            "child_index": 40,
+            "order": 33
+          }
+        },
+        "source_text_full": "本人郑重声明：所呈交的学位论文，是本人在导师指导下进行研究工作所取得的研究成果。除文中已经注明引用的内容外，本学位论文的研究成果不包含任何他人创作的、已公开发表或者没有公开发表的作品的内容。对本论文所涉及的研究工作做出贡献的其他个人和集体，均已在文中以明确方式标明。本学位论文原创性声明的法律责任由本人承担。",
+        "deterministic_obligation_keys": []
+      },
+      {
+        "id": "C00038",
+        "text": "学位论文作者签名： 年 月 日",
+        "evidence_ids": [
+          "E00035"
+        ],
+        "source_kind": "paragraph",
+        "location": {
+          "part": "document",
+          "child_index": 41,
+          "order": 34
+        },
+        "part_index": 0,
+        "source_span": {
+          "evidence_id": "E00035",
+          "start_offset": 0,
+          "end_offset": 43,
+          "text": "学位论文作者签名：                       年    月    日",
+          "source_sha256": "f4288e7735ee7bb8a205f845e21244ec8e69b7308a1f9c499a5d025a2780ed74",
+          "location": {
+            "part": "document",
+            "child_index": 41,
+            "order": 34
+          }
+        },
+        "source_text_full": "学位论文作者签名： 年 月 日",
+        "deterministic_obligation_keys": []
+      }
+    ],
+    "evidence_context": {
+      "E00033": {
+        "id": "E00033",
+        "kind": "paragraph",
+        "text": "北京体育大学学位论文原创性声明",
+        "style_id": null,
+        "runs": [
+          {
+            "text": "北京体育大学",
+            "format": {
+              "fonts": {
+                "eastAsia": "黑体"
+              },
+              "size_pt": 16.0,
+              "bold": true
+            }
+          },
+          {
+            "text": "学位论文原创性声明",
+            "format": {
+              "fonts": {
+                "eastAsia": "黑体"
+              },
+              "size_pt": 16.0,
+              "bold": true
+            }
+          }
+        ],
+        "location": {
+          "part": "document",
+          "child_index": 39,
+          "order": 32
+        },
+        "context_before": [
+          "秘书            技术职称          所在单位",
+          "年  月"
+        ],
+        "context_after": [
+          "本人郑重声明：所呈交的学位论文，是本人在导师指导下进行研究工作所取得的研究成果。除文中已经注明引用的内容外，本学位论文的研究成果不包含任何他人创作的、已公开发表或者没有公开发表的作品的内容。对本论文所涉及的研究工作做出贡献的其他个人和集体，均已在文中以明确方式标明。本学位论文原创性声明的法律责任由本人承担。",
+          "学位论文作者签名：                       年    月    日"
+        ],
+        "style_name": null,
+        "xml_locator": {
+          "part": "document",
+          "child_index": 39,
+          "order": 32
+        }
+      },
+      "E00034": {
+        "id": "E00034",
+        "kind": "paragraph",
+        "text": "本人郑重声明：所呈交的学位论文，是本人在导师指导下进行研究工作所取得的研究成果。除文中已经注明引用的内容外，本学位论文的研究成果不包含任何他人创作的、已公开发表或者没有公开发表的作品的内容。对本论文所涉及的研究工作做出贡献的其他个人和集体，均已在文中以明确方式标明。本学位论文原创性声明的法律责任由本人承担。",
+        "style_id": null,
+        "runs": [
+          {
+            "text": "本人郑重声明：所呈交的学位论文，是本人在导师指导下进行研究工作所取得的研究成果。除文中已经注明引用的内容外，本学位论文的研究成果不包含任何他人创作的、已公开发表或者没有公开发表的作品的内容。对本论文所涉及的研究工作做出贡献的其他个人和集体，均已在文中以明确方式标明。本学位论文原创性声明的法律责任由本人承担。",
+            "format": {
+              "fonts": {
+                "eastAsia": "宋体",
+                "ascii": "宋体",
+                "hAnsi": "宋体"
+              },
+              "size_pt": 14.0
+            }
+          }
+        ],
+        "location": {
+          "part": "document",
+          "child_index": 40,
+          "order": 33
+        },
+        "context_before": [
+          "年  月",
+          "北京体育大学学位论文原创性声明"
+        ],
+        "context_after": [
+          "学位论文作者签名：                       年    月    日",
+          "非公开学位论文标注说明"
+        ],
+        "style_name": null,
+        "xml_locator": {
+          "part": "document",
+          "child_index": 40,
+          "order": 33
+        }
+      },
+      "E00035": {
+        "id": "E00035",
+        "kind": "paragraph",
+        "text": "学位论文作者签名：                       年    月    日",
+        "style_id": null,
+        "runs": [
+          {
+            "text": "学位论文作者签名：",
+            "format": {
+              "fonts": {
+                "eastAsia": "宋体",
+                "ascii": "宋体",
+                "hAnsi": "宋体"
+              },
+              "size_pt": 14.0
+            }
+          },
+          {
+            "text": "年",
+            "format": {
+              "fonts": {
+                "eastAsia": "宋体",
+                "ascii": "宋体",
+                "hAnsi": "宋体"
+              },
+              "size_pt": 14.0
+            }
+          },
+          {
+            "text": "月",
+            "format": {
+              "fonts": {
+                "eastAsia": "宋体",
+                "ascii": "宋体",
+                "hAnsi": "宋体"
+              },
+              "size_pt": 14.0
+            }
+          },
+          {
+            "text": "日",
+            "format": {
+              "fonts": {
+                "eastAsia": "宋体",
+                "ascii": "宋体",
+                "hAnsi": "宋体"
+              },
+              "size_pt": 14.0
+            }
+          }
+        ],
+        "location": {
+          "part": "document",
+          "child_index": 41,
+          "order": 34
+        },
+        "context_before": [
+          "北京体育大学学位论文原创性声明",
+          "本人郑重声明：所呈交的学位论文，是本人在导师指导下进行研究工作所取得的研究成果。除文中已经注明引用的内容外，本学位论文的研究成果不包含任何他人创作的、已公开发表或者没有公开发表的作品的内容。对本论文所涉及的研究工作做出贡献的其他个人和集体，均已在文中以明确方式标明。本学位论文原创性声明的法律责任由本人承担。"
+        ],
+        "context_after": [
+          "非公开学位论文标注说明",
+          "根据北京体育大学有关规定，非公开学位论文须经指导教师同意、作者本人申请和相关部门批准方能标注。未经批准的均为公开学位论文（公开的学位论文本项为空白）。"
+        ],
+        "style_name": null,
+        "xml_locator": {
+          "part": "document",
+          "child_index": 41,
+          "order": 34
+        }
+      }
+    },
+    "declaration_anchor_preference": "abstract_title_zh"
+  },
+  "parent": {
+    "contract_version": "3.0",
+    "requirements": [
+      {
+        "existing_requirement_id": null,
+        "field_key": null,
+        "clause_ids": [
+          "C00033",
+          "C00034",
+          "C00035",
+          "C00036",
+          "C00037"
+        ],
+        "source_fragment_clause_ids": null,
+        "evidence_ids": [
+          "E00033",
+          "E00034"
+        ],
+        "confidence": 0.98,
+        "reason": "The current source provides one complete fixed originality-declaration heading and body. The declaration is printable DOCX structure, while the truthfulness, attribution, and legal-responsibility statements remain human-verifiable obligations.",
+        "applicability": null,
+        "input_prerequisites": null,
+        "verification": {
+          "mode": "static_docx",
+          "checks": [
+            "Verify the exact source heading and body are materialized once at the verified abstract_title_zh anchor.",
+            "Verify blank author and date signature placeholders are preserved without asserting actual signing."
+          ],
+          "checker_ids": null
+        },
+        "role": "declarations",
+        "properties": {
+          "before_role": "abstract_title_zh",
+          "items": [
+            {
+              "source_signature_lines": [
+                {
+                  "text": "学位论文作者签名：                       年    月    日",
+                  "source_evidence_id": "E00035",
+                  "source_sha256": "f4288e7735ee7bb8a1f9c499a5d025a2780ed74",
+                  "attestation_scope": "placeholder_presence_only"
+                }
+              ],
+              "id": "decl-originality-c00033-c00037",
+              "resource_id": null,
+              "version": null,
+              "sha256": null,
+              "heading": null,
+              "body": null,
+              "body_parts": null,
+              "source_evidence_ids": [
+                "E00033",
+                "E00034"
+              ],
+              "signature_placeholders": [
+                {
+                  "role": "author",
+                  "label": "学位论文作者签名",
+                  "attestation_scope": "placeholder_presence_only"
+                },
+                {
+                  "role": "date",
+                  "label": "年 月 日",
+                  "attestation_scope": "placeholder_presence_only"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    ],
+    "clause_reviews": [
+      {
+        "clause_id": "C00033",
+        "classification": "executable",
+        "reason": "The current fixed-declaration candidate identifies an exact declaration heading that the DOCX must preserve at the verified declaration anchor.",
+        "obligations": [
+          {
+            "id": "c33-fixed-declaration-heading",
+            "status": "covered",
+            "reason": "The exact heading is supplied by E00033 and is included in the source-bound declaration item.",
+            "actor": "document generator",
+            "action": "print",
+            "target": "originality declaration heading",
+            "condition": null,
+            "source_quote": "北京体育大学学位论文原创性声明",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "automatic"
+          }
+        ],
+        "normative_basis": "fixed_statement"
+      },
+      {
+        "clause_id": "C00034",
+        "classification": "executable_with_external_check",
+        "reason": "The source-bound fixed declaration body must be printed, while the author's assertion that the work is their research result requires separate human verification.",
+        "obligations": [
+          {
+            "id": "c34-fixed-body",
+            "status": "covered",
+            "reason": "The complete source paragraph E00034 is bound to the declaration item for exact printing.",
+            "actor": "document generator",
+            "action": "print",
+            "target": "originality declaration body",
+            "condition": null,
+            "source_quote": "本人郑重声明：所呈交的学位论文，是本人在导师指导下进行研究工作所取得的研究成果。",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "automatic"
+          },
+          {
+            "id": "c34-truthfulness-assertion",
+            "status": "unverifiable",
+            "reason": "Whether the author actually conducted the stated research under the supervisor's guidance is a real-world truthfulness matter not established by DOCX generation.",
+            "actor": "author",
+            "action": "verify and attest",
+            "target": "research-result assertion",
+            "condition": null,
+            "source_quote": "本人郑重声明：所呈交的学位论文，是本人在导师指导下进行研究工作所取得的研究成果",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "human"
+          }
+        ],
+        "normative_basis": "fixed_statement"
+      },
+      {
+        "clause_id": "C00035",
+        "classification": "executable_with_external_check",
+        "reason": "The fixed declaration text is printable, but the claim about absence of unacknowledged third-party works requires human provenance verification.",
+        "obligations": [
+          {
+            "id": "c35-fixed-body",
+            "status": "covered",
+            "reason": "The source paragraph containing this statement is included once through E00034.",
+            "actor": "document generator",
+            "action": "print",
+            "target": "originality declaration body",
+            "condition": null,
+            "source_quote": "除文中已经注明引用的内容外，本学位论文的研究成果不包含任何他人创作的、已公开发表或者没有公开发表的作品的内容",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "automatic"
+          },
+          {
+            "id": "c35-originality-verification",
+            "status": "unverifiable",
+            "reason": "DOCX generation cannot establish the truth of the originality and citation-completeness assertion.",
+            "actor": "author",
+            "action": "verify and attest",
+            "target": "originality assertion",
+            "condition": null,
+            "source_quote": "除文中已经注明引用的内容外，本学位论文的研究成果不包含任何他人创作的、已公开发表或者没有公开发表的作品的内容",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "human"
+          }
+        ],
+        "normative_basis": "fixed_statement"
+      },
+      {
+        "clause_id": "C00036",
+        "classification": "executable_with_external_check",
+        "reason": "The fixed declaration text is printable, while completeness of contribution attribution requires human verification against the thesis and contribution records.",
+        "obligations": [
+          {
+            "id": "c36-fixed-body",
+            "status": "covered",
+            "reason": "The source paragraph containing this statement is included once through E00034.",
+            "actor": "document generator",
+            "action": "print",
+            "target": "originality declaration body",
+            "condition": null,
+            "source_quote": "对本论文所涉及的研究工作做出贡献的其他个人和集体，均已在文中以明确方式标明",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "automatic"
+          },
+          {
+            "id": "c36-contribution-attribution",
+            "status": "unverifiable",
+            "reason": "DOCX generation cannot verify that every contributing person or collective has been clearly identified in the thesis.",
+            "actor": "author",
+            "action": "verify and attest",
+            "target": "contribution attribution",
+            "condition": null,
+            "source_quote": "对本论文所涉及的研究工作做出贡献的其他个人和集体，均已在文中以明确方式标明",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "human"
+          }
+        ],
+        "normative_basis": "fixed_statement"
+      },
+      {
+        "clause_id": "C00037",
+        "classification": "executable_with_external_check",
+        "reason": "The fixed declaration text is printable, but acceptance of legal responsibility is a human legal declaration and cannot be completed by rendering the text.",
+        "obligations": [
+          {
+            "id": "c37-fixed-body",
+            "status": "covered",
+            "reason": "The source paragraph containing this statement is included once through E00034.",
+            "actor": "document generator",
+            "action": "print",
+            "target": "originality declaration body",
+            "condition": null,
+            "source_quote": "本学位论文原创性声明的法律责任由本人承担",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "automatic"
+          },
+          {
+            "id": "c37-legal-responsibility",
+            "status": "unverifiable",
+            "reason": "Printing the declaration does not establish that the author has made and accepted the legal responsibility declaration.",
+            "actor": "author",
+            "action": "verify and attest",
+            "target": "legal-responsibility declaration",
+            "condition": null,
+            "source_quote": "本学位论文原创性声明的法律责任由本人承担",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "human"
+          }
+        ],
+        "normative_basis": "fixed_statement"
+      },
+      {
+        "clause_id": "C00038",
+        "classification": "external_compliance",
+        "reason": "The source line requires an actual author signature and date; blank placeholders can be printed, but signing and dating are distinct human obligations.",
+        "obligations": [
+          {
+            "id": "c38-author-signature",
+            "status": "unverifiable",
+            "reason": "The document may preserve a blank signature line, but actual signing must be completed by the author.",
+            "actor": "author",
+            "action": "sign",
+            "target": "originality declaration",
+            "condition": null,
+            "source_quote": "学位论文作者签名",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "human"
+          },
+          {
+            "id": "c38-signing-date",
+            "status": "unverifiable",
+            "reason": "The document may preserve a blank date line, but the actual signing date must be supplied by the author.",
+            "actor": "author",
+            "action": "date",
+            "target": "originality declaration",
+            "condition": null,
+            "source_quote": "年    月    日",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "human"
+          }
+        ],
+        "normative_basis": "external_duty"
+      }
+    ],
+    "unsupported_items": [],
+    "reported_conflicts": []
+  },
+  "retry": {
+    "contract_version": "3.0",
+    "requirements": [
+      {
+        "existing_requirement_id": null,
+        "field_key": null,
+        "clause_ids": [
+          "C00033",
+          "C00034",
+          "C00035",
+          "C00036",
+          "C00037"
+        ],
+        "source_fragment_clause_ids": null,
+        "evidence_ids": [
+          "E00033",
+          "E00034"
+        ],
+        "confidence": 0.98,
+        "reason": "The current source provides one complete fixed originality-declaration heading and body. The declaration is printable DOCX structure, while the truthfulness, attribution, and legal-responsibility statements remain human-verifiable obligations.",
+        "applicability": null,
+        "input_prerequisites": null,
+        "verification": {
+          "mode": "static_docx",
+          "checks": [
+            "Verify the exact source heading and body are materialized once at the verified abstract_title_zh anchor.",
+            "Verify blank author and date signature placeholders are preserved without asserting actual signing."
+          ],
+          "checker_ids": null
+        },
+        "role": "declarations",
+        "properties": {
+          "before_role": "abstract_title_zh",
+          "items": [
+            {
+              "source_signature_lines": [
+                {
+                  "text": "学位论文作者签名：                       年    月    日",
+                  "source_evidence_id": "E00035",
+                  "source_sha256": "f4288e7735ee7bb8a205f845e21244ec8e69b7308a1f9c499a5d025a2780ed74",
+                  "attestation_scope": "placeholder_presence_only"
+                }
+              ],
+              "id": "decl-originality-c00033-c00037",
+              "resource_id": null,
+              "version": null,
+              "sha256": null,
+              "heading": null,
+              "body": null,
+              "body_parts": null,
+              "source_evidence_ids": [
+                "E00033",
+                "E00034"
+              ],
+              "signature_placeholders": [
+                {
+                  "role": "author",
+                  "label": "学位论文作者签名",
+                  "attestation_scope": "placeholder_presence_only"
+                },
+                {
+                  "role": "date",
+                  "label": "年 月 日",
+                  "attestation_scope": "placeholder_presence_only"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    ],
+    "clause_reviews": [
+      {
+        "clause_id": "C00033",
+        "classification": "executable",
+        "reason": "The current fixed-declaration candidate identifies an exact declaration heading that the DOCX must preserve at the verified declaration anchor.",
+        "obligations": [
+          {
+            "id": "c33-fixed-declaration-heading",
+            "status": "covered",
+            "reason": "The exact heading is supplied by E00033 and is included in the source-bound declaration item.",
+            "actor": "document generator",
+            "action": "print",
+            "target": "originality declaration heading",
+            "condition": null,
+            "source_quote": "北京体育大学学位论文原创性声明",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "automatic"
+          }
+        ],
+        "normative_basis": "fixed_statement"
+      },
+      {
+        "clause_id": "C00034",
+        "classification": "executable_with_external_check",
+        "reason": "The source-bound fixed declaration body must be printed, while the author's assertion that the work is their research result requires separate human verification.",
+        "obligations": [
+          {
+            "id": "c34-fixed-body",
+            "status": "covered",
+            "reason": "The complete source paragraph E00034 is bound to the declaration item for exact printing.",
+            "actor": "document generator",
+            "action": "print",
+            "target": "originality declaration body",
+            "condition": null,
+            "source_quote": "本人郑重声明：所呈交的学位论文，是本人在导师指导下进行研究工作所取得的研究成果。",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "automatic"
+          },
+          {
+            "id": "c34-truthfulness-assertion",
+            "status": "unverifiable",
+            "reason": "Whether the author actually conducted the stated research under the supervisor's guidance is a real-world truthfulness matter not established by DOCX generation.",
+            "actor": "author",
+            "action": "verify and attest",
+            "target": "research-result assertion",
+            "condition": null,
+            "source_quote": "本人郑重声明：所呈交的学位论文，是本人在导师指导下进行研究工作所取得的研究成果",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "human"
+          }
+        ],
+        "normative_basis": "fixed_statement"
+      },
+      {
+        "clause_id": "C00035",
+        "classification": "executable_with_external_check",
+        "reason": "The fixed declaration text is printable, but the claim about absence of unacknowledged third-party works requires human provenance verification.",
+        "obligations": [
+          {
+            "id": "c35-fixed-body",
+            "status": "covered",
+            "reason": "The source paragraph containing this statement is included once through E00034.",
+            "actor": "document generator",
+            "action": "print",
+            "target": "originality declaration body",
+            "condition": null,
+            "source_quote": "除文中已经注明引用的内容外，本学位论文的研究成果不包含任何他人创作的、已公开发表或者没有公开发表的作品的内容",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "automatic"
+          },
+          {
+            "id": "c35-originality-verification",
+            "status": "unverifiable",
+            "reason": "DOCX generation cannot establish the truth of the originality and citation-completeness assertion.",
+            "actor": "author",
+            "action": "verify and attest",
+            "target": "originality assertion",
+            "condition": null,
+            "source_quote": "除文中已经注明引用的内容外，本学位论文的研究成果不包含任何他人创作的、已公开发表或者没有公开发表的作品的内容",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "human"
+          }
+        ],
+        "normative_basis": "fixed_statement"
+      },
+      {
+        "clause_id": "C00036",
+        "classification": "executable_with_external_check",
+        "reason": "The fixed declaration text is printable, while completeness of contribution attribution requires human verification against the thesis and contribution records.",
+        "obligations": [
+          {
+            "id": "c36-fixed-body",
+            "status": "covered",
+            "reason": "The source paragraph containing this statement is included once through E00034.",
+            "actor": "document generator",
+            "action": "print",
+            "target": "originality declaration body",
+            "condition": null,
+            "source_quote": "对本论文所涉及的研究工作做出贡献的其他个人和集体，均已在文中以明确方式标明",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "automatic"
+          },
+          {
+            "id": "c36-contribution-attribution",
+            "status": "unverifiable",
+            "reason": "DOCX generation cannot verify that every contributing person or collective has been clearly identified in the thesis.",
+            "actor": "author",
+            "action": "verify and attest",
+            "target": "contribution attribution",
+            "condition": null,
+            "source_quote": "对本论文所涉及的研究工作做出贡献的其他个人和集体，均已在文中以明确方式标明",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "human"
+          }
+        ],
+        "normative_basis": "fixed_statement"
+      },
+      {
+        "clause_id": "C00037",
+        "classification": "executable_with_external_check",
+        "reason": "The fixed declaration text is printable, but acceptance of legal responsibility is a human legal declaration and cannot be completed by rendering the text.",
+        "obligations": [
+          {
+            "id": "c37-fixed-body",
+            "status": "covered",
+            "reason": "The source paragraph containing this statement is included once through E00034.",
+            "actor": "document generator",
+            "action": "print",
+            "target": "originality declaration body",
+            "condition": null,
+            "source_quote": "本学位论文原创性声明的法律责任由本人承担",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "automatic"
+          },
+          {
+            "id": "c37-legal-responsibility",
+            "status": "unverifiable",
+            "reason": "Printing the declaration does not establish that the author has made and accepted the legal responsibility declaration.",
+            "actor": "author",
+            "action": "verify and attest",
+            "target": "legal-responsibility declaration",
+            "condition": null,
+            "source_quote": "本学位论文原创性声明的法律责任由本人承担",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "human"
+          }
+        ],
+        "normative_basis": "fixed_statement"
+      },
+      {
+        "clause_id": "C00038",
+        "classification": "external_compliance",
+        "reason": "The source line requires an actual author signature and date; blank placeholders can be printed, but signing and dating are distinct human obligations.",
+        "obligations": [
+          {
+            "id": "c38-author-signature",
+            "status": "unverifiable",
+            "reason": "The document may preserve a blank signature line, but actual signing must be completed by the author.",
+            "actor": "author",
+            "action": "sign",
+            "target": "originality declaration",
+            "condition": null,
+            "source_quote": "学位论文作者签名",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "human"
+          },
+          {
+            "id": "c38-signing-date",
+            "status": "unverifiable",
+            "reason": "The document may preserve a blank date line, but the actual signing date must be supplied by the author.",
+            "actor": "author",
+            "action": "date",
+            "target": "originality declaration",
+            "condition": null,
+            "source_quote": "年    月    日",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "human"
+          }
+        ],
+        "normative_basis": "external_duty"
+      }
+    ],
+    "unsupported_items": [],
+    "reported_conflicts": []
+  }
+}

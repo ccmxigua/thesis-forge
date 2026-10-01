@@ -329,6 +329,11 @@ evidence ID, byte hash and `placeholder_presence_only` scope. It is not added
 to the declaration's executable clause edges and does not change external
 signature/date obligations into covered duties. Signed/filled text, ambiguous
 ownership, other physical regions or altered source bindings are ineligible.
+The model omits `source_signature_lines` (must emit `null` on the native wire),
+including its text, evidence IDs and hashes. Only code generates these fields
+from the current source. The local declaration/resource schemas and source
+binding checks remain unchanged; an already supplied wrong hash is rejected,
+not replaced with current identity. Raw output and code projection stay distinct.
 The run-scoped resource digest includes the exact lines; serialization audits
 check their text and position after the body. Legacy neutral placeholders
 continue to work, including additional labels not represented by source lines.

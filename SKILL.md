@@ -102,7 +102,15 @@ are mandatory; independent disagreement still fails closed.
 
 After the unchanged-candidate independent review budget is exhausted, a pure
 typed `condition` disagreement may authorize one separate primary proposal
-within the existing primary attempt budget. Code reconstructs the complete
+under a separate one-shot condition-proposal budget. Ordinary parse/schema
+repair attempts cannot consume this opportunity before a valid candidate first
+reaches independent review. The bridge reconstructs the complete rejected
+source-bound feedback before reserving it and records both budget categories,
+the feedback/candidate/source hashes and the reservation in the attempt receipt.
+At most one condition proposal may start per chunk; another disagreement or
+any failure of that proposal is terminal even if ordinary slots remain. This
+does not expand ordinary retries or authorize any other type of reassessment.
+Code reconstructs the complete
 current source review and rejects missing/duplicate/foreign selectors, changed
 source/run identity, another disputed typed field, or any other invalid check.
 Only named atom conditions may change; the reviewer does not dictate a value.

@@ -18,6 +18,8 @@ from source_literal_binding import compose_source_fragments
 
 CODE = "primary_condition_reassessment_required"
 RULE_ID = "v3_source_bound_condition_reassessment"
+RETRY_BUDGET_POLICY = "v3_regular_attempts_plus_one_verified_condition_proposal"
+MAX_PRIMARY_CONDITION_PROPOSALS = 1
 
 
 def condition_feedback(candidate, chunk, request, rejected_review):
@@ -84,6 +86,38 @@ def _semantic(value):
     value = copy.deepcopy(value)
     value.pop("provenance", None)
     return value
+
+
+def condition_proposal_budget_receipt(candidate, chunk, records, normalized_raw_parent):
+    """Authenticate a separate one-shot proposal opportunity, never a pass.
+
+    A locally valid candidate may first reach independent review after ordinary
+    repair attempts are exhausted. Rebuild the complete source-bound feedback
+    before reserving this opportunity; an error-code string alone is not enough.
+    Actual proposed edits still need condition_reassessment and a fresh review.
+    """
+    if (not isinstance(records, list) or len(records) != 1
+            or not isinstance(records[0], dict) or records[0].get("code") != CODE
+            or not isinstance(normalized_raw_parent, dict)):
+        return None
+    record = records[0]
+    if record.get("response_sha256") != sha256_json(normalized_raw_parent):
+        return None
+    rebuilt = condition_feedback(candidate, chunk, record.get("review_request"),
+                                 record.get("rejected_review"))
+    if rebuilt is None or any(record.get(key) != value for key, value in rebuilt.items()):
+        return None
+    return {"policy_version": RETRY_BUDGET_POLICY,
+            "proposal_limit": MAX_PRIMARY_CONDITION_PROPOSALS,
+            "feedback_sha256": sha256_json(record),
+            "normalized_raw_parent_sha256": sha256_json(normalized_raw_parent),
+            "candidate_response_sha256": rebuilt["candidate_response_sha256"],
+            "source_chunk_sha256": rebuilt["source_chunk_sha256"],
+            "run_id": rebuilt["run_id"],
+            "condition_atoms": [{"clause_id": item["clause_id"],
+                                 "obligation_id": item["obligation_id"]}
+                                for item in rebuilt["condition_atoms"]],
+            "semantic_review_required": True, "submission_ready": False}
 
 
 def condition_reassessment(previous, current, records, paths, chunk, *, prepare, validate):

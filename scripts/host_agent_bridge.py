@@ -256,6 +256,8 @@ from source_quote_reassessment import quote_context_reassessment, RULE_ID as QUO
 from source_condition_reassessment import (
     condition_feedback, condition_reassessment, CODE as CONDITION_REASSESSMENT_CODE,
     RULE_ID as CONDITION_REASSESSMENT_RULE,
+    condition_proposal_budget_receipt, MAX_PRIMARY_CONDITION_PROPOSALS,
+    RETRY_BUDGET_POLICY as CONDITION_RETRY_BUDGET_POLICY,
 )
 from semantic_source_references import (  # noqa: E402
     REFERENCE_PROTOCOL,
@@ -13165,6 +13167,8 @@ def run_bridge(
             **host_context.as_audit(),
             "max_concurrency": max_concurrency,
             "max_attempts": max_attempts,
+            "primary_condition_proposal_limit": MAX_PRIMARY_CONDITION_PROPOSALS,
+            "retry_budget_policy": CONDITION_RETRY_BUDGET_POLICY,
             "model": effective_model,
             "codex_capabilities": copy.deepcopy(codex_capabilities),
             "structured_output_mode": structured_output_mode,
@@ -13284,7 +13288,27 @@ def run_bridge(
         )
         failures: list[str] = []
         retry_error_records: list[dict[str, Any]] = []
-        for attempt in range(1, max_attempts + 1):
+        ordinary_attempts_started = 0
+        condition_proposals_started = 0
+        condition_reservation: dict[str, Any] | None = None
+        for attempt in range(1, max_attempts + MAX_PRIMARY_CONDITION_PROPOSALS + 1):
+            controller.check()
+            proposal_reservation = condition_reservation
+            condition_reservation = None
+            if proposal_reservation is not None:
+                condition_proposals_started += 1
+            else:
+                ordinary_attempts_started += 1
+            retry_budget = {
+                "policy_version": CONDITION_RETRY_BUDGET_POLICY,
+                "ordinary_attempt_limit": max_attempts,
+                "ordinary_attempts_started": ordinary_attempts_started,
+                "condition_proposal_limit": MAX_PRIMARY_CONDITION_PROPOSALS,
+                "condition_proposals_started": condition_proposals_started,
+                "current_attempt_kind": (
+                    "condition_proposal" if proposal_reservation is not None else "ordinary"
+                ),
+            }
             audit: dict[str, Any] = {}
             pending_retry_authorizations: list[dict[str, Any]] = []
             retry_parent_response: Any = None
@@ -13304,8 +13328,11 @@ def run_bridge(
                         current_attempt=attempt,
                         attempts=[
                             *chunk_lifecycle[index].get("attempts", []),
-                            {"attempt": attempt, "status": "running", "started_at": attempt_started},
+                            {"attempt": attempt, "status": "running", "started_at": attempt_started,
+                             "retry_budget": copy.deepcopy(retry_budget),
+                             "condition_proposal_reservation": copy.deepcopy(proposal_reservation)},
                         ],
+                        retry_budget=copy.deepcopy(retry_budget),
                     )
                 retry_parent_response_path = None
                 retry_artifact_receipts: list[dict[str, Any]] = []
@@ -14123,6 +14150,7 @@ def run_bridge(
                     audit["response_path"] = str(response_path.resolve())
                     audit["accepted_response_sha256"] = _response_sha256(response)
                     audit["attempt_failures"] = failures
+                    audit["retry_budget"] = copy.deepcopy(retry_budget)
                     finished = datetime.now(timezone.utc).isoformat()
                     with lifecycle_lock:
                         chunk_lifecycle[index].update(
@@ -14250,7 +14278,10 @@ def run_bridge(
                     raise
                 if isinstance(exc, IndependentObligationReviewError) and getattr(exc, "retryable", False):
                     records = getattr(exc, "error_records", [])
-                    if (len(records) == 1 and records[0].get("code") == CONDITION_REASSESSMENT_CODE):
+                    normalized_condition_parent = None
+                    if (isinstance(records, list) and len(records) == 1
+                            and isinstance(records[0], dict)
+                            and records[0].get("code") == CONDITION_REASSESSMENT_CODE):
                         raw_path = attempt_response_path.with_name(
                             f"{attempt_response_path.stem}.raw{attempt_response_path.suffix}")
                         normalized_parent = normalize_native_response(
@@ -14258,6 +14289,34 @@ def run_bridge(
                             chunk.get("response_schema", {}),
                         )
                         records[0]["response_sha256"] = _response_sha256(normalized_parent)
+                        normalized_condition_parent = normalized_parent
+                # Ordinary repair budget must not suppress the first valid
+                # candidate's independently authorized condition proposal.
+                # It is a separate one-shot phase: never an unlimited retry
+                # and never permission to change other semantic fields.
+                condition_error = (
+                    isinstance(exc, IndependentObligationReviewError)
+                    and getattr(exc, "retryable", False)
+                    and any(isinstance(record, dict)
+                            and record.get("code") == CONDITION_REASSESSMENT_CODE
+                            for record in (getattr(exc, "error_records", None) or []))
+                )
+                if condition_error and condition_proposals_started < MAX_PRIMARY_CONDITION_PROPOSALS:
+                    try:
+                        bound_candidate = _read_json(attempt_response_path, label="condition-budget candidate")
+                        if (not validate_host_agent_response(bound_candidate, chunk)
+                                and not validate_response_provenance(
+                                    bound_candidate, provenance, require_fresh_origin=True)):
+                            condition_reservation = condition_proposal_budget_receipt(
+                                bound_candidate, chunk, getattr(exc, "error_records", None),
+                                normalized_condition_parent)
+                    except (OSError, ValueError, TypeError):
+                        condition_reservation = None
+                retry_permitted = (
+                    condition_reservation is not None
+                    or (not condition_error and condition_proposals_started == 0
+                        and ordinary_attempts_started < max_attempts)
+                ) and (getattr(exc, "repair_plan", {}) or {}).get("status") != "repair_plan_unavailable"
                 semantic_drift_records = getattr(exc, "error_records", None)
                 if (
                     isinstance(semantic_drift_records, list)
@@ -14517,7 +14576,7 @@ def run_bridge(
                         }
                         repair_base_snapshot = getattr(exc, "repair_base_snapshot", None)
                         chunk_lifecycle[index]["attempts"][-1].update(
-                            status="failed" if attempt >= max_attempts else "retrying",
+                            status="retrying" if retry_permitted else "failed",
                             finished_at=datetime.now(timezone.utc).isoformat(),
                             error_type=type(exc).__name__,
                             error=str(exc),
@@ -14547,8 +14606,9 @@ def run_bridge(
                                 or (audit.get("independent_obligation_review")
                                     if isinstance(audit, dict) else None)
                             ),
+                            condition_proposal_authorization=copy.deepcopy(condition_reservation),
                         )
-                if attempt >= max_attempts or (getattr(exc, "repair_plan", {}) or {}).get("status") == "repair_plan_unavailable":
+                if not retry_permitted:
                     update_chunk_lifecycle(
                         index,
                         status="failed",
@@ -14709,6 +14769,8 @@ def run_bridge(
         **host_context.as_audit(),
         "max_concurrency": max_concurrency,
         "max_attempts": max_attempts,
+        "primary_condition_proposal_limit": MAX_PRIMARY_CONDITION_PROPOSALS,
+        "retry_budget_policy": CONDITION_RETRY_BUDGET_POLICY,
         "model": effective_model,
         "codex_capabilities": copy.deepcopy(codex_capabilities),
         "structured_output_mode": structured_output_mode,

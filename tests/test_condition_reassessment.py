@@ -18,7 +18,10 @@ import requirements_engine as engine
 import apply_format_spec as applier
 from docx import Document
 from semantic_contract import attach_request_provenance, sha256_json
-from source_condition_reassessment import condition_feedback, condition_reassessment, CODE, RULE_ID
+from source_condition_reassessment import (
+    condition_feedback, condition_reassessment, condition_proposal_budget_receipt,
+    CODE, RULE_ID, RETRY_BUDGET_POLICY,
+)
 
 
 def incident():
@@ -97,6 +100,154 @@ class ConditionReassessmentTests(unittest.TestCase):
         self.assertEqual(len(self.proof(candidate, compiled, chunk, [record])), 4)
         self.assertEqual(bridge.validate_host_agent_response(compiled, chunk), [])
         self.assertEqual((raw, candidate, chunk, record), frozen)
+
+    def test_separate_budget_requires_complete_current_feedback_and_raw_parent(self):
+        _, raw, candidate, chunk, record = incident()
+        frozen = copy.deepcopy((raw, candidate, chunk, record))
+        receipt = condition_proposal_budget_receipt(candidate, chunk, [record], raw)
+        self.assertEqual(receipt["policy_version"], RETRY_BUDGET_POLICY)
+        self.assertEqual(receipt["proposal_limit"], 1)
+        self.assertFalse(receipt["submission_ready"])
+        self.assertEqual((raw, candidate, chunk, record), frozen)
+        for defect in ("code_only", "run", "source", "candidate", "parent", "request", "review", "extra"):
+            damaged = copy.deepcopy(record); records = [damaged]
+            if defect == "code_only": records = [{"code": CODE}]
+            elif defect == "run": damaged["run_id"] = "old-run"
+            elif defect == "source": damaged["source_chunk_sha256"] = "0" * 64
+            elif defect == "candidate": damaged["candidate_response_sha256"] = "0" * 64
+            elif defect == "parent": damaged["response_sha256"] = "0" * 64
+            elif defect == "request": damaged["review_request"]["run_id"] = "old-run"
+            elif defect == "review": damaged["rejected_review"]["results"].pop()
+            else: records.append({"code": "unrelated_error"})
+            with self.subTest(defect=defect):
+                self.assertIsNone(condition_proposal_budget_receipt(candidate, chunk, records, raw))
+
+    def _late_condition_budget_case(self, *, outcome="accepted", ordinary_limit=2, early_rejection=True):
+        """Offline bridge orchestration, not a real provider/Word acceptance."""
+        data, raw, _, _, _ = incident()
+        original_data = json.loads((ROOT / "tests/fixtures/cover-condition-reassessment-incident.json").read_text())
+        source = data["source"]
+        evidence = {"evidence": list(source["evidence_context"].values())}
+        with tempfile.TemporaryDirectory() as td:
+            directory = Path(td) / "packet"; directory.mkdir()
+            request = engine.build_llm_request([], source["clauses"], evidence, {}, "full", contract_version="3.0")
+            request.update(case_id="budget-offline", batch={"index": 1},
+                           runtime_context={"code_fingerprint_sha256": sha256_json("budget-offline-code")})
+            request = attach_request_provenance(request, source_sha256=sha256_json(evidence), evidence_doc=evidence,
+                clauses=source["clauses"], run_id="budget-offline")
+            engine.prepare_host_agent_review_packets(request, source["clauses"], evidence, sha256_json(evidence),
+                directory, chunk_size=100)
+            chunk = json.loads((directory / "llm-request-chunks.json").read_text())[0]
+            captured = {}; reviews = []; primary_calls = []
+
+            def independent(candidate, current_chunk, **kwargs):
+                reviews.append(kwargs["attempt"])
+                captured["controller"] = kwargs["controller"]
+                if "record" not in captured:
+                    review_request = native.build_obligation_coverage_request(candidate, current_chunk,
+                        run_id=kwargs["run_id"], chunk_index=kwargs["chunk_index"])
+                    review_request.update(attempt=kwargs["attempt"], provider_attempt=2)
+                    review = copy.deepcopy(original_data["independent"])
+                    checks = {c["check_id"]: c for c in review_request["checks"]}
+                    for result in review["results"]:
+                        links = checks[result["check_id"]]["review_context"]["linked_requirements"]
+                        for atom in result["identified_obligations"]:
+                            rebound = []
+                            for ref in atom["requirement_refs"]:
+                                fingerprint = original_data["linked_requirement_fingerprints"][result["check_id"]][ref]
+                                matches = [link["requirement_ref"] for link in links
+                                    if sha256_json({k:v for k,v in link.items() if k != "requirement_ref"}) == fingerprint]
+                                self.assertEqual(len(matches), 1)
+                                rebound.append(matches[0])
+                            atom["requirement_refs"] = rebound
+                    record = condition_feedback(candidate, current_chunk, review_request, review)
+                    self.assertIsNotNone(record)
+                    captured["record"] = copy.deepcopy(record)
+                    if outcome == "stale_feedback": record["source_chunk_sha256"] = "0" * 64
+                    error = bridge.IndependentObligationReviewError("source-bound condition proposal needed")
+                    error.retryable = True; error.error_records = [record]
+                    raise error
+                self.assertEqual(bridge.validate_host_agent_response(candidate, current_chunk), [])
+                if outcome == "repeat_request":
+                    error = bridge.IndependentObligationReviewError("another condition request must not reset the budget")
+                    error.retryable = True; error.error_records = [{"code": CODE}]
+                    raise error
+                if outcome == "fresh_rejection":
+                    error = bridge.IndependentObligationReviewError("fresh reviewer still rejects the candidate")
+                    error.retryable = False
+                    raise error
+                from test_host_agent_bridge import HostAgentBridgeTests
+                return HostAgentBridgeTests._fake_independent_review(candidate, current_chunk, **kwargs)
+
+            def primary(_command, **kwargs):
+                primary_calls.append(len(primary_calls) + 1)
+                body = copy.deepcopy(raw) if "record" not in captured else proposed(raw, captured["record"])
+                body["provenance"] = chunk["provenance"]
+                if outcome == "unrelated_edit" and "record" in captured:
+                    body["clause_reviews"][0]["reason"] += " unauthorized edit"
+                text = ("not valid JSON" if early_rejection and len(primary_calls) == 1 else json.dumps(body))
+                return subprocess.CompletedProcess(["mock-host"], 0, json.dumps({"runId": "offline-budget",
+                    "status": "ok", "provider": "openai", "model": "gpt-5.6-luna",
+                    "result": {"payloads": [{"text": text}]}}), "")
+
+            actual_budget = bridge.condition_proposal_budget_receipt
+            def reserve(*args):
+                receipt = actual_budget(*args)
+                if outcome == "cancel_after_reservation" and receipt is not None:
+                    captured["controller"].request_stop("cancelled after reservation")
+                return receipt
+
+            output = Path(td) / "merged.json"
+            with patch.dict(os.environ, {"THESIS_FORGE_HOST_RUNTIME": "openclaw"}), \
+                 patch.object(bridge, "_run_command", side_effect=primary), \
+                 patch.object(bridge, "condition_proposal_budget_receipt", side_effect=reserve), \
+                 patch.object(bridge, "_run_independent_obligation_coverage_review", side_effect=independent):
+                if outcome == "accepted":
+                    bridge.run_bridge(directory, response_out=output, agent_id="main", timeout=1,
+                        max_attempts=ordinary_limit, openclaw_bin="mock-host", model="openai/gpt-5.6-luna")
+                else:
+                    with self.assertRaises((ValueError, bridge.HostAgentCancelled,
+                                            bridge.IndependentObligationReviewError)):
+                        bridge.run_bridge(directory, response_out=output, agent_id="main", timeout=1,
+                            max_attempts=ordinary_limit, openclaw_bin="mock-host", model="openai/gpt-5.6-luna")
+            audit = json.loads((directory / "host-agent-run.json").read_text())
+            self.assertEqual(output.exists(), outcome == "accepted")
+            return audit, primary_calls, reviews
+
+    def test_first_condition_proposal_survives_exhausted_ordinary_budget(self):
+        audit, calls, reviews = self._late_condition_budget_case()
+        self.assertEqual(calls, [1, 2, 3])
+        self.assertEqual(reviews, [2, 3])
+        self.assertEqual(audit["status"], "merged")
+        budget = audit["chunk_runs"][0]["retry_budget"]
+        self.assertEqual(budget["ordinary_attempts_started"], 2)
+        self.assertEqual(budget["condition_proposals_started"], 1)
+        attempts = audit["chunk_lifecycle"][0]["attempts"]
+        self.assertIsNotNone(attempts[1]["condition_proposal_authorization"])
+        self.assertEqual(attempts[2]["retry_budget"]["current_attempt_kind"], "condition_proposal")
+        self.assertIsNotNone(attempts[2]["condition_proposal_reservation"])
+
+    def test_bad_feedback_and_cancel_cannot_dispatch_extra_primary(self):
+        for outcome in ("stale_feedback", "cancel_after_reservation"):
+            with self.subTest(outcome=outcome):
+                audit, calls, reviews = self._late_condition_budget_case(outcome=outcome)
+                self.assertEqual(calls, [1, 2])
+                self.assertEqual(reviews, [2])
+                self.assertFalse(audit["merged_response_written"])
+
+    def test_proposal_never_bypasses_fresh_review_or_retries_forever(self):
+        for outcome in ("repeat_request", "fresh_rejection", "unrelated_edit"):
+            with self.subTest(outcome=outcome):
+                audit, calls, reviews = self._late_condition_budget_case(outcome=outcome)
+                self.assertEqual(calls, [1, 2, 3])
+                self.assertEqual(reviews, [2] if outcome == "unrelated_edit" else [2, 3])
+                self.assertFalse(audit["merged_response_written"])
+        # An early condition proposal is still one-shot, not followed by
+        # unused ordinary slots or a second condition proposal.
+        _, calls, reviews = self._late_condition_budget_case(
+            outcome="repeat_request", ordinary_limit=3, early_rejection=False)
+        self.assertEqual(calls, [1, 2])
+        self.assertEqual(reviews, [1, 2])
 
     def test_not_a_reviewer_copy_or_a_pass(self):
         _, raw, candidate, chunk, record = incident()

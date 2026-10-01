@@ -11,6 +11,8 @@ import hashlib
 import re
 from typing import Any
 
+from fixed_declaration_source import derive_fixed_declaration_candidates
+
 
 _BOUNDARY_ONLY = re.compile(r"^[\s，,、：:;；。！？!?…“”‘’（）()【】\[\]{}]*$")
 _NORMALIZE_CLAUSE = re.compile(r"\s+")
@@ -388,6 +390,49 @@ def _verify_non_text_role_selector(
     return fragments
 
 
+def _declaration_render_only_selection(requirement, clauses, evidence_map, reviews):
+    """Allow a complete source grouping, never promote human duties to edges.
+
+    A declaration may print a responsibility sentence while the real-world
+    responsibility remains an external pending obligation. The render selector
+    must be one complete, exact current grouping and every extra clause must
+    have a distinct, nonempty human inventory. Full span/payload checks follow.
+    """
+    selector = requirement.get("source_fragment_clause_ids")
+    edges = requirement.get("clause_ids")
+    properties = requirement.get("properties")
+    items = properties.get("items") if isinstance(properties, dict) else None
+    if (not isinstance(selector, list) or not isinstance(edges, list)
+            or not isinstance(items, list) or len(items) != 1
+            or not isinstance(items[0], dict) or not isinstance(reviews, list)):
+        return None
+    extras = [cid for cid in selector if cid not in edges]
+    if not extras or len({c.get("id") for c in clauses}) != len(clauses):
+        return None
+    groups = [group for group in derive_fixed_declaration_candidates(
+        clauses, evidence_map, anchor=properties.get("before_role"))
+        if group.get("clause_ids") == selector
+        and group.get("evidence_ids") == items[0].get("source_evidence_ids")
+        and group.get("heading_clause_id") in edges
+        and [cid for cid in selector if cid in edges] == edges]
+    if len(groups) != 1:
+        return None
+    by_clause = {r.get("clause_id"): r for r in reviews if isinstance(r, dict)}
+    if len(by_clause) != len(reviews):
+        return None
+    for cid in extras:
+        review = by_clause.get(cid, {})
+        atoms = review.get("obligations")
+        if (review.get("classification") != "external_compliance"
+                or not isinstance(atoms, list) or not atoms
+                or any(not isinstance(atom, dict) or atom.get("status") != "unverifiable"
+                       or atom.get("route") != "human" for atom in atoms)):
+            return None
+    return {"policy": "declaration_render_only_source_fragments_v1",
+            "executable_clause_ids": copy.deepcopy(edges), "render_only_clause_ids": extras,
+            "selected_group": copy.deepcopy(groups[0]), "external_actions_verified": False}
+
+
 def materialize_source_fragment_literals(
     response: Any,
     clauses: list[dict[str, Any]],
@@ -434,9 +479,13 @@ def materialize_source_fragment_literals(
             })
             continue
         try:
+            render_only = _declaration_render_only_selection(
+                item, clauses, evidence_map, output.get("clause_reviews"),
+            ) if role == "declarations" else None
             binding = compose_source_fragments(
                 item.get("source_fragment_clause_ids"), clause_map, evidence_context,
-                requirement_clause_ids=item.get("clause_ids"),
+                requirement_clause_ids=(item["source_fragment_clause_ids"]
+                    if render_only is not None else item.get("clause_ids")),
                 requirement_evidence_ids=item.get("evidence_ids"),
                 literal_role=role,
             )
@@ -460,6 +509,7 @@ def materialize_source_fragment_literals(
                     binding["text"].encode("utf-8")
                 ).hexdigest(),
                 "action": "verified_against_role_native_declaration_text",
+                **({"render_only_selection": render_only} if render_only is not None else {}),
             })
             continue
         supplied_text = properties.get("text")

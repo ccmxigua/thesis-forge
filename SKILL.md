@@ -245,7 +245,18 @@ executable/covered/verify_existing/executable_with_external_check and evidence b
 nested `source_evidence_ids` selects the exact current source paragraphs to
 print. Printing an approval, signature, or seal instruction does not attest
 that the real-world action occurred. Administrative approval/marking regions
-remain conditional cover structures, not fixed declarations. A clause with
+remain conditional cover structures, not fixed declarations.
+
+The declaration's optional `source_fragment_clause_ids` is likewise a render
+selector, not an executable obligation edge. It may include external pending
+clauses only as one unique complete current heading/body grouping selected by
+the same nested source evidence. Each extra clause must retain nonempty human,
+unverifiable obligations; exact source spans, full paragraph coverage and
+role-native text are still checked. No requirement edge or review changes,
+and the projection audit lists render-only and executable clauses separately.
+Other roles keep the ordinary selector-subset restriction. Signature lines
+remain separately bound, not part of the heading/body selector.
+A clause with
 both a DOCX action and a distinct real-world approval, consent, signature, or
 seal action may use `executable_with_external_check` only after a source-bound
 review identifies at least one covered DOCX obligation and at least one

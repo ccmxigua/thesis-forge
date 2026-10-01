@@ -77,6 +77,15 @@ def build_source_reference_packet(request: dict[str, Any]) -> dict[str, Any]:
         # fallback span; conservative sentence spans improve English sources
         # without splitting decimal numbers or common abbreviations.
         ranges = _source_ranges(text)
+        context = check.get("review_context") or {}
+        # Typed primary atoms may cite a proper subspan rather than a whole
+        # sentence. Make that exact quotation selectable; never ask a model
+        # to retype it or invent a range to satisfy a later equality check.
+        for primary in context.get("primary_obligations") or []:
+            quote = primary.get("source_quote") if isinstance(primary, dict) else None
+            if isinstance(quote, str) and quote.strip() and text.count(quote) == 1:
+                offset = text.index(quote)
+                ranges.append((offset, offset + len(quote)))
         spans = []
         for start, end in dict.fromkeys(ranges):
             identity = {"request_sha256": binding, "check_id": check_id,
@@ -122,9 +131,16 @@ def source_reference_schema(
             review_context = review_context if isinstance(review_context, dict) else {}
             primary_obligations = review_context.get("primary_obligations")
             primary_ids: list[str] = []
-            if review_context.get("classification") in {
+            external_mapping = review_context.get("classification") in {
                 "external_compliance", "executable_with_external_check",
-            } and primary_obligations:
+            }
+            typed_mapping = any(
+                isinstance(item, dict) and item.get("force", "unknown") != "unknown"
+                and all(item.get(k) not in {None, "", "unknown"}
+                        for k in ("actor", "action", "target", "source_quote"))
+                for item in (primary_obligations or [])
+            ) if isinstance(primary_obligations, list) else False
+            if (external_mapping or typed_mapping) and primary_obligations:
                 if not isinstance(primary_obligations, list):
                     raise ValueError("external primary obligation inventory is malformed")
                 primary_ids = [
@@ -165,9 +181,14 @@ def source_reference_schema(
                     if not permitted_codes:
                         continue
                     code_schema["enum"] = permitted_codes
-                if primary_ids and not is_scope_branch:
+                if primary_ids:
                     obligation_props["primary_obligation_id"] = {"enum": primary_ids}
-                    obligation["required"].append("primary_obligation_id")
+                    if external_mapping and not is_scope_branch:
+                        obligation["required"].append("primary_obligation_id")
+                    # Ordinary typed checks may discover an additional source
+                    # duty with no primary atom. Keep its mapping optional;
+                    # the canonical validator separately requires one exact
+                    # mapping for every already typed primary atom.
                 else:
                     obligation_props.pop("primary_obligation_id", None)
                 obligation_props.pop("source_quote")
@@ -177,6 +198,16 @@ def source_reference_schema(
                     for key in obligation["required"]
                 ]
                 compiled_obligation_branches.append(obligation)
+                if external_mapping and primary_ids and not is_scope_branch:
+                    # A source-first reviewer must be able to report a duty
+                    # the primary inventory missed. It cannot claim this new
+                    # duty is covered or map it to an unrelated primary ID.
+                    unmatched = copy.deepcopy(obligation)
+                    unmatched["properties"].pop("primary_obligation_id", None)
+                    unmatched["required"].remove("primary_obligation_id")
+                    unmatched["properties"]["disposition"] = {"enum": ["unrepresented"]}
+                    unmatched["properties"]["requirement_refs"]["maxItems"] = 0
+                    compiled_obligation_branches.append(unmatched)
             if constrain_requirement_links:
                 # Generation-time constraint mirrors the canonical coverage
                 # validator. Parsing still preserves invalid raw output for a

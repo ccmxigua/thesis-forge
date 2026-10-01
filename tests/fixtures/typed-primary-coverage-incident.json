@@ -1,0 +1,169 @@
+{
+  "origin": "ced9862 real fresh BSU, primary and independently compiled C00033 result unmodified",
+  "clause": {
+    "id": "C00033",
+    "text": "北京体育大学学位论文原创性声明",
+    "evidence_ids": [
+      "E00033"
+    ],
+    "source_kind": "paragraph",
+    "location": {
+      "part": "document",
+      "child_index": 39,
+      "order": 32
+    },
+    "part_index": 0,
+    "source_span": {
+      "evidence_id": "E00033",
+      "start_offset": 0,
+      "end_offset": 15,
+      "text": "北京体育大学学位论文原创性声明",
+      "source_sha256": "dee65d50fd4d5d8005c286b6a46703d0c73d22949826314586197a67cb836ea5",
+      "location": {
+        "part": "document",
+        "child_index": 39,
+        "order": 32
+      }
+    },
+    "source_text_full": "北京体育大学学位论文原创性声明",
+    "deterministic_obligation_keys": []
+  },
+  "evidence_context": {
+    "E00033": {
+      "id": "E00033",
+      "kind": "paragraph",
+      "text": "北京体育大学学位论文原创性声明",
+      "style_id": null,
+      "runs": [
+        {
+          "text": "北京体育大学",
+          "format": {
+            "fonts": {
+              "eastAsia": "黑体"
+            },
+            "size_pt": 16,
+            "bold": true
+          }
+        },
+        {
+          "text": "学位论文原创性声明",
+          "format": {
+            "fonts": {
+              "eastAsia": "黑体"
+            },
+            "size_pt": 16,
+            "bold": true
+          }
+        }
+      ],
+      "location": {
+        "part": "document",
+        "child_index": 39,
+        "order": 32
+      },
+      "context_before": [
+        "秘书            技术职称          所在单位",
+        "年  月"
+      ],
+      "context_after": [
+        "本人郑重声明：所呈交的学位论文，是本人在导师指导下进行研究工作所取得的研究成果。除文中已经注明引用的内容外，本学位论文的研究成果不包含任何他人创作的、已公开发表或者没有公开发表的作品的内容。对本论文所涉及的研究工作做出贡献的其他个人和集体，均已在文中以明确方式标明。本学位论文原创性声明的法律责任由本人承担。",
+        "学位论文作者签名：                       年    月    日"
+      ],
+      "style_name": null,
+      "xml_locator": {
+        "part": "document",
+        "child_index": 39,
+        "order": 32
+      }
+    }
+  },
+  "review": {
+    "clause_id": "C00033",
+    "classification": "executable",
+    "reason": "The source explicitly identifies a fixed originality-declaration heading that must be represented in the document declaration structure.",
+    "obligations": [
+      {
+        "id": "c33-fixed-declaration-display",
+        "status": "covered",
+        "reason": "The declaration requirement preserves the exact source heading and its associated fixed declaration grouping.",
+        "actor": "document compiler",
+        "action": "insert",
+        "target": "fixed originality declaration",
+        "source_quote": "北京体育大学学位论文原创性声明",
+        "force": "required",
+        "applicability": "applicable",
+        "route": "automatic"
+      }
+    ],
+    "normative_basis": "fixed_statement"
+  },
+  "requirements": [
+    {
+      "clause_ids": [
+        "C00033",
+        "C00034",
+        "C00035",
+        "C00036"
+      ],
+      "evidence_ids": [
+        "E00033",
+        "E00034"
+      ],
+      "confidence": 0.98,
+      "reason": "The current source provides a genuine fixed declaration heading and body grouping. The declaration text is executable as document structure, while the attestation content remains subject to human verification.",
+      "input_prerequisites": [
+        {
+          "kind": "runtime",
+          "key": "runtime.anchor_inventory.selected",
+          "required": true,
+          "reason": "The declaration requires the verified current insertion anchor."
+        }
+      ],
+      "verification": {
+        "mode": "static_docx",
+        "checks": [
+          "Verify the fixed declaration is inserted at the selected abstract_title_zh anchor.",
+          "Verify source evidence E00033 and E00034 are materialized once without duplicated paragraphs."
+        ]
+      },
+      "role": "declarations",
+      "properties": {
+        "before_role": "abstract_title_zh",
+        "items": [
+          {
+            "id": "decl-originality-0001",
+            "source_evidence_ids": [
+              "E00033",
+              "E00034"
+            ],
+            "signature_placeholders": []
+          }
+        ]
+      }
+    }
+  ],
+  "independent_result": {
+    "check_id": "C00033",
+    "verdict": "consistent",
+    "rationale": "The heading establishes the fixed originality-declaration structure, and the linked requirement preserves its insertion and single-materialization constraints.",
+    "identified_obligations": [
+      {
+        "force": "required",
+        "applicability": "applicable",
+        "actor": "document compiler",
+        "action": "insert",
+        "target": "fixed originality declaration",
+        "obligation_summary": "Insert the fixed originality-declaration heading and associated declaration grouping in the document declaration structure.",
+        "requirement_refs": [
+          "RR82f4151bd66b27b170ea"
+        ],
+        "disposition": "represented",
+        "source_quote": "北京体育大学学位论文原创性声明"
+      }
+    ],
+    "evidence_quotes": [
+      "北京体育大学学位论文原创性声明"
+    ],
+    "machine_obligation_ids": []
+  }
+}

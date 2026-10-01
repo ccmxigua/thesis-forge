@@ -19,6 +19,7 @@ from host_runtime import automatic_adapter_id, require_host_runtime
 from process_runner import run_process
 from artifact_io import atomic_write_text
 from semantic_contract import sha256_json, strict_json_dumps
+from source_atom_metadata import bind_atom_quote
 from obligation_workflow import (
     OBLIGATION_COVERAGE_PROTOCOL,
     SCOPE_DEPENDENCY_DIMENSIONS,
@@ -406,6 +407,34 @@ def build_obligation_coverage_request(
                     "evidence_ids": copy.deepcopy(supported_clause.get("evidence_ids") or []),
                 })
         cited_evidence_ids = set(clause.get("evidence_ids") or [])
+        primary_obligations = copy.deepcopy(review.get("obligations") or [])
+        primary_quote_bindings = []
+        for primary in primary_obligations:
+            quote = primary.get("source_quote") if isinstance(primary, dict) else None
+            if quote is None:
+                continue  # Legacy atoms without typed quotation remain legacy.
+            try:
+                proof = bind_atom_quote(quote, clause_id, clause_by_id, evidence_context)
+            except (ValueError, KeyError, TypeError) as exc:
+                raise NativeSemanticReviewError("primary obligation quotation has no current source binding") from exc
+            # Context may be valid current evidence yet sit outside this
+            # selected clause. Scope the review quotation to the clause text,
+            # retaining the original quotation and binding as immutable proof.
+            if quote not in source_text:
+                fragment = proof["clause_binding"]["source_fragments"][0]
+                if not (proof["quote_start_offset"] <= fragment["start_offset"]
+                        < fragment["end_offset"] <= proof["quote_end_offset"]):
+                    raise NativeSemanticReviewError("primary quotation cannot be scoped without extending its source range")
+                primary["source_quote"] = source_text
+            primary_quote_bindings.append({
+                "primary_obligation_id": primary.get("id"),
+                "original_source_quote": quote,
+                "review_source_quote": primary["source_quote"],
+                "source_binding": proof,
+                "original_quote_sha256": sha256_json(quote),
+                "review_quote_sha256": sha256_json(primary["source_quote"]),
+                "semantic_dimensions_unchanged": True,
+            })
         checks.append({
             "check_id": clause_id,
             "document_text": source_text,
@@ -418,7 +447,8 @@ def build_obligation_coverage_request(
                     str(review.get("classification"))
                 ),
                 "reason": review.get("reason"),
-                "primary_obligations": copy.deepcopy(review.get("obligations") or []),
+                "primary_obligations": primary_obligations,
+                "primary_obligation_quote_bindings": primary_quote_bindings,
                 "linked_requirements": linked_requirements,
                 "source_clause_support": source_clause_support,
                 "cited_evidence": {
@@ -641,10 +671,18 @@ def validate_obligation_coverage_response(
                 continue
             matching = [o for o in result.get("identified_obligations", [])
                         if o.get("primary_obligation_id") == primary.get("id")]
-            if len(matching) != 1 or any(matching[0].get(k) != primary.get(k, "unknown")
+            if len(matching) != 1:
+                raise NativeSemanticReviewError(
+                    f"independent typed-primary mapping missing or duplicate for {check_id}"
+                )
+            if any(matching[0].get(k) != primary.get(k, "unknown")
                     for k in ("actor", "action", "target", "source_quote", "force", "applicability")):
                 raise NativeSemanticReviewError(
                     f"independent source-atom modality/applicability disagreement for {check_id}"
+                )
+            if matching[0].get("condition") != primary.get("condition"):
+                raise NativeSemanticReviewError(
+                    f"independent source-atom condition disagreement for {check_id}"
                 )
         source_verification_pending = 0
         scope_unresolved = 0

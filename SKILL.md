@@ -97,6 +97,13 @@ Administrative labels with this policy are printed blank while approval/value
 verification remains unchanged. Serialized cover audits check the labels and
 do not count them as trusted metadata. Real Word/visual acceptance is separate.
 
+Native structured-output schemas are provider projections, not the local
+contract. Unsupported composition constraints (`allOf`, `not`, `if`/`then`/
+`else`, and non-portable `oneOf`) remain in the local schema and are described
+but omitted from the native wire schema. Preflight rejects any such keyword
+left on the wire, as well as a constraint-only schema without a concrete shape.
+Every returned candidate must still pass the unchanged local contract.
+
 Existing requirement IDs are selectors into the current input, never IDs for
 the model to allocate. Each freshly prepared chunk constrains the selector to
 its supplied candidates before computing its request hash. A new requirement

@@ -36,7 +36,7 @@ def applicability_value_schema() -> dict[str, Any]:
     }
 
 
-_COMPOSITION_KEYS = {"$ref", "const", "enum", "anyOf", "allOf", "oneOf", "not", "if"}
+_COMPOSITION_KEYS = {"$ref", "const", "enum", "anyOf"}
 
 # OpenAI-compatible strict structured outputs accept the shape of JSON data,
 # but not every JSON-Schema validation keyword.  These constraints remain in
@@ -49,6 +49,7 @@ _NATIVE_UNSUPPORTED_KEYWORDS = frozenset({
     "minProperties", "maxProperties", "propertyNames", "patternProperties",
     "dependencies", "dependentRequired", "dependentSchemas",
     "unevaluatedProperties", "unevaluatedItems",
+    "allOf", "oneOf", "not", "if", "then", "else",
 })
 
 
@@ -301,6 +302,8 @@ def native_schema_support_errors(schema: Any, path: str = "$") -> list[str]:
     if not isinstance(schema, dict):
         return [f"{path}: native schema must be an object"]
     errors: list[str] = []
+    for keyword in sorted(set(schema) & _NATIVE_UNSUPPORTED_KEYWORDS):
+        errors.append(f"{path}: native_schema_unsupported_keyword:{keyword}")
     if not schema:
         errors.append(f"{path}: native_schema_empty_schema")
     if "type" not in schema and not (set(schema) & _COMPOSITION_KEYS):

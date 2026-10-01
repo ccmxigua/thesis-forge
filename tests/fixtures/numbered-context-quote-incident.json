@@ -1,0 +1,143 @@
+{
+  "clauses": [
+    {
+      "id": "C00059",
+      "text": "2. 学校可以将本学位论文的全部或部分内容编入有关数据库进行检索，可以采用影印、缩印或其他复制手段保存和汇编本学位论文",
+      "evidence_ids": [
+        "E00052"
+      ],
+      "source_kind": "paragraph",
+      "location": {
+        "part": "document",
+        "child_index": 53,
+        "order": 51
+      },
+      "part_index": 0,
+      "source_span": {
+        "evidence_id": "E00052",
+        "start_offset": 0,
+        "end_offset": 59,
+        "text": "2. 学校可以将本学位论文的全部或部分内容编入有关数据库进行检索，可以采用影印、缩印或其他复制手段保存和汇编本学位论文",
+        "source_sha256": "606c10d9cabbc7871361bc338968eaaa3c0ad7cd83f861277923bde7d687e2ca",
+        "location": {
+          "part": "document",
+          "child_index": 53,
+          "order": 51
+        }
+      },
+      "source_text_full": "2. 学校可以将本学位论文的全部或部分内容编入有关数据库进行检索，可以采用影印、缩印或其他复制手段保存和汇编本学位论文；学校根据规定向教育部指定的收藏和存档单位提交学位论文；",
+      "deterministic_obligation_keys": []
+    },
+    {
+      "id": "C00060",
+      "text": "学校根据规定向教育部指定的收藏和存档单位提交学位论文",
+      "evidence_ids": [
+        "E00052"
+      ],
+      "source_kind": "paragraph",
+      "location": {
+        "part": "document",
+        "child_index": 53,
+        "order": 51
+      },
+      "part_index": 1,
+      "source_span": {
+        "evidence_id": "E00052",
+        "start_offset": 60,
+        "end_offset": 86,
+        "text": "学校根据规定向教育部指定的收藏和存档单位提交学位论文",
+        "source_sha256": "606c10d9cabbc7871361bc338968eaaa3c0ad7cd83f861277923bde7d687e2ca",
+        "location": {
+          "part": "document",
+          "child_index": 53,
+          "order": 51
+        }
+      },
+      "source_text_full": "2. 学校可以将本学位论文的全部或部分内容编入有关数据库进行检索，可以采用影印、缩印或其他复制手段保存和汇编本学位论文；学校根据规定向教育部指定的收藏和存档单位提交学位论文；",
+      "deterministic_obligation_keys": []
+    }
+  ],
+  "evidence_context": {
+    "E00052": {
+      "id": "E00052",
+      "kind": "paragraph",
+      "text": "2. 学校可以将本学位论文的全部或部分内容编入有关数据库进行检索，可以采用影印、缩印或其他复制手段保存和汇编本学位论文；学校根据规定向教育部指定的收藏和存档单位提交学位论文；",
+      "style_id": null,
+      "runs": [
+        {
+          "text": "2.",
+          "format": {
+            "fonts": {
+              "eastAsia": "宋体",
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            },
+            "size_pt": 14.0
+          }
+        },
+        {
+          "text": "学校可以将本学位论文的全部或部分内容编入有关数据库进行检索，可以采用影印、缩印或其他复制手段保存和汇编本学位论文；学校根据规定向教育部指定的收藏和存档单位提交学位论文",
+          "format": {
+            "fonts": {
+              "eastAsia": "宋体",
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            },
+            "size_pt": 14.0
+          }
+        },
+        {
+          "text": "；",
+          "format": {
+            "fonts": {
+              "eastAsia": "宋体",
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            },
+            "size_pt": 14.0
+          }
+        }
+      ],
+      "location": {
+        "part": "document",
+        "child_index": 53,
+        "order": 51
+      },
+      "context_before": [
+        "本人了解北京体育大学拥有在《中华人民共和国著作权法》规定范围内的学位论文使用权，同意在以下几方面向学校授权。即：",
+        "1.学校将学位论文编入《北京体育大学博士硕士学位论文全文数据库》，并作为资料在学校图书馆等场所提供阅览；"
+      ],
+      "context_after": [
+        "3.非公开学位论文在解密后的使用权同公开论文。",
+        "本人承诺：本人的学位论文是在北京体育大学学习期间创作完成的作品，并已通过论文答辩；提交的学位论文电子版与纸质本论文的内容一致，如因不同造成不良后果由本人自负。"
+      ],
+      "style_name": null,
+      "xml_locator": {
+        "part": "document",
+        "child_index": 53,
+        "order": 51
+      }
+    }
+  },
+  "review": {
+    "clause_id": "C00059",
+    "classification": "covered",
+    "reason": "The clause is a fixed authorization term and its cited source paragraph is included exactly in the declaration.",
+    "obligations": [
+      {
+        "id": "C00059-copy-and-archive",
+        "status": "covered",
+        "reason": "The declaration body preserves the database, copying, preservation, compilation, and archive-submission wording.",
+        "actor": "学校",
+        "action": "检索、复制、保存、汇编并提交论文",
+        "target": "学位论文及指定收藏存档单位",
+        "condition": "根据规定",
+        "source_quote": "学校可以将本学位论文的全部或部分内容编入有关数据库进行检索，可以采用影印、缩印或其他复制手段保存和汇编本学位论文；学校根据规定向教育部指定的收藏和存档单位提交学位论文",
+        "force": "required",
+        "applicability": "applicable",
+        "route": "automatic"
+      }
+    ],
+    "normative_basis": "fixed_statement"
+  }
+}

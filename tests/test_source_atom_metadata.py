@@ -10,6 +10,7 @@ import unittest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 import host_agent_bridge as bridge
+import native_semantic_review as native
 from host_review_contract import contract_error_records
 from source_atom_metadata import project_atom_metadata, bind_atom_quote
 from source_literal_binding import compose_source_fragments
@@ -17,6 +18,25 @@ from semantic_contract import sha256_json
 
 
 class SourceAtomMetadataTests(unittest.TestCase):
+    def numbered_incident(self):
+        data = json.loads((ROOT / "tests/fixtures/numbered-context-quote-incident.json").read_text())
+        clauses = data["clauses"]
+        ids = {c["id"]: f"current-clause-{i}" for i, c in enumerate(clauses)}
+        old_eid = clauses[0]["evidence_ids"][0]
+        for c in clauses:
+            c["id"] = ids[c["id"]]
+            c["evidence_ids"] = ["current-evidence"]
+            c["source_span"]["evidence_id"] = "current-evidence"
+        evidence = data["evidence_context"][old_eid]
+        evidence["id"] = "current-evidence"
+        review = data["review"]
+        review["clause_id"] = clauses[0]["id"]
+        review["obligations"][0]["id"] = "current-atom"
+        response = {"contract_version": "3.0", "requirements": [], "clause_reviews": [review]}
+        chunk = {"clauses": clauses, "evidence_context": {"current-evidence": evidence},
+                 "provenance": {"run_id": "fresh-numbered-quote-test"}}
+        return response, chunk
+
     def example(self):
         source = "Keywords  must use semicolons。"
         span_text = source[:-1]
@@ -186,6 +206,94 @@ class SourceAtomMetadataTests(unittest.TestCase):
             atom = response["clause_reviews"][0]["obligations"][0]
             atom.update(source_quote="年 月 日", route="automatic")
             self.assertEqual(project_atom_metadata(response, self.records(response, chunk, ("source_quote",)), chunk), (None, []))
+
+    def test_numbered_context_recovers_only_missing_prefix_and_preserves_neighboring_text(self):
+        response, chunk = self.numbered_incident()
+        frozen = copy.deepcopy(response)
+        old = response["clause_reviews"][0]["obligations"][0]["source_quote"]
+        clause_map = {c["id"]: c for c in chunk["clauses"]}
+        with self.assertRaises(ValueError):
+            bind_atom_quote(old, chunk["clauses"][0]["id"], clause_map, chunk["evidence_context"])
+        projected, audit = project_atom_metadata(response, self.records(response, chunk, ("source_quote",)), chunk)
+        self.assertEqual(response, frozen)
+        expected = copy.deepcopy(response)
+        expected["clause_reviews"][0]["obligations"][0]["source_quote"] = "2. " + old
+        self.assertEqual(projected, expected)
+        self.assertEqual(len(audit), 1)
+        recovery = audit[0]["quote_context_recovery"]
+        self.assertEqual(recovery["restored_prefix"], "2. ")
+        self.assertEqual(recovery["selected_quote_binding"]["clause_binding"]["text"], chunk["clauses"][0]["source_span"]["text"])
+        self.assertTrue(recovery["context_is_not_execution_scope"])
+        self.assertTrue(audit[0]["independent_review_required"])
+        self.assertFalse(audit[0]["submission_ready"])
+        self.assertEqual(project_atom_metadata(projected, self.records(projected, chunk, ("source_quote",)), chunk), (None, []))
+
+    def test_numbered_context_retry_authorizes_no_other_semantics_or_source_edge(self):
+        response, chunk = self.numbered_incident()
+        records = self.records(response, chunk, ("source_quote",))
+        projected, _ = project_atom_metadata(response, records, chunk)
+        path = "$.clause_reviews[0].obligations[0].source_quote"
+        self.assertTrue(bridge._retry_changes_allowed(records, [path], contract_version="3.0", previous_response=response, current_response=projected, chunk=chunk))
+        for field, value in (("action", "submit only"), ("target", "neighbor duty"),
+                             ("condition", None), ("status", "unverifiable"),
+                             ("force", "optional"), ("id", "replacement")):
+            changed = copy.deepcopy(projected)
+            changed["clause_reviews"][0]["obligations"][0][field] = value
+            with self.subTest(field=field):
+                self.assertFalse(bridge._atom_metadata_retry_path_allowed(response, changed, records, path, chunk))
+        changed = copy.deepcopy(projected)
+        changed["clause_reviews"][0]["clause_id"] = chunk["clauses"][1]["id"]
+        self.assertFalse(bridge._atom_metadata_retry_path_allowed(response, changed, records, path, chunk))
+
+    def test_numbered_context_does_not_expand_independent_review_execution_scope(self):
+        response, chunk = self.numbered_incident()
+        projected, audit = project_atom_metadata(response, self.records(response, chunk, ("source_quote",)), chunk)
+        request = native.build_obligation_coverage_request(projected, chunk, run_id="fresh-numbered-quote-test", chunk_index=1)
+        check = next(c for c in request["checks"] if c["check_id"] == chunk["clauses"][0]["id"])
+        selected = chunk["clauses"][0]["source_span"]["text"]
+        self.assertEqual(check["document_text"], selected)
+        atom = check["review_context"]["primary_obligations"][0]
+        self.assertEqual(atom["source_quote"], selected)
+        original = response["clause_reviews"][0]["obligations"][0]
+        for k in ("actor", "action", "target", "condition", "force", "applicability", "status", "route"):
+            self.assertEqual(atom[k], original[k])
+        self.assertNotIn(chunk["clauses"][1]["source_span"]["text"], check["document_text"])
+        self.assertTrue(audit[0]["independent_review_required"])
+
+    def test_numbered_context_wrong_occurrence_stale_source_and_invented_words_are_rejected(self):
+        for change in ("stale_hash", "wrong_evidence", "duplicate_clause", "stale_feedback",
+                       "neighbor_only", "wrong_words", "duplicate_quote"):
+            response, chunk = self.numbered_incident()
+            atom = response["clause_reviews"][0]["obligations"][0]
+            if change == "stale_hash": chunk["clauses"][0]["source_span"]["source_sha256"] = "0" * 64
+            elif change == "wrong_evidence": chunk["clauses"][0]["evidence_ids"] = ["other"]
+            elif change == "duplicate_clause": chunk["clauses"].append(copy.deepcopy(chunk["clauses"][0]))
+            elif change == "neighbor_only": atom["source_quote"] = chunk["clauses"][1]["source_span"]["text"]
+            elif change == "wrong_words": atom["source_quote"] = atom["source_quote"].replace("可以", "必须")
+            elif change == "duplicate_quote":
+                evidence = chunk["evidence_context"]["current-evidence"]
+                evidence["text"] += atom["source_quote"]
+                for clause in chunk["clauses"]:
+                    clause["source_span"]["source_sha256"] = hashlib.sha256(evidence["text"].encode()).hexdigest()
+            records = self.records(response, chunk, ("source_quote",))
+            if change == "stale_feedback": records[0]["response_sha256"] = "0" * 64
+            with self.subTest(change=change):
+                self.assertEqual(project_atom_metadata(response, records, chunk), (None, []))
+
+    def test_numbered_fringe_is_not_a_decimal_quantity_negation_or_semantic_prefix(self):
+        for source, omitted in (("3.5 cm是高度；部门须审批。", "3."),
+                                ("不得发布论文；部门须审批。", "不得"),
+                                ("第二章说明内容；部门须审批。", "第二章"),
+                                ("可能可以发布论文；部门须审批。", "可能")):
+            response, chunk = self.example()
+            selected = source.split("；")[0]
+            clause = chunk["clauses"][0]
+            clause.update(text=selected)
+            clause["source_span"].update(text=selected, start_offset=0, end_offset=len(selected), source_sha256=hashlib.sha256(source.encode()).hexdigest())
+            chunk["evidence_context"]["evidence-random"]["text"] = source
+            response["clause_reviews"][0]["obligations"][0].update(source_quote=source[len(omitted):], route="automatic")
+            with self.subTest(source=source):
+                self.assertEqual(project_atom_metadata(response, self.records(response, chunk, ("source_quote",)), chunk), (None, []))
 
 
 if __name__ == "__main__":

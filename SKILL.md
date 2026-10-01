@@ -56,6 +56,18 @@ classification and obligation status. A proper clause subspan may restore
 whitespace runs only when every nonblank token and delimiter is unchanged and
 the current source has exactly one matching occurrence; repeated or stale
 subspans remain rejected. Never broaden that quotation to the whole clause.
+When an exact unique current-evidence context quote omits only the selected
+span's leading enumeration marker, code may restore that original marker
+without trimming or adding any prose. Dot-numbering must be followed by
+whitespace; decimal quantities, negation, heading words and semantic prefixes
+are not recoverable fringes. Recovering a numeric marker does not establish
+whether the source is a heading, numbered duty or normative instruction; its
+classification and typed semantic fields stay unproved by this operation.
+The quote must already contain all remaining selected prose,
+and all neighboring context is preserved, not promoted to execution scope.
+Record the original/recovered quote, exact offsets, source binding and
+enumeration-recovery policy. Independent review still scopes its reading to
+the selected clause and must assess the unchanged typed semantic fields.
 Preserve the immutable raw response and
 record the source-bound repair transaction. No actor, action, target, force,
 condition or classification is guessed or changed by this projection, and

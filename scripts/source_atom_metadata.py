@@ -36,6 +36,38 @@ def bind_atom_quote(quote, clause_id, clause_map, evidence_context):
             "quote_sha256": sha256_json(quote), "context_is_not_execution_scope": True}
 
 
+def _recover_numbered_context_quote(quote, binding, clause_map, evidence_context):
+    """Restore only an omitted enumeration fringe, preserving all context.
+
+    The unchanged quote must occur exactly once in the current evidence,
+    start immediately after the selected span's numbering, and contain all
+    remaining selected prose. Never trim neighboring duties or add prose.
+    Dot-numbering needs whitespace: a decimal quantity is not an enumerator.
+    """
+    fragment = binding["source_fragments"][0]
+    source = evidence_map_for_clauses(list(clause_map.values()), evidence_context)[fragment["evidence_id"]]["text"]
+    start, end = fragment["start_offset"], fragment["end_offset"]
+    offset = source.find(quote)
+    if offset < 0 or source.find(quote, offset + 1) >= 0:
+        return None
+    stop = offset + len(quote)
+    if not (start < offset < end < stop):
+        return None
+    fringe = source[start:offset]
+    if re.fullmatch(r"\s*(?:[1-9]\d{0,2}[.．]\s+|[1-9]\d{0,2}、\s*|[（(][1-9]\d{0,2}[）)]\s*)", fringe) is None:
+        return None
+    replacement = source[start:stop]
+    proof = bind_atom_quote(replacement, fragment["clause_id"], clause_map, evidence_context)
+    return replacement, {
+        "policy": "current_source_numbered_context_quote_v1",
+        "restored_prefix": fringe,
+        "original_quote_start_offset": offset,
+        "original_quote_end_offset": stop,
+        "selected_quote_binding": proof,
+        "context_is_not_execution_scope": True,
+    }
+
+
 def project_atom_metadata(response, records, chunk):
     """Repair only validator-named fields of an exact current source atom.
 
@@ -83,6 +115,7 @@ def project_atom_metadata(response, records, chunk):
         except (ValueError, KeyError, TypeError):
             continue
         original = atom.get(field)
+        context_recovery = None
         if field == "source_quote":
             exact = binding["text"]
             try:
@@ -100,16 +133,20 @@ def project_atom_metadata(response, records, chunk):
                 # whitespace runs may differ: preserve every nonblank token
                 # and delimiter, require exactly one occurrence in the bound
                 # current clause, then recover its original source bytes.
-                pattern = "".join(r"\s+" if token.isspace() else re.escape(token)
-                                  for token in re.findall(r"\s+|\S+", original.strip()))
-                matches = list(re.finditer(pattern, exact))
-                if len(matches) != 1:
-                    continue
-                replacement = matches[0].group()
-                try:
-                    bind_atom_quote(replacement, cid, clause_map, chunk.get("evidence_context"))
-                except (ValueError, KeyError, TypeError):
-                    continue
+                recovered = _recover_numbered_context_quote(original, binding, clause_map, chunk.get("evidence_context"))
+                if recovered is not None:
+                    replacement, context_recovery = recovered
+                else:
+                    pattern = "".join(r"\s+" if token.isspace() else re.escape(token)
+                                      for token in re.findall(r"\s+|\S+", original.strip()))
+                    matches = list(re.finditer(pattern, exact))
+                    if len(matches) != 1:
+                        continue
+                    replacement = matches[0].group()
+                    try:
+                        bind_atom_quote(replacement, cid, clause_map, chunk.get("evidence_context"))
+                    except (ValueError, KeyError, TypeError):
+                        continue
         else:
             replacement = route_for_obligation(review.get("classification"), atom.get("status"))
             if original not in ROUTES or replacement == "unknown":
@@ -124,6 +161,7 @@ def project_atom_metadata(response, records, chunk):
             "validator_record_sha256": sha256_json(record),
             "baseline_response_sha256": sha256_json(response),
             "semantic_obligation_fields_unchanged": True,
+            **({"quote_context_recovery": context_recovery} if context_recovery else {}),
             "independent_review_required": True, "submission_ready": False,
         })
     if not audit:

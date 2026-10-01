@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 import tempfile
 import unittest
@@ -86,6 +87,105 @@ class ThesisFormatWrapperTests(unittest.TestCase):
             self.assertEqual(primary[primary.index("--codex-model") + 1], "gpt-6-luna")
             self.assertEqual(final[final.index("--semantic-review-model") + 1], "gpt-6-luna")
             self.assertEqual(final[final.index("--semantic-review-runtime") + 1], "codex")
+
+    def test_default_uses_current_agent_even_with_declared_native_host(self) -> None:
+        with patch.dict("os.environ", {"THESIS_FORGE_HOST_RUNTIME": "codex"}), \
+             patch.object(wrapper, "run_stage", return_value=0) as run, \
+             patch.object(wrapper, "require_host_runtime") as native, \
+             patch.object(wrapper.codex_adapter, "resolve_model") as model:
+            self.assertEqual(wrapper.main(["requirements.docx", "thesis.docx"]), 0)
+        native.assert_not_called()
+        model.assert_not_called()
+        run.assert_called_once()
+        command = run.call_args.args[0]
+        self.assertIn("--prepare-host-review", command)
+        self.assertNotIn("--semantic-review-runtime", command)
+        self.assertNotIn("--codex-model", command)
+        work = Path(command[command.index("--work-dir") + 1])
+        self.assertTrue(work.is_absolute())
+        self.assertTrue(work.name.startswith("thesis-forge-"))
+        self.assertEqual(command[2], str(Path("requirements.docx").resolve()))
+        self.assertEqual(command[3], str(Path("thesis.docx").resolve()))
+
+    def test_explicit_native_executable_path_is_caller_relative(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            with patch.dict("os.environ", {"THESIS_FORGE_HOST_RUNTIME": "codex"}), \
+                 patch.object(wrapper, "strict_json_read", return_value={"run_id": "r"}), \
+                 patch.object(wrapper, "run_stage", return_value=0) as run:
+                self.assertEqual(wrapper.main([
+                    "r.docx", "i.docx", str(Path(td) / "o.docx"),
+                    "--work-dir", str(Path(td) / "work"), "--auto-host-agent",
+                    "--codex-bin", "./tools/codex", "--codex-model", "chosen-model"]), 0)
+            primary = run.call_args_list[1].args[0]
+            self.assertEqual(primary[primary.index("--codex-bin") + 1],
+                             str(Path("./tools/codex").resolve()))
+            self.assertEqual(primary[primary.index("--codex-model") + 1], "chosen-model")
+
+    def test_default_work_directories_are_distinct(self) -> None:
+        with patch.object(wrapper, "run_stage", return_value=0) as run:
+            for _ in range(2):
+                wrapper.main(["requirements.docx", "thesis.docx"])
+        commands = [call.args[0] for call in run.call_args_list]
+        work = [c[c.index("--work-dir") + 1] for c in commands]
+        self.assertNotEqual(*work)
+
+    def test_native_options_are_not_silently_ignored_by_packet_default(self) -> None:
+        for flag in ("--codex-model", "--host-runtime", "--codex-bin", "--host-agent-model"):
+            for value in ("override", ""):
+                with self.subTest(flag=flag, value=value), \
+                     patch.object(wrapper, "run_stage") as run, \
+                     self.assertRaises(SystemExit):
+                    wrapper.main(["r.docx", "i.docx", flag, value])
+                run.assert_not_called()
+
+    def test_packet_continuation_requires_original_work_and_receipt(self) -> None:
+        with patch.object(wrapper, "run_stage") as run:
+            for options in (["--llm-response", "response.json"],
+                            ["--llm-response", "response.json", "--work-dir", "missing-work"]):
+                with self.subTest(options=options), self.assertRaises(SystemExit):
+                    wrapper.main(["r.docx", "i.docx", "out.docx", *options])
+        run.assert_not_called()
+
+    def test_submission_does_not_default_to_offline_acceptance(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            work = Path(td)
+            review = work / "review" / "requirements"
+            review.mkdir(parents=True)
+            (review / "extraction-manifest.json").write_text(json.dumps({"run_id": "r"}))
+            (review / "merge-receipt.json").write_text("{}")
+            with patch.object(wrapper, "run_stage") as run, self.assertRaises(SystemExit):
+                wrapper.main(["r.docx", "i.docx", "out.docx", "--work-dir", str(work),
+                              "--llm-response", "response.json", "--output-policy", "submission"])
+            run.assert_not_called()
+
+    def test_existing_native_audit_never_falls_back_to_offline(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            work = Path(td)
+            review = work / "review" / "requirements"
+            review.mkdir(parents=True)
+            for filename in ("merge-receipt.json", "host-agent-run.json"):
+                (review / filename).write_text("{}")
+            (review / "extraction-manifest.json").write_text(json.dumps({"run_id": "r"}))
+            with patch.object(wrapper, "run_stage", return_value=0) as run:
+                self.assertEqual(wrapper.main([
+                    "r.docx", "i.docx", "out.docx", "--work-dir", str(work),
+                    "--llm-response", "response.json"]), 0)
+            command = run.call_args.args[0]
+            self.assertIn("--host-agent-audit", command)
+            self.assertNotIn("--allow-offline-review", command)
+
+    def test_broken_native_audit_symlink_is_not_offline_fallback(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            work = Path(td)
+            review = work / "review" / "requirements"
+            review.mkdir(parents=True)
+            (review / "merge-receipt.json").write_text("{}")
+            (review / "extraction-manifest.json").write_text(json.dumps({"run_id": "r"}))
+            (review / "host-agent-run.json").symlink_to(work / "missing-audit.json")
+            with patch.object(wrapper, "run_stage") as run, self.assertRaises(SystemExit):
+                wrapper.main(["r.docx", "i.docx", "out.docx", "--work-dir", str(work),
+                              "--llm-response", "response.json"])
+            run.assert_not_called()
 
 
 if __name__ == "__main__":

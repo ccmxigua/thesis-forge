@@ -12,6 +12,47 @@ Python access can use the packet workflow below. Automatic invocation exists
 only for hosts with an implemented native adapter. Python does not gain access
 to an arbitrary chat agent's model merely because that agent loaded this file.
 
+## Ordinary conversation: start here
+
+Use this skill directly in the invoking conversation. The current Agent does
+the semantic reading with its current model; do not launch another agent CLI,
+choose a model, set provider credentials, or edit global settings by default.
+A host needs file read/write access and a Python execution tool with the project
+dependencies. A chat without those tools cannot execute the local pipeline;
+report the missing capability rather than claim universal execution.
+
+1. From the skill directory, run `python3 scripts/thesis_format.py
+   /absolute/requirements.docx /absolute/thesis.docx`. Omitted execution mode
+   prepares packets without calling a provider. Omitted `--work-dir` creates a
+   unique directory under the caller's `build/`; retain the printed `work_dir`.
+   An optional output path at this stage is not a generated document.
+2. Read that run's `review/requirements/host-agent-review-manifest.json` and
+   **all** `llm-request-chunks.json` packets. In this conversation, produce each
+   declarative response at its requested `batch.response_filename`. Follow
+   each packet's schema, evidence and provenance. Do not reuse old responses.
+3. Run `python3 scripts/merge_host_agent_review.py <work>/review/requirements
+   --response-out <work>/review/host-agent-response.json`. This validates and
+   merges locally; failed contracts must be corrected, not bypassed.
+4. Run `python3 scripts/thesis_format.py /absolute/requirements.docx
+   /absolute/thesis.docx /absolute/review.docx --work-dir <work>
+   --llm-response <work>/review/host-agent-response.json`. A packet response with
+   no native audit defaults to the existing non-release draft workflow. No
+   extra host/model/offline option is needed. The original run, sources, merge
+   receipt and code fingerprint must match. Existing native audits do not
+   silently fall back to this path if invalid.
+
+These commands are orchestration steps for the Agent, not options the user
+must configure. Use absolute script paths when running outside the skill
+directory. DOCX input needs no LaTeX converter; `.tex` needs Pandoc and legacy
+`.doc` needs an available Word conversion tool. The skill never selects a model
+for this conversation or verifies an unexposed model identity. Missing
+independent review remains explicitly unverified, and `submission_ready=false`.
+Inspect generated drafts and report unresolved duties; creation is not Word
+visual acceptance. Formal submission still requires the release gates below.
+Only explicit authorization for `--auto-host-agent` selects the separate native
+subprocess workflow and its model policy. A requested pinned BSU benchmark is
+that exception, not the ordinary skill default.
+
 ## Operating contract
 
 - Preserve the current Agent model for every semantic review decision.
@@ -457,8 +498,7 @@ Prepare a fresh run with:
 ```bash
 python3 scripts/thesis_format.py \
   requirements.doc input.tex output.docx \
-  --work-dir build/host-auto-$(date -u +%Y%m%d-%H%M%S) \
-  --prepare-agent-review
+  --work-dir build/host-review-$(date -u +%Y%m%d-%H%M%S)
 ```
 
 Then the current host Agent must read the manifest and all chunk requests,
@@ -496,7 +536,8 @@ OpenClaw route parameters.  The Codex CLI's provider/model identity is not
 inferred from the binary name; when it is not exposed, the run audit records
 route visibility as `unobservable`.
 
-The project's native Codex default is `gpt-6-luna`. Omitting `--codex-model`
+The explicit automatic subprocess's native Codex default is `gpt-6-luna`,
+not the default model of the skill or the current conversation. Omitting `--codex-model`
 uses this versioned project policy for both primary and independent review;
 the post-format review follows the selected host model unless explicitly
 overridden. Use `--codex-model` or `--semantic-review-model` for an explicit
@@ -504,6 +545,22 @@ override. This does not modify global Codex settings or other native hosts'
 routes. An unavailable model fails closed; it is not replaced with an older
 model. Requested model identity is recorded separately from actual route
 visibility, which may remain `unobservable`.
+
+For compound native-review failures, repair authorization is bound to the
+complete validator bundle and its exact parent candidate. Empty obligation
+inventories may be completed only at named current-source targets; typed atoms
+and their derived schema errors require full response revalidation. Other
+classification, requirement, condition or provenance changes are not granted
+by a missing-inventory finding. Fresh independent source-first review remains
+mandatory after this bounded correction.
+
+Registered abstract quality enum flags can be compiled from an authenticated
+exact Chinese-abstract source span into one already-linked target. This adds
+guidance only, never creates a parent, resolves ambiguity, changes an obligation
+inventory or hardens a soft rule. Enum flags use a canonical set order across
+attempts; original response, current span/hash and projection receipts remain
+separate. Unknown, negated, quoted, conditional or conflicting source targets
+remain fail-closed. Compilation and retry authorization are not release proof.
 
 For a Codex host, use the current Codex CLI and its configured native account:
 
@@ -1101,16 +1158,18 @@ cannot be proved by a locally generated merge receipt. Keep the source,
 response and code fingerprint unchanged between preparation and continuation;
 otherwise start a fresh work directory.
 
-On a host without an automatic adapter, run the **non-release** final stage:
+In an ordinary conversation (with or without an installed adapter), run the
+**non-release** final stage:
 
 ```bash
 python3 scripts/thesis_format.py \
   requirements.doc input.tex output.docx \
   --work-dir build/host-review \
-  --llm-response build/host-review/review/host-agent-response.json \
-  --offline-review-draft
+  --llm-response build/host-review/review/host-agent-response.json
 ```
 
+`--offline-review-draft` remains an explicit compatible spelling for this
+non-release path. Submission mode never implicitly selects it.
 This path verifies the current extraction, chunk contracts, aggregate, merge
 receipt, semantic ledger, and commit hashes, then writes fresh deterministic
 artifacts under

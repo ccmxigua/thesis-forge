@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -203,6 +204,12 @@ class PortableReviewDraftTests(unittest.TestCase):
         self.assertFalse(result["submission_ready"])
 
     def test_real_wrapper_prepare_merge_and_continue_without_native_cli(self) -> None:
+        self._real_wrapper_flow(defaults=False)
+
+    def test_ordinary_conversation_defaults_work_without_native_cli(self) -> None:
+        self._real_wrapper_flow(defaults=True)
+
+    def _real_wrapper_flow(self, *, defaults: bool) -> None:
         root = Path(self.temporary.name) / "cli-smoke"
         root.mkdir()
         requirements = root / "requirements.docx"
@@ -214,12 +221,22 @@ class PortableReviewDraftTests(unittest.TestCase):
             document = Document()
             document.add_paragraph(text)
             document.save(path)
+        # Relative caller-owned paths outside the checkout and no installed
+        # native CLI: the current agent supplies JSON, not a provider override.
+        env = dict(os.environ, PATH="", THESIS_FORGE_HOST_RUNTIME="ordinary-agent")
         base = [sys.executable, str(ROOT / "scripts" / "thesis_format.py"),
-                str(requirements), str(source), str(output),
-                "--work-dir", str(work)]
-        prepared = subprocess.run(base + ["--prepare-agent-review"],
-                                  capture_output=True, text=True, check=False)
+                requirements.name, source.name, output.name,
+                "--work-dir", work.name]
+        preparation = base[:-2] if defaults else base + ["--prepare-agent-review"]
+        prepared = subprocess.run(preparation,
+                                  cwd=root, env=env, capture_output=True, text=True, check=False)
         self.assertEqual(prepared.returncode, 0, prepared.stderr[-1200:] + prepared.stdout[-1200:])
+        if defaults:
+            context = json.loads(prepared.stdout.splitlines()[0])
+            self.assertEqual(context["model_selection"], "unchanged_by_skill")
+            work = Path(context["work_dir"])
+            self.assertEqual(work.parent, (root / "build").resolve())
+            base[-1] = str(work)
         review_dir = work / "review" / "requirements"
         chunks = json.loads((review_dir / "llm-request-chunks.json").read_text(encoding="utf-8"))
         self.assertTrue(chunks)
@@ -239,12 +256,13 @@ class PortableReviewDraftTests(unittest.TestCase):
         merged = subprocess.run(
             [sys.executable, str(ROOT / "scripts" / "merge_host_agent_review.py"),
              str(review_dir), "--response-out", str(merged_path)],
-            capture_output=True, text=True, check=False,
+            cwd=root, env=env, capture_output=True, text=True, check=False,
         )
         self.assertEqual(merged.returncode, 0, merged.stderr[-1200:] + merged.stdout[-1200:])
         continued = subprocess.run(
-            base + ["--llm-response", str(merged_path), "--offline-review-draft"],
-            capture_output=True, text=True, check=False,
+            base + ["--llm-response", str(merged_path)]
+            + ([] if defaults else ["--offline-review-draft"]),
+            cwd=root, env=env, capture_output=True, text=True, check=False,
         )
         manifest = json.loads((work / "pipeline-manifest.json").read_text(encoding="utf-8"))
         self.assertNotIn("refusing to reuse a non-empty work directory", continued.stderr)

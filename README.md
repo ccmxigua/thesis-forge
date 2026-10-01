@@ -1,6 +1,29 @@
 # thesis-forge
 
-**V2 通用毕业论文 LaTeX → DOCX 转换管线** — 支持多校配置，一条命令完成从 LaTeX 源文件到符合学校排版规范的 Word 文档的全自动转换。
+**来源驱动的论文格式审查 skill**：普通 agent 对话使用当前 agent 和当前模型进行语义分析，本地 Python 校验、合并和生成 DOCX 草稿。无需默认切换到 Codex、OpenClaw 或某个固定模型。
+
+## 普通 agent 对话使用（默认入口）
+
+让能读写文件、执行 Python 的 agent 加载本仓库 [SKILL.md](SKILL.md)，提供学校要求文件和论文源文件即可。下列步骤由 agent 执行，用户不必配置模型参数：
+
+```bash
+# 默认只准备当前对话的审查包，不调用任何模型 API/agent CLI。
+python3 scripts/thesis_format.py /absolute/requirements.docx /absolute/thesis.docx
+# 记住输出中的 work_dir；当前 agent 读取全部 chunk 并写入所要求的 JSON。
+python3 scripts/merge_host_agent_review.py <work>/review/requirements \
+  --response-out <work>/review/host-agent-response.json
+python3 scripts/thesis_format.py /absolute/requirements.docx /absolute/thesis.docx \
+  /absolute/review.docx --work-dir <work> \
+  --llm-response <work>/review/host-agent-response.json
+```
+
+默认续跑只接受本轮来源及合并回执，生成可编辑审查草稿，`submission_ready=false`；不冒充独立复核或 Word/PDF 发布验收。当前对话不暴露模型名时，不猜测实际模型身份。没有文件/Python 工具的纯聊天环境不能执行本地项目。
+
+`--auto-host-agent` 是另行显式授权的原生 CLI 批跑，不是普通 skill 默认。该 Codex 子进程默认 `gpt-6-luna` 是批跑策略，不能宣称继承了当前聊天模型；显式 BSU 验证可继续固定它。正式发布门禁不受上述默认入口变化影响。
+
+以下 V2 overlay、`convert.sh` 和 API 说明属于旧版兼容工具，不是新文档的来源审查入口，也不能证明学校要求已满足。
+
+**V2 通用毕业论文 LaTeX → DOCX 转换管线（旧版）** — 支持多校配置及转换工具。
 
 [![Status](https://img.shields.io/badge/status-beta-orange)](https://github.com/ccmxigua/thesis-forge)
 [![Python](https://img.shields.io/badge/python-3.9+-blue)](https://www.python.org/)

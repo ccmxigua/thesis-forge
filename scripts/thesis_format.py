@@ -4,7 +4,10 @@
 This intentionally exposes no rule-only, known-template, or supported-subset
 switch.  Preparation writes an evidence-bound host-Agent review packet; final
 formatting consumes the response produced by the Agent currently running this
-skill.  ``--prepare-agent-review`` is the host-neutral packet workflow.
+skill.  The default is the host-neutral packet workflow: without a response,
+prepare for the current conversation; with a merged response, continue a
+non-release draft. No model or native CLI is selected by this default.
+``--prepare-agent-review`` also explicitly selects packet preparation.
 ``--auto-host-agent`` selects an explicit native adapter only after the host
 runtime has been declared and validated.  The selected adapter is always the
 native CLI for that declared host; it never falls back across hosts.
@@ -18,6 +21,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import uuid
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -111,7 +115,8 @@ def main(argv: list[str]) -> int:
     )
     p.add_argument("input", type=Path, help="thesis source (.tex or .docx)")
     p.add_argument("output", type=Path, nargs="?", help="formatted output DOCX")
-    p.add_argument("--work-dir", type=Path, required=True)
+    p.add_argument("--work-dir", type=Path,
+                   help="run directory; preparation defaults to a new build/thesis-forge-<uuid> under the caller's directory; continuation requires the same directory")
     p.add_argument("--style-template", type=Path)
     p.add_argument("--thesis-profile", type=Path)
     p.add_argument("--template-profile", type=Path,
@@ -159,6 +164,53 @@ def main(argv: list[str]) -> int:
     p.add_argument("--strict-release", action="store_true",
                    help="also require official template profile, render evidence and submission readiness")
     args = p.parse_args(argv)
+    # An ordinary skill is executed by the current conversation's Agent, not
+    # by discovering a CLI or selecting a different model. Native execution
+    # remains explicit even when host-runtime environment variables exist.
+    if not (args.prepare_agent_review or args.auto_host_agent or args.llm_response):
+        args.prepare_agent_review = True
+    if args.work_dir is None:
+        if args.llm_response:
+            p.error("--llm-response continuation requires the original --work-dir")
+        args.work_dir = Path.cwd() / "build" / f"thesis-forge-{uuid.uuid4().hex}"
+    if not args.auto_host_agent:
+        native_options = {
+            "--host-runtime": args.host_runtime,
+            "--codex-bin": args.codex_bin,
+            "--codex-model": args.codex_model,
+            "--openclaw-bin": args.openclaw_bin,
+            "--host-agent-model": args.host_agent_model,
+            "--host-agent-parent-session-key": args.host_agent_parent_session_key,
+            "--no-host-agent-model-inheritance": args.no_host_agent_model_inheritance,
+            "--allow-prompt-only": args.allow_prompt_only,
+        }
+        if args.host_agent_id != "main":
+            native_options["--host-agent-id"] = args.host_agent_id
+        supplied = [key for key, value in native_options.items()
+                    if value is not None and value is not False]
+        if supplied:
+            p.error("native model/host options require explicit --auto-host-agent: "
+                    + ", ".join(supplied))
+        # Never fall back after a bad native receipt. Only the normal packet
+        # path with no native audit defaults to its existing non-release gate.
+        audit = args.work_dir.resolve() / "review" / "requirements" / "host-agent-run.json"
+        if (args.llm_response and args.output_policy == "review_draft"
+                and not args.strict_release and not args.require_submission_ready
+                and not (audit.exists() or audit.is_symlink())):
+            args.offline_review_draft = True
+    # run_stage executes from ROOT. Resolve user paths in their invocation
+    # directory first, so a loaded skill also works outside its checkout.
+    for field in ("requirements", "input", "output", "work_dir", "llm_response",
+                  "style_template", "thesis_profile", "template_profile", "render_report"):
+        value = getattr(args, field)
+        if value is not None:
+            setattr(args, field, value.resolve())
+    # Explicit executable paths have the same caller-relative contract; bare
+    # command names retain their adapter's ordinary PATH lookup semantics.
+    for field in ("codex_bin", "openclaw_bin"):
+        value = getattr(args, field)
+        if value and "/" in value:
+            setattr(args, field, str(Path(value).resolve()))
     if args.output_policy == "review_draft" and (args.require_submission_ready or args.strict_release):
         p.error("--require-submission-ready/--strict-release require --output-policy submission")
     if args.offline_review_draft and (
@@ -291,6 +343,14 @@ def main(argv: list[str]) -> int:
         )
 
     if args.prepare_agent_review:
+        print(json.dumps({
+            "workflow": "current_conversation_packets",
+            "work_dir": str(args.work_dir),
+            "semantic_executor": "current_agent",
+            "model_selection": "unchanged_by_skill",
+            "provider_model_verified": False,
+            "submission_ready": False,
+        }), flush=True)
         command = pipeline_command(
             args, prepare_host_review=True,
             requirements_dir=args.work_dir.resolve() / "review" / "requirements",

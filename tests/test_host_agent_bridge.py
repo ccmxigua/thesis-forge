@@ -10457,6 +10457,155 @@ class HostAgentBridgeTests(unittest.TestCase):
         )
         self.assertIsNotNone(stale_error)
 
+    def test_source_fragment_retry_repairs_targeted_literal_with_unchanged_selector(self) -> None:
+        # An arbitrary label, not a school/clause-ID special case. The semantic
+        # slice excludes punctuation, while the fixed source label retains it.
+        label = "档案编号"
+        source = label + "："
+        location = {"part": "document", "table_child_index": 7,
+                    "row_index": 2, "col_index": 0, "paragraph_index": 0, "order": 9}
+        clause = {
+            "id": "CL-label", "text": label, "evidence_ids": ["EV-label"],
+            "source_kind": "table_cell", "location": location,
+            "source_evidence_text": source,
+            "source_span": {
+                "evidence_id": "EV-label", "start_offset": 0,
+                "end_offset": len(label), "text": label,
+                "source_sha256": hashlib.sha256(source.encode()).hexdigest(),
+                "location": location,
+            },
+        }
+        chunk = {
+            "provenance": {
+                "run_id": "literal-retry", "case_id": "arbitrary-case",
+                "source_sha256": "a" * 64, "clause_sha256": "b" * 64,
+                "evidence_sha256": "c" * 64, "request_sha256": "d" * 64,
+            },
+            "case_id": "arbitrary-case", "batch": {"index": 1},
+            "runtime_context": {"code_fingerprint_sha256": "9" * 64},
+            "response_schema": {"type": "object"},
+            "clauses": [clause],
+            "evidence_context": {"EV-label": {
+                "id": "EV-label", "kind": "table_cell", "text": source,
+                "location": location,
+            }},
+            "requirement_contract": {"role_properties_schema": {
+                "cover_field_label": {"$ref": "#/$defs/roleSpec"},
+            }},
+        }
+        previous = {
+            "contract_version": "3.0", "provenance": chunk["provenance"],
+            "requirements": [{
+                "role": "cover_field_label", "properties": {"text": label},
+                "clause_ids": ["CL-label"], "evidence_ids": ["EV-label"],
+                "source_fragment_clause_ids": ["CL-label"],
+                "reason": "Preserve the fixed label from the current table cell.",
+            }],
+            "clause_reviews": [], "unsupported_items": [], "reported_conflicts": [],
+        }
+        records = [{
+            "code": "source_fragment_binding_violation",
+            "json_pointer": "$.requirements[0].properties.text",
+            "response_sha256": bridge._response_sha256(previous),
+            "raw_error": "source_fragment_literal_conflict",
+        }]
+        for literal in (None, source):
+            with self.subTest(literal=literal):
+                current = copy.deepcopy(previous)
+                current["requirements"][0]["properties"]["text"] = literal
+                authorizations = []
+                error, changed = bridge._retry_semantic_change_error(
+                    previous, current, records, contract_version="3.0", chunk=chunk,
+                    authorization_out=authorizations,
+                )
+                self.assertIsNone(error)
+                self.assertEqual(changed, ["$.requirements[0].properties.text"])
+                self.assertEqual(len(authorizations), 1)
+                self.assertTrue(authorizations[0]["source_binding_complete"])
+                projected, _, errors = bridge.materialize_source_fragment_literals(
+                    current, chunk["clauses"], chunk["evidence_context"],
+                )
+                self.assertEqual(errors, [])
+                self.assertEqual(projected["requirements"][0]["properties"]["text"], source)
+                self.assertEqual(current["requirements"][0]["properties"]["text"], literal)
+
+        current = copy.deepcopy(previous)
+        current["requirements"][0]["properties"]["text"] = None
+        variants = []
+        for key, value in (
+            ("reason", "unrequested rewrite"),
+            ("clause_ids", ["foreign-clause"]),
+            ("evidence_ids", ["foreign-evidence"]),
+            ("source_fragment_clause_ids", None),
+            ("role", "body_text"),
+        ):
+            candidate = copy.deepcopy(current)
+            candidate["requirements"][0][key] = value
+            variants.append((key, candidate, records, chunk))
+        candidate = copy.deepcopy(current)
+        candidate["requirements"][0]["properties"]["text"] = source + "猜测"
+        variants.append(("guessed_literal", candidate, records, chunk))
+        stale = copy.deepcopy(records)
+        stale[0]["response_sha256"] = "0" * 64
+        variants.append(("stale_parent", current, stale, chunk))
+        selector_error = copy.deepcopy(records)
+        selector_error[0]["json_pointer"] = "$.requirements[0].source_fragment_clause_ids"
+        variants.append(("selector_error_cannot_authorize_text_only", current, selector_error, chunk))
+        stale_source = copy.deepcopy(chunk)
+        stale_source["clauses"][0]["source_span"]["source_sha256"] = "0" * 64
+        variants.append(("stale_source", current, records, stale_source))
+        for name, candidate, error_records, source_chunk in variants:
+            with self.subTest(rejection=name):
+                error, _ = bridge._retry_semantic_change_error(
+                    previous, candidate, error_records, contract_version="3.0", chunk=source_chunk,
+                )
+                self.assertIsNotNone(error)
+
+        # Two independent source instances must have independent authorizations.
+        multi_chunk = copy.deepcopy(chunk)
+        second_clause = copy.deepcopy(clause)
+        second_clause["id"] = "CL-second"
+        second_clause["evidence_ids"] = ["EV-second"]
+        second_clause["source_span"]["evidence_id"] = "EV-second"
+        multi_chunk["clauses"].append(second_clause)
+        multi_chunk["evidence_context"]["EV-second"] = {
+            **copy.deepcopy(chunk["evidence_context"]["EV-label"]), "id": "EV-second",
+        }
+        multi_previous = copy.deepcopy(previous)
+        second_requirement = copy.deepcopy(previous["requirements"][0])
+        second_requirement["clause_ids"] = ["CL-second"]
+        second_requirement["evidence_ids"] = ["EV-second"]
+        second_requirement.pop("source_fragment_clause_ids")
+        multi_previous["requirements"].append(second_requirement)
+        multi_current = copy.deepcopy(multi_previous)
+        multi_current["requirements"][0]["properties"]["text"] = None
+        multi_current["requirements"][1]["properties"]["text"] = source
+        multi_current["requirements"][1]["source_fragment_clause_ids"] = ["CL-second"]
+        multi_records = [
+            {**records[0], "response_sha256": bridge._response_sha256(multi_previous)},
+            {**records[0], "response_sha256": bridge._response_sha256(multi_previous),
+             "json_pointer": "$.requirements[1].source_fragment_clause_ids"},
+        ]
+        error, _ = bridge._retry_semantic_change_error(
+            multi_previous, multi_current, multi_records, contract_version="3.0", chunk=multi_chunk,
+        )
+        self.assertIsNone(error)
+        multi_previous["requirements"][1]["source_fragment_clause_ids"] = ["CL-second"]
+        for record in multi_records:
+            record["response_sha256"] = bridge._response_sha256(multi_previous)
+        # Its selector is now unchanged: index 1 has no text-targeted error.
+        error, _ = bridge._retry_semantic_change_error(
+            multi_previous, multi_current, multi_records, contract_version="3.0", chunk=multi_chunk,
+        )
+        self.assertIsNotNone(error)
+        multi_records.append({
+            **multi_records[1], "json_pointer": "$.requirements[1].properties.text",
+        })
+        error, _ = bridge._retry_semantic_change_error(
+            multi_previous, multi_current, multi_records, contract_version="3.0", chunk=multi_chunk,
+        )
+        self.assertIsNone(error)
+
     def test_source_fragment_retry_rejects_null_selector_and_unrequested_obligation_rewrite(self) -> None:
         label = "答辩委员会"
         source = label + "："

@@ -2453,7 +2453,8 @@ def _source_fragment_binding_retry_allowed(
 
     This retry rule cannot rewrite requirement identity or any other semantic
     field. The candidate may add or correct the current requirement's ordered
-    clause selector. Text roles must use the exact materialized text; declaration
+    clause selector, or retain a correct selector while repairing only a
+    validator-targeted literal. Text roles must use the exact materialized text; declaration
     roles must bind to their existing role-native text atoms without a top-level
     ``properties.text`` field.
     """
@@ -2590,6 +2591,14 @@ def _source_fragment_binding_retry_allowed(
     }
     return bool(actual_changed_paths) and set(actual_changed_paths) <= allowed_paths and all(
         f"$.requirements[{index}].source_fragment_clause_ids" in actual_changed_paths
+        or (
+            f"$.requirements[{index}].properties.text" in actual_changed_paths
+            and any(
+                record.get("json_pointer")
+                == f"$.requirements[{index}].properties.text"
+                for record in matching_records[index]
+            )
+        )
         for index in matching_records
     )
 

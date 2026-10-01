@@ -710,6 +710,14 @@ the full validator. This projection cannot change punctuation or any
 non-whitespace character. Missing, stale, foreign, or ambiguous source bindings
 remain failures; the rule does not normalize source evidence or weaken the
 exact-literal contract.
+For a validator-targeted literal conflict, a retry may retain an already valid
+`source_fragment_clause_ids` selector and change only the named `properties.text`
+to the exact current-source composition, or to `null` for deterministic
+materialization. A selector change is not required when it is already correct.
+Authorization still checks the receipt-bound parent, current source hashes,
+evidence, offsets, role schema and unchanged requirement graph. Selector-only
+errors do not authorize unrelated text edits; guessed text, stale evidence,
+changed classifications and other payload changes remain rejected.
 Repeated fixed literals at distinct source locations are separate content
 instances, not competing global role values. Emit one text requirement per
 occurrence and use its own fragment selector; omit/null the literal when code

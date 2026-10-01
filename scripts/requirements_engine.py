@@ -29,7 +29,10 @@ from existing_requirement_contract import (
     project_authoritative_existing_payloads as _project_authoritative_existing_payloads,
 )
 from format_spec_validation import load_and_validate, validate_instance
-from format_contract_guards import normalize_verification_checker_ids
+from format_contract_guards import (
+    normalize_verification_checker_ids, registered_input_catalog,
+    input_prerequisite_generation_schema, INPUT_CATALOG_VERSION,
+)
 from question_contract import bind_question_records
 from host_review_contract import (
     HOST_REVIEW_CONTRACT_V2,
@@ -2005,6 +2008,12 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
         if isinstance(request_rule_spec, dict):
             request_rule_spec.pop("content_instances", None)
             request_rule_spec.pop("cover_field_instances", None)
+        input_catalog = registered_input_catalog(
+            runtime_context, request_rule_spec.get("requirements", []),
+        )
+        request_defs["inputPrerequisiteSpec"] = input_prerequisite_generation_schema(
+            request_defs["inputPrerequisiteSpec"], input_catalog,
+        )
         request = {
             "contract_version": contract_version,
             "task": "extract_and_review_complete_thesis_format_spec",
@@ -2055,6 +2064,7 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
                 "For the explicit clause '论文中出现英文时需要使用Times New Roman字体', bind applicability.conditions to fact source_inventory.english_text with operator present and value null. This is a registered source fact, not free-form prose; do not invent another fact name or treat a missing source fact as false.",
                 "Use input_prerequisites for required metadata, source content, template resources, or runtime services. Keys must use the registered namespace for their kind: metadata uses registered thesis_profile paths such as thesis_profile.cover_metadata or thesis_profile.cover_metadata.title_zh, or exact thesis_profile when the whole supplied profile is needed; source_content uses source_inventory., template_resource uses template_profile., and runtime uses registered runtime paths such as runtime.anchor_inventory or runtime.anchor_inventory.selected, never runtime_context.*. Whole-profile presence is not completeness, trusted approval, or confirmation of nested fields: declare specific required fields separately. thesis_profile and thesis_profile.cover_metadata are distinct scopes, not aliases; do not substitute one for another on retry. Do not fabricate missing inputs.",
                 "Use verification to declare the minimum evidence mode: static_docx, word_render, pdf_render, manual, or external.",
+                "Choose each input_prerequisites key from requirement_contract.input_catalog for its exact kind. A prefix is not enough: do not invent thesis_content, abstract_zh, or another alias. Catalog membership is not presence, completeness or approval. Preserve the source-required scope; if no registered selector expresses it, keep the obligation pending instead of guessing an equivalent input or fabricating a prerequisite.",
                 "Resolve each clause through its evidence_ids and the matching evidence_context entry; the evidence map is authoritative for source text, runs, styles, location, and neighboring context.",
                 "Use verify_existing only when an existing_requirement_id is being reused and the emitted role, properties, evidence_ids, and source text are an exact evidence-backed match. If the evidence occurrence differs, emit a new requirement or use a non-executable classification; do not force an existing_requirement_id.",
                 "Every emitted requirement must be referenced by at least one covered, executable, or verify_existing clause_review; do not emit unused requirement objects. Every such clause review reference must point to a semantically matching emitted requirement.",
@@ -2078,6 +2088,8 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
             "clauses": clause_packets,
             "evidence_context": evidence_context,
             "requirement_contract": {
+                "input_catalog_version": INPUT_CATALOG_VERSION,
+                "input_catalog": input_catalog,
                 "allowed_roles": sorted(ALLOWED_REQUIREMENT_ROLES),
                 "role_properties_schema": {
                     role: {"$ref": f"#/$defs/{schema_name}"}
@@ -2112,6 +2124,7 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
                     item["id"] for item in clause_packets
                     if isinstance(item.get("id"), str)
                 ],
+                input_catalog=input_catalog,
             )
         }
         if contract_version == HOST_REVIEW_CONTRACT_V2:

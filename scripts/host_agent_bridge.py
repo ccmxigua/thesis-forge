@@ -1211,6 +1211,11 @@ def _structured_contract_repair_guidance(
                 "Do not emit runtime_context.* or invent a replacement path. "
                 "The whole profile and cover_metadata subset are not interchangeable; "
                 "namespace feedback does not authorize changing the requested input scope."
+                " Select only a key listed under the same kind in requirement_contract.input_catalog "
+                "and its inputPrerequisiteSpec; a namespace prefix alone is insufficient. "
+                "Catalog membership does not prove supplied content or semantic equivalence. "
+                "If no exact selector expresses the required scope, retain the rejected parent "
+                "and fail closed rather than deleting the prerequisite or substituting another input."
             )
         elif code == "applicability_fact_namespace":
             rule = (

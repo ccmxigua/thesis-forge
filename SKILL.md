@@ -1157,6 +1157,14 @@ contract response and immutable host receipts.
   apply. Parsing preserves rejected raw states for bounded correction; it must
   not relabel an unrepresented duty as pending merely to pass schema validation.
 - Missing chunk response: stop and report the exact filename.
+- Input prerequisites use the code-owned `requirement_contract.input_catalog`
+  for their exact kind. Generation schema couples kind and key by registered
+  enums, retained in native projection. Current nested source/template paths
+  and existing registered declarations can extend the catalog; absent roots
+  remain selectable without implying supplied content, completeness or approval.
+  Do not alias an unknown key, erase a prerequisite or replace its scope on retry.
+  Unregistered-path feedback is a typed namespace error, not authorization to
+  guess a new semantic input. Source, identity and final acceptance gates remain.
 - A registered pure keyword-origin instruction may retain a typed selection
   relation (selecting terms from the thesis), while routing responsibility to
   pending human verification. Require current exact evidence, whole-source

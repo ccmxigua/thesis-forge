@@ -7,6 +7,7 @@ different trusted field or declaring an unregistered input path.
 from __future__ import annotations
 
 import re
+import copy
 from typing import Any
 
 
@@ -21,6 +22,13 @@ REGISTERED_PROFILE_OBJECTS = frozenset({
 # An exact whole-input selector, not an alias for cover_metadata and not
 # permission to treat every nested field as supplied/confirmed.
 REGISTERED_AGGREGATE_INPUTS = {"thesis_profile": "metadata"}
+INPUT_KIND_PREFIXES = {
+    "metadata": "thesis_profile.",
+    "source_content": "source_inventory.",
+    "template_resource": "template_profile.",
+    "runtime": "runtime.",
+}
+INPUT_CATALOG_VERSION = "registered-input-catalog-v1"
 REGISTERED_COVER_FIELDS = frozenset({
     "trust", "classification_number", "unit_code", "title_zh", "title_en",
     "subtitle_zh", "subtitle_en", "author_name", "student_id", "college_name",
@@ -129,6 +137,75 @@ def registered_input_key(key: Any) -> bool:
             or ".".join(parts) in REGISTERED_RUNTIME_PATHS
         )
     return False
+
+
+def registered_input_catalog(
+    runtime_context: dict[str, Any] | None = None,
+    requirements: list[dict[str, Any]] | None = None,
+) -> dict[str, list[str]]:
+    """Generate selectable scopes, never proof of presence or equivalence.
+
+    Registered roots remain selectable even when absent. Nested source and
+    template selectors come from current input dictionaries or existing
+    prerequisite declarations, not guessed aliases. Offline contracts retain
+    their registered nested-path support; generation only lists current paths.
+    """
+    keys = set(REGISTERED_AGGREGATE_INPUTS)
+    keys.update(f"thesis_profile.{name}" for name in REGISTERED_PROFILE_FIELDS | REGISTERED_PROFILE_OBJECTS)
+    keys.update(f"thesis_profile.cover_metadata.{name}" for name in REGISTERED_COVER_FIELDS)
+    for prefix, roots in (("source_inventory", REGISTERED_SOURCE_ROOTS),
+                          ("template_profile", REGISTERED_TEMPLATE_ROOTS),
+                          ("runtime", REGISTERED_RUNTIME_ROOTS | REGISTERED_RUNTIME_PATHS)):
+        keys.update(f"{prefix}.{name}" for name in roots)
+
+    def visit(value: Any, prefix: str) -> None:
+        if not isinstance(value, dict):
+            return  # Array positions are not stable dotted dictionary paths.
+        for name, child in value.items():
+            if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", name):
+                continue
+            path = f"{prefix}.{name}"
+            if registered_input_key(path):
+                keys.add(path)
+                visit(child, path)
+
+    context = runtime_context if isinstance(runtime_context, dict) else {}
+    for field, prefix in (("source_inventory", "source_inventory"),
+                          ("template_profile", "template_profile"),
+                          ("runtime_inventory", "runtime"),
+                          ("confirmed_thesis_profile", "thesis_profile")):
+        visit(context.get(field), prefix)
+    for requirement in requirements or []:
+        if not isinstance(requirement, dict):
+            continue
+        prerequisites = requirement.get("input_prerequisites")
+        for prerequisite in prerequisites if isinstance(prerequisites, list) else []:
+            key = prerequisite.get("key") if isinstance(prerequisite, dict) else None
+            if registered_input_key(key):
+                keys.add(key)
+    return {kind: sorted(key for key in keys if key.startswith(prefix)
+                        or REGISTERED_AGGREGATE_INPUTS.get(key) == kind)
+            for kind, prefix in INPUT_KIND_PREFIXES.items()}
+
+
+def input_prerequisite_generation_schema(
+    base: dict[str, Any], catalog: dict[str, list[str]],
+) -> dict[str, Any]:
+    """Couple each prerequisite kind to its exact registered key domain.
+
+    Enum and anyOf survive strict native projection; a namespace regex does
+    not. Never normalize an invalid provider key into a different input scope.
+    """
+    schema = copy.deepcopy(base)
+    schema["properties"]["key"]["enum"] = sorted({key for keys in catalog.values() for key in keys})
+    branches = []
+    for kind, keys in catalog.items():
+        branch = copy.deepcopy(schema)
+        branch["properties"]["kind"] = {"enum": [kind]}
+        branch["properties"]["key"]["enum"] = list(keys)
+        branches.append(branch)
+    schema["anyOf"] = branches
+    return schema
 
 
 def normalize_label(value: Any) -> str:
@@ -294,12 +371,7 @@ def input_prerequisite_errors(spec: dict[str, Any]) -> list[str]:
                     f"$.requirements[{index}].input_prerequisites[{pindex}].key: "
                     f"unregistered input path {key!r}"
                 )
-            expected_prefix = {
-                "metadata": "thesis_profile.",
-                "source_content": "source_inventory.",
-                "template_resource": "template_profile.",
-                "runtime": "runtime.",
-            }.get(prerequisite.get("kind"))
+            expected_prefix = INPUT_KIND_PREFIXES.get(prerequisite.get("kind"))
             aggregate_kind_matches = (
                 isinstance(key, str)
                 and key in REGISTERED_AGGREGATE_INPUTS

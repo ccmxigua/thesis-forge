@@ -12,6 +12,7 @@ import json
 from typing import Any
 
 from compliance import classification_requires_requirement
+from format_contract_guards import registered_input_catalog, input_prerequisite_generation_schema
 
 
 def applicability_value_schema() -> dict[str, Any]:
@@ -369,6 +370,7 @@ def build_host_review_response_schema(
     contract_version: str,
     eligible_existing_ids: list[str] | None = None,
     eligible_clause_ids: list[str] | None = None,
+    input_catalog: dict[str, list[str]] | None = None,
 ) -> dict[str, Any]:
     """Compile the one Host Review response schema used by all adapters.
 
@@ -394,6 +396,9 @@ def build_host_review_response_schema(
         for key, value in format_schema.get("$defs", {}).items()
         if key not in {"contentInstance", "coverFieldInstance"}
     }
+    request_defs["inputPrerequisiteSpec"] = input_prerequisite_generation_schema(
+        request_defs["inputPrerequisiteSpec"], input_catalog or registered_input_catalog(),
+    )
     if isinstance(request_defs.get("requirement"), dict):
         request_defs["requirement"].get("properties", {}).pop("field_instance_ids", None)
     applicability = request_defs.get("applicabilitySpec")

@@ -568,6 +568,7 @@ def contract_error_records(
             code = "cover_binding_violation"
         elif "input_prerequisites" in lowered and (
             "pattern" in lowered
+            or "unregistered input path" in lowered
             or "namespace" in lowered
             or "runtime_context" in lowered
             or "does not match" in lowered

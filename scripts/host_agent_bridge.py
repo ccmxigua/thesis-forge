@@ -248,6 +248,7 @@ from administrative_relation_projection import (
     project_administrative_copies, project_copied_administrative_qualifiers,
 )
 from responsibility_projection import project_redundant_render_entities
+from context_relation_projection import project_context_edges
 from declaration_signature_projection import project_signature_only_declarations
 from responsibility_ledger import canonical_review_atom
 from repair_transaction import repair_receipt
@@ -733,6 +734,7 @@ _BASE_CONTRACT_REPAIR_RULES = (
     "Every emitted requirement must contain at least one non-null property in its role-specific properties object. A field_key identifies a content instance but is not an executable payload; do not emit properties: {} or use field_key alone. For text and cover-field roles, copy the exact evidence-backed text into properties.text; for style/layout roles, emit the declared nested style or layout property.",
     "This non-empty-payload rule applies only to actual DOCX requirements. A pure external approval, consent, application or seal duty must have pending clause-review obligations and NO requirement object. Never copy an administrative table to fill an external requirement. Bind each administrative property to its exact operative clauses: the default-public sentence, table field labels, duration choices and shorter-duration notes may share one source-region requirement with all supporting clause/evidence links. Do not add a second full-table requirement merely to satisfy a missing edge. If distinct regions, unique operations or conflicting values exist, preserve them separately for source-first review rather than merging or deleting them.",
     "A source-bound administrative field instance may coexist with the full table. Do not copy table-wide policy or shorter-duration qualifiers onto a field-only requirement without their operative clause/evidence edges. If current validator feedback names such a misbound copy, reassess the source and propose changes only at the named qualifier fields; preserve all requirement identities, field instances, clause/evidence edges, applicability and exception lists. Never delete an existing source edge to make the feedback disappear. Distinct exceptions are not automatically equivalent and all semantic proposals need fresh independent review.",
+    "Context is not an execution edge: do not include an informational heading or zero-duty explanation in requirements[].clause_ids merely because it names the source region. Keep that clause in clause_reviews and the source packet; cite only operative clauses and their backing evidence in the executable requirement. Never relabel approval, signature or seal duties as informational, or omit a duty to satisfy this distinction.",
     "For an explicit acknowledgments length clause such as '字数一般不超过500字', use the content_constraints role with the nested payload properties.acknowledgments.max_chars. Do not emit generic null-valued placeholder fields or put the limit at the role root; the bridge may compile this exact evidence-backed form mechanically.",
     "For an explicit appendix placement clause such as '附录放在正文之后另起页', use the appendices role with properties.page_break_each: true. Do not emit generic null-valued appendix fields or infer labels/titles/order from this clause; the bridge may compile only this exact evidence-backed page-break form mechanically.",
     "For a cover requirement with an empty required institution string and the declared neutral placeholder policy, preserve the cover structure and use '——'; never copy a school name or infer an institution identity from nearby evidence.",
@@ -9097,6 +9099,7 @@ def _project_exact_duplicate_requirements(
 def _apply_safe_mechanical_repairs(
     response: Any, error_records: list[dict[str, Any]],
     *, chunk: dict[str, Any] | None = None,
+    source_projection_validation_sha256: str | None = None,
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
     """Compose independent validator-directed repairs on one frozen candidate.
 
@@ -9117,6 +9120,15 @@ def _apply_safe_mechanical_repairs(
         current_records = contract_error_records(current_errors, response=response, chunk=chunk)
         if (current_records and sorted(_response_sha256(item) for item in current_records)
                 == sorted(_response_sha256(item) for item in error_records)):
+            fingerprints = _retry_input_fingerprints(chunk)
+            if _retry_fingerprints_complete(fingerprints):
+                contextual, context_audit = project_context_edges(
+                    response, chunk, error_records, validate=validate_host_agent_response,
+                    source_projection_validation_sha256=source_projection_validation_sha256,
+                    invocation_fingerprints=fingerprints,
+                )
+                if contextual is not None:
+                    return contextual, context_audit
             signatures, signatures_audit = project_signature_only_declarations(
                 response, chunk, validate=validate_host_agent_response,
             )
@@ -9994,6 +10006,7 @@ def prepare_native_response_candidate(
         retry_error_records = [*original_error_records, *retry_inventory_records]
         repaired_response, mechanical_repairs = _apply_safe_mechanical_repairs(
             response, original_error_records, chunk=chunk,
+            source_projection_validation_sha256=source_projection_validation_sha256,
         )
         if repaired_response is None:
             error = ValueError(
@@ -10058,6 +10071,7 @@ def prepare_native_response_candidate(
             )
             next_response, next_repairs = _apply_safe_mechanical_repairs(
                 repaired_response, round_records, chunk=chunk,
+                source_projection_validation_sha256=source_projection_validation_sha256,
             )
             if next_response is None or not next_repairs:
                 break

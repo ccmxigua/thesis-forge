@@ -849,6 +849,22 @@ response and an index/hash audit remain intact. The same deterministic
 projection must yield the identical validated candidate whether applied to
 the raw response or its already-collapsed form before it can narrow a retry
 comparison; any differing payload or indexed clause review stays rejected.
+For a mixed relation containing executable clauses and informational context,
+code may detach only context edges whose unchanged primary review explicitly
+has `normative_basis: insufficient` and an empty obligation inventory, with no
+known source-compiled duty. The exact complete paragraph must additionally
+match a closed nominal-heading grammar without normative/action/numeric-limit
+cues; unknown prose remains on the ordinary semantic review path. This requires authenticated current-source chunk
+projection, exact spans and locations, complete invocation fingerprints and
+the complete current validator bundle. All retained execution inventories must
+be covered; external/unresolved edges, existing requirements, literal selectors,
+conflicts and payload references to detached source IDs are ineligible. Source
+clauses and reviews are never removed or reclassified. The receipt preserves
+the original requirement and full detached context/evidence, while the retained
+payload, conditions, prerequisites and checks remain unchanged. The complete
+validator and a fresh source-first review must still pass; a mistaken primary
+informational label is not proof of absence of duties. This is candidate repair,
+not coverage approval, score-based acceptance or permission to submit.
 The source compiler may also create a keyword-content requirement without a
 model-created parent only when the current evidence verifies the complete
 source span and that whole sentence uniquely states the keyword placement,

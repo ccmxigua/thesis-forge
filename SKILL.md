@@ -1147,6 +1147,15 @@ contract response and immutable host receipts.
 
 ## Handling failures
 
+- Independent coverage generation couples external pending verdicts to pending
+  atoms with current primary IDs; mixed pending verdicts separate represented
+  DOCX atoms from external actions using their current primary status. Unknown
+  additional source duties remain reportable as diagnostic `incomplete` /
+  `unrepresented` atoms without an invented ID. Generation constraints are not
+  completeness proof: native decoding cannot enforce every array constraint,
+  so canonical coverage, one-to-one identity, source and mixed-duty checks still
+  apply. Parsing preserves rejected raw states for bounded correction; it must
+  not relabel an unrepresented duty as pending merely to pass schema validation.
 - Missing chunk response: stop and report the exact filename.
 - Provenance mismatch: rerun preparation and review the new packets; do not
   edit hashes by hand.

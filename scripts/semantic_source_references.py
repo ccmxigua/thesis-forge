@@ -147,6 +147,51 @@ def build_source_reference_packet(request: dict[str, Any]) -> dict[str, Any]:
     return packet
 
 
+def _external_verdict_generation_branches(
+    branch: dict[str, Any], atoms: list[dict[str, Any]], context: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Couple pending verdicts to their atom states without hiding omissions.
+
+    Concrete object alternatives survive native projection (unlike if/allOf).
+    This is generation-only: parsing preserves rejected provider output for
+    the existing bounded correction route and canonical semantic validator.
+    """
+    mixed = context.get("classification") == "executable_with_external_check"
+    pending_verdict = "mixed_execution_external_pending" if mixed else "external_compliance_pending"
+    pending_atoms = []
+    primary = context.get("primary_obligations") or []
+    for atom in atoms:
+        for disposition in (["represented", "external_action_pending"] if mixed else ["external_action_pending"]):
+            if disposition not in atom["properties"]["disposition"].get("enum", []):
+                continue
+            candidate = copy.deepcopy(atom)
+            candidate["properties"]["disposition"] = {"enum": [disposition]}
+            if primary:
+                status = "covered" if disposition == "represented" else "unverifiable"
+                ids = [item["id"] for item in primary if item.get("status") == status]
+                if not ids or "primary_obligation_id" not in candidate["required"]:
+                    continue
+                candidate["properties"]["primary_obligation_id"] = {"enum": ids}
+            if disposition == "external_action_pending":
+                candidate["properties"]["requirement_refs"]["maxItems"] = 0
+            pending_atoms.append(candidate)
+    diagnostic = copy.deepcopy(branch)
+    diagnostic["properties"]["verdict"]["enum"] = [
+        value for value in diagnostic["properties"]["verdict"]["enum"]
+        if value not in {"external_compliance_pending", "mixed_execution_external_pending"}
+    ]
+    alternatives = [diagnostic]
+    if pending_atoms:
+        pending = copy.deepcopy(branch)
+        pending["properties"]["verdict"] = {"enum": [pending_verdict]}
+        pending["properties"]["identified_obligations"].update({
+            "minItems": max(1, len(primary)),
+            "items": {"anyOf": pending_atoms},
+        })
+        alternatives.append(pending)
+    return alternatives
+
+
 def source_reference_schema(
     canonical_schema: dict[str, Any], packet: dict[str, Any], *, coverage: bool,
     constrain_requirement_links: bool = False,
@@ -333,6 +378,14 @@ def source_reference_schema(
                 if len(compiled_obligation_branches) == 1
                 else {"anyOf": compiled_obligation_branches}
             )
+            if constrain_requirement_links and external_mapping:
+                # Keep the outer per-check properties stable for consumers;
+                # the additional union constrains the whole result, not just
+                # individual atoms. Diagnostic verdicts retain unmatched
+                # source duties with no invented primary mapping.
+                branch["anyOf"] = _external_verdict_generation_branches(
+                    branch, compiled_obligation_branches, review_context,
+                )
         branches.append(branch)
     schema["properties"]["results"]["items"] = {"anyOf": branches}
     return schema

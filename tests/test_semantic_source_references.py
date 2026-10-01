@@ -26,6 +26,133 @@ from semantic_source_references import (
 
 
 class SemanticSourceReferenceTests(unittest.TestCase):
+    def test_external_generation_couples_pending_verdict_and_current_atom_mapping(self) -> None:
+        request = {"run_id": "fresh", "checks": [{"check_id": "external-any-id",
+            "document_text": "导师同意后学院批准。", "review_context": {
+                "classification": "external_compliance", "requires_requirement": False,
+                "linked_requirements": [], "primary_obligations": [
+                    {"id": "consent", "status": "unverifiable"},
+                    {"id": "approval", "status": "unverifiable"}]}}]}
+        packet = build_source_reference_packet(request)
+        ref = packet["checks"][0]["source_spans"][0]["ref_id"]
+        wire = source_reference_schema(OBLIGATION_COVERAGE_SCHEMA, packet, coverage=True,
+                                       constrain_requirement_links=True)
+        native = native_output_schema(wire)
+        self.assertEqual(native_schema_support_errors(native), [])
+        branch = wire["properties"]["results"]["items"]["anyOf"][0]
+        self.assertEqual(branch["properties"]["check_id"]["enum"], ["external-any-id"])
+        raw = {"results": [{"check_id": "external-any-id", "verdict": "external_compliance_pending",
+            "rationale": "External actions still pending.", "evidence_refs": [ref],
+            "identified_obligations": [{"source_ref": ref, "disposition": "external_action_pending",
+                "primary_obligation_id": oid, "requirement_refs": []} for oid in ("consent", "approval")]}]}
+        pending_atom = branch["anyOf"][1]["properties"]["identified_obligations"]["items"]["anyOf"][0]
+        provider = copy.deepcopy(raw)
+        for atom in provider["results"][0]["identified_obligations"]:
+            for key in pending_atom["properties"]:
+                if key not in atom:
+                    atom[key] = None  # Strict native optional omission sentinel.
+        self.assertEqual(validate_instance(raw, wire), [])
+        self.assertEqual(validate_instance(provider, native), [])
+        compiled, receipt = compile_source_reference_response(provider, request,
+            OBLIGATION_COVERAGE_SCHEMA, coverage=True, provider_nullable_optionals=True)
+        self.assertEqual(compiled["results"][0]["verdict"], "external_compliance_pending")
+        self.assertTrue(receipt["semantic_verdicts_unchanged"])
+        for change in ("unrepresented", "ambiguous", "represented", "foreign-id", "missing-id", "wrong-verdict"):
+            bad = copy.deepcopy(provider)
+            atom = bad["results"][0]["identified_obligations"][0]
+            if change in {"unrepresented", "ambiguous", "represented"}:
+                atom["disposition"] = change
+            elif change == "foreign-id":
+                atom["primary_obligation_id"] = "old-id"
+            elif change == "missing-id":
+                atom["primary_obligation_id"] = None
+            else:
+                bad["results"][0]["verdict"] = "mixed_execution_external_pending"
+            with self.subTest(change=change):
+                self.assertTrue(validate_instance(bad, native))
+        missing = copy.deepcopy(raw)
+        missing["results"][0]["identified_obligations"] = []
+        self.assertTrue(validate_instance(missing, wire))
+        # Unsupported native minItems cannot establish inventory completeness.
+        duplicate = copy.deepcopy(compiled)
+        duplicate["results"][0]["identified_obligations"][1]["primary_obligation_id"] = "consent"
+        from native_semantic_review import NativeSemanticReviewError
+        with self.assertRaises(NativeSemanticReviewError):
+            validate_obligation_coverage_response(duplicate, request["checks"])
+
+    def test_external_generation_keeps_truthful_unmapped_diagnostics_and_raw_rejection(self) -> None:
+        request = {"checks": [{"check_id": "different-id", "document_text": "本人签名并承担责任。",
+            "review_context": {"classification": "external_compliance", "linked_requirements": [],
+                "primary_obligations": [{"id": "sign", "status": "unverifiable"}]}}]}
+        packet = build_source_reference_packet(request)
+        ref = packet["checks"][0]["source_spans"][0]["ref_id"]
+        wire = source_reference_schema(OBLIGATION_COVERAGE_SCHEMA, packet, coverage=True,
+                                       constrain_requirement_links=True)
+        raw = {"results": [{"check_id": "different-id", "verdict": "incomplete", "rationale": "Missing duty.",
+            "evidence_refs": [ref], "identified_obligations": [{"source_ref": ref,
+                "disposition": "unrepresented", "requirement_refs": []}]}]}
+        self.assertEqual(validate_instance(raw, wire), [])
+        provider = copy.deepcopy(raw)
+        diagnostic_atoms = wire["properties"]["results"]["items"]["anyOf"][0]["anyOf"][0]["properties"]["identified_obligations"]["items"]["anyOf"]
+        unmatched = next(atom for atom in diagnostic_atoms if "primary_obligation_id" not in atom["properties"])
+        for key in unmatched["properties"]:
+            provider["results"][0]["identified_obligations"][0].setdefault(key, None)
+        self.assertEqual(validate_instance(provider, native_output_schema(wire)), [])
+        diagnostic, _ = compile_source_reference_response(provider, request,
+            OBLIGATION_COVERAGE_SCHEMA, coverage=True, provider_nullable_optionals=True)
+        self.assertNotIn("primary_obligation_id", diagnostic["results"][0]["identified_obligations"][0])
+        combined = copy.deepcopy(raw)
+        combined["results"][0]["identified_obligations"].insert(0, {
+            "source_ref": ref, "disposition": "external_action_pending",
+            "primary_obligation_id": "sign", "requirement_refs": []})
+        self.assertEqual(validate_instance(combined, wire), [])
+        combined_compiled, _ = compile_source_reference_response(combined, request,
+            OBLIGATION_COVERAGE_SCHEMA, coverage=True)
+        from native_semantic_review import NativeSemanticReviewError
+        with self.assertRaises(NativeSemanticReviewError):
+            validate_obligation_coverage_response(combined_compiled, request["checks"])
+        # This is a preserved diagnostic, not permission to accept omissions.
+        raw["results"][0]["verdict"] = "external_compliance_pending"
+        before = copy.deepcopy(raw)
+        self.assertTrue(validate_instance(raw, wire))
+        # Parsing is intentionally not a repairer or a provider-generation gate.
+        # Historical contradictions are preserved for canonical rejection.
+        compiled, _ = compile_source_reference_response(raw, request, OBLIGATION_COVERAGE_SCHEMA, coverage=True)
+        self.assertEqual(raw, before)
+        self.assertEqual(compiled["results"][0]["identified_obligations"][0]["disposition"], "unrepresented")
+        changed = copy.deepcopy(request)
+        changed["checks"][0]["document_text"] += "新增义务。"
+        with self.assertRaises(ValueError):
+            compile_source_reference_response(raw, changed, OBLIGATION_COVERAGE_SCHEMA, coverage=True)
+
+    def test_mixed_generation_routes_atoms_to_matching_current_primary_status(self) -> None:
+        request = {"checks": [{"check_id": "mixed-any-id", "document_text": "批准后应标注密级。",
+            "review_context": {"classification": "executable_with_external_check", "requires_requirement": True,
+                "linked_requirements": [{"requirement_ref": "RR-current"}], "primary_obligations": [
+                    {"id": "approval", "status": "unverifiable"}, {"id": "label", "status": "covered"}]}}]}
+        packet = build_source_reference_packet(request)
+        ref = packet["checks"][0]["source_spans"][0]["ref_id"]
+        wire = source_reference_schema(OBLIGATION_COVERAGE_SCHEMA, packet, coverage=True,
+                                       constrain_requirement_links=True)
+        raw = {"results": [{"check_id": "mixed-any-id", "verdict": "mixed_execution_external_pending",
+            "rationale": "Split local formatting and external action.", "evidence_refs": [ref],
+            "identified_obligations": [
+                {"source_ref": ref, "disposition": "external_action_pending", "primary_obligation_id": "approval", "requirement_refs": []},
+                {"source_ref": ref, "disposition": "represented", "primary_obligation_id": "label", "requirement_refs": ["RR-current"]}]}]}
+        self.assertEqual(validate_instance(raw, wire), [])
+        self.assertEqual(native_schema_support_errors(native_output_schema(wire)), [])
+        for key, value in (("primary_obligation_id", "label"), ("disposition", "unrepresented"),
+                           ("requirement_refs", ["RR-current"])):
+            bad = copy.deepcopy(raw)
+            bad["results"][0]["identified_obligations"][0][key] = value
+            with self.subTest(key=key):
+                self.assertTrue(validate_instance(bad, wire))
+        diagnostic = copy.deepcopy(raw)
+        diagnostic["results"][0]["verdict"] = "incomplete"
+        diagnostic["results"][0]["identified_obligations"].append({"source_ref": ref,
+            "disposition": "unrepresented", "requirement_refs": []})
+        self.assertEqual(validate_instance(diagnostic, wire), [])
+
     def test_generation_schema_prevents_unlinked_and_cross_check_coverage(self) -> None:
         request = {"checks": [
             {"check_id": "label", "document_text": "论文题目", "review_context": {

@@ -14,6 +14,10 @@ from format_spec_validation import validate_instance
 from host_review_schema import normalize_native_response
 from semantic_contract import sha256_json
 from pending_source_work import compile_pending_source_work
+from source_obligation_compiler import (
+    compile_source_content_verification_codes,
+    typed_source_verification_inventory_is_bound,
+)
 
 
 REFERENCE_PROTOCOL = "semantic_source_references_v2"
@@ -147,8 +151,10 @@ def build_source_reference_packet(request: dict[str, Any]) -> dict[str, Any]:
     return packet
 
 
-def _external_verdict_generation_branches(
+def _pending_verdict_generation_branches(
     branch: dict[str, Any], atoms: list[dict[str, Any]], context: dict[str, Any],
+    *, pending_verdict: str, disposition_statuses: dict[str, str],
+    excluded_verdicts: set[str],
 ) -> list[dict[str, Any]]:
     """Couple pending verdicts to their atom states without hiding omissions.
 
@@ -156,29 +162,26 @@ def _external_verdict_generation_branches(
     This is generation-only: parsing preserves rejected provider output for
     the existing bounded correction route and canonical semantic validator.
     """
-    mixed = context.get("classification") == "executable_with_external_check"
-    pending_verdict = "mixed_execution_external_pending" if mixed else "external_compliance_pending"
     pending_atoms = []
     primary = context.get("primary_obligations") or []
     for atom in atoms:
-        for disposition in (["represented", "external_action_pending"] if mixed else ["external_action_pending"]):
+        for disposition, status in disposition_statuses.items():
             if disposition not in atom["properties"]["disposition"].get("enum", []):
                 continue
             candidate = copy.deepcopy(atom)
             candidate["properties"]["disposition"] = {"enum": [disposition]}
             if primary:
-                status = "covered" if disposition == "represented" else "unverifiable"
                 ids = [item["id"] for item in primary if item.get("status") == status]
                 if not ids or "primary_obligation_id" not in candidate["required"]:
                     continue
                 candidate["properties"]["primary_obligation_id"] = {"enum": ids}
-            if disposition == "external_action_pending":
+            if disposition != "represented":
                 candidate["properties"]["requirement_refs"]["maxItems"] = 0
             pending_atoms.append(candidate)
     diagnostic = copy.deepcopy(branch)
     diagnostic["properties"]["verdict"]["enum"] = [
         value for value in diagnostic["properties"]["verdict"]["enum"]
-        if value not in {"external_compliance_pending", "mixed_execution_external_pending"}
+        if value not in excluded_verdicts
     ]
     alternatives = [diagnostic]
     if pending_atoms:
@@ -383,8 +386,48 @@ def source_reference_schema(
                 # the additional union constrains the whole result, not just
                 # individual atoms. Diagnostic verdicts retain unmatched
                 # source duties with no invented primary mapping.
-                branch["anyOf"] = _external_verdict_generation_branches(
+                mixed = review_context.get("classification") == "executable_with_external_check"
+                branch["anyOf"] = _pending_verdict_generation_branches(
                     branch, compiled_obligation_branches, review_context,
+                    pending_verdict="mixed_execution_external_pending" if mixed else "external_compliance_pending",
+                    disposition_statuses=({"represented": "covered", "external_action_pending": "unverifiable"}
+                        if mixed else {"external_action_pending": "unverifiable"}),
+                    excluded_verdicts={"external_compliance_pending", "mixed_execution_external_pending"},
+                )
+            elif (constrain_requirement_links
+                    and review_context.get("classification") == "requires_source_verification"
+                    and review_context.get("requires_requirement") is False
+                    and not review_context.get("linked_requirements")
+                    and review_context.get("source_content_verification_codes")
+                        == compile_source_content_verification_codes(check["document_text"])
+                    and typed_source_verification_inventory_is_bound(
+                        check["document_text"], primary_obligations)):
+                verification_atoms = []
+                for atom in compiled_obligation_branches:
+                    atom = copy.deepcopy(atom)
+                    atom["properties"]["disposition"]["enum"] = [
+                        value for value in atom["properties"]["disposition"]["enum"]
+                        if value != "authoring_content_pending"
+                    ]
+                    if atom["properties"]["disposition"]["enum"]:
+                        atom["required"] = list(dict.fromkeys(atom["required"] + ["primary_obligation_id"]))
+                        verification_atoms.append(atom)
+                # Source-bound pure provenance cannot authorize missing prose.
+                # Keep diagnostics (including unmatched additional duties) open
+                # without erasing the existing typed primary inventory.
+                diagnostic_atoms = copy.deepcopy(compiled_obligation_branches)
+                for atom in diagnostic_atoms:
+                    atom["properties"]["disposition"]["enum"] = [
+                        value for value in atom["properties"]["disposition"]["enum"]
+                        if value != "authoring_content_pending"
+                    ]
+                diagnostic_atoms = [atom for atom in diagnostic_atoms if atom["properties"]["disposition"]["enum"]]
+                props["identified_obligations"]["items"] = {"anyOf": diagnostic_atoms}
+                branch["anyOf"] = _pending_verdict_generation_branches(
+                    branch, verification_atoms, review_context,
+                    pending_verdict="source_content_verification_pending",
+                    disposition_statuses={"source_content_verification_pending": "unresolved"},
+                    excluded_verdicts={"source_content_pending", "source_content_verification_pending"},
                 )
         branches.append(branch)
     schema["properties"]["results"]["items"] = {"anyOf": branches}

@@ -14,7 +14,11 @@ import host_agent_bridge as bridge
 import native_semantic_review as native
 import requirements_engine as engine
 from semantic_contract import sha256_json
-from semantic_source_references import compile_source_reference_response
+from semantic_source_references import (
+    build_source_reference_packet, compile_source_reference_response, source_reference_schema,
+)
+from host_review_schema import native_output_schema, native_schema_support_errors
+from format_spec_validation import validate_instance
 from source_obligation_compiler import (
     materialize_source_verification_classifications,
     typed_source_verification_inventory_is_bound,
@@ -49,6 +53,132 @@ class TypedVerificationRoutingTests(unittest.TestCase):
     def project(self, response, chunk):
         return materialize_source_verification_classifications(response, chunk["clauses"],
             provenance=chunk["provenance"], evidence_context=chunk["evidence_context"])
+
+    def test_origin_selection_variants_keep_typed_semantics_and_pending_human_responsibility(self):
+        actions = (
+            "select keywords from the thesis and ensure each has a clear source",
+            "choose key terms from the paper",
+            "extract keywords from the paper",
+            "pick keywords from the manuscript and check every term has provenance",
+            "从论文中选取关键词并确保每个关键词有明确出处",
+        )
+        for action in actions:
+            response, chunk, _ = fixture()
+            atom = response["clause_reviews"][0]["obligations"][0]
+            atom["action"] = action
+            before = copy.deepcopy(response)
+            candidate, audit = self.project(response, chunk)
+            with self.subTest(action=action):
+                self.assertEqual(response, before)
+                self.assertEqual(candidate["clause_reviews"][0]["classification"], "requires_source_verification")
+                projected = candidate["clause_reviews"][0]["obligations"][0]
+                for key in ("id", "actor", "action", "target", "source_quote", "force", "applicability", "condition"):
+                    self.assertEqual(projected.get(key), atom.get(key))
+                self.assertEqual((projected["status"], projected["route"]), ("unresolved", "human"))
+                self.assertEqual(audit[0]["original_primary_obligations"], [atom])
+                self.assertTrue(audit[0]["current_evidence_binding_verified"])
+                self.assertFalse(audit[0]["submission_ready"])
+
+    def test_origin_selection_never_authorizes_other_content_or_unbound_source(self):
+        for action in (
+            "write keywords from the thesis", "select keywords from the internet",
+            "select keywords from the thesis and write an abstract",
+            "select keywords from the thesis and obtain department approval",
+            "select new keywords from the thesis", "select keywords without thesis provenance",
+            "从论文中选取关键词并撰写摘要", "从互联网中选取关键词",
+        ):
+            response, chunk, _ = fixture()
+            response["clause_reviews"][0]["obligations"][0]["action"] = action
+            with self.subTest(action=action):
+                self.assertEqual(self.project(response, chunk), (response, []))
+        for change in ("missing_evidence", "old_hash", "mixed_source", "linked", "duplicate"):
+            response, chunk, _ = fixture()
+            atom = response["clause_reviews"][0]["obligations"][0]
+            atom["action"] = "select keywords from the thesis and ensure each has a clear source"
+            if change == "missing_evidence": chunk["evidence_context"] = {}
+            elif change == "old_hash": chunk["clauses"][0]["source_span"]["source_sha256"] = "0" * 64
+            elif change == "mixed_source":
+                clause = chunk["clauses"][0]; source = clause["text"] + "；作者须撰写摘要。"
+                clause["text"] = source
+                clause["source_span"].update(text=source, end_offset=len(source), source_sha256=hashlib.sha256(source.encode()).hexdigest())
+                chunk["evidence_context"][clause["source_span"]["evidence_id"]]["text"] = source
+                atom["source_quote"] = source
+            elif change == "linked": response["requirements"] = [{"clause_ids": [chunk["clauses"][0]["id"]]}]
+            else: response["clause_reviews"][0]["obligations"].append(copy.deepcopy(atom))
+            with self.subTest(change=change):
+                self.assertEqual(self.project(response, chunk), (response, []))
+
+    def test_pure_origin_generation_rejects_authoring_and_preserves_diagnostics(self):
+        response, chunk, result = fixture()
+        action = "select keywords from the thesis and ensure each has a clear source"
+        response["clause_reviews"][0]["obligations"][0]["action"] = action
+        candidate, audit = bridge.prepare_native_response_candidate(response, chunk)
+        self.assertEqual(bridge.validate_host_agent_response(candidate, chunk), [])
+        self.assertTrue(audit["source_verification_classification_projections"][0]["typed_inventory_preserved"])
+        request = native.build_obligation_coverage_request(candidate, chunk, run_id="fresh-select", chunk_index=1)
+        wire = source_reference_schema(native.OBLIGATION_COVERAGE_SCHEMA,
+            build_source_reference_packet(request), coverage=True, constrain_requirement_links=True)
+        self.assertEqual(native_schema_support_errors(native_output_schema(wire)), [])
+        result["identified_obligations"][0]["action"] = action
+        original = wire_response(request, result)
+        frozen = copy.deepcopy(original)
+        self.assertTrue(validate_instance(original, wire))
+        # Parsing retains rejected observations rather than silently relabeling.
+        bad_compiled, _ = compile_source_reference_response(original, request, native.OBLIGATION_COVERAGE_SCHEMA, coverage=True)
+        with self.assertRaises(native.SourceVerificationMislabelledAsAuthoringError):
+            native.validate_obligation_coverage_response(bad_compiled, request["checks"])
+        self.assertEqual(original, frozen)
+        result["verdict"] = "source_content_verification_pending"
+        result["identified_obligations"][0]["disposition"] = "source_content_verification_pending"
+        raw = wire_response(request, result)
+        self.assertEqual(validate_instance(raw, wire), [])
+        provider = copy.deepcopy(raw)
+        pending = wire["properties"]["results"]["items"]["anyOf"][0]["anyOf"][1]
+        atom_schema = pending["properties"]["identified_obligations"]["items"]["anyOf"][0]
+        for atom in provider["results"][0]["identified_obligations"]:
+            for key in atom_schema["properties"]:
+                atom.setdefault(key, None)
+        self.assertEqual(validate_instance(provider, native_output_schema(wire)), [])
+        provider_compiled, _ = compile_source_reference_response(provider, request,
+            native.OBLIGATION_COVERAGE_SCHEMA, coverage=True, provider_nullable_optionals=True)
+        self.assertEqual(native.validate_obligation_coverage_response(provider_compiled, request["checks"]), [result])
+        compiled, receipt = compile_source_reference_response(raw, request, native.OBLIGATION_COVERAGE_SCHEMA, coverage=True)
+        self.assertEqual(native.validate_obligation_coverage_response(compiled, request["checks"]), [result])
+        self.assertTrue(receipt["semantic_verdicts_unchanged"])
+        for change in ("missing_id", "foreign_id", "double_id", "mixed_authoring", "wrong_verdict"):
+            bad = copy.deepcopy(raw); atom = bad["results"][0]["identified_obligations"][0]
+            if change == "missing_id": atom.pop("primary_obligation_id")
+            elif change == "foreign_id": atom["primary_obligation_id"] = "old-id"
+            elif change == "double_id": bad["results"][0]["identified_obligations"].append(copy.deepcopy(atom))
+            elif change == "mixed_authoring":
+                other = copy.deepcopy(atom); other["disposition"] = "authoring_content_pending"
+                bad["results"][0]["identified_obligations"].append(other)
+            else: bad["results"][0]["verdict"] = "source_content_pending"
+            with self.subTest(change=change):
+                if change != "double_id": self.assertTrue(validate_instance(bad, wire))
+                try:
+                    observed, _ = compile_source_reference_response(bad, request, native.OBLIGATION_COVERAGE_SCHEMA, coverage=True)
+                except ValueError:
+                    continue
+                with self.assertRaises(native.NativeSemanticReviewError):
+                    native.validate_obligation_coverage_response(observed, request["checks"])
+        diagnostic = copy.deepcopy(raw)
+        diagnostic["results"][0]["verdict"] = "incomplete"
+        diagnostic["results"][0]["identified_obligations"].append({
+            "source_ref": raw["results"][0]["evidence_refs"][0], "disposition": "unrepresented", "requirement_refs": []})
+        self.assertEqual(validate_instance(diagnostic, wire), [])
+        self.assertEqual(candidate["requirements"], [])
+
+    def test_origin_generation_constraint_does_not_close_unrelated_authoring_channels(self):
+        response, chunk, _ = fixture()
+        candidate, _ = self.project(response, chunk)
+        request = native.build_obligation_coverage_request(candidate, chunk, run_id="fresh-general", chunk_index=1)
+        check = request["checks"][0]
+        check["document_text"] = "作者应补充本人真实研究内容。"
+        check["review_context"]["source_content_verification_codes"] = []
+        wire = source_reference_schema(native.OBLIGATION_COVERAGE_SCHEMA,
+            build_source_reference_packet(request), coverage=True, constrain_requirement_links=True)
+        self.assertNotIn("anyOf", wire["properties"]["results"]["items"]["anyOf"][0])
 
     def test_captured_typed_inventory_only_changes_pending_responsibility(self):
         response, chunk, _ = fixture(); frozen = copy.deepcopy(response)

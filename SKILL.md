@@ -1157,6 +1157,15 @@ contract response and immutable host receipts.
   apply. Parsing preserves rejected raw states for bounded correction; it must
   not relabel an unrepresented duty as pending merely to pass schema validation.
 - Missing chunk response: stop and report the exact filename.
+- A registered pure keyword-origin instruction may retain a typed selection
+  relation (selecting terms from the thesis), while routing responsibility to
+  pending human verification. Require current exact evidence, whole-source
+  purity and a closed origin relation; never rewrite actor/action/target or
+  infer that verification passed. Policy v5 records the original and projected
+  inventory. Generation keeps this pure route separate from authoring content,
+  requires current primary IDs for a pending verdict, and retains unmatched
+  diagnostics. Duplicate IDs, actual authoring instructions, mixed duties,
+  unknown actions and stale source bindings still fail closed.
 - Provenance mismatch: rerun preparation and review the new packets; do not
   edit hashes by hand.
 - Contract or clause-coverage failure: correct the host-Agent response using

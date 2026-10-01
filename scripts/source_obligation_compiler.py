@@ -13,7 +13,7 @@ import re
 from typing import Any
 
 
-SOURCE_VERIFICATION_CLASSIFICATION_POLICY_VERSION = "source-verification-classification-v4"
+SOURCE_VERIFICATION_CLASSIFICATION_POLICY_VERSION = "source-verification-classification-v5"
 SOURCE_KEYWORD_CONSTRAINT_PROJECTION_POLICY_VERSION = "source-keyword-constraints-v3"
 SOURCE_HEADING_BINDING_POLICY_VERSION = "source-heading-binding-v1"
 
@@ -2489,6 +2489,19 @@ _KEYWORD_VERIFICATION_ACTION = re.compile(
     r"(?:核验|核对|检查|验证|确认)(?:中文|英文|论文|的|关键词|关键字|列表|术语|来源|出处|主题|对应关系|溯源|及|与|和|可追溯性)+\Z",
     re.IGNORECASE,
 )
+_KEYWORD_ORIGIN_SELECTION_ACTION = re.compile(
+    # Choosing existing thesis terms is an origin relation, not authorization
+    # to write new content. The complete pure-source and evidence guards below
+    # are mandatory; this grammar alone never changes responsibility.
+    r"(?:select|choose|extract|pick)\s+(?:the\s+)?(?:keywords?|key\s+terms?)\s+"
+    r"from\s+(?:the\s+)?(?:thesis|paper|manuscript)"
+    r"(?:\s+and\s+(?:ensure|verify|confirm|check)\s+(?:that\s+)?"
+    r"(?:each|every)(?:\s+(?:keyword|term))?\s+(?:has|have)\s+"
+    r"(?:a\s+)?(?:clear\s+)?(?:source|origin|provenance)(?:\s+in\s+(?:the\s+)?(?:thesis|paper|manuscript))?)?\Z|"
+    r"从(?:论文|正文)中(?:选取|选择|提取)(?:关键词|关键字)"
+    r"(?:(?:并|并且)(?:确保|核验|确认)(?:每个|各个)(?:关键词|关键字)?(?:在论文中)?有明确出处)?\Z",
+    re.IGNORECASE,
+)
 _KEYWORD_VERIFICATION_ACTOR = re.compile(
     r"(?:author|reviewer|student|writer)(?:\s+(?:or|and)\s+(?:author|reviewer|student|writer))*\Z|"
     r"(?:作者|审查人|审核人|学生)(?:(?:或|和|与)(?:作者|审查人|审核人|学生))*\Z", re.IGNORECASE,
@@ -2521,7 +2534,8 @@ def typed_source_verification_inventory_is_bound(
                 or atom.get("status") != expected_status
                 or atom.get("condition") is not None
                 or _KEYWORD_VERIFICATION_ACTOR.fullmatch(atom["actor"]) is None
-                or _KEYWORD_VERIFICATION_ACTION.fullmatch(atom["action"]) is None
+                or not (_KEYWORD_VERIFICATION_ACTION.fullmatch(atom["action"])
+                        or _KEYWORD_ORIGIN_SELECTION_ACTION.fullmatch(atom["action"]))
                 or _KEYWORD_VERIFICATION_TARGET.fullmatch(atom["target"]) is None
                 or re.search(r"关键词|关键字|\bkeywords?\b", atom["target"], re.IGNORECASE) is None
                 or not isinstance(atom.get("force"), str)

@@ -1130,6 +1130,43 @@ def _table_obligation_gaps(
     return gaps
 
 
+def _cover_title_label_visibility_errors(requirement, index, clauses, evidence_context):
+    """A title's metadata role does not determine its printed label policy.
+
+    Bare cover titles retain their legacy value-only default. A source-backed
+    form may instead print a title label: bind that explicit always policy to
+    one current linked source occurrence, never merely to the field name.
+    """
+    properties = requirement.get("properties")
+    if not isinstance(properties, dict) or not isinstance(properties.get("fields"), list):
+        return []
+    clause_map = {c.get("id"): c for c in clauses if isinstance(c, dict)}
+    linked_ids = requirement.get("clause_ids")
+    linked_evidence = requirement.get("evidence_ids")
+    errors = []
+    for field_index, field in enumerate(properties["fields"]):
+        if (not isinstance(field, dict) or field.get("id") not in {"title_zh", "title_en"}
+                or field.get("label_display_policy") != "always"):
+            continue
+        label = field.get("label")
+        matches = []
+        for cid in linked_ids if isinstance(linked_ids, list) else []:
+            try:
+                binding = compose_source_fragments([cid], clause_map, evidence_context,
+                                                   literal_role="cover_field_label")
+                fragment = binding["source_fragments"][0]
+                if (isinstance(label, str) and label == binding["text"]
+                        and isinstance(linked_evidence, list)
+                        and fragment["evidence_id"] in linked_evidence):
+                    matches.append(binding)
+            except (ValueError, KeyError, TypeError):
+                continue
+        if len(matches) != 1:
+            errors.append(f"$.requirements[{index}].properties.fields[{field_index}]"
+                          ".label_display_policy: must_be_bound_to_exact_linked_source_clause")
+    return errors
+
+
 def _security_marking_qualifier_binding_errors(
     response: dict[str, Any], clauses: Any,
 ) -> list[str]:
@@ -1693,6 +1730,9 @@ def validate_response(response: Any, chunk: dict[str, Any]) -> list[str]:
                     f"$.requirements[{index}].properties: role_schema_resolution_failed:{exc}"
                 )
         if role == "cover":
+            errors.extend(_cover_title_label_visibility_errors(
+                item, index, clauses, evidence_context,
+            ))
             for guard_error in cover_binding_errors({"cover": item.get("properties")}):
                 errors.append(
                     f"$.requirements[{index}].properties{guard_error.removeprefix('$.cover')}"

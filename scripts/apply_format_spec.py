@@ -697,7 +697,8 @@ def _cover_field_value(cover: dict[str, Any], metadata: dict[str, Any], field: d
 
 def _cover_field_text(field: dict[str, Any], value: str) -> str | None:
     """Keep label visibility distinct from missing/optional instance values."""
-    if field.get("id") in {"title_zh", "title_en"}:
+    if (field.get("id") in {"title_zh", "title_en"}
+            and field.get("label_display_policy", "with_value") != "always"):
         return value or None
     if not value and field.get("label_display_policy", "with_value") != "always":
         return None

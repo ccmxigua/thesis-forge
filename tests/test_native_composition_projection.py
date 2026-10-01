@@ -12,8 +12,13 @@ from format_spec_validation import validate_instance
 
 
 class NativeCompositionProjectionTests(unittest.TestCase):
-    def test_conditional_cover_restriction_stays_local_not_on_provider_wire(self):
+    def test_conditional_constraint_stays_local_not_on_provider_wire(self):
         spec = json.loads((ROOT / "schema/format-spec.schema.json").read_text())
+        # Exercise composition projection without imposing a field-name-only
+        # title-label restriction on every real source document.
+        spec["$defs"]["coverField"]["allOf"] = [{
+            "if": {"type": "object", "properties": {"id": {"enum": ["student_id"]}}},
+            "then": {"type": "object", "properties": {"display_policy": {"enum": ["required"]}}}}]
         local = {"type": "object", "properties": {"field": {"$ref": "#/$defs/coverField"}},
                  "required": ["field"], "additionalProperties": False, "$defs": spec["$defs"]}
         original = copy.deepcopy(local)
@@ -21,11 +26,11 @@ class NativeCompositionProjectionTests(unittest.TestCase):
         self.assertEqual(native_schema_support_errors(wire), [])
         self.assertNotIn("allOf", wire["$defs"]["coverField"])
         self.assertIn("Local validator also requires", wire["$defs"]["coverField"]["description"])
-        value = {"field": {"id": "title_zh", "label": "题目", "order": 1,
-            "value_from": "thesis_profile.cover_metadata.title_zh", "display_policy": "required",
+        value = {"field": {"id": "student_id", "label": "学号", "order": 1,
+            "value_from": "thesis_profile.cover_metadata.student_id", "display_policy": "if_present",
             "label_display_policy": "always"}}
         self.assertTrue(validate_instance(value, local))
-        value["field"]["label_display_policy"] = "with_value"
+        value["field"]["display_policy"] = "required"
         self.assertEqual(validate_instance(value, local), [])
         self.assertEqual(local, original)
 

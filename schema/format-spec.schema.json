@@ -1965,11 +1965,7 @@
           "minimum": 1
         }
       },
-      "additionalProperties": false,
-      "allOf": [{
-        "if": {"type": "object", "properties": {"id": {"enum": ["title_zh", "title_en"]}}},
-        "then": {"type": "object", "properties": {"label_display_policy": {"enum": ["with_value"]}}}
-      }]
+      "additionalProperties": false
     },
     "coverSpec": {
       "type": "object",

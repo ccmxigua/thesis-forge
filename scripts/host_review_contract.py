@@ -35,6 +35,7 @@ from source_obligation_compiler import (
     materialize_known_source_verification,
 )
 from source_literal_binding import (
+    compose_source_fragments,
     TOP_LEVEL_NON_TEXT_ROLES as _TOP_LEVEL_NON_TEXT_ROLES,
     materialize_source_fragment_literals,
     normalize_clause_literal,
@@ -1910,6 +1911,20 @@ def validate_response(response: Any, chunk: dict[str, Any]) -> list[str]:
                 "must be a declared evidence basis, not a classification"
             )
         clause = clause_map.get(clause_id)
+        from responsibility_ledger import route_for_obligation
+        for atom_index, atom in enumerate(review.get("obligations") or []):
+            if not isinstance(atom, dict):
+                continue
+            proposed_route = atom.get("route")
+            if proposed_route is not None and proposed_route != route_for_obligation(str(classification), atom.get("status")):
+                errors.append(f"$.clause_reviews[{review_index}].obligations[{atom_index}].route: responsibility_route_conflict")
+            if atom.get("source_quote") is not None:
+                try:
+                    bound = compose_source_fragments([clause_id], clause_map, evidence_context)
+                    if atom["source_quote"] not in bound["text"]:
+                        raise ValueError("quote outside source atom")
+                except (ValueError, KeyError, TypeError):
+                    errors.append(f"$.clause_reviews[{review_index}].obligations[{atom_index}].source_quote: must_equal_current_source_subspan")
         indexes = review.get("requirement_indexes")
         errors.extend(_validate_obligations(
             review, review_index,

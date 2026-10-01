@@ -32,6 +32,7 @@ if str(ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(ROOT / "scripts"))
 from artifact_io import atomic_write_text  # noqa: E402
 from draft_scorecard import audit_scorecard, validate_bound_scorecard  # noqa: E402
+from property_receipts import evaluation_unit_receipt_errors  # noqa: E402
 from host_adapters import codex as codex_adapter  # noqa: E402
 from host_runtime import (  # noqa: E402
     HostRuntimeError,
@@ -50,6 +51,7 @@ from apply_format_spec import (  # noqa: E402
     build_semantic_content_checks,
     current_expected_property_receipt_ids,
     resolve_profile_constraints,
+    validate_current_evaluation_units,
 )
 from format_spec_validation import load_and_validate  # noqa: E402
 from process_runner import run_process  # noqa: E402
@@ -871,6 +873,12 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
                 blockers.append("capability_artifact_invalid")
             else:
                 raw_findings = capability.get("findings", [])
+                from pipeline_finding import integrity_findings
+                try:
+                    if integrity_findings(raw_findings):
+                        blockers.append("capability_integrity_failure")
+                except ValueError:
+                    blockers.append("capability_finding_contract_invalid")
                 blocking_count = sum(
                     1 for item in raw_findings
                     if isinstance(item, dict) and item.get("blocking")
@@ -981,13 +989,33 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
                         current_map_path = case_artifact("style_map", manifest.get("style_map"))
                         current_spec = strict_json_loads(current_spec_path.read_text(encoding="utf-8"))
                         current_map = strict_json_loads(current_map_path.read_text(encoding="utf-8"))
+                        source_clause_record = manifest.get("source_clause_record")
+                        source_clause_path = (
+                            Path(source_clause_record["path"])
+                            if isinstance(source_clause_record, dict)
+                            and isinstance(source_clause_record.get("path"), str)
+                            else None
+                        )
+                        evaluation_errors, authoritative_evaluation_units = (
+                            validate_current_evaluation_units(
+                                current_spec, pipeline_manifest=manifest,
+                                source_clauses_path=source_clause_path,
+                            )
+                        )
+                        if evaluation_errors:
+                            raise ValueError(
+                                "scorecard source-unit ledger invalid: "
+                                + "; ".join(evaluation_errors)
+                            )
                         expected_receipts = current_expected_property_receipt_ids(
                             Document(output_path), current_spec, current_map.get("mappings", current_map),
                         )
                         receipt_payload_path = validation_path.parent / "property-receipts.json"
                         receipt_payload = strict_json_loads(receipt_payload_path.read_text(encoding="utf-8"))
                         if (set(validation["property_receipt_audit"]["expected_receipt_ids"]) != expected_receipts
-                                or receipt_payload.get("receipts") != validation["property_receipt_audit"]["receipts"]):
+                                or receipt_payload.get("receipts") != validation["property_receipt_audit"]["receipts"]
+                                or evaluation_unit_receipt_errors(
+                                    receipt_payload.get("receipts", []), current_spec.get("requirements", []))):
                             raise ValueError("scorecard receipt inventory differs from current requirements or receipt artifact")
                         scored_draft_ok = (
                             strict_json_loads(card_path.read_text(encoding="utf-8")) == card
@@ -997,6 +1025,7 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
                                 manual_items=manual_ledger["items"], findings=scoring_findings,
                                 capability_findings=capability.get("findings", []) if isinstance(capability, dict) else [],
                                 output=output_path,
+                                evaluation_units_by_requirement=authoritative_evaluation_units,
                             )
                             and strict_json_loads(card_audit_path.read_text(encoding="utf-8"))
                             == validation.get("draft_scorecard_audit")
@@ -1275,6 +1304,13 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
         except (OSError, ValueError):
             capability = None
     checks["capability_preflight"] = str(capability_path) if capability_path else None
+    if isinstance(capability, dict):
+        from pipeline_finding import integrity_findings
+        try:
+            if integrity_findings(capability.get("findings", [])):
+                blockers.append("capability_integrity_failure")
+        except ValueError:
+            blockers.append("capability_finding_contract_invalid")
     if capability is None or capability.get("status") in {"blocked", "failed"}:
         blockers.append("capability_artifact_not_passed")
     elif any(item.get("blocking") for item in capability.get("findings", []) if isinstance(item, dict)):

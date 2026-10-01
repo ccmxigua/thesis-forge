@@ -298,8 +298,12 @@ class PendingSourceWorkTests(unittest.TestCase):
                 self.assertEqual(len(gates), expected_count)
                 self.assertEqual({g.get("pending_work_code") for g in gates if g.get("pending_work_code")},
                                  {f["code"] for f in compile_pending_source_work(source)})
+                ledger_binding = manual_tests.ManualReviewTests._binding(
+                    run_id="new-run", case_id=chunk["case_id"],
+                    source_sha256=chunk["provenance"]["source_sha256"],
+                )
                 ledger = build_manual_review_ledger({}, [], release_gates=gates,
-                    binding=manual_tests.ManualReviewTests._binding(run_id="new-run", case_id=chunk["case_id"]))
+                    binding=ledger_binding)
                 self.assertEqual(len(ledger["items"]), expected_count)
                 self.assertFalse(ledger["submission_ready"])
                 self.assertEqual(len({i["manual_obligation_id"] for i in ledger["items"]}), expected_count)

@@ -41,7 +41,8 @@ class DraftScorecardTests(unittest.TestCase):
 
     def test_equal_observed_check_scores_not_confidence_or_release(self):
         card = self.card()
-        self.assertEqual(card["score"], 20)
+        self.assertIsNone(card["score"])
+        self.assertEqual(card["observed_checks_verified_percent"], 20)
         self.assertEqual(card["verified_count"], 1)
         self.assertEqual(card["unmet_or_pending_count"], 4)
         self.assertFalse(card["submission_ready"])
@@ -55,7 +56,8 @@ class DraftScorecardTests(unittest.TestCase):
         for receipt in self.audit["receipts"]:
             receipt["status"] = "verified"
         card = build_scorecard(self.binding, self.audit, [], [])
-        self.assertEqual(card["score"], 100)
+        self.assertIsNone(card["score"])
+        self.assertEqual(card["observed_checks_verified_percent"], 100)
         self.assertTrue(card["human_check_required"])
         self.assertFalse(card["submission_ready"])
 
@@ -84,7 +86,8 @@ class DraftScorecardTests(unittest.TestCase):
                     {"code": "cap.backend", "blocking": True}]
         card = build_scorecard(self.binding, self.audit, [], [], findings)
         self.assertEqual(len([x for x in card["entries"] if x["kind"] == "capability"]), 2)
-        self.assertEqual(card["score"], 20)
+        self.assertIsNone(card["score"])
+        self.assertEqual(card["observed_checks_verified_percent"], 20)
         self.assertEqual(findings, [x["detail"] for x in card["entries"] if x["kind"] == "capability"])
 
     def test_docx_serialization_bound_exact_visible_text(self):

@@ -237,6 +237,12 @@ RESPONSE_SCHEMA: dict[str, Any] = {
 _SCOPE_DEPENDENCY_CODES = tuple(sorted(SCOPE_DEPENDENCY_DIMENSIONS))
 _SCOPE_DEPENDENCY_DIMENSION_VALUES = tuple(sorted(set().union(*SCOPE_DEPENDENCY_DIMENSIONS.values())))
 _OBLIGATION_BASE_PROPERTIES: dict[str, Any] = {
+    "force": {"enum": ["required", "prohibited", "recommended", "optional", "unknown"]},
+    "applicability": {"enum": ["applicable", "not_applicable", "unknown", "conflicted"]},
+    "actor": {"type": "string", "minLength": 1},
+    "action": {"type": "string", "minLength": 1},
+    "target": {"type": "string", "minLength": 1},
+    "condition": {"type": "string", "minLength": 1},
     "source_quote": {"type": "string", "minLength": 1},
     "obligation_summary": {"type": "string", "minLength": 1},
     "primary_obligation_id": {"type": "string", "minLength": 1},
@@ -628,6 +634,18 @@ def validate_obligation_coverage_response(
             if isinstance(item, dict) and isinstance(item.get("requirement_ref"), str)
         }
         represented = unrepresented = ambiguous = external_pending = authoring_pending = 0
+        for primary in context.get("primary_obligations") or []:
+            if (not isinstance(primary, dict) or primary.get("force", "unknown") == "unknown"
+                    or not all(primary.get(k) not in {None, "", "unknown"}
+                               for k in ("actor", "action", "target", "source_quote"))):
+                continue
+            matching = [o for o in result.get("identified_obligations", [])
+                        if o.get("primary_obligation_id") == primary.get("id")]
+            if len(matching) != 1 or any(matching[0].get(k) != primary.get(k, "unknown")
+                    for k in ("actor", "action", "target", "source_quote", "force", "applicability")):
+                raise NativeSemanticReviewError(
+                    f"independent source-atom modality/applicability disagreement for {check_id}"
+                )
         source_verification_pending = 0
         scope_unresolved = 0
         backend_unsupported = 0
@@ -1353,6 +1371,9 @@ def _prompt(request: dict[str, Any]) -> str:
             "Missing or non-unique geometry is not authority to guess. Neighbor text is context only; "
             "source_refs still select only this check's document_text. "
             "Do not assume primary_obligations is complete or correct. A source obligation is "
+            "If a primary obligation proposes typed actor/action/target/source_quote and a known force, "
+            "independently assess those dimensions and applicability from the source, return them with "
+            "its primary_obligation_id, and report any disagreement rather than copying to pass validation. "
             "represented only when a linked requirement property and its verification contract "
             "faithfully preserve its meaning, scope, modality, strength, and qualifiers. "
             "Every represented obligation must select at least one requirement_ref from this check's "

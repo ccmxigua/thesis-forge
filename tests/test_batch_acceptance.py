@@ -441,6 +441,7 @@ class BatchAcceptanceTests(unittest.TestCase):
                     "duplicate_count": 0,
                     "expected_receipt_ids": ["PR-R00001-0001"],
                     "receipts": [{"receipt_id": "PR-R00001-0001", "status": "verified",
+                                  "requirement_id": "R00001",
                                   "serialized_docx_sha256": output_sha256}],
                 },
             }), encoding="utf-8")
@@ -547,7 +548,7 @@ class BatchAcceptanceTests(unittest.TestCase):
             markers.write_text(json.dumps(scored_markers), encoding="utf-8")
             scored_accepted = batch.case_acceptance(result, root=root)
             self.assertTrue(scored_accepted["accepted"], scored_accepted)
-            self.assertEqual(scored_accepted["checks"]["draft_scorecard"]["score"], 0)
+            self.assertIsNone(scored_accepted["checks"]["draft_scorecard"]["score"])
             self.assertFalse(scored_accepted["checks"]["property_receipts"]["all_expected_receipts_verified"])
             for mutation in ("score", "remove_item", "old_run", "omit_finding", "omit_capability", "submission"):
                 with self.subTest(mutation=mutation):

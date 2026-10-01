@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from functools import lru_cache
+import copy
 from pathlib import Path
 from typing import Any, Callable
 
@@ -192,8 +193,21 @@ def build_property_receipts(
                 "status": status,
                 "verification_method": verification_methods.get(role, verification_method),
                 "serialized_docx_sha256": serialized_docx_sha256,
+                **({"evaluation_units": copy.deepcopy(requirement["evaluation_units"])}
+                   if "evaluation_units" in requirement else {}),
             })
     return receipts
+
+
+def evaluation_unit_receipt_errors(receipts: list[dict], requirements: list[dict]) -> list[str]:
+    """Reconstruct code-owned unit metadata from the current spec, not a sidecar."""
+    by_id = {r.get("id"): r for r in requirements if isinstance(r, dict)}
+    errors = []
+    for receipt in receipts:
+        requirement = by_id.get(receipt.get("requirement_id"))
+        if requirement is None or receipt.get("evaluation_units") != requirement.get("evaluation_units"):
+            errors.append("evaluation_unit_receipt_mismatch:" + str(receipt.get("receipt_id")))
+    return errors
 
 
 def audit_property_receipts(

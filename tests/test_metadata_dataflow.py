@@ -144,6 +144,7 @@ class MetadataDataflowTest(unittest.TestCase):
             manifest = json.loads((work / "pipeline-manifest.json").read_text(encoding="utf-8"))
             profile = json.loads(profile_path.read_text(encoding="utf-8"))
             spec = json.loads(spec_path.read_text(encoding="utf-8"))
+            self.assertEqual(manifest["run_id"], spec["run_id"])
             capability_step = next(step for step in manifest["steps"] if step["name"] == "capability_preflight")
             semantic_step = next(step for step in manifest["steps"] if step["name"] == "semantic_metadata")
             self.assertEqual(spec["thesis_profile"], profile)

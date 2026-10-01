@@ -240,6 +240,9 @@ from obligation_workflow import OBLIGATION_ANALYSIS_LEDGER_PROTOCOL, work_type_f
 from table_source_context import table_context_retry_is_source_bound, table_retry_feedback_is_source_bound
 from document_text_font import materialize_document_font_references
 from administrative_relation_projection import project_administrative_copies
+from responsibility_projection import project_redundant_render_entities
+from responsibility_ledger import canonical_review_atom
+from repair_transaction import repair_receipt
 from semantic_source_references import (  # noqa: E402
     REFERENCE_PROTOCOL,
     bind_validated_source_reference_selections,
@@ -1424,6 +1427,24 @@ def _validate_retry_attempt_artifact(
                 str(snapshot.get("path") or ""),
                 "stage receipt does not match the attempt invocation fingerprints",
             )
+
+    for snapshot in stage_snapshots:
+        if not isinstance(snapshot, dict) or snapshot.get("stage") not in {
+                "normalized_raw", "compiled_candidate", "mechanically_repaired_candidate"} or snapshot.get("path") is None:
+            continue
+        stage = snapshot["stage"]
+        stage_path = Path(snapshot["path"])
+        expected_prefix = f"{response_path.stem}.attempt-{attempt_number:02d}.stage-"
+        if (stage_path.parent.resolve() != response_path.parent.resolve()
+                or not re.fullmatch(re.escape(expected_prefix) + r"\d{2}-" + stage + re.escape(response_path.suffix), stage_path.name)
+                or not stage_path.is_file() or snapshot.get("accepted") is not False
+                or sha256_file(stage_path) != snapshot.get("file_bytes_sha256")):
+            fail("retry_candidate_stage_artifact_mismatch", stage, str(stage_path), "candidate stage bytes/path not intact")
+        validate_snapshot_binding(snapshot, stage)
+        payload = _read_json(stage_path, label="candidate stage")
+        if (snapshot.get("canonical_json_sha256") != _response_sha256(payload)
+                or snapshot.get("semantic_view_sha256") != _response_sha256(_semantic_retry_view(payload))):
+            fail("retry_candidate_stage_artifact_mismatch", stage, str(stage_path), "candidate stage canonical hash differs")
 
     def validate_unaccepted_repair_base() -> dict[str, Any] | None:
         repair_base_path_text = str(repair_base_path.resolve())
@@ -8776,6 +8797,13 @@ def _apply_safe_mechanical_repairs(
     if isinstance(chunk, dict):
         current_errors = validate_host_agent_response(response, chunk)
         current_records = contract_error_records(current_errors, response=response, chunk=chunk)
+        if (current_records and sorted(_response_sha256(item) for item in current_records)
+                == sorted(_response_sha256(item) for item in error_records)):
+            routed, route_audit = project_redundant_render_entities(
+                response, chunk, validate=validate_host_agent_response,
+            )
+            if routed is not None:
+                return routed, route_audit
         allowed_copy_errors = all(
             record.get("code") in {"non_requirement_classification_relation", "missing_derived_requirement",
                                    "requirement_relation_mismatch"}
@@ -9490,6 +9518,7 @@ def prepare_native_response_candidate(
     if not isinstance(response_schema, dict):
         raise ValueError("current Host Agent chunk has no local response schema")
     response = normalize_native_response(raw_response, response_schema)
+    stage_candidates = [{"stage": "normalized_raw", "response": copy.deepcopy(response)}]
     response, source_literal_occurrence_projections = _project_repeated_literal_occurrences(
         response, chunk,
         source_projection_validation_sha256=source_projection_validation_sha256,
@@ -9577,6 +9606,7 @@ def prepare_native_response_candidate(
     response, soft_keyword_guidance_projections = materialize_soft_keyword_count_guidance(
         response, chunk.get("clauses"),
     )
+    stage_candidates.append({"stage": "compiled_candidate", "response": copy.deepcopy(response)})
     source_literal_whitespace_projections: list[dict[str, Any]] = []
     mechanical_repairs: list[dict[str, Any]] = []
     mechanical_revalidation: dict[str, Any] = {
@@ -9588,6 +9618,7 @@ def prepare_native_response_candidate(
     def attach_source_projection_failure_audit(error: ValueError) -> None:
         # A later, unrelated contract failure must not erase the provenance
         # of source-bound changes already made to this rejected candidate.
+        error.stage_candidates = copy.deepcopy(stage_candidates)
         error.document_font_projections = copy.deepcopy(document_font_projections)
         error.source_keyword_constraint_projection_policy_version = (  # type: ignore[attr-defined]
             SOURCE_KEYWORD_CONSTRAINT_PROJECTION_POLICY_VERSION
@@ -9622,6 +9653,7 @@ def prepare_native_response_candidate(
         if source_literal_whitespace_projections:
             contract_errors = validate_host_agent_response(response, chunk)
     if contract_errors:
+        mechanical_base_candidate = copy.deepcopy(response)
         original_error_records = contract_error_records(
             contract_errors, response=response, chunk=chunk,
         )
@@ -9648,6 +9680,16 @@ def prepare_native_response_candidate(
             error.retry_authorizing_error_records = copy.deepcopy(  # type: ignore[attr-defined]
                 retry_error_records
             )
+            external_relation_only = (any(r.get("code") == "non_requirement_classification_relation"
+                                         for r in original_error_records) and not retry_inventory_records)
+            error.repair_plan = {
+                "protocol": "candidate_repair_transaction_v1",
+                "status": "repair_plan_unavailable" if external_relation_only else "validator_targeted_retry_required",
+                "candidate_sha256": _response_sha256(response),
+                "error_bundle_sha256": _response_sha256(original_error_records),
+                "source_chunk_sha256": _response_sha256(chunk),
+                "reason": "No proved conservation projection exists; semantic/source revision is not mechanical authority." if external_relation_only else "Preserve all non-target fields; existing bounded authorization applies.",
+            }
             error.mechanical_repair_audit = {  # type: ignore[attr-defined]
                 "status": "not_applied",
                 "repairs": [],
@@ -9657,7 +9699,7 @@ def prepare_native_response_candidate(
                     for item in original_error_records if isinstance(item, dict)
                 }),
             }
-            if source_literal_occurrence_projections:
+            if contract_errors:
                 # Partitioning changes requirement indexes. Residual feedback
                 # must address this exact unaccepted candidate, not the raw
                 # aggregate with its old indexes. The ordinary retry-artifact
@@ -9671,6 +9713,7 @@ def prepare_native_response_candidate(
             raise error
 
         remaining_errors = validate_host_agent_response(repaired_response, chunk)
+        stage_candidates.append({"stage": "mechanically_repaired_candidate", "response": copy.deepcopy(repaired_response)})
         seen_repair_states = {_response_sha256(response), _response_sha256(repaired_response)}
         # Independent failures can require disjoint corrections (for example
         # pruning an unbound schema shell and then fixing a source-bound cover
@@ -9693,6 +9736,7 @@ def prepare_native_response_candidate(
             seen_repair_states.add(next_sha)
             mechanical_repairs.extend(next_repairs)
             repaired_response = next_response
+            stage_candidates.append({"stage": "mechanically_repaired_candidate", "response": copy.deepcopy(repaired_response)})
             remaining_errors = validate_host_agent_response(repaired_response, chunk)
         remaining_error_records = contract_error_records(
             remaining_errors, response=repaired_response, chunk=chunk,
@@ -9767,7 +9811,11 @@ def prepare_native_response_candidate(
             raise error
         response = repaired_response
 
+    transaction = (repair_receipt(mechanical_base_candidate, response, original_error_records,
+                                  mechanical_repairs, chunk) if mechanical_repairs else None)
     return response, {
+        "repair_transaction": transaction,
+        "stage_candidates": stage_candidates,
         "document_font_projections": document_font_projections,
         "source_verification_classification_policy_version": (
             SOURCE_VERIFICATION_CLASSIFICATION_POLICY_VERSION
@@ -10152,6 +10200,15 @@ not an additional content_constraints or cover requirement. Never emit a spare
 cover/default/template shell with empty relations, even when its reason says
 "placeholder"; cover.fields=[] is valid only inside a real, source-bound cover
 requirement with non_public_administration present.
+CLASSIFICATION-FIRST RESPONSIBILITY PLAN: enumerate source duties before
+proposing DOCX operations. Each pure approval, legal responsibility, signature,
+or truthfulness duty remains a human obligation and grants no mutation authority.
+For a mixed clause, keep both its covered document atom and pending human atom;
+one unique source-backed render entity may cover the document atom without
+duplicating the full entity for each sentence. A checker is not a mutator.
+Only exact property-basis clause edges authorize properties; render/context
+evidence never grants permission to borrow a sibling clause's rule. Unknown
+actor, target, force, or applicability stays unknown, not guessed from confidence.
 existing_requirement_id is an optional selector, NOT an output ID to allocate.
 Use an ID only from eligible_existing_requirements and only for the exact supplied
 role, clause_ids, evidence_ids and source occurrence. For a NEW requirement,
@@ -10550,6 +10607,19 @@ def run_host_agent_chunk(
     decoded_raw_snapshot = _attempt_stage_snapshot(
         "decoded_raw", raw_response, path=raw_response_path, chunk=chunk,
     )
+    def persist_candidate_stages(stages: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        snapshots = []
+        for number, stage in enumerate(stages):
+            payload = stage["response"]
+            stage_path = response_path.with_name(
+                f"{response_path.stem}.stage-{number:02d}-{stage['stage']}{response_path.suffix}"
+            )
+            if stage_path.exists():
+                raise RetryRawArtifactIntegrityError("refusing to overwrite candidate stage: " + str(stage_path))
+            atomic_write_text(stage_path, strict_json_dumps(payload, ensure_ascii=False, indent=2) + "\n")
+            snapshots.append(_attempt_stage_snapshot(
+                stage["stage"], payload, path=stage_path, chunk=chunk, accepted=False))
+        return snapshots
     try:
         normalized_raw_response = normalize_native_response(raw_response, response_schema)
         response, candidate_audit = prepare_native_response_candidate(
@@ -10557,7 +10627,7 @@ def run_host_agent_chunk(
             source_projection_validation_sha256=source_projection_validation_sha256,
         )
     except (OSError, ValueError, TypeError, json.JSONDecodeError) as exc:
-        retry_stage_snapshots = [decoded_raw_snapshot]
+        retry_stage_snapshots = [decoded_raw_snapshot, *persist_candidate_stages(getattr(exc, "stage_candidates", []))]
         repair_base = getattr(exc, "repair_base_candidate", None)
         if isinstance(repair_base, dict):
             repair_base_path = response_path.with_name(
@@ -10598,9 +10668,7 @@ def run_host_agent_chunk(
         raise
     attempt_stage_snapshots = [
         decoded_raw_snapshot,
-        _attempt_stage_snapshot(
-            "normalized_raw", normalized_raw_response, path=None, chunk=chunk,
-        ),
+        *persist_candidate_stages(candidate_audit.get("stage_candidates", [])),
         _attempt_stage_snapshot(
             "projected_candidate", response, path=None, chunk=chunk,
             projection_audit=candidate_audit,
@@ -10759,6 +10827,7 @@ def run_host_agent_chunk(
         "retry_parent_response_sha256": retry_parent_response_sha256,
     }
     if mechanical_repairs:
+        audit["repair_transaction"] = copy.deepcopy(candidate_audit["repair_transaction"])
         audit["mechanical_repairs"] = mechanical_repairs
         audit["mechanical_repair_count"] = len(mechanical_repairs)
         audit["mechanical_repair_revalidation"] = mechanical_repair_revalidation or {
@@ -11014,6 +11083,8 @@ def _validate_completed_obligation_ledger_chain(
                 "end": span.get("end"),
             }
             expected_obligations.append({
+                "source_atom": copy.deepcopy(obligation),
+                **canonical_review_atom(provenance.get("source_sha256"), check_id, span, obligation),
                 "analysis_obligation_id": "AO-" + _response_sha256(identity)[:24],
                 "check_id": check_id,
                 "source_ref": source_ref,
@@ -11368,6 +11439,8 @@ def _write_obligation_analysis_ledger(
                 "end": span.get("end"),
             }
             obligations.append({
+                "source_atom": copy.deepcopy(obligation),
+                **canonical_review_atom(provenance.get("source_sha256"), check_id, span, obligation),
                 "analysis_obligation_id": "AO-" + _response_sha256(identity)[:24],
                 "check_id": check_id,
                 "source_ref": selected["source_ref"],
@@ -13010,6 +13083,14 @@ def run_bridge(
                                 f"Host Agent current raw response {index} attempt {attempt}"
                             ),
                         )
+                        if semantic_parent_receipt.get("kind") == "unaccepted_repair_base":
+                            # Feedback addresses a compiled candidate. Reproduce
+                            # that same representation for the new response;
+                            # decoded raw observations below remain separate.
+                            current_raw, _ = prepare_native_response_candidate(
+                                current_raw, chunk,
+                                source_projection_validation_sha256=source_projection_validation_sha256,
+                            )
                         retry_parent_response = previous_raw
                         raw_model_semantic_changes = _retry_change_paths(
                             previous_raw, current_raw,
@@ -13983,6 +14064,7 @@ def run_bridge(
                             retry_input_fingerprints=_retry_input_fingerprints(chunk),
                             **attempt_error_state,
                             repair_base_snapshot=copy.deepcopy(repair_base_snapshot),
+                            repair_plan=copy.deepcopy(getattr(exc, "repair_plan", None)),
                             mechanical_repair_audit=(
                                 copy.deepcopy(repair_audit)
                                 if isinstance(repair_audit, dict) else None
@@ -13999,7 +14081,7 @@ def run_bridge(
                                     if isinstance(audit, dict) else None)
                             ),
                         )
-                if attempt >= max_attempts:
+                if attempt >= max_attempts or (getattr(exc, "repair_plan", {}) or {}).get("status") == "repair_plan_unavailable":
                     update_chunk_lifecycle(
                         index,
                         status="failed",
@@ -14009,7 +14091,7 @@ def run_bridge(
                     )
                     raise ValueError(
                         f"Host Agent response {index}/{len(chunks)} failed after "
-                        f"{max_attempts} attempts: {failures[-1]}"
+                        f"{attempt} attempts: {failures[-1]}"
                     ) from exc
         raise AssertionError("unreachable Host Agent retry state")
 

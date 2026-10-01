@@ -48,6 +48,7 @@ from native_semantic_review import (
 )
 from offline_review_receipt import validate_offline_merge_receipt
 from obligation_workflow import OBLIGATION_ANALYSIS_LEDGER_PROTOCOL, work_type_for_disposition
+from responsibility_ledger import canonical_review_atom
 from semantic_source_references import (
     REFERENCE_PROTOCOL,
     bind_validated_source_reference_selections,
@@ -704,6 +705,9 @@ def _validate_independent_obligation_receipts(
                     )
                 expected_identity_by_obligation_id[analysis_obligation_id] = identity
                 expected_item = {
+                    "source_atom": copy.deepcopy(obligation),
+                    **canonical_review_atom(
+                        provenance.get("source_sha256"), check_id, span, obligation),
                     "analysis_obligation_id": analysis_obligation_id,
                     "check_id": check_id,
                     "source_ref": source_ref,
@@ -989,6 +993,8 @@ def _validate_independent_obligation_receipts(
                     "scope-unresolved receipt has no reconstructed current-run obligation identity"
                 )
             scope_unresolved_items.append({
+                "source_atom": copy.deepcopy(obligation.get("source_atom")),
+                **{k: copy.deepcopy(obligation[k]) for k in ("canonical_obligation_key", "evaluation_unit_id") if k in obligation},
                 "analysis_obligation_id": obligation_id,
                 "analysis_obligation_identity": copy.deepcopy(analysis_identity),
                 "work_type": obligation.get("work_type"),
@@ -1406,6 +1412,7 @@ def _source_content_pending_release_gates(
                 )
             gate = {
                 "source_code": "independent_authoring_content_pending",
+                **{k: copy.deepcopy(pending[k]) for k in ("canonical_obligation_key", "evaluation_unit_id") if k in pending},
                 "category": "input_prerequisite",
                 "source_text": quote,
                 "reason": summary,
@@ -1624,6 +1631,7 @@ def _source_content_verification_release_gates(
                     else "independent_external_action" if external_action
                     else "independent_existing_content_verification"
                 ),
+                **{k: copy.deepcopy(pending[k]) for k in ("canonical_obligation_key", "evaluation_unit_id") if k in pending},
                 "category": (
                     "runtime_manual_unverifiable" if external_action
                     else "semantic_content_review"
@@ -1803,6 +1811,7 @@ def _scope_unresolved_release_gates(
             seen_obligation_ids.add(obligation_id)
             gate = {
                 "source_code": "independent_scope_unresolved",
+                **{k: copy.deepcopy(item[k]) for k in ("canonical_obligation_key", "evaluation_unit_id") if k in item},
                 "category": "runtime_manual_unverifiable",
                 "work_type": "scope_clarification",
                 "source_text": quote,
@@ -2167,9 +2176,11 @@ PREVIEW_PLACEHOLDER_BLOCKERS = {
 
 
 def capability_gate_blocked(report: dict[str, Any], compliance_mode: str) -> bool:
-    """Fail closed only in full mode; subset mode must retain explicit gaps."""
-    return compliance_mode == "full" and any(
-        item.get("blocking") for item in report.get("findings", []))
+    """Integrity is mode-independent; legal capability gaps remain explicit."""
+    from pipeline_finding import integrity_findings
+    items = report.get("findings", [])
+    return bool(integrity_findings(items)) or (compliance_mode == "full" and any(
+        item.get("blocking") for item in items))
 
 
 def record_capability_summary(manifest: dict[str, Any], summary: dict[str, Any]) -> None:
@@ -2483,6 +2494,8 @@ def _main(argv: list[str]) -> int:
     style_map = work / "style-map.json"
     apply_dir = work / "application"; manifest_path = work / "pipeline-manifest.json"
     capability_report_path = work / "capability-preflight.json"
+    format_spec_path = requirements_dir / "format-spec.json"
+    source_clause_path = requirements_dir / "requirement-clauses.json"
     metadata_path = work / "semantic-metadata.json"
     canonical_profile_path = work / "thesis-profile.json"
     section_plan_path = work / "section-plan.json"
@@ -2876,6 +2889,11 @@ def _main(argv: list[str]) -> int:
         "template_reconciliation": extraction_manifest.get("template_reconciliation"),
         "runtime_context": extraction_manifest.get("runtime_context"),
     })
+    # The top-level run identity is consumed by every downstream artifact
+    # binder (capability preflight, source-unit scorecard, and apply gate).
+    # Keep it as a projection of the freshly validated extraction manifest,
+    # never from a model response or caller-supplied report.
+    manifest["run_id"] = extraction_manifest.get("run_id")
     manifest["template_evidence"] = extraction_manifest.get("template_evidence")
     manifest["template_reconciliation"] = extraction_manifest.get("template_reconciliation")
 
@@ -3004,6 +3022,9 @@ def _main(argv: list[str]) -> int:
     capability_report = read_json(capability_report_path) if capability_report_path.exists() else None
     manifest["capability_preflight"] = str(capability_report_path)
     if capability_report:
+        manifest["capability_preflight_record"] = file_record(capability_report_path)
+        manifest["format_spec_record"] = file_record(format_spec_path)
+        manifest["source_clause_record"] = file_record(source_clause_path)
         manifest["capability_preflight_status"] = capability_report.get("status")
         manifest["capability_preflight_provenance"] = capability_report.get("provenance")
         capability_summary = capability_report.get("summary", {})
@@ -3320,6 +3341,13 @@ def _main(argv: list[str]) -> int:
         write_json(manifest_path, manifest)
 
     manifest["application_input"] = str(application_input.resolve())
+    # Bind the exact preflight/spec/source artifacts before invoking the
+    # lower-level formatter. The apply CLI repeats these checks so direct
+    # invocation cannot bypass the pipeline's capability and scoring gates.
+    manifest["capability_preflight_record"] = file_record(capability_report_path)
+    manifest["format_spec_record"] = file_record(requirements_dir / "format-spec.json")
+    manifest["source_clause_record"] = file_record(requirements_dir / "requirement-clauses.json")
+    write_json(manifest_path, manifest)
     apply_cmd = [sys.executable, str(ROOT / "scripts" / "apply_format_spec.py"), str(application_input),
                  str(requirements_dir / "format-spec.json"), str(args.output), "--out-dir", str(apply_dir),
                  "--style-map", str(style_map), "--compliance-mode", execution_compliance_mode,
@@ -3328,7 +3356,8 @@ def _main(argv: list[str]) -> int:
                  "--source-evidence-context", str(requirements_dir / "evidence-context.json"),
                  "--source-extraction-manifest", str(requirements_dir / "extraction-manifest.json"),
                  "--output-policy", args.output_policy,
-                 "--capability-report", str(capability_report_path)]
+                 "--capability-report", str(capability_report_path),
+                 "--pipeline-manifest", str(manifest_path)]
     apply_cmd += ["--case-id", args.case_id or "standalone"]
     if not args.neutral_reference_docx:
         apply_cmd.append("--require-coverage")
@@ -3343,7 +3372,6 @@ def _main(argv: list[str]) -> int:
     if args.output_policy == "review_draft":
         apply_cmd += [
             "--manual-review-items", str(manual_review_items_path),
-            "--pipeline-manifest", str(manifest_path),
         ]
     if args.semantic_review_runtime:
         apply_cmd += [

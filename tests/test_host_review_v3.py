@@ -1041,7 +1041,12 @@ class HostReviewV3Tests(unittest.TestCase):
         )
         self.assertIn("obligations", executable["required"])
         self.assertEqual(executable["properties"]["obligations"]["type"], "array")
-        self.assertNotIn("null", str(executable["properties"]["obligations"]))
+        # The inventory itself and required identity/status/reason cannot be
+        # null. Optional typed dimensions may be null in native encoding and
+        # normalize back to absent/unknown, never to a known force.
+        self.assertNotIn("anyOf", executable["properties"]["obligations"])
+        for field in ("id", "status", "reason"):
+            self.assertNotIn("null", str(executable["properties"]["obligations"]["items"]["properties"][field]))
 
         for obligations in (None, []):
             response = self._executable_response()

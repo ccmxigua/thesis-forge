@@ -614,7 +614,7 @@ def plan_capabilities(spec: dict[str, Any], registry: dict[str, Any], compliance
     ):
         findings.append(finding(
             "capability.contract_binding_error", "capability_preflight",
-            "error", compliance_mode == "full", error,
+            "error", True, error,
             [evidence("source", "format_contract_guards")],
         ))
     for index, requirement in enumerate(spec.get("requirements", []), 1):

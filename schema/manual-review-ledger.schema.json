@@ -63,6 +63,8 @@
               "manual_obligation_id": {"type": "string", "pattern": "^MO-[0-9a-f]{64}$"},
               "analysis_obligation_id": {"type": ["string", "null"], "pattern": "^AO-[0-9a-f]{24}$"},
               "analysis_obligation_identity_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+              "canonical_obligation_key": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "evaluation_unit_id": {"type": "string", "pattern": "^EU-[0-9a-f]{32}$"},
               "clause_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
               "requirement_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
               "question_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
@@ -130,6 +132,8 @@
           "release_gate": {"type": "boolean"},
           "original_blocking": {"type": "boolean"},
           "analysis_obligation_id": {"type": "string", "pattern": "^AO-[0-9a-f]{24}$"},
+          "canonical_obligation_key": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "evaluation_unit_id": {"type": "string", "pattern": "^EU-[0-9a-f]{32}$"},
           "analysis_obligation_identity": {
             "type": "object",
             "required": [

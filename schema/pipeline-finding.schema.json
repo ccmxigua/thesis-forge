@@ -9,6 +9,7 @@
     "stage": {"type": "string", "pattern": "^[a-z][a-z0-9_.-]*$"},
     "severity": {"enum": ["info", "warning", "error"]},
     "blocking": {"type": "boolean"},
+    "gate_class": {"enum": ["integrity", "quality", "input", "semantic"]},
     "evidence": {
       "type": "array",
       "items": {

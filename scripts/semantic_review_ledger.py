@@ -16,6 +16,7 @@ from format_spec_validation import load_and_validate
 from host_review_contract import derived_requirement_indexes
 from semantic_contract import sha256_json
 from source_obligation_compiler import compile_known_source_obligations
+from responsibility_ledger import build_responsibility_ledger
 
 
 def _stable_requirement_id(requirement: dict[str, Any]) -> str:
@@ -622,4 +623,5 @@ def build_semantic_review_ledger(
         ],
         "response_sha256": ledger_response_sha256,
         "obligation_shadow_graph": shadow_graph,
+        "responsibility_routes": build_responsibility_ledger(response, clauses),
     }

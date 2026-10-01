@@ -83,6 +83,7 @@ from semantic_review_ledger import (
     build_semantic_review_ledger,
     deduplicate_exact_requirements,
 )
+from responsibility_ledger import requirement_evaluation_units
 from host_review_schema import build_host_review_response_schema
 from source_obligation_compiler import compile_known_source_obligation_ids
 from source_literal_binding import (
@@ -2950,6 +2951,12 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
                    "clause_ids": sorted(clause_ids), "resolved_by": "llm", "confidence": float(confidence),
                    "source_text": " | ".join(clause_map[cid]["text"] for cid in sorted(clause_ids)),
                    "reason": reason.strip()}
+            units = requirement_evaluation_units(
+                review_map, clause_map, sorted(clause_ids),
+                (response.get("provenance") or {}).get("source_sha256", ""),
+            )
+            if units:
+                req["evaluation_units"] = units
             if field_instance_ids:
                 req["field_instance_ids"] = list(field_instance_ids)
             if "source_fragment_clause_ids" in item:

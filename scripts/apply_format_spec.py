@@ -84,6 +84,7 @@ from property_receipts import (
     expected_receipt_ids,
     flatten,
 )
+from responsibility_ledger import validate_requirement_evaluation_units
 
 ROLE_STYLES = {role: style_aliases(role) for role in role_names()}
 ALIGN = {"left": WD_ALIGN_PARAGRAPH.LEFT, "center": WD_ALIGN_PARAGRAPH.CENTER,
@@ -148,6 +149,171 @@ def _checked_pipeline_file_record(record: Any, label: str) -> tuple[str | None, 
     if record.get("sha256") != digest or record.get("bytes") != byte_count:
         return None, f"pipeline_{label}_record_hash_mismatch"
     return digest, None
+
+
+def _validate_current_file_record(record: Any, path: Path, label: str) -> list[str]:
+    """Check that a manifest record names and hashes this exact current artifact."""
+    if not isinstance(record, dict) or not isinstance(record.get("path"), str):
+        return [f"{label}_record_missing"]
+    try:
+        expected_path = Path(record["path"]).expanduser().resolve(strict=True)
+        actual_path = path.expanduser().resolve(strict=True)
+        actual_sha = _file_sha256(actual_path)
+        actual_bytes = actual_path.stat().st_size
+    except OSError:
+        return [f"{label}_artifact_unavailable"]
+    errors = []
+    if expected_path != actual_path:
+        errors.append(f"{label}_path_mismatch")
+    if record.get("sha256") != actual_sha:
+        errors.append(f"{label}_sha256_mismatch")
+    if record.get("bytes") != actual_bytes:
+        errors.append(f"{label}_byte_count_mismatch")
+    return errors
+
+
+def validate_capability_report_for_apply(
+    report: Any,
+    *,
+    report_path: Path,
+    format_spec_path: Path,
+    spec: dict[str, Any],
+    compliance_mode: str,
+    source_clauses_path: Path | None = None,
+    pipeline_manifest: dict[str, Any] | None = None,
+) -> list[str]:
+    """Validate capability evidence and enforce its mode-specific hard gate.
+
+    A report is usable only for the exact serialized format spec and run. The
+    pipeline manifest adds a second artifact binding when this is a pipeline
+    invocation; a direct CLI caller may still use the self-bound report for
+    diagnostics, but cannot obtain submission readiness without that manifest.
+    """
+    if not isinstance(report, dict):
+        return ["capability_report_must_be_object"]
+    errors: list[str] = []
+    if report.get("stage") != "capability_preflight":
+        errors.append("capability_report_stage_mismatch")
+    if report.get("compliance_mode") != compliance_mode:
+        errors.append("capability_report_compliance_mode_mismatch")
+    provenance = report.get("provenance")
+    if not isinstance(provenance, dict) or provenance.get("stage") != "capability_preflight":
+        errors.append("capability_report_provenance_missing")
+        provenance = {}
+    if provenance.get("run_id") != spec.get("run_id"):
+        errors.append("capability_report_run_id_mismatch")
+    errors.extend(_validate_current_file_record(
+        provenance.get("format_spec"), format_spec_path, "capability_report_format_spec",
+    ))
+    if source_clauses_path is not None:
+        errors.extend(_validate_current_file_record(
+            provenance.get("clauses"), source_clauses_path,
+            "capability_report_source_clauses",
+        ))
+    try:
+        expected_spec_path = Path(str(provenance.get("format_spec", {}).get("path"))).resolve(strict=True)
+        actual_spec_path = format_spec_path.resolve(strict=True)
+        if expected_spec_path != actual_spec_path:
+            errors.append("capability_report_format_spec_path_mismatch")
+    except (OSError, AttributeError, TypeError):
+        # The file-record helper above already reports a missing or unreadable
+        # path; this branch only keeps malformed nested values fail-closed.
+        pass
+
+    findings = report.get("findings")
+    if not isinstance(findings, list) or any(not isinstance(item, dict) for item in findings):
+        errors.append("capability_report_findings_invalid")
+        findings = []
+    else:
+        from pipeline_finding import integrity_findings
+        try:
+            if integrity_findings(findings):
+                errors.append("capability_report_integrity_failure")
+        except ValueError:
+            errors.append("capability_report_integrity_failure")
+    has_blockers = any(item.get("blocking") is True for item in findings)
+    execution_ready = report.get("execution_ready")
+    if not isinstance(execution_ready, bool):
+        errors.append("capability_report_execution_ready_invalid")
+    elif execution_ready == has_blockers:
+        errors.append("capability_report_execution_ready_inconsistent")
+    if compliance_mode == "full" and has_blockers:
+        errors.append("capability_report_full_mode_blocked")
+
+    if pipeline_manifest is not None:
+        if pipeline_manifest.get("run_id") != spec.get("run_id"):
+            errors.append("pipeline_manifest_run_id_mismatch")
+        errors.extend(_validate_current_file_record(
+            pipeline_manifest.get("format_spec_record"), format_spec_path,
+            "pipeline_format_spec",
+        ))
+        errors.extend(_validate_current_file_record(
+            pipeline_manifest.get("capability_preflight_record"), report_path,
+            "pipeline_capability_report",
+        ))
+        recorded_report_path = pipeline_manifest.get("capability_preflight")
+        if not isinstance(recorded_report_path, str):
+            errors.append("pipeline_capability_report_path_missing")
+        else:
+            try:
+                if Path(recorded_report_path).resolve(strict=True) != report_path.resolve(strict=True):
+                    errors.append("pipeline_capability_report_path_mismatch")
+            except OSError:
+                errors.append("pipeline_capability_report_unavailable")
+    return errors
+
+
+def validate_current_evaluation_units(
+    spec: dict[str, Any],
+    *,
+    pipeline_manifest: dict[str, Any] | None,
+    source_clauses_path: Path | None,
+) -> tuple[list[str], dict[str, list[dict[str, Any]]]]:
+    """Load and verify evaluation units against manifest-bound source evidence."""
+    has_units = any(
+        isinstance(requirement, dict) and "evaluation_units" in requirement
+        for requirement in spec.get("requirements", [])
+    )
+    if pipeline_manifest is None:
+        return (["evaluation_units_require_pipeline_manifest"] if has_units else []), {}
+    host_receipts = pipeline_manifest.get("host_review_receipts")
+    if not isinstance(host_receipts, dict):
+        return (["evaluation_units_host_review_receipt_missing"] if has_units else []), {}
+    ledger_record = host_receipts.get("semantic_review_ledger")
+    if ledger_record is None and not has_units:
+        return [], {}
+    if not isinstance(ledger_record, dict) or not isinstance(ledger_record.get("path"), str):
+        return ["evaluation_units_semantic_ledger_receipt_missing"], {}
+    if source_clauses_path is None:
+        return ["evaluation_units_current_source_clauses_missing"], {}
+
+    errors = _validate_current_file_record(
+        pipeline_manifest.get("source_clause_record"), source_clauses_path,
+        "pipeline_source_clauses",
+    )
+    ledger_path = Path(ledger_record["path"])
+    errors.extend(_validate_current_file_record(
+        ledger_record, ledger_path, "pipeline_semantic_review_ledger",
+    ))
+    if errors:
+        return errors, {}
+    try:
+        semantic_ledger = load_json(ledger_path)
+        clauses_value = strict_json_read(source_clauses_path)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        return [f"evaluation_units_artifact_unreadable:{exc}"], {}
+    source_clauses = (
+        clauses_value if isinstance(clauses_value, list)
+        else clauses_value.get("clauses") if isinstance(clauses_value, dict)
+        else None
+    )
+    if not isinstance(source_clauses, list):
+        return ["evaluation_units_source_clauses_invalid"], {}
+    return validate_requirement_evaluation_units(
+        spec, semantic_ledger, source_clauses,
+        expected_run_id=pipeline_manifest.get("run_id"),
+        expected_response_sha256=host_receipts.get("aggregate_sha256"),
+    )
 
 
 def _current_manual_review_binding(
@@ -3775,8 +3941,8 @@ def main(argv: list[str]) -> int:
     p.add_argument("--semantic-review-config", type=Path)
     p.add_argument("--case-id", help="stable case identity bound into semantic-content review")
     args = p.parse_args(argv)
-    if bool(args.manual_review_items) != bool(args.pipeline_manifest):
-        p.error("--manual-review-items and --pipeline-manifest must be supplied together")
+    if args.manual_review_items and not args.pipeline_manifest:
+        p.error("--manual-review-items requires --pipeline-manifest")
     if bool(args.semantic_review_runtime) != bool(args.semantic_review_model):
         p.error("--semantic-review-runtime and --semantic-review-model must be supplied together")
     if args.semantic_review_timeout <= 0:
@@ -3788,6 +3954,12 @@ def main(argv: list[str]) -> int:
         allow_missing_required_metadata=args.output_policy == "review_draft",
     )
     if validation_errors: raise SystemExit("invalid format spec:\n" + "\n".join(validation_errors))
+    pipeline_manifest = None
+    if args.pipeline_manifest:
+        try:
+            pipeline_manifest = load_json(args.pipeline_manifest)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            raise SystemExit(f"invalid pipeline manifest: {exc}") from exc
     raw_content_instances = spec.get("content_instances", spec.get("cover_field_instances", []))
     content_instance_source_bindings: dict[str, list[dict[str, Any]]] = {}
     content_instance_source_binding_record: dict[str, Any] = {"status": "not_required", "count": 0}
@@ -3891,6 +4063,43 @@ def main(argv: list[str]) -> int:
         }]
     if blockers:
         raise SystemExit(f"refusing to apply a blocked format spec: {', '.join(blockers)}")
+    capability_report = None
+    capability_report_validated = False
+    if args.capability_report:
+        try:
+            capability_report = load_json(args.capability_report)
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            raise SystemExit(f"cannot read capability preflight report: {exc}") from exc
+        capability_errors = validate_capability_report_for_apply(
+            capability_report,
+            report_path=args.capability_report,
+            format_spec_path=args.format_spec,
+            spec=spec,
+            compliance_mode=compliance_mode,
+            source_clauses_path=args.source_clauses,
+            pipeline_manifest=pipeline_manifest,
+        )
+        if capability_errors:
+            raise SystemExit(
+                "capability preflight is invalid or blocks this application:\n"
+                + "\n".join(capability_errors)
+            )
+        capability_report_validated = True
+    elif args.require_submission_ready:
+        raise SystemExit("--require-submission-ready requires a current capability report")
+    if args.require_submission_ready and pipeline_manifest is None:
+        raise SystemExit("--require-submission-ready requires a current pipeline manifest")
+    evaluation_unit_errors, expected_evaluation_units_by_requirement = (
+        validate_current_evaluation_units(
+            spec, pipeline_manifest=pipeline_manifest,
+            source_clauses_path=args.source_clauses,
+        )
+    )
+    if evaluation_unit_errors:
+        raise SystemExit(
+            "evaluation-unit source integrity validation failed:\n"
+            + "\n".join(evaluation_unit_errors)
+        )
     doc = Document(args.input); args.out_dir.mkdir(parents=True, exist_ok=True)
     manual_review_ledger = None
     manual_review_ingress_record: dict[str, Any] | None = None
@@ -3898,7 +4107,6 @@ def main(argv: list[str]) -> int:
         try:
             ledger_bytes = args.manual_review_items.read_bytes()
             manual_review_ledger = strict_json_loads(ledger_bytes.decode("utf-8"))
-            pipeline_manifest = load_json(args.pipeline_manifest)
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             raise SystemExit(f"invalid manual-review ledger: {exc}") from exc
         if not isinstance(manual_review_ledger, dict):
@@ -4599,7 +4807,7 @@ def main(argv: list[str]) -> int:
     if args.output_policy == "review_draft":
         late_review_items = manual_review_validation_items(raw_validation_findings, spec)
         scoring_capability_findings = (
-            load_json(args.capability_report).get("findings", []) if args.capability_report else []
+            capability_report.get("findings", []) if capability_report else []
         )
         late_review_items.extend(semantic_uncertainty_items)
         manual_review_receipts = manual_review_receipt_items(property_receipts)
@@ -4637,6 +4845,7 @@ def main(argv: list[str]) -> int:
         draft_scorecard = build_scorecard(
             manual_review_document_ledger["binding"], property_receipt_audit,
             manual_review_document_ledger["items"], raw_validation_findings, scoring_capability_findings,
+            evaluation_units_by_requirement=expected_evaluation_units_by_requirement,
         )
         append_scorecard(check, draft_scorecard)
         staged_output = sibling_temp(args.output)
@@ -4696,6 +4905,7 @@ def main(argv: list[str]) -> int:
         draft_scorecard = build_scorecard(
             manual_review_document_ledger["binding"], property_receipt_audit,
             manual_review_document_ledger["items"], raw_validation_findings, scoring_capability_findings,
+            evaluation_units_by_requirement=expected_evaluation_units_by_requirement,
         )
         draft_scorecard_audit = audit_scorecard(args.output, draft_scorecard)
         if not draft_scorecard_audit["valid"]:
@@ -4727,8 +4937,7 @@ def main(argv: list[str]) -> int:
                     "reason": "every executable property requires a serialized DOCX receipt",
                 })
     source_clause_records = spec.get("clause_compliance", [])
-    if args.capability_report:
-        capability_report = load_json(args.capability_report)
+    if capability_report:
         source_clause_records = annotate_satisfied_inputs(
             source_clause_records, capability_report.get("clauses", []))
     verified_clause_records = finalize_records(
@@ -4745,6 +4954,8 @@ def main(argv: list[str]) -> int:
             compliance["overall_status"] = "content_pending"
     effective_submission_ready = bool(
         submission_audit["submission_ready"]
+        and capability_report_validated
+        and pipeline_manifest is not None
         and not metadata_pending
         and not content_pending
         and not confirmed_semantic_issue_ids
@@ -4848,6 +5059,15 @@ def main(argv: list[str]) -> int:
                                    "pending_fields": cover_pending_fields},
               "declaration_changes": declaration_changes,
               "submission_audit": submission_audit,
+              "capability_preflight": {
+                  "status": "validated" if capability_report_validated else "missing",
+                  "report": str(args.capability_report.resolve()) if args.capability_report else None,
+                  "run_id": (capability_report or {}).get("provenance", {}).get("run_id")
+                  if isinstance((capability_report or {}).get("provenance"), dict) else None,
+                  "submission_gate_satisfied": bool(
+                      capability_report_validated and pipeline_manifest is not None
+                  ),
+              },
               "unsupported_items": spec.get("completeness", {}).get("unsupported_items", []),
               "confirmed_semantic_issues": sorted(confirmed_semantic_issue_ids),
               "semantic_issue_binding": semantic_issue_binding,

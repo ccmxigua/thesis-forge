@@ -19,6 +19,7 @@ from question_contract import bind_question_records, normalize_question_records
 from semantic_contract import strict_json_dumps, strict_json_loads
 from format_spec_validation import validate_instance
 from obligation_workflow import OBLIGATION_ANALYSIS_LEDGER_PROTOCOL
+from responsibility_ledger import canonical_review_atom
 
 from artifact_io import atomic_write_text
 
@@ -281,6 +282,19 @@ def _validate_analysis_obligation_identity(
         ):
             if producer_context.get(field) != identity.get(field):
                 raise ValueError(f"analysis obligation producer context {field} mismatch")
+    if "canonical_obligation_key" in item or "evaluation_unit_id" in item:
+        producers = [p.get("record", {}).get("obligation") for p in item.get("producer_records", [])
+                     if isinstance(p, dict) and p.get("producer") == "independent_obligation_review"
+                     and isinstance(p.get("record"), dict)]
+        matching = [p for p in producers if isinstance(p, dict)
+                    and p.get("analysis_obligation_id") == analysis_id and isinstance(p.get("source_atom"), dict)]
+        if len(matching) != 1:
+            raise ValueError("canonical unit requires the original bound AO source atom")
+        expected = canonical_review_atom(binding["source_sha256"], identity["check_id"],
+            {"source_sha256": identity["source_sha256"], "start": identity["start"], "end": identity["end"]},
+            matching[0]["source_atom"])
+        if any(item.get(k) != expected[k] or matching[0].get(k) != expected[k] for k in expected):
+            raise ValueError("canonical unit differs from current AO source atom")
     return identity
 
 
@@ -308,6 +322,7 @@ def build_manual_review_crosswalk(
         analysis_identity = _validate_analysis_obligation_identity(item, binding)
         analysis_id = item.get("analysis_obligation_id")
         entries.append({
+            **{k: item[k] for k in ("canonical_obligation_key", "evaluation_unit_id") if k in item},
             "marker_id": item.get("marker_id"),
             "manual_obligation_id": item.get("manual_obligation_id"),
             "analysis_obligation_id": analysis_id,

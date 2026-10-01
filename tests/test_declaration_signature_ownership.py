@@ -77,6 +77,22 @@ class DeclarationSignatureOwnershipTests(unittest.TestCase):
         self.assertEqual(raw, frozen)
         self.assertEqual(candidate["clause_reviews"], bridge.normalize_native_response(raw, chunk["response_schema"])["clause_reviews"])
 
+    def test_signature_source_identity_does_not_require_a_heading_execution_edge(self):
+        data, chunk = incident(); raw = model_proposal(data)
+        group = bridge._fixed_declaration_candidates(chunk["clauses"], chunk["evidence_context"],
+            anchor=chunk["declaration_anchor_preference"])[0]
+        heading = group["heading_clause_id"]
+        req = raw["requirements"][0]
+        req["clause_ids"].remove(heading)
+        req["evidence_ids"] = [eid for eid in req["evidence_ids"] if eid not in group["heading_evidence_ids"]]
+        review = next(r for r in raw["clause_reviews"] if r["clause_id"] == heading)
+        review.update(classification="informational", obligations=[], normative_basis="insufficient")
+        candidate, _ = bridge.prepare_native_response_candidate(raw, chunk)
+        self.assertEqual(bridge.validate_host_agent_response(candidate, chunk), [])
+        self.assertTrue(candidate["requirements"][0]["properties"]["items"][0]["source_signature_lines"])
+        self.assertNotIn(heading, candidate["requirements"][0]["clause_ids"])
+        self.assertEqual(candidate["clause_reviews"], bridge.normalize_native_response(raw, chunk["response_schema"])["clause_reviews"])
+
     def test_source_identity_faults_still_fail_closed(self):
         for mutation in ("stale_hash", "foreign_evidence", "forged_text"):
             data, chunk = incident(); raw = copy.deepcopy(data["retry"])

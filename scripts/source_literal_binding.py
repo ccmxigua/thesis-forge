@@ -11,7 +11,7 @@ import hashlib
 import re
 from typing import Any
 
-from fixed_declaration_source import derive_fixed_declaration_candidates
+from fixed_declaration_source import derive_fixed_declaration_candidates, matches_declaration_render_selection
 
 
 _BOUNDARY_ONLY = re.compile(r"^[\s，,、：:;；。！？!?…“”‘’（）()【】\[\]{}]*$")
@@ -395,8 +395,9 @@ def _declaration_render_only_selection(requirement, clauses, evidence_map, revie
 
     A declaration may print a responsibility sentence while the real-world
     responsibility remains an external pending obligation. The render selector
-    must be one complete, exact current grouping and every extra clause must
-    have a distinct, nonempty human inventory. Full span/payload checks follow.
+    must be one complete, exact current grouping. External extra clauses retain
+    their human inventory; informational context has no obligations. Neither
+    becomes an execution edge. Full span/payload checks follow.
     """
     selector = requirement.get("source_fragment_clause_ids")
     edges = requirement.get("clause_ids")
@@ -412,9 +413,7 @@ def _declaration_render_only_selection(requirement, clauses, evidence_map, revie
     groups = [group for group in derive_fixed_declaration_candidates(
         clauses, evidence_map, anchor=properties.get("before_role"))
         if group.get("clause_ids") == selector
-        and group.get("evidence_ids") == items[0].get("source_evidence_ids")
-        and group.get("heading_clause_id") in edges
-        and [cid for cid in selector if cid in edges] == edges]
+        and matches_declaration_render_selection(group, edges, items[0].get("source_evidence_ids"))]
     if len(groups) != 1:
         return None
     by_clause = {r.get("clause_id"): r for r in reviews if isinstance(r, dict)}
@@ -423,6 +422,8 @@ def _declaration_render_only_selection(requirement, clauses, evidence_map, revie
     for cid in extras:
         review = by_clause.get(cid, {})
         atoms = review.get("obligations")
+        if review.get("classification") == "informational" and atoms in (None, []):
+            continue
         if (review.get("classification") != "external_compliance"
                 or not isinstance(atoms, list) or not atoms
                 or any(not isinstance(atom, dict) or atom.get("status") != "unverifiable"
@@ -486,7 +487,8 @@ def materialize_source_fragment_literals(
                 item.get("source_fragment_clause_ids"), clause_map, evidence_context,
                 requirement_clause_ids=(item["source_fragment_clause_ids"]
                     if render_only is not None else item.get("clause_ids")),
-                requirement_evidence_ids=item.get("evidence_ids"),
+                requirement_evidence_ids=(render_only["selected_group"]["evidence_ids"]
+                    if render_only is not None else item.get("evidence_ids")),
                 literal_role=role,
             )
         except SourceFragmentBindingError as exc:

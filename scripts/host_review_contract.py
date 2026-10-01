@@ -14,7 +14,7 @@ from document_text_font import document_font_scope_errors
 from evidence_context_guards import sample_content_guard
 from format_spec_validation import schema_support_errors, validate_instance
 from format_contract_guards import cover_binding_errors, input_prerequisite_errors
-from fixed_declaration_source import derive_fixed_declaration_candidates, bound_signature_lines
+from fixed_declaration_source import derive_fixed_declaration_candidates, bound_signature_lines, matches_declaration_render_selection
 from semantic_contract import strict_json_loads
 from existing_requirement_contract import (
     existing_reference_errors, project_authoritative_existing_payloads,
@@ -1718,8 +1718,8 @@ def validate_response(response: Any, chunk: dict[str, Any]) -> list[str]:
                     if signature_lines:
                         groups = [g for g in derive_fixed_declaration_candidates(
                             clauses, evidence_context, anchor=chunk.get("declaration_anchor_preference"))
-                            if g.get("evidence_ids") == declaration.get("source_evidence_ids")
-                            and g.get("heading_clause_id") in (item.get("clause_ids") or [])]
+                            if matches_declaration_render_selection(g, item.get("clause_ids"),
+                                declaration.get("source_evidence_ids"))]
                         if len(groups) != 1 or signature_lines != bound_signature_lines(groups[0], evidence_context):
                             errors.append(f"$.requirements[{index}].properties.items[{item_index}].source_signature_lines: must_equal_unique_adjacent_blank_source_lines")
                     source_ids = declaration.get("source_evidence_ids")
@@ -1757,12 +1757,7 @@ def validate_response(response: Any, chunk: dict[str, Any]) -> list[str]:
                         )
                         bound_candidates = [
                             candidate for candidate in candidates
-                            if candidate.get("evidence_ids") == source_ids
-                            and candidate.get("heading_clause_id") in (item.get("clause_ids") or [])
-                            and [
-                                clause_id for clause_id in candidate.get("clause_ids", [])
-                                if clause_id in (item.get("clause_ids") or [])
-                            ] == item.get("clause_ids")
+                            if matches_declaration_render_selection(candidate, item.get("clause_ids"), source_ids)
                         ]
                         if len(bound_candidates) != 1:
                             errors.append(

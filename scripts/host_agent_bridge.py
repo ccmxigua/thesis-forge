@@ -178,7 +178,7 @@ from existing_requirement_contract import (  # noqa: E402
 )
 from format_contract_guards import normalize_label  # noqa: E402
 from fixed_declaration_source import (  # noqa: E402
-    derive_fixed_declaration_candidates, bound_signature_lines,
+    derive_fixed_declaration_candidates, bound_signature_lines, matches_declaration_render_selection,
 )
 
 from host_adapters import codex as codex_adapter  # noqa: E402
@@ -527,12 +527,18 @@ def _materialize_fixed_declaration_source_text(
         # The candidate lists the text to render; the requirement edge lists
         # only obligations the model classified as DOCX-executable.  Never
         # promote an external action by copying the whole source group.
-        selected_clause_ids = [value for value in candidate_clause_ids if value in raw_clause_ids]
-        if (
-            not raw_clause_ids
-            or raw_clause_ids != selected_clause_ids
-            or candidate.get("heading_clause_id") not in raw_clause_ids
-        ):
+        if not matches_declaration_render_selection(candidate, raw_clause_ids, source_ids):
+            continue
+        if len(clause_by_id) != len(clauses):
+            continue
+        try:
+            for cid in candidate_clause_ids:
+                clause = clause_by_id[cid]
+                _exact_clause_source_text(clause, evidence_context)
+                span = clause["source_span"]
+                if span.get("location") != evidence_context[span["evidence_id"]].get("location"):
+                    raise ValueError("declaration source location mismatch")
+        except (NativeSemanticReviewError, ValueError, TypeError, KeyError):
             continue
         mixed_valid = True
         for clause_id in raw_clause_ids:
@@ -5615,10 +5621,7 @@ def _declaration_selector_retry_ledger(
         selected = [c for c in _fixed_declaration_candidates(
             chunk["clauses"], chunk["evidence_context"],
             anchor=chunk.get("declaration_anchor_preference"))
-            if c["evidence_ids"] == new_ids
-            and c["heading_clause_id"] in old_req["clause_ids"]
-            and [cid for cid in c["clause_ids"] if cid in old_req["clause_ids"]]
-                == old_req["clause_ids"]]
+            if matches_declaration_render_selection(c, old_req["clause_ids"], new_ids)]
         if len(selected) != 1:
             return None
         group = selected[0]

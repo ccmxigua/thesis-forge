@@ -116,6 +116,22 @@ def exact_source_clause(clause_id: str, source: str, evidence_id: str = "E1") ->
     }
 
 
+def bind_declaration_fixture_spans(chunk: dict) -> None:
+    """Supply exact current source occurrences for old compact declaration fixtures."""
+    for clause in chunk["clauses"]:
+        if "source_span" in clause:
+            continue
+        eid = clause["evidence_ids"][0]
+        evidence = chunk["evidence_context"][eid]
+        source, text = evidence["text"], clause["text"]
+        start = source.index(text)
+        clause["source_span"] = {
+            "evidence_id": eid, "start_offset": start, "end_offset": start + len(text),
+            "text": text, "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
+            **({"location": copy.deepcopy(evidence["location"])} if "location" in evidence else {}),
+        }
+
+
 class HostAgentBridgeTests(unittest.TestCase):
     def setUp(self) -> None:
         self._host_runtime_env = patch.dict(
@@ -3680,6 +3696,7 @@ class HostAgentBridgeTests(unittest.TestCase):
         }
         retry_raw = copy.deepcopy(parent_raw)
         retry_raw["clause_reviews"][3]["classification"] = "requires_source_verification"
+        bind_declaration_fixture_spans(chunk)
         parent_candidate, parent_projection = bridge._materialize_fixed_declaration_source_text(
             parent_raw, chunk,
         )
@@ -7934,6 +7951,7 @@ class HostAgentBridgeTests(unittest.TestCase):
                 "chunk_sha256": "e" * 64,
             },
         }
+        bind_declaration_fixture_spans(source)
         candidate = bridge._fixed_declaration_candidates(
             source["clauses"], source["evidence_context"],
             anchor=source["declaration_anchor_preference"],
@@ -8024,6 +8042,7 @@ class HostAgentBridgeTests(unittest.TestCase):
                 {"clause_id": "C2", "classification": "executable"},
             ],
         }
+        bind_declaration_fixture_spans(source)
         unchanged, audits = bridge._materialize_fixed_declaration_source_text(response, source)
         self.assertEqual(unchanged, response)
         self.assertEqual(audits, [])
@@ -8124,6 +8143,7 @@ class HostAgentBridgeTests(unittest.TestCase):
                 {"clause_id": "C3", "classification": "executable"},
             ],
         }
+        bind_declaration_fixture_spans(source)
         projected, audits = bridge._materialize_fixed_declaration_source_text(response, source)
         item = projected["requirements"][0]["properties"]["items"][0]
         self.assertEqual(item["heading"], "学位论文使用授权书")

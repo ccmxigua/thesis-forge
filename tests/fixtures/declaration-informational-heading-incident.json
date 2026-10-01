@@ -1,0 +1,847 @@
+{
+  "source": {
+    "clauses": [
+      {
+        "id": "C00054",
+        "text": "北京体育大学学位论文使用授权书",
+        "evidence_ids": [
+          "E00048"
+        ],
+        "source_kind": "paragraph",
+        "location": {
+          "part": "document",
+          "child_index": 49,
+          "order": 47
+        },
+        "part_index": 0,
+        "source_span": {
+          "evidence_id": "E00048",
+          "start_offset": 0,
+          "end_offset": 15,
+          "text": "北京体育大学学位论文使用授权书",
+          "source_sha256": "4e58041c3d041f9aaeed1296772bb173e8d32b3b73b498ca3008ab3e086ef2c3",
+          "location": {
+            "part": "document",
+            "child_index": 49,
+            "order": 47
+          }
+        },
+        "source_text_full": "北京体育大学学位论文使用授权书",
+        "deterministic_obligation_keys": []
+      },
+      {
+        "id": "C00055",
+        "text": "本人完全了解学校研究生学位论文收藏和利用的管理规定，同意向北京体育大学提交本人的学位论文电子版及相应的纸质本",
+        "evidence_ids": [
+          "E00049"
+        ],
+        "source_kind": "paragraph",
+        "location": {
+          "part": "document",
+          "child_index": 50,
+          "order": 48
+        },
+        "part_index": 0,
+        "source_span": {
+          "evidence_id": "E00049",
+          "start_offset": 0,
+          "end_offset": 54,
+          "text": "本人完全了解学校研究生学位论文收藏和利用的管理规定，同意向北京体育大学提交本人的学位论文电子版及相应的纸质本",
+          "source_sha256": "6e9644539e43129c9bce84c5b80b48a8144d4029580f6594561d072918e852b0",
+          "location": {
+            "part": "document",
+            "child_index": 50,
+            "order": 48
+          }
+        },
+        "source_text_full": "本人完全了解学校研究生学位论文收藏和利用的管理规定，同意向北京体育大学提交本人的学位论文电子版及相应的纸质本。",
+        "deterministic_obligation_keys": []
+      },
+      {
+        "id": "C00056",
+        "text": "本人了解北京体育大学拥有在《中华人民共和国著作权法》规定范围内的学位论文使用权，同意在以下几方面向学校授权",
+        "evidence_ids": [
+          "E00050"
+        ],
+        "source_kind": "paragraph",
+        "location": {
+          "part": "document",
+          "child_index": 51,
+          "order": 49
+        },
+        "part_index": 0,
+        "source_span": {
+          "evidence_id": "E00050",
+          "start_offset": 0,
+          "end_offset": 53,
+          "text": "本人了解北京体育大学拥有在《中华人民共和国著作权法》规定范围内的学位论文使用权，同意在以下几方面向学校授权",
+          "source_sha256": "18e2be3a3ec648a6c97dfa6c008a09a2b144b95477f4a117287b1b5fb0cdbedf",
+          "location": {
+            "part": "document",
+            "child_index": 51,
+            "order": 49
+          }
+        },
+        "source_text_full": "本人了解北京体育大学拥有在《中华人民共和国著作权法》规定范围内的学位论文使用权，同意在以下几方面向学校授权。即：",
+        "deterministic_obligation_keys": []
+      },
+      {
+        "id": "C00057",
+        "text": "即",
+        "evidence_ids": [
+          "E00050"
+        ],
+        "source_kind": "paragraph",
+        "location": {
+          "part": "document",
+          "child_index": 51,
+          "order": 49
+        },
+        "part_index": 1,
+        "source_span": {
+          "evidence_id": "E00050",
+          "start_offset": 54,
+          "end_offset": 55,
+          "text": "即",
+          "source_sha256": "18e2be3a3ec648a6c97dfa6c008a09a2b144b95477f4a117287b1b5fb0cdbedf",
+          "location": {
+            "part": "document",
+            "child_index": 51,
+            "order": 49
+          }
+        },
+        "source_text_full": "本人了解北京体育大学拥有在《中华人民共和国著作权法》规定范围内的学位论文使用权，同意在以下几方面向学校授权。即：",
+        "deterministic_obligation_keys": []
+      },
+      {
+        "id": "C00058",
+        "text": "1.学校将学位论文编入《北京体育大学博士硕士学位论文全文数据库》，并作为资料在学校图书馆等场所提供阅览",
+        "evidence_ids": [
+          "E00051"
+        ],
+        "source_kind": "paragraph",
+        "location": {
+          "part": "document",
+          "child_index": 52,
+          "order": 50
+        },
+        "part_index": 0,
+        "source_span": {
+          "evidence_id": "E00051",
+          "start_offset": 0,
+          "end_offset": 51,
+          "text": "1.学校将学位论文编入《北京体育大学博士硕士学位论文全文数据库》，并作为资料在学校图书馆等场所提供阅览",
+          "source_sha256": "3ed42d37954e20007b3273733f24970f2af0584bc18bd546e8962f5644374d06",
+          "location": {
+            "part": "document",
+            "child_index": 52,
+            "order": 50
+          }
+        },
+        "source_text_full": "1.学校将学位论文编入《北京体育大学博士硕士学位论文全文数据库》，并作为资料在学校图书馆等场所提供阅览；",
+        "deterministic_obligation_keys": []
+      },
+      {
+        "id": "C00059",
+        "text": "2. 学校可以将本学位论文的全部或部分内容编入有关数据库进行检索，可以采用影印、缩印或其他复制手段保存和汇编本学位论文",
+        "evidence_ids": [
+          "E00052"
+        ],
+        "source_kind": "paragraph",
+        "location": {
+          "part": "document",
+          "child_index": 53,
+          "order": 51
+        },
+        "part_index": 0,
+        "source_span": {
+          "evidence_id": "E00052",
+          "start_offset": 0,
+          "end_offset": 59,
+          "text": "2. 学校可以将本学位论文的全部或部分内容编入有关数据库进行检索，可以采用影印、缩印或其他复制手段保存和汇编本学位论文",
+          "source_sha256": "606c10d9cabbc7871361bc338968eaaa3c0ad7cd83f861277923bde7d687e2ca",
+          "location": {
+            "part": "document",
+            "child_index": 53,
+            "order": 51
+          }
+        },
+        "source_text_full": "2. 学校可以将本学位论文的全部或部分内容编入有关数据库进行检索，可以采用影印、缩印或其他复制手段保存和汇编本学位论文；学校根据规定向教育部指定的收藏和存档单位提交学位论文；",
+        "deterministic_obligation_keys": []
+      },
+      {
+        "id": "C00060",
+        "text": "学校根据规定向教育部指定的收藏和存档单位提交学位论文",
+        "evidence_ids": [
+          "E00052"
+        ],
+        "source_kind": "paragraph",
+        "location": {
+          "part": "document",
+          "child_index": 53,
+          "order": 51
+        },
+        "part_index": 1,
+        "source_span": {
+          "evidence_id": "E00052",
+          "start_offset": 60,
+          "end_offset": 86,
+          "text": "学校根据规定向教育部指定的收藏和存档单位提交学位论文",
+          "source_sha256": "606c10d9cabbc7871361bc338968eaaa3c0ad7cd83f861277923bde7d687e2ca",
+          "location": {
+            "part": "document",
+            "child_index": 53,
+            "order": 51
+          }
+        },
+        "source_text_full": "2. 学校可以将本学位论文的全部或部分内容编入有关数据库进行检索，可以采用影印、缩印或其他复制手段保存和汇编本学位论文；学校根据规定向教育部指定的收藏和存档单位提交学位论文；",
+        "deterministic_obligation_keys": []
+      },
+      {
+        "id": "C00061",
+        "text": "3.非公开学位论文在解密后的使用权同公开论文",
+        "evidence_ids": [
+          "E00053"
+        ],
+        "source_kind": "paragraph",
+        "location": {
+          "part": "document",
+          "child_index": 54,
+          "order": 52
+        },
+        "part_index": 0,
+        "source_span": {
+          "evidence_id": "E00053",
+          "start_offset": 0,
+          "end_offset": 22,
+          "text": "3.非公开学位论文在解密后的使用权同公开论文",
+          "source_sha256": "fdc80fe19971aa9452eae1390afc299d04fce202b4c78389210a5ecaaccf31a3",
+          "location": {
+            "part": "document",
+            "child_index": 54,
+            "order": 52
+          }
+        },
+        "source_text_full": "3.非公开学位论文在解密后的使用权同公开论文。",
+        "deterministic_obligation_keys": []
+      },
+      {
+        "id": "C00062",
+        "text": "本人承诺：本人的学位论文是在北京体育大学学习期间创作完成的作品，并已通过论文答辩",
+        "evidence_ids": [
+          "E00054"
+        ],
+        "source_kind": "paragraph",
+        "location": {
+          "part": "document",
+          "child_index": 55,
+          "order": 53
+        },
+        "part_index": 0,
+        "source_span": {
+          "evidence_id": "E00054",
+          "start_offset": 0,
+          "end_offset": 40,
+          "text": "本人承诺：本人的学位论文是在北京体育大学学习期间创作完成的作品，并已通过论文答辩",
+          "source_sha256": "15a2e7d11987771d841e2a6fefde0c5ee43e2c13b80e0c976f3793eb07a1c25f",
+          "location": {
+            "part": "document",
+            "child_index": 55,
+            "order": 53
+          }
+        },
+        "source_text_full": "本人承诺：本人的学位论文是在北京体育大学学习期间创作完成的作品，并已通过论文答辩；提交的学位论文电子版与纸质本论文的内容一致，如因不同造成不良后果由本人自负。",
+        "deterministic_obligation_keys": []
+      },
+      {
+        "id": "C00063",
+        "text": "提交的学位论文电子版与纸质本论文的内容一致，如因不同造成不良后果由本人自负",
+        "evidence_ids": [
+          "E00054"
+        ],
+        "source_kind": "paragraph",
+        "location": {
+          "part": "document",
+          "child_index": 55,
+          "order": 53
+        },
+        "part_index": 1,
+        "source_span": {
+          "evidence_id": "E00054",
+          "start_offset": 41,
+          "end_offset": 78,
+          "text": "提交的学位论文电子版与纸质本论文的内容一致，如因不同造成不良后果由本人自负",
+          "source_sha256": "15a2e7d11987771d841e2a6fefde0c5ee43e2c13b80e0c976f3793eb07a1c25f",
+          "location": {
+            "part": "document",
+            "child_index": 55,
+            "order": 53
+          }
+        },
+        "source_text_full": "本人承诺：本人的学位论文是在北京体育大学学习期间创作完成的作品，并已通过论文答辩；提交的学位论文电子版与纸质本论文的内容一致，如因不同造成不良后果由本人自负。",
+        "deterministic_obligation_keys": []
+      }
+    ],
+    "evidence_context": {
+      "E00048": {
+        "id": "E00048",
+        "kind": "paragraph",
+        "text": "北京体育大学学位论文使用授权书",
+        "style_id": null,
+        "runs": [
+          {
+            "text": "北京体育大学",
+            "format": {
+              "fonts": {
+                "eastAsia": "黑体",
+                "ascii": "黑体",
+                "hAnsi": "宋体"
+              },
+              "size_pt": 16.0
+            }
+          },
+          {
+            "text": "学位论文使用授权书",
+            "format": {
+              "fonts": {
+                "eastAsia": "黑体",
+                "ascii": "黑体",
+                "hAnsi": "宋体"
+              },
+              "size_pt": 16.0
+            }
+          }
+        ],
+        "location": {
+          "part": "document",
+          "child_index": 49,
+          "order": 47
+        },
+        "context_before": [
+          "北京体育大学学位评定委员会办公室盖章(有效)",
+          "注：限制★2年(可少于2年);秘密★10年(可少于10年);机密★20年(可少于20年)"
+        ],
+        "context_after": [
+          "本人完全了解学校研究生学位论文收藏和利用的管理规定，同意向北京体育大学提交本人的学位论文电子版及相应的纸质本。",
+          "本人了解北京体育大学拥有在《中华人民共和国著作权法》规定范围内的学位论文使用权，同意在以下几方面向学校授权。即："
+        ],
+        "style_name": null,
+        "xml_locator": {
+          "part": "document",
+          "child_index": 49,
+          "order": 47
+        }
+      },
+      "E00049": {
+        "id": "E00049",
+        "kind": "paragraph",
+        "text": "本人完全了解学校研究生学位论文收藏和利用的管理规定，同意向北京体育大学提交本人的学位论文电子版及相应的纸质本。",
+        "style_id": null,
+        "runs": [
+          {
+            "text": "本人完全了解学校研究生学位论文收藏和利用的管理规定，同意向北京体育大学提交本人的学位论文电子版及相应的纸质本",
+            "format": {
+              "fonts": {
+                "eastAsia": "宋体",
+                "ascii": "宋体",
+                "hAnsi": "宋体"
+              },
+              "size_pt": 14.0
+            }
+          },
+          {
+            "text": "。",
+            "format": {
+              "fonts": {
+                "eastAsia": "宋体",
+                "ascii": "宋体",
+                "hAnsi": "宋体"
+              },
+              "size_pt": 14.0
+            }
+          }
+        ],
+        "location": {
+          "part": "document",
+          "child_index": 50,
+          "order": 48
+        },
+        "context_before": [
+          "注：限制★2年(可少于2年);秘密★10年(可少于10年);机密★20年(可少于20年)",
+          "北京体育大学学位论文使用授权书"
+        ],
+        "context_after": [
+          "本人了解北京体育大学拥有在《中华人民共和国著作权法》规定范围内的学位论文使用权，同意在以下几方面向学校授权。即：",
+          "1.学校将学位论文编入《北京体育大学博士硕士学位论文全文数据库》，并作为资料在学校图书馆等场所提供阅览；"
+        ],
+        "style_name": null,
+        "xml_locator": {
+          "part": "document",
+          "child_index": 50,
+          "order": 48
+        }
+      },
+      "E00050": {
+        "id": "E00050",
+        "kind": "paragraph",
+        "text": "本人了解北京体育大学拥有在《中华人民共和国著作权法》规定范围内的学位论文使用权，同意在以下几方面向学校授权。即：",
+        "style_id": null,
+        "runs": [
+          {
+            "text": "本人了解北京体育大学拥有在《中华人民共和国著作权法》规定范围内的学位论文使用权，同意在以下几方面向学校授权。即：",
+            "format": {
+              "fonts": {
+                "eastAsia": "宋体",
+                "ascii": "宋体",
+                "hAnsi": "宋体"
+              },
+              "size_pt": 14.0
+            }
+          }
+        ],
+        "location": {
+          "part": "document",
+          "child_index": 51,
+          "order": 49
+        },
+        "context_before": [
+          "北京体育大学学位论文使用授权书",
+          "本人完全了解学校研究生学位论文收藏和利用的管理规定，同意向北京体育大学提交本人的学位论文电子版及相应的纸质本。"
+        ],
+        "context_after": [
+          "1.学校将学位论文编入《北京体育大学博士硕士学位论文全文数据库》，并作为资料在学校图书馆等场所提供阅览；",
+          "2. 学校可以将本学位论文的全部或部分内容编入有关数据库进行检索，可以采用影印、缩印或其他复制手段保存和汇编本学位论文；学校根据规定向教育部指定的收藏和存档单位提交学位论文；"
+        ],
+        "style_name": null,
+        "xml_locator": {
+          "part": "document",
+          "child_index": 51,
+          "order": 49
+        }
+      },
+      "E00051": {
+        "id": "E00051",
+        "kind": "paragraph",
+        "text": "1.学校将学位论文编入《北京体育大学博士硕士学位论文全文数据库》，并作为资料在学校图书馆等场所提供阅览；",
+        "style_id": null,
+        "runs": [
+          {
+            "text": "1.学校将学位论文编入《北京体育大学博士硕士学位论文全文数据库》，并作为资料在学校图书馆等场所提供阅览；",
+            "format": {
+              "fonts": {
+                "eastAsia": "宋体",
+                "ascii": "宋体",
+                "hAnsi": "宋体"
+              },
+              "size_pt": 14.0
+            }
+          }
+        ],
+        "location": {
+          "part": "document",
+          "child_index": 52,
+          "order": 50
+        },
+        "context_before": [
+          "本人完全了解学校研究生学位论文收藏和利用的管理规定，同意向北京体育大学提交本人的学位论文电子版及相应的纸质本。",
+          "本人了解北京体育大学拥有在《中华人民共和国著作权法》规定范围内的学位论文使用权，同意在以下几方面向学校授权。即："
+        ],
+        "context_after": [
+          "2. 学校可以将本学位论文的全部或部分内容编入有关数据库进行检索，可以采用影印、缩印或其他复制手段保存和汇编本学位论文；学校根据规定向教育部指定的收藏和存档单位提交学位论文；",
+          "3.非公开学位论文在解密后的使用权同公开论文。"
+        ],
+        "style_name": null,
+        "xml_locator": {
+          "part": "document",
+          "child_index": 52,
+          "order": 50
+        }
+      },
+      "E00052": {
+        "id": "E00052",
+        "kind": "paragraph",
+        "text": "2. 学校可以将本学位论文的全部或部分内容编入有关数据库进行检索，可以采用影印、缩印或其他复制手段保存和汇编本学位论文；学校根据规定向教育部指定的收藏和存档单位提交学位论文；",
+        "style_id": null,
+        "runs": [
+          {
+            "text": "2.",
+            "format": {
+              "fonts": {
+                "eastAsia": "宋体",
+                "ascii": "宋体",
+                "hAnsi": "宋体"
+              },
+              "size_pt": 14.0
+            }
+          },
+          {
+            "text": "学校可以将本学位论文的全部或部分内容编入有关数据库进行检索，可以采用影印、缩印或其他复制手段保存和汇编本学位论文；学校根据规定向教育部指定的收藏和存档单位提交学位论文",
+            "format": {
+              "fonts": {
+                "eastAsia": "宋体",
+                "ascii": "宋体",
+                "hAnsi": "宋体"
+              },
+              "size_pt": 14.0
+            }
+          },
+          {
+            "text": "；",
+            "format": {
+              "fonts": {
+                "eastAsia": "宋体",
+                "ascii": "宋体",
+                "hAnsi": "宋体"
+              },
+              "size_pt": 14.0
+            }
+          }
+        ],
+        "location": {
+          "part": "document",
+          "child_index": 53,
+          "order": 51
+        },
+        "context_before": [
+          "本人了解北京体育大学拥有在《中华人民共和国著作权法》规定范围内的学位论文使用权，同意在以下几方面向学校授权。即：",
+          "1.学校将学位论文编入《北京体育大学博士硕士学位论文全文数据库》，并作为资料在学校图书馆等场所提供阅览；"
+        ],
+        "context_after": [
+          "3.非公开学位论文在解密后的使用权同公开论文。",
+          "本人承诺：本人的学位论文是在北京体育大学学习期间创作完成的作品，并已通过论文答辩；提交的学位论文电子版与纸质本论文的内容一致，如因不同造成不良后果由本人自负。"
+        ],
+        "style_name": null,
+        "xml_locator": {
+          "part": "document",
+          "child_index": 53,
+          "order": 51
+        }
+      },
+      "E00053": {
+        "id": "E00053",
+        "kind": "paragraph",
+        "text": "3.非公开学位论文在解密后的使用权同公开论文。",
+        "style_id": null,
+        "runs": [
+          {
+            "text": "3.非公开学位论文在解密后的使用权同公开论文。",
+            "format": {
+              "fonts": {
+                "eastAsia": "宋体",
+                "ascii": "宋体",
+                "hAnsi": "宋体"
+              },
+              "size_pt": 14.0
+            }
+          }
+        ],
+        "location": {
+          "part": "document",
+          "child_index": 54,
+          "order": 52
+        },
+        "context_before": [
+          "1.学校将学位论文编入《北京体育大学博士硕士学位论文全文数据库》，并作为资料在学校图书馆等场所提供阅览；",
+          "2. 学校可以将本学位论文的全部或部分内容编入有关数据库进行检索，可以采用影印、缩印或其他复制手段保存和汇编本学位论文；学校根据规定向教育部指定的收藏和存档单位提交学位论文；"
+        ],
+        "context_after": [
+          "本人承诺：本人的学位论文是在北京体育大学学习期间创作完成的作品，并已通过论文答辩；提交的学位论文电子版与纸质本论文的内容一致，如因不同造成不良后果由本人自负。",
+          "学位论文作者暨授权人签字："
+        ],
+        "style_name": null,
+        "xml_locator": {
+          "part": "document",
+          "child_index": 54,
+          "order": 52
+        }
+      },
+      "E00054": {
+        "id": "E00054",
+        "kind": "paragraph",
+        "text": "本人承诺：本人的学位论文是在北京体育大学学习期间创作完成的作品，并已通过论文答辩；提交的学位论文电子版与纸质本论文的内容一致，如因不同造成不良后果由本人自负。",
+        "style_id": null,
+        "runs": [
+          {
+            "text": "本人承诺：本人的学位论文是在北京体育大学学习期间创作完成的作品，并已通过论文答辩；提交的学位论文电子版与纸质本论文的内容一致，如因不同造成不良后果由本人自负。",
+            "format": {
+              "fonts": {
+                "eastAsia": "宋体",
+                "ascii": "宋体",
+                "hAnsi": "宋体"
+              },
+              "size_pt": 14.0
+            }
+          }
+        ],
+        "location": {
+          "part": "document",
+          "child_index": 55,
+          "order": 53
+        },
+        "context_before": [
+          "2. 学校可以将本学位论文的全部或部分内容编入有关数据库进行检索，可以采用影印、缩印或其他复制手段保存和汇编本学位论文；学校根据规定向教育部指定的收藏和存档单位提交学位论文；",
+          "3.非公开学位论文在解密后的使用权同公开论文。"
+        ],
+        "context_after": [
+          "学位论文作者暨授权人签字：",
+          "年    月    日"
+        ],
+        "style_name": null,
+        "xml_locator": {
+          "part": "document",
+          "child_index": 55,
+          "order": 53
+        }
+      }
+    },
+    "declaration_anchor_preference": "abstract_title_zh"
+  },
+  "raw": {
+    "contract_version": "3.0",
+    "requirements": [
+      {
+        "existing_requirement_id": null,
+        "field_key": null,
+        "clause_ids": [
+          "C00058",
+          "C00059",
+          "C00060",
+          "C00061"
+        ],
+        "source_fragment_clause_ids": null,
+        "evidence_ids": [
+          "E00051",
+          "E00052",
+          "E00053"
+        ],
+        "confidence": 0.86,
+        "reason": "These clauses provide the fixed body text of the source-grouped authorization declaration; the linked clauses describe the printed authorization terms, while separate consent and truthfulness duties remain human obligations.",
+        "applicability": {
+          "status": "always",
+          "conditions": null,
+          "exceptions": null
+        },
+        "input_prerequisites": null,
+        "verification": {
+          "mode": "static_docx",
+          "checks": [
+            "Declaration heading and body are materialized from the selected candidate's unique source evidence paragraphs."
+          ],
+          "checker_ids": null
+        },
+        "role": "declarations",
+        "properties": {
+          "before_role": "abstract_title_zh",
+          "items": [
+            {
+              "source_signature_lines": null,
+              "id": "bsu-authorization-declaration",
+              "resource_id": null,
+              "version": null,
+              "sha256": null,
+              "heading": null,
+              "body": null,
+              "body_parts": null,
+              "source_evidence_ids": [
+                "E00048",
+                "E00049",
+                "E00050",
+                "E00051",
+                "E00052",
+                "E00053",
+                "E00054"
+              ],
+              "signature_placeholders": []
+            }
+          ]
+        }
+      }
+    ],
+    "clause_reviews": [
+      {
+        "clause_id": "C00054",
+        "classification": "informational",
+        "reason": "This is the declaration heading in the fixed-text candidate, not an independently executable obligation.",
+        "obligations": [],
+        "normative_basis": "fixed_statement"
+      },
+      {
+        "clause_id": "C00055",
+        "classification": "external_compliance",
+        "reason": "The author must understand the rules and consent to submission; printing the statement does not establish consent.",
+        "obligations": [
+          {
+            "id": "C00055-consent-and-submission",
+            "status": "unverifiable",
+            "reason": "Actual understanding, consent, and submission are human actions.",
+            "actor": "author",
+            "action": "understand the rules and consent to submit the thesis copies",
+            "target": "university",
+            "condition": null,
+            "source_quote": "同意向北京体育大学提交本人的学位论文电子版及相应的纸质本",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "human"
+          }
+        ],
+        "normative_basis": "external_duty"
+      },
+      {
+        "clause_id": "C00056",
+        "classification": "external_compliance",
+        "reason": "The clause records the author's consent to the university's use rights; document text cannot establish that consent.",
+        "obligations": [
+          {
+            "id": "C00056-authorization-consent",
+            "status": "unverifiable",
+            "reason": "Actual authorization requires the author's consent.",
+            "actor": "author",
+            "action": "consent to the stated thesis-use authorization",
+            "target": "university",
+            "condition": null,
+            "source_quote": "同意在以下几方面向学校授权",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "human"
+          }
+        ],
+        "normative_basis": "external_duty"
+      },
+      {
+        "clause_id": "C00057",
+        "classification": "informational",
+        "reason": "This is a connective introducing the listed authorization terms, with no independent obligation.",
+        "obligations": [],
+        "normative_basis": "insufficient"
+      },
+      {
+        "clause_id": "C00058",
+        "classification": "executable",
+        "reason": "This is a fixed body clause in the source-grouped authorization declaration.",
+        "obligations": [
+          {
+            "id": "C00058-fixed-declaration-text",
+            "status": "covered",
+            "reason": "Its source text is included in the selected fixed declaration candidate.",
+            "actor": null,
+            "action": "include fixed declaration text",
+            "target": "authorization declaration",
+            "condition": null,
+            "source_quote": "1.学校将学位论文编入《北京体育大学博士硕士学位论文全文数据库》，并作为资料在学校图书馆等场所提供阅览",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "automatic"
+          }
+        ],
+        "normative_basis": "fixed_statement"
+      },
+      {
+        "clause_id": "C00059",
+        "classification": "executable",
+        "reason": "This is a fixed body clause in the source-grouped authorization declaration.",
+        "obligations": [
+          {
+            "id": "C00059-fixed-declaration-text",
+            "status": "covered",
+            "reason": "Its source text is included in the selected fixed declaration candidate.",
+            "actor": null,
+            "action": "include fixed declaration text",
+            "target": "authorization declaration",
+            "condition": null,
+            "source_quote": "2. 学校可以将本学位论文的全部或部分内容编入有关数据库进行检索，可以采用影印、缩印或其他复制手段保存和汇编本学位论文",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "automatic"
+          }
+        ],
+        "normative_basis": "fixed_statement"
+      },
+      {
+        "clause_id": "C00060",
+        "classification": "executable",
+        "reason": "This is a fixed body clause in the source-grouped authorization declaration.",
+        "obligations": [
+          {
+            "id": "C00060-fixed-declaration-text",
+            "status": "covered",
+            "reason": "Its source text is included in the selected fixed declaration candidate.",
+            "actor": null,
+            "action": "include fixed declaration text",
+            "target": "authorization declaration",
+            "condition": null,
+            "source_quote": "学校根据规定向教育部指定的收藏和存档单位提交学位论文",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "automatic"
+          }
+        ],
+        "normative_basis": "fixed_statement"
+      },
+      {
+        "clause_id": "C00061",
+        "classification": "executable",
+        "reason": "This is a fixed body clause in the source-grouped authorization declaration.",
+        "obligations": [
+          {
+            "id": "C00061-fixed-declaration-text",
+            "status": "covered",
+            "reason": "Its source text is included in the selected fixed declaration candidate.",
+            "actor": null,
+            "action": "include fixed declaration text",
+            "target": "authorization declaration",
+            "condition": null,
+            "source_quote": "3.非公开学位论文在解密后的使用权同公开论文",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "automatic"
+          }
+        ],
+        "normative_basis": "fixed_statement"
+      },
+      {
+        "clause_id": "C00062",
+        "classification": "external_compliance",
+        "reason": "The author must make the stated factual promise; printing it does not establish its truth or the author's attestation.",
+        "obligations": [
+          {
+            "id": "C00062-author-promise",
+            "status": "unverifiable",
+            "reason": "The truth of authorship and successful defense requires human confirmation.",
+            "actor": "author",
+            "action": "attest that the thesis was completed during study and passed the defense",
+            "target": "thesis authorship and defense status",
+            "condition": null,
+            "source_quote": "本人承诺：本人的学位论文是在北京体育大学学习期间创作完成的作品，并已通过论文答辩",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "human"
+          }
+        ],
+        "normative_basis": "external_duty"
+      },
+      {
+        "clause_id": "C00063",
+        "classification": "external_compliance",
+        "reason": "The author bears responsibility for the consistency of submitted copies and associated consequences; printing the statement does not establish those facts or the undertaking.",
+        "obligations": [
+          {
+            "id": "C00063-consistency-undertaking",
+            "status": "unverifiable",
+            "reason": "Copy consistency and the author's undertaking require human confirmation.",
+            "actor": "author",
+            "action": "ensure submitted electronic and paper copies match and accept stated responsibility",
+            "target": "thesis copies and resulting consequences",
+            "condition": null,
+            "source_quote": "提交的学位论文电子版与纸质本论文的内容一致，如因不同造成不良后果由本人自负",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "human"
+          }
+        ],
+        "normative_basis": "external_duty"
+      }
+    ],
+    "unsupported_items": [],
+    "reported_conflicts": []
+  }
+}

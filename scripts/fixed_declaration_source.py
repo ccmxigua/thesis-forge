@@ -83,6 +83,22 @@ def bound_signature_lines(group: dict, evidence_context: dict) -> list[dict]:
     return lines
 
 
+def matches_declaration_render_selection(group: dict, edges: Any, source_ids: Any) -> bool:
+    """Match physical print sources separately from nonempty execution edges.
+
+    This predicate grants no semantic classification or source freshness. Its
+    callers still validate exact current spans, inventories and local contracts.
+    A heading may be informational without being an executable requirement edge.
+    """
+    if (not isinstance(edges, list) or not edges
+            or not isinstance(source_ids, list) or not source_ids
+            or any(not isinstance(value, str) or not value for value in [*edges, *source_ids])
+            or len(set(edges)) != len(edges) or len(set(source_ids)) != len(source_ids)):
+        return False
+    return (group.get("evidence_ids") == source_ids
+            and [cid for cid in group.get("clause_ids", []) if cid in edges] == edges)
+
+
 def derive_fixed_declaration_candidates(
     clauses: Any, evidence_context: dict[str, Any], *, anchor: Any,
 ) -> list[dict[str, Any]]:

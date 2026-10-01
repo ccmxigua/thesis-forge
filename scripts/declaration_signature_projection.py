@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import copy
 import re
-from fixed_declaration_source import derive_fixed_declaration_candidates, bound_signature_lines
+from fixed_declaration_source import derive_fixed_declaration_candidates, bound_signature_lines, matches_declaration_render_selection
 from native_semantic_review import _exact_clause_source_text, NativeSemanticReviewError
 from source_atom_metadata import bind_atom_quote
 from semantic_contract import sha256_json
@@ -83,7 +83,8 @@ def project_signature_only_declarations(response, chunk, *, validate):
                 if (kept_props.get("before_role") == props["before_role"] and len(kept_items) == 1
                         and kept_items[0].get("source_evidence_ids") == group["evidence_ids"]
                         and kept_items[0].get("source_signature_lines") == lines
-                        and group["heading_clause_id"] in (kept.get("clause_ids") or [])):
+                        and matches_declaration_render_selection(group, kept.get("clause_ids"),
+                            kept_items[0].get("source_evidence_ids"))):
                     matches.append((other_index, group, lines))
         if len(matches) != 1:
             return None, []

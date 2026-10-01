@@ -328,10 +328,12 @@ that the real-world action occurred. Administrative approval/marking regions
 remain conditional cover structures, not fixed declarations.
 
 The declaration's optional `source_fragment_clause_ids` is likewise a render
-selector, not an executable obligation edge. It may include external pending
-clauses only as one unique complete current heading/body grouping selected by
-the same nested source evidence. Each extra clause must retain nonempty human,
-unverifiable obligations; exact source spans, full paragraph coverage and
+selector, not an executable obligation edge. It may include informational
+headings/connective context without obligations and external pending clauses,
+only as one unique complete current heading/body grouping selected by the same
+nested source evidence. The heading need not be an executable edge. Every
+external extra clause retains nonempty human, unverifiable obligations;
+exact current source spans and locations, full paragraph coverage and
 role-native text are still checked. No requirement edge or review changes,
 and the projection audit lists render-only and executable clauses separately.
 Other roles keep the ordinary selector-subset restriction. Signature lines

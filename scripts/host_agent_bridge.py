@@ -207,6 +207,7 @@ from host_review_schema import (  # noqa: E402
 from source_literal_binding import (  # noqa: E402
     SourceFragmentBindingError,
     compose_source_fragments,
+    normalize_clause_literal,
     materialize_source_fragment_literals,
 )
 from host_runtime import (  # noqa: E402
@@ -243,6 +244,7 @@ from administrative_relation_projection import project_administrative_copies
 from responsibility_projection import project_redundant_render_entities
 from responsibility_ledger import canonical_review_atom
 from repair_transaction import repair_receipt
+from source_atom_metadata import project_atom_metadata, bind_atom_quote
 from semantic_source_references import (  # noqa: E402
     REFERENCE_PROTOCOL,
     bind_validated_source_reference_selections,
@@ -2624,6 +2626,64 @@ def _source_fragment_binding_retry_allowed(
     )
 
 
+def _atom_metadata_retry_path_allowed(previous, current, records, path, chunk):
+    """Authorize a representation fix only at its original atom position.
+
+    The whole atom and classification must otherwise match. A quote error
+    cannot authorize deleting an obligation, changing its target/status, or
+    moving it to a different array position.
+    """
+    match = re.fullmatch(r"\$\.clause_reviews\[(\d+)\]\.obligations\[(\d+)\]\.(source_quote|route)", path)
+    if (match is None or not isinstance(chunk, dict)
+            or not records or any(not isinstance(r, dict) for r in records)):
+        return False
+    projection, proofs = project_atom_metadata(previous, records, chunk)
+    if projection is None and match[3] == "source_quote":
+        # A previously rejected contextual quotation may be shortened to the
+        # same source atom without losing lexical content. Both quotations
+        # must independently bind to this exact occurrence; no invented text.
+        i, j = int(match[1]), int(match[2])
+        try:
+            old_review, new_review = previous["clause_reviews"][i], current["clause_reviews"][i]
+            old_atom, new_atom = old_review["obligations"][j], new_review["obligations"][j]
+            source_records = [r for r in records if r.get("json_pointer") == path]
+            if (len(source_records) != 1 or source_records[0].get("response_sha256") != _response_sha256(previous)
+                    or source_records[0].get("code") != "contract_validation_error"
+                    or source_records[0].get("raw_error") != f"{path}: must_equal_current_source_subspan"
+                    or source_records[0].get("clause_id") != old_review.get("clause_id")):
+                return False
+            clause_map = {c["id"]: c for c in chunk["clauses"]}
+            if len(clause_map) != len(chunk["clauses"]):
+                return False
+            for quote in (old_atom["source_quote"], new_atom["source_quote"]):
+                bind_atom_quote(quote, old_review["clause_id"], clause_map, chunk.get("evidence_context"))
+            if normalize_clause_literal(old_atom["source_quote"]) != normalize_clause_literal(new_atom["source_quote"]):
+                return False
+            projection = copy.deepcopy(previous)
+            projection["clause_reviews"][i]["obligations"][j]["source_quote"] = new_atom["source_quote"]
+            proofs = [{"json_pointer": path, "field": "source_quote"}]
+        except (ValueError, KeyError, IndexError, TypeError):
+            return False
+    if projection is None or not any(proof["json_pointer"] == path for proof in proofs):
+        return False
+    i, j, field = int(match[1]), int(match[2]), match[3]
+    try:
+        old_review, new_review = previous["clause_reviews"][i], current["clause_reviews"][i]
+        old_atom, new_atom = old_review["obligations"][j], new_review["obligations"][j]
+        if (old_review.get("clause_id") != new_review.get("clause_id")
+                or old_review.get("classification") != new_review.get("classification")
+                or len(old_review["obligations"]) != len(new_review["obligations"])):
+            return False
+        allowed_fields = {p["field"] for p in proofs if p["json_pointer"].startswith(
+            f"$.clause_reviews[{i}].obligations[{j}].")}
+        if ({k: v for k, v in old_atom.items() if k not in allowed_fields}
+                != {k: v for k, v in new_atom.items() if k not in allowed_fields}):
+            return False
+        return new_atom.get(field) == projection["clause_reviews"][i]["obligations"][j][field]
+    except (KeyError, IndexError, TypeError):
+        return False
+
+
 def _retry_changes_allowed(
     records: list[dict[str, Any]], changed_paths: list[str], *, contract_version: str,
     previous_response: Any = None, current_response: Any = None,
@@ -2823,6 +2883,8 @@ def _retry_changes_allowed(
         return True
 
     for path in changed_paths:
+        if _atom_metadata_retry_path_allowed(previous_response, current_response, records, path, chunk):
+            continue
         if cover_placeholder_repair:
             match = re.fullmatch(
                 r"\$\.requirements\[(\d+)\]\.properties\.institution", path,
@@ -5835,6 +5897,8 @@ def _retry_authorization_ledger(
                     related = pointer == path
                 if related:
                     matching.append(record)
+        elif _atom_metadata_retry_path_allowed(previous_response, current_response, records, path, chunk):
+            matching = [record for record in records if record.get("json_pointer") == path]
         else:
             for record in records:
                 if not isinstance(record, dict):
@@ -8799,6 +8863,9 @@ def _apply_safe_mechanical_repairs(
         current_records = contract_error_records(current_errors, response=response, chunk=chunk)
         if (current_records and sorted(_response_sha256(item) for item in current_records)
                 == sorted(_response_sha256(item) for item in error_records)):
+            metadata, metadata_audit = project_atom_metadata(response, error_records, chunk)
+            if metadata is not None:
+                return metadata, metadata_audit
             routed, route_audit = project_redundant_render_entities(
                 response, chunk, validate=validate_host_agent_response,
             )

@@ -8,6 +8,7 @@ import copy
 from typing import Any
 
 from compliance import classification_requires_requirement
+from source_atom_metadata import bind_atom_quote
 from document_text_font import document_font_scope_errors
 from evidence_context_guards import sample_content_guard
 from format_spec_validation import schema_support_errors, validate_instance
@@ -1920,9 +1921,7 @@ def validate_response(response: Any, chunk: dict[str, Any]) -> list[str]:
                 errors.append(f"$.clause_reviews[{review_index}].obligations[{atom_index}].route: responsibility_route_conflict")
             if atom.get("source_quote") is not None:
                 try:
-                    bound = compose_source_fragments([clause_id], clause_map, evidence_context)
-                    if atom["source_quote"] not in bound["text"]:
-                        raise ValueError("quote outside source atom")
+                    bind_atom_quote(atom["source_quote"], clause_id, clause_map, evidence_context)
                 except (ValueError, KeyError, TypeError):
                     errors.append(f"$.clause_reviews[{review_index}].obligations[{atom_index}].source_quote: must_equal_current_source_subspan")
         indexes = review.get("requirement_indexes")

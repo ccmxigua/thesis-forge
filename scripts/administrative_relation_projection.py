@@ -7,6 +7,7 @@ The caller must authenticate validator feedback and run independent review.
 from __future__ import annotations
 
 import copy
+import re
 from typing import Any, Callable
 
 from native_semantic_review import NativeSemanticReviewError, _exact_clause_source_text
@@ -20,6 +21,188 @@ from source_obligation_compiler import (
 
 POLICY = "source_bound_administrative_copy_projection_v1"
 EXECUTABLE = {"covered", "executable", "verify_existing"}
+
+
+def project_copied_administrative_qualifiers(
+    response: dict[str, Any], chunk: dict[str, Any], *,
+    validate: Callable[[dict[str, Any], dict[str, Any]], list[str]],
+    model_retry_response: dict[str, Any] | None = None,
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    """Remove a misbound qualifier copy, never its requirement or source duty.
+
+    The qualifier must already survive on exactly one fully source-bound
+    administrative table containing the same current table-cell edges. Both
+    requirements keep their identity, prerequisites, checks and applicability.
+    No requirement merge or relation addition is authorized by this rule.
+    Different exceptions disable mechanical cleanup. An authenticated primary
+    retry may instead propose removal at these exact validator-named fields;
+    the caller must preserve the parent and re-run independent semantic review.
+    """
+    if (response.get("contract_version") != "3.0" or response.get("conflicts")
+            or response.get("reported_conflicts")):
+        return None, []
+    requirements, clauses, reviews, evidence = (response.get("requirements"),
+        chunk.get("clauses"), response.get("clause_reviews"), chunk.get("evidence_context"))
+    provenance = chunk.get("provenance")
+    if (not all(isinstance(x, list) and x for x in (requirements, clauses, reviews))
+            or not isinstance(evidence, dict) or not isinstance(provenance, dict)
+            or not isinstance(provenance.get("run_id"), str) or not provenance["run_id"]
+            or any(not isinstance(provenance.get(k), str)
+                   or re.fullmatch(r"[0-9a-f]{64}", provenance[k]) is None
+                   for k in ("source_sha256", "clause_sha256", "evidence_sha256", "request_sha256"))):
+        return None, []
+    if "provenance" in response and response["provenance"] != provenance:
+        return None, []
+    by_id = {c.get("id"): c for c in clauses if isinstance(c, dict)}
+    review_by_id = {r.get("clause_id"): r for r in reviews if isinstance(r, dict)}
+    if (len(by_id) != len(clauses) or len(review_by_id) != len(reviews)
+            or set(by_id) != set(review_by_id)
+            or any(not isinstance(cid, str) or not cid for cid in by_id)):
+        return None, []
+    try:
+        for clause in by_id.values():
+            _exact_clause_source_text(clause, evidence)
+    except (NativeSemanticReviewError, ValueError, KeyError, TypeError):
+        return None, []
+    for clause in clauses:
+        span = clause.get("source_span", {})
+        record = evidence.get(span.get("evidence_id"), {})
+        if (not isinstance(span.get("location"), dict)
+                or span["location"] != record.get("location")
+                or clause.get("location", span["location"]) != span["location"]):
+            return None, []
+    errors = validate(response, chunk)
+    prefix = r"\$\.requirements\[(\d+)\]\.properties\.non_public_administration"
+    pattern = re.compile(prefix + r"\.(publication_default_policy|security_marking_options\[(\d+)\]\.shorter_duration_allowed): (must_be_bound_to_exact_linked_source_clause|must_be_bound_to_linked_source_clause)$")
+    targets: dict[int, list[tuple[str, int | None]]] = {}
+    for error in errors:
+        match = pattern.fullmatch(error)
+        if match is None:
+            return None, []
+        index = int(match[1])
+        if index >= len(requirements):
+            return None, []
+        targets.setdefault(index, []).append((match[2], int(match[3]) if match[3] else None))
+    if not targets:
+        return None, []
+
+    def links(req):
+        ids, eids = req.get("clause_ids"), req.get("evidence_ids")
+        if (not isinstance(ids, list) or not ids or any(cid not in by_id for cid in ids)
+                or len(set(ids)) != len(ids) or not isinstance(eids, list)
+                or len(set(eids)) != len(eids)
+                or set(eids) != {eid for cid in ids for eid in by_id[cid].get("evidence_ids", [])}):
+            return None
+        return ids
+
+    def admin(req):
+        props = req.get("properties")
+        value = props.get("non_public_administration") if isinstance(props, dict) else None
+        return value if req.get("role") == "cover" and isinstance(value, dict) else None
+
+    def typed_scope(value):
+        keys = ("status", "conditions") if model_retry_response is not None else ("status", "conditions", "exceptions")
+        return ({key: value.get(key) for key in keys}
+                if isinstance(value, dict) else value)
+
+    candidate = copy.deepcopy(response)
+    repairs = []
+    for index, fields in targets.items():
+        duplicate = requirements[index]
+        copied = admin(duplicate) if isinstance(duplicate, dict) else None
+        ids = links(duplicate) if copied else None
+        if not ids or not copied.get("fields"):
+            return None, []
+        if model_retry_response is not None:
+            model_requirements = model_retry_response.get("requirements")
+            if (not isinstance(model_requirements, list) or len(model_requirements) != len(requirements)
+                    or any(not isinstance(a, dict) or not isinstance(b, dict)
+                           or any(a.get(k) != b.get(k) for k in ("role", "field_key", "existing_requirement_id"))
+                           for a, b in zip(requirements, model_requirements))):
+                return None, []
+            proposed = admin(model_requirements[index])
+            if not proposed:
+                return None, []
+            for field, option_index in fields:
+                if option_index is None:
+                    if proposed.get(field) is not None:
+                        return None, []
+                else:
+                    proposed_options = proposed.get("security_marking_options")
+                    if (not isinstance(proposed_options, list) or not isinstance(copied.get("security_marking_options"), list)
+                            or len(proposed_options) != len(copied["security_marking_options"])
+                            or not isinstance(proposed_options[option_index], dict)
+                            or proposed_options[option_index].get("shorter_duration_allowed") is not None
+                            or {k: v for k, v in proposed_options[option_index].items() if k != "shorter_duration_allowed"}
+                               != {k: v for k, v in copied["security_marking_options"][option_index].items() if k != "shorter_duration_allowed"}):
+                        return None, []
+        for cid in ids:
+            review = review_by_id[cid]
+            atoms = review.get("obligations")
+            if (review.get("classification") not in EXECUTABLE
+                    or not isinstance(atoms, list) or not atoms
+                    or any(not isinstance(a, dict) or a.get("status") != "covered" for a in atoms)):
+                return None, []
+        locations = [by_id[cid]["source_span"]["location"] for cid in ids]
+        tables = {(loc.get("part"), loc.get("table_child_index")) for loc in locations}
+        if (len(tables) != 1 or any(not isinstance(loc.get("part"), str)
+                or type(loc.get("table_child_index")) is not int for loc in locations)):
+            return None, []
+        options = copied.get("security_marking_options")
+        anchors = []
+        for other_index, req in enumerate(requirements):
+            if other_index == index or other_index in targets or not isinstance(req, dict):
+                continue
+            retained, retained_ids = admin(req), links(req)
+            if (not retained or not retained_ids or not set(ids) <= set(retained_ids)
+                    or not _contained(copied["fields"], retained.get("fields"), ".fields")
+                    or typed_scope(copied.get("applicability")) != typed_scope(retained.get("applicability"))
+                    or typed_scope(duplicate.get("applicability")) != typed_scope(req.get("applicability"))):
+                continue
+            retained_tables = {(by_id[cid]["source_span"]["location"].get("part"),
+                                by_id[cid]["source_span"]["location"].get("table_child_index"))
+                               for cid in retained_ids
+                               if "table_child_index" in by_id[cid]["source_span"]["location"]}
+            if retained_tables != tables:
+                continue
+            bound = True
+            for field, option_index in fields:
+                if option_index is None:
+                    bound = bound and copied.get(field) == retained.get(field) == "unapproved_is_public"
+                else:
+                    retained_options = retained.get("security_marking_options")
+                    bound = bound and isinstance(options, list) and isinstance(retained_options, list)
+                    if bound:
+                        bound = (option_index < len(options) and isinstance(options[option_index], dict)
+                                 and options[option_index].get("shorter_duration_allowed") is True
+                                 and sum(o == options[option_index] for o in retained_options) == 1)
+            if bound:
+                anchors.append(other_index)
+        if len(anchors) != 1:
+            return None, []
+        projected = candidate["requirements"][index]["properties"]["non_public_administration"]
+        removed = []
+        for field, option_index in fields:
+            if option_index is None:
+                removed.append({"path": field, "value": projected.pop(field)})
+            else:
+                removed.append({"path": field, "value": projected["security_marking_options"][option_index].pop("shorter_duration_allowed")})
+        repairs.append({"rule_id": "source_bound_copied_administrative_qualifier_v1",
+            "code": "cover_binding_violation", "requirement_index": index,
+            "retained_requirement_index": anchors[0], "removed_copies": removed,
+            "source_spans": {cid: copy.deepcopy(by_id[cid]["source_span"])
+                             for cid in requirements[anchors[0]]["clause_ids"]},
+            "source_response_sha256": sha256_json(response),
+            "source_chunk_sha256": sha256_json(chunk), "provenance": copy.deepcopy(provenance),
+            "primary_proposal_sha256": sha256_json(model_retry_response) if model_retry_response is not None else None,
+            "exception_equivalence_asserted": model_retry_response is None,
+            "requirement_relations_unchanged": True, "clause_reviews_unchanged": True,
+            "independent_review_required": True, "submission_ready": False})
+    if validate(candidate, chunk):
+        return None, []
+    for repair in repairs:
+        repair["repaired_response_sha256"] = sha256_json(candidate)
+    return candidate, repairs
 
 
 def _contained(value: Any, retained: Any, path: str = "") -> bool:

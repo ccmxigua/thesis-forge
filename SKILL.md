@@ -154,6 +154,29 @@ required; pending actions remain pending and never authorize submission.
 Other layouts are not declared unsupported: they simply receive no mechanical
 copy repair and still require their ordinary source-bound semantic review.
 
+A distinct field-instance requirement must not be deleted merely because it
+copied an administrative qualifier. For the exact default-public policy and
+shorter-duration flags rejected by the current validator, code may remove only
+the misbound copies when exactly one valid current-source table requirement
+already retains the identical values. The field instance's clause/evidence
+edges must be contained in that same physical table, and the typed scope must
+match, including exception lists. Requirement count, identities, fields, source regions, prerequisites,
+checks, applicability and clause-review atoms remain unchanged. Unknown,
+conflicting, stale or ambiguously retained values fail closed; the complete
+contract and a fresh source-first review still run. Both original copies and
+the unchanged authoritative source requirements remain in the repair audit.
+This is qualifier-copy cleanup, not a semantic merge or submission approval.
+Different exception text never proves equivalent scope. With complete current
+validator feedback, a receipt-bound primary retry may explicitly propose
+removal of just the rejected qualifier copies. Code reads that proposal as a
+limited patch onto the authenticated parent, rather than accepting the whole
+model replacement. It retains both requirements' original exception lists and
+all source edges; unrelated raw edits are preserved as discarded observations
+in the retry receipt. Other values, options, identities or requirement counts
+cannot authorize this patch. It is a semantic reassessment proposal, not code
+resolving exceptions, and needs the ordinary source-bound retry authorization,
+full contract validation and a new independent review before chunk acceptance.
+
 When one response has both a non-removable external-only requirement and a
 different unbound requirement with no clause/evidence links, the two errors do
 not form a mechanical relation-addition retry. Stop before sending a parent

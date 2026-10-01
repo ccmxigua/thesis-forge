@@ -244,7 +244,9 @@ from native_semantic_review import (  # noqa: E402
 from obligation_workflow import OBLIGATION_ANALYSIS_LEDGER_PROTOCOL, work_type_for_disposition
 from table_source_context import table_context_retry_is_source_bound, table_retry_feedback_is_source_bound
 from document_text_font import materialize_document_font_references
-from administrative_relation_projection import project_administrative_copies
+from administrative_relation_projection import (
+    project_administrative_copies, project_copied_administrative_qualifiers,
+)
 from responsibility_projection import project_redundant_render_entities
 from responsibility_ledger import canonical_review_atom
 from repair_transaction import repair_receipt
@@ -704,6 +706,7 @@ _BASE_CONTRACT_REPAIR_RULES = (
     "For keyword content constraints, keep count_guidance, min_count/max_count, max_item_chars, item_length_metric, require_after_role, and separator under a content_constraints requirement at properties.keywords_zh or properties.keywords_en. Preserve a top-level keyword role only for its own declared role/style properties; do not use it as the sole representation of content constraints.",
     "Every emitted requirement must contain at least one non-null property in its role-specific properties object. A field_key identifies a content instance but is not an executable payload; do not emit properties: {} or use field_key alone. For text and cover-field roles, copy the exact evidence-backed text into properties.text; for style/layout roles, emit the declared nested style or layout property.",
     "This non-empty-payload rule applies only to actual DOCX requirements. A pure external approval, consent, application or seal duty must have pending clause-review obligations and NO requirement object. Never copy an administrative table to fill an external requirement. Bind each administrative property to its exact operative clauses: the default-public sentence, table field labels, duration choices and shorter-duration notes may share one source-region requirement with all supporting clause/evidence links. Do not add a second full-table requirement merely to satisfy a missing edge. If distinct regions, unique operations or conflicting values exist, preserve them separately for source-first review rather than merging or deleting them.",
+    "A source-bound administrative field instance may coexist with the full table. Do not copy table-wide policy or shorter-duration qualifiers onto a field-only requirement without their operative clause/evidence edges. If current validator feedback names such a misbound copy, reassess the source and propose changes only at the named qualifier fields; preserve all requirement identities, field instances, clause/evidence edges, applicability and exception lists. Never delete an existing source edge to make the feedback disappear. Distinct exceptions are not automatically equivalent and all semantic proposals need fresh independent review.",
     "For an explicit acknowledgments length clause such as '字数一般不超过500字', use the content_constraints role with the nested payload properties.acknowledgments.max_chars. Do not emit generic null-valued placeholder fields or put the limit at the role root; the bridge may compile this exact evidence-backed form mechanically.",
     "For an explicit appendix placement clause such as '附录放在正文之后另起页', use the appendices role with properties.page_break_each: true. Do not emit generic null-valued appendix fields or infer labels/titles/order from this clause; the bridge may compile only this exact evidence-backed page-break form mechanically.",
     "For a cover requirement with an empty required institution string and the declared neutral placeholder policy, preserve the cover structure and use '——'; never copy a school name or infer an institution identity from nearby evidence.",
@@ -5598,6 +5601,7 @@ def _project_validator_targeted_obligation_fields(
     parent_response: Any,
     model_retry_response: Any,
     records: list[dict[str, Any]],
+    *, chunk: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     """Project only source-inventory fields explicitly targeted by the validator.
 
@@ -5636,6 +5640,11 @@ def _project_validator_targeted_obligation_fields(
         }
     ]
     if not target_records:
+        qualifier_candidate, qualifier_audit = _project_validator_targeted_qualifier_fields(
+            parent_response, model_retry_response, records, chunk=chunk,
+        )
+        if qualifier_candidate is not None:
+            return qualifier_candidate, qualifier_audit
         audit.update(status="not_applicable", reason="no_targeted_obligation_records")
         return None, audit
 
@@ -5726,6 +5735,35 @@ def _project_validator_targeted_obligation_fields(
         "projected_response_sha256": _response_sha256(projected),
     })
     return projected, audit
+
+
+def _project_validator_targeted_qualifier_fields(parent, proposed, records, *, chunk):
+    """Read a primary proposal as a bounded patch, not a replacement graph."""
+    audit = {"policy": "validator_targeted_administrative_qualifiers_v1", "status": "not_applicable"}
+    if not isinstance(chunk, dict) or not isinstance(parent, dict) or not isinstance(proposed, dict):
+        return None, audit
+    current_records = contract_error_records(
+        validate_host_agent_response(parent, chunk), response=parent, chunk=chunk,
+    )
+    if (not current_records or any(r.get("code") != "cover_binding_violation" for r in current_records)
+            or sorted(_response_sha256(r) for r in current_records)
+               != sorted(_response_sha256(r) for r in records)):
+        return None, audit
+    candidate, repairs = project_copied_administrative_qualifiers(
+        parent, chunk, validate=validate_host_agent_response, model_retry_response=proposed,
+    )
+    if candidate is None:
+        return None, audit
+    changed = _retry_change_paths(parent, candidate)
+    if set(changed) != {r["json_pointer"] for r in current_records}:
+        return None, audit
+    audit.update(status="projected", parent_response_sha256=_response_sha256(parent),
+        model_retry_response_sha256=_response_sha256(proposed), projected_response_sha256=_response_sha256(candidate),
+        applied_paths=changed, projected_changed_paths=changed,
+        discarded_unrequested_paths=_retry_change_paths(proposed, candidate),
+        model_retry_changed_paths=_retry_change_paths(parent, proposed), source_bound_repairs=repairs,
+        primary_semantic_reassessment=True, independent_review_required=True, submission_ready=False)
+    return candidate, audit
 
 
 def _retry_path_source_binding(
@@ -8913,6 +8951,11 @@ def _apply_safe_mechanical_repairs(
             )
             if copied is not None and copy_audit:
                 return copied, copy_audit
+            qualifiers, qualifier_audit = project_copied_administrative_qualifiers(
+                response, chunk, validate=validate_host_agent_response,
+            )
+            if qualifiers is not None and qualifier_audit:
+                return qualifiers, qualifier_audit
 
     pruned, prune_audit = _prune_unbound_empty_schema_shells(response, error_records, chunk)
     if pruned is not None:
@@ -13290,8 +13333,11 @@ def run_bridge(
                                     previous_raw,
                                     current_for_authorization,
                                     semantic_parent_error_records,
+                                    chunk=chunk,
                                 )
                             )
+                            if projection_audit.get("policy") == "validator_targeted_administrative_qualifiers_v1":
+                                obligation_projection_records = semantic_parent_error_records
                             if projected_raw is not None and obligation_projection_records:
                                 projected_authorizations: list[dict[str, Any]] = []
                                 projected_retry_comparison, projected_declaration_projection = (

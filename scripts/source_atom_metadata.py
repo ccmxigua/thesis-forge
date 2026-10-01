@@ -91,9 +91,25 @@ def project_atom_metadata(response, records, chunk):
             except (ValueError, KeyError, TypeError):
                 pass
             if (not isinstance(original, str) or not normalize_clause_literal(exact)
-                    or normalize_clause_literal(original) != normalize_clause_literal(exact)):
+                    or not original.strip()):
                 continue
-            replacement = exact
+            if normalize_clause_literal(original) == normalize_clause_literal(exact):
+                replacement = exact
+            else:
+                # A typed atom can quote a proper subspan of the clause. Only
+                # whitespace runs may differ: preserve every nonblank token
+                # and delimiter, require exactly one occurrence in the bound
+                # current clause, then recover its original source bytes.
+                pattern = "".join(r"\s+" if token.isspace() else re.escape(token)
+                                  for token in re.findall(r"\s+|\S+", original.strip()))
+                matches = list(re.finditer(pattern, exact))
+                if len(matches) != 1:
+                    continue
+                replacement = matches[0].group()
+                try:
+                    bind_atom_quote(replacement, cid, clause_map, chunk.get("evidence_context"))
+                except (ValueError, KeyError, TypeError):
+                    continue
         else:
             replacement = route_for_obligation(review.get("classification"), atom.get("status"))
             if original not in ROUTES or replacement == "unknown":

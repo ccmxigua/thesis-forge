@@ -150,6 +150,43 @@ class SourceAtomMetadataTests(unittest.TestCase):
         records[0]["response_sha256"] = "0" * 64
         self.assertFalse(bridge._atom_metadata_retry_path_allowed(response, after, records, path, chunk))
 
+    def test_internal_atom_whitespace_is_restored_without_widening_to_full_clause(self):
+        response, chunk = self.example()
+        source = "学位论文作者签名：                       年    月    日"
+        clause = chunk["clauses"][0]
+        clause.update(text=source)
+        clause["source_span"].update(text=source, end_offset=len(source),
+                                    source_sha256=hashlib.sha256(source.encode()).hexdigest())
+        chunk["evidence_context"]["evidence-random"]["text"] = source
+        atom = response["clause_reviews"][0]["obligations"][0]
+        atom.update(source_quote="年 月 日", route="automatic")
+        records = self.records(response, chunk, ("source_quote",))
+        projected, audit = project_atom_metadata(response, records, chunk)
+        self.assertEqual(projected["clause_reviews"][0]["obligations"][0]["source_quote"], "年    月    日")
+        self.assertEqual({k: v for k, v in atom.items() if k != "source_quote"},
+                         {k: v for k, v in projected["clause_reviews"][0]["obligations"][0].items() if k != "source_quote"})
+        self.assertTrue(audit[0]["independent_review_required"])
+        path = "$.clause_reviews[0].obligations[0].source_quote"
+        self.assertTrue(bridge._atom_metadata_retry_path_allowed(response, projected, records, path, chunk))
+        self.assertTrue(bridge._retry_changes_allowed(records, [path], contract_version="3.0",
+                                                    previous_response=response, current_response=projected, chunk=chunk))
+        for bad_quote in ("年月日", "年 天 日", "月 日 年"):
+            atom["source_quote"] = bad_quote
+            self.assertEqual(project_atom_metadata(response, self.records(response, chunk, ("source_quote",)), chunk), (None, []))
+
+    def test_internal_atom_duplicate_occurrence_and_stale_source_are_rejected(self):
+        for source, stale in (("日期：年    月    日；又一日期：年  月  日", False),
+                              ("日期：年    月    日", True)):
+            response, chunk = self.example()
+            clause = chunk["clauses"][0]
+            clause.update(text=source)
+            clause["source_span"].update(text=source, end_offset=len(source),
+                                        source_sha256="0" * 64 if stale else hashlib.sha256(source.encode()).hexdigest())
+            chunk["evidence_context"]["evidence-random"]["text"] = source
+            atom = response["clause_reviews"][0]["obligations"][0]
+            atom.update(source_quote="年 月 日", route="automatic")
+            self.assertEqual(project_atom_metadata(response, self.records(response, chunk, ("source_quote",)), chunk), (None, []))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -52,7 +52,11 @@ execution scope. Source hashes, offsets and evidence links must still match;
 an unrelated occurrence cannot supply the quote. For validator-named metadata
 errors only, code may reconstruct a whitespace/edge-punctuation-equivalent
 quote from its original source span, or derive a route from the unchanged
-classification and obligation status. Preserve the immutable raw response and
+classification and obligation status. A proper clause subspan may restore
+whitespace runs only when every nonblank token and delimiter is unchanged and
+the current source has exactly one matching occurrence; repeated or stale
+subspans remain rejected. Never broaden that quotation to the whole clause.
+Preserve the immutable raw response and
 record the source-bound repair transaction. No actor, action, target, force,
 condition or classification is guessed or changed by this projection, and
 complete contract validation plus fresh independent semantic review remain

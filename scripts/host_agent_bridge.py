@@ -5505,6 +5505,120 @@ def _v3_unknown_property_text_requirement_change_allowed(
     return previous_rest == current_rest
 
 
+def _declaration_selector_retry_ledger(
+    previous, current, model_raw, records, chunk, comparison_previous, comparison_current,
+):
+    """Separate a blank-line selector correction from its exact source projection.
+
+    This never chooses a declaration for the model or accepts model-written
+    literals. Only removal of adjacent, blank signature evidence from the
+    heading/body selector is eligible; the same lines remain separately printed
+    and human signing obligations remain unchanged.
+    """
+    if (not isinstance(chunk, dict) or not isinstance(previous, dict)
+            or not isinstance(current, dict) or not isinstance(model_raw, dict)
+            or previous.get("contract_version") != HOST_REVIEW_CONTRACT_V3
+            or len(records) != 1 or not isinstance(records[0], dict)
+            or not _retry_fingerprints_complete(_retry_input_fingerprints(chunk))):
+        return None
+    record = records[0]
+    path = record.get("json_pointer", "")
+    match = re.fullmatch(
+        r"\$\.requirements\[(\d+)\]\.properties\.items\[(\d+)\]\.source_evidence_ids", path)
+    if (match is None or record.get("code") != "contract_validation_error"
+            or record.get("raw_error") != path + ": render_only_evidence_requires_one_exact_current_source_candidate"
+            or record.get("response_sha256") != _response_sha256(previous)):
+        return None
+    try:
+        request_body = copy.deepcopy(chunk)
+        request_body.pop("provenance", None)
+        if (chunk["provenance"].get("request_sha256") != _response_sha256(request_body)
+                or chunk["provenance"].get("clause_sha256") != _response_sha256(chunk["clauses"])):
+            return None
+        # Authenticate the whole current error bundle, not just its last error.
+        rebuilt = contract_error_records(
+            validate_host_agent_response(previous, chunk), response=previous, chunk=chunk)
+        if rebuilt != records:
+            return None
+        ri, ii = map(int, match.groups())
+        old_req = previous["requirements"][ri]
+        old_ids = old_req["properties"]["items"][ii]["source_evidence_ids"]
+        new_ids = model_raw["requirements"][ri]["properties"]["items"][ii]["source_evidence_ids"]
+        if (old_req.get("role") != "declarations" or not isinstance(old_ids, list)
+                or not isinstance(new_ids, list) or len(old_ids) != len(set(old_ids))
+                or len(new_ids) != len(set(new_ids)) or old_ids == new_ids):
+            return None
+        selected = [c for c in _fixed_declaration_candidates(
+            chunk["clauses"], chunk["evidence_context"],
+            anchor=chunk.get("declaration_anchor_preference"))
+            if c["evidence_ids"] == new_ids
+            and c["heading_clause_id"] in old_req["clause_ids"]
+            and [cid for cid in c["clause_ids"] if cid in old_req["clause_ids"]]
+                == old_req["clause_ids"]]
+        if len(selected) != 1:
+            return None
+        group = selected[0]
+        lines = bound_signature_lines(group, chunk["evidence_context"])
+        extras = [eid for eid in old_ids if eid not in new_ids]
+        if (not extras or [eid for eid in old_ids if eid in new_ids] != new_ids
+                or set(extras) != {line["source_evidence_id"] for line in lines}):
+            return None
+        expected_raw = copy.deepcopy(previous)
+        expected_raw["requirements"][ri]["properties"]["items"][ii]["source_evidence_ids"] = new_ids
+        # All graph/atom/literal edits, even an exact model-copied heading, are
+        # outside this selector-only proposal. Provenance is checked separately.
+        for value in (previous, model_raw, current):
+            if value.get("provenance") not in (None, chunk.get("provenance")):
+                return None
+        def without_provenance(value):
+            value = copy.deepcopy(value)
+            value.pop("provenance", None)
+            return value
+        if without_provenance(expected_raw) != without_provenance(model_raw):
+            return None
+        projected, audits = _materialize_fixed_declaration_source_text(expected_raw, chunk)
+        parent_projected, _ = _materialize_fixed_declaration_source_text(previous, chunk)
+        if (len(audits) != 1 or audits[0]["requirement_index"] != ri
+                or projected["requirements"][ri]["properties"]["items"][ii].get("source_signature_lines") != lines
+                or without_provenance(current) not in (without_provenance(expected_raw), without_provenance(projected))
+                or without_provenance(comparison_previous) != without_provenance(parent_projected)
+                or without_provenance(comparison_current) != without_provenance(projected)):
+            return None
+        clause_map = {c["id"]: c for c in chunk["clauses"]}
+        if len(clause_map) != len(chunk["clauses"]):
+            return None
+        # Verify every rendered paragraph and signature span, not just req edges.
+        full_source = compose_source_fragments(
+            group["clause_ids"] + group["signature_clause_ids"], clause_map, chunk["evidence_context"])
+        if validate_host_agent_response(projected, chunk):
+            return None
+        changed = _retry_change_paths(comparison_previous, comparison_current)
+        ledger = []
+        for changed_path in changed:
+            binding, evidence, complete = _retry_path_source_binding(
+                changed_path, previous, projected, records, chunk)
+            if not complete:
+                return None
+            ledger.append({
+                "path": changed_path, "rule_id": "v3_declaration_blank_signature_selector_retry",
+                "authorization_type": "source_bound_selector_and_code_projection",
+                "baseline_response_sha256": _response_sha256(previous),
+                "model_raw_response_sha256": _response_sha256(model_raw),
+                "candidate_response_sha256": _response_sha256(projected),
+                "validator_records_sha256": _response_sha256(records),
+                "model_changed_paths": [path],
+                "change_owner": "model_selector" if changed_path == path else "code_source_materialization",
+                "source_binding": binding, "source_evidence_bindings": evidence,
+                "source_binding_complete": complete, "rendered_source_binding": full_source,
+                "code_projection": copy.deepcopy(audits),
+                "semantic_review_required": True, "independent_review_required": True,
+                "submission_ready": False,
+            })
+        return ledger or None
+    except (ValueError, KeyError, TypeError, IndexError, AttributeError):
+        return None
+
+
 def _retry_semantic_change_error(
     previous_response: Any,
     current_response: Any,
@@ -5515,6 +5629,7 @@ def _retry_semantic_change_error(
     authorization_out: list[dict[str, Any]] | None = None,
     comparison_previous_response: Any | None = None,
     comparison_current_response: Any | None = None,
+    model_retry_response: Any | None = None,
 ) -> tuple[ValueError | None, list[str]]:
     """Reject semantic drift even when the retry response is still invalid.
 
@@ -5534,6 +5649,15 @@ def _retry_semantic_change_error(
         if comparison_current_response is not None else current_response
     )
     changed_paths = _retry_change_paths(comparison_previous, comparison_current)
+    selector_ledger = _declaration_selector_retry_ledger(
+        previous_response, current_response,
+        model_retry_response if model_retry_response is not None else current_response,
+        records, chunk, comparison_previous, comparison_current,
+    )
+    if selector_ledger is not None:
+        if authorization_out is not None:
+            authorization_out.extend(copy.deepcopy(selector_ledger))
+        return None, changed_paths
     authorization_previous = previous_response
     authorization_current = current_response
     # An independent source-first correction is bound to the persisted
@@ -13391,6 +13515,7 @@ def run_bridge(
                                 f"Host Agent current raw response {index} attempt {attempt}"
                             ),
                         )
+                        normalized_model_retry = copy.deepcopy(current_raw)
                         if semantic_parent_receipt.get("kind") == "unaccepted_repair_base":
                             # Feedback addresses a compiled candidate. Reproduce
                             # that same representation for the new response;
@@ -13401,7 +13526,7 @@ def run_bridge(
                             )
                         retry_parent_response = previous_raw
                         raw_model_semantic_changes = _retry_change_paths(
-                            previous_raw, current_raw,
+                            previous_raw, normalized_model_retry,
                         )
                         current_for_authorization, exact_duplicate_projection = (
                             _project_exact_duplicate_requirements(current_raw)
@@ -13443,6 +13568,7 @@ def run_bridge(
                             authorization_out=pending_retry_authorizations,
                             comparison_previous_response=previous_retry_comparison,
                             comparison_current_response=current_retry_comparison,
+                            model_retry_response=normalized_model_retry,
                         )
                         model_semantic_changes = raw_model_semantic_changes
                         retry_field_projection: dict[str, Any] | None = None
@@ -13508,6 +13634,8 @@ def run_bridge(
                             "raw_candidate_file_sha256": sha256_file(current_raw_path),
                             "raw_parent_canonical_sha256": _response_sha256(previous_raw),
                             "raw_candidate_canonical_sha256": _response_sha256(current_raw),
+                            "normalized_model_retry_sha256": _response_sha256(normalized_model_retry),
+                            "model_observation_basis": "normalized_raw_before_candidate_compilation",
                             "raw_semantic_changed_paths": model_semantic_changes,
                             "exact_duplicate_requirement_projection": copy.deepcopy(
                                 exact_duplicate_projection
@@ -13878,6 +14006,9 @@ def run_bridge(
                             elif any(item.get("rule_id") == CONDITION_REASSESSMENT_RULE
                                      for item in pending_retry_authorizations):
                                 audit["semantic_retry_change_policy"] = CONDITION_REASSESSMENT_RULE
+                            elif any(item.get("rule_id") == "v3_declaration_blank_signature_selector_retry"
+                                     for item in pending_retry_authorizations):
+                                audit["semantic_retry_change_policy"] = "v3_declaration_blank_signature_selector_retry"
                             elif (
                                 isinstance(retry_field_projection, dict)
                                 and retry_field_projection.get("status") == "projected"

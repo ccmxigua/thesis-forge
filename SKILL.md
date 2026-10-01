@@ -328,6 +328,19 @@ condition or DOCX operation lost. Preserve the removed payload and pending
 reviews in the repair audit; full validation and fresh independent review are
 still mandatory. This is not a general external-requirement deletion rule.
 
+A validator-targeted retry may remove adjacent blank signature paragraphs
+from a declaration's heading/body `source_evidence_ids` only when the model
+selects one exact current declaration group. Code never chooses the selector.
+The entire current error bundle, parent hash, request/clause hashes, source
+spans and invocation fingerprints are checked. Every other raw field stays
+unchanged, including source literals and pending human obligations. The
+compiler then prints the exact heading/body and separately bound blank
+signature lines. Retry receipts distinguish model selector changes from
+code-owned literal materialization; a supplied comparison is not proof.
+Full validation and a fresh independent source-first review remain mandatory.
+Foreign evidence, duplicate groups, filled/non-adjacent signature lines,
+stale errors or another model edit cannot use this correction path.
+
 When a user confirms that an unresolved clause is a real semantic ambiguity but
 does not provide its authoritative interpretation, record that acknowledgement
 in a run-bound `semantic-issue-confirmation` sidecar and pass it with

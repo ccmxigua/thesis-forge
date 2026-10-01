@@ -1,0 +1,1813 @@
+{
+  "source": {
+    "clauses": [
+      {
+        "id": "C00021",
+        "text": "（学术学位）",
+        "evidence_ids": [
+          "E00021"
+        ],
+        "source_kind": "paragraph",
+        "location": {
+          "part": "document",
+          "child_index": 24,
+          "order": 20
+        },
+        "part_index": 0,
+        "source_span": {
+          "evidence_id": "E00021",
+          "start_offset": 0,
+          "end_offset": 6,
+          "text": "（学术学位）",
+          "source_sha256": "611040c2295fee68782c17ac6443dbbe67ae3a16f5b51dfd3cb79e66f83489d9",
+          "location": {
+            "part": "document",
+            "child_index": 24,
+            "order": 20
+          }
+        },
+        "source_text_full": "（学术学位）",
+        "deterministic_obligation_keys": []
+      },
+      {
+        "id": "C00022",
+        "text": "论文题目（中文）",
+        "evidence_ids": [
+          "E00022"
+        ],
+        "source_kind": "paragraph",
+        "location": {
+          "part": "document",
+          "child_index": 25,
+          "order": 21
+        },
+        "part_index": 0,
+        "source_span": {
+          "evidence_id": "E00022",
+          "start_offset": 0,
+          "end_offset": 8,
+          "text": "论文题目（中文）",
+          "source_sha256": "3f8d3dd03edc1fcbd255b8501917fcdf97ef1499f345589f0cc426de5a0dfad6",
+          "location": {
+            "part": "document",
+            "child_index": 25,
+            "order": 21
+          }
+        },
+        "source_text_full": "论文题目（中文）",
+        "deterministic_obligation_keys": []
+      },
+      {
+        "id": "C00023",
+        "text": "English title（英文）",
+        "evidence_ids": [
+          "E00023"
+        ],
+        "source_kind": "paragraph",
+        "location": {
+          "part": "document",
+          "child_index": 26,
+          "order": 22
+        },
+        "part_index": 0,
+        "source_span": {
+          "evidence_id": "E00023",
+          "start_offset": 0,
+          "end_offset": 17,
+          "text": "English title（英文）",
+          "source_sha256": "164bc4aa4c8c5d821bdb909b07b705fc2788696b77478f8b3ceb0156623105bb",
+          "location": {
+            "part": "document",
+            "child_index": 26,
+            "order": 22
+          }
+        },
+        "source_text_full": "English title（英文）",
+        "deterministic_obligation_keys": []
+      },
+      {
+        "id": "C00024",
+        "text": "论文作者 指导教师",
+        "evidence_ids": [
+          "E00024"
+        ],
+        "source_kind": "paragraph",
+        "location": {
+          "part": "document",
+          "child_index": 28,
+          "order": 23
+        },
+        "part_index": 0,
+        "source_span": {
+          "evidence_id": "E00024",
+          "start_offset": 0,
+          "end_offset": 34,
+          "text": "论文作者                          指导教师",
+          "source_sha256": "336d12f5aca91b861261ba3006aec60d8f0c59a49eef02134ca000360ecf6e27",
+          "location": {
+            "part": "document",
+            "child_index": 28,
+            "order": 23
+          }
+        },
+        "source_text_full": "论文作者 指导教师",
+        "deterministic_obligation_keys": []
+      },
+      {
+        "id": "C00025",
+        "text": "申请学位 培养单位",
+        "evidence_ids": [
+          "E00025"
+        ],
+        "source_kind": "paragraph",
+        "location": {
+          "part": "document",
+          "child_index": 29,
+          "order": 24
+        },
+        "part_index": 0,
+        "source_span": {
+          "evidence_id": "E00025",
+          "start_offset": 0,
+          "end_offset": 34,
+          "text": "申请学位                          培养单位",
+          "source_sha256": "aab245dc4267c7bb97ccbf6903a6f8ac4bb132d0c3b5bb432645219d2d2b6a54",
+          "location": {
+            "part": "document",
+            "child_index": 29,
+            "order": 24
+          }
+        },
+        "source_text_full": "申请学位 培养单位",
+        "deterministic_obligation_keys": []
+      },
+      {
+        "id": "C00026",
+        "text": "一级学科 二级学科",
+        "evidence_ids": [
+          "E00026"
+        ],
+        "source_kind": "paragraph",
+        "location": {
+          "part": "document",
+          "child_index": 30,
+          "order": 25
+        },
+        "part_index": 0,
+        "source_span": {
+          "evidence_id": "E00026",
+          "start_offset": 0,
+          "end_offset": 34,
+          "text": "一级学科                          二级学科",
+          "source_sha256": "daa5507509bd6ab755cf6bd4e031f378c59da95d357f1cfb9544e1d6576f0cfb",
+          "location": {
+            "part": "document",
+            "child_index": 30,
+            "order": 25
+          }
+        },
+        "source_text_full": "一级学科 二级学科",
+        "deterministic_obligation_keys": []
+      },
+      {
+        "id": "C00027",
+        "text": "答辩委员会",
+        "evidence_ids": [
+          "E00027"
+        ],
+        "source_kind": "paragraph",
+        "location": {
+          "part": "document",
+          "child_index": 31,
+          "order": 26
+        },
+        "part_index": 0,
+        "source_span": {
+          "evidence_id": "E00027",
+          "start_offset": 0,
+          "end_offset": 5,
+          "text": "答辩委员会",
+          "source_sha256": "2dc64a05584a6e1605308d5a6e36cc8b2501380417fb794f0de2a277994b171c",
+          "location": {
+            "part": "document",
+            "child_index": 31,
+            "order": 26
+          }
+        },
+        "source_text_full": "答辩委员会：",
+        "deterministic_obligation_keys": []
+      },
+      {
+        "id": "C00028",
+        "text": "主席 技术职称 所在单位",
+        "evidence_ids": [
+          "E00028"
+        ],
+        "source_kind": "paragraph",
+        "location": {
+          "part": "document",
+          "child_index": 32,
+          "order": 27
+        },
+        "part_index": 0,
+        "source_span": {
+          "evidence_id": "E00028",
+          "start_offset": 0,
+          "end_offset": 32,
+          "text": "主席            技术职称          所在单位",
+          "source_sha256": "07f3535c7871e6226032dc6d33ac0182734217dc5f9dc8b5882e045d5425a2ba",
+          "location": {
+            "part": "document",
+            "child_index": 32,
+            "order": 27
+          }
+        },
+        "source_text_full": "主席 技术职称 所在单位",
+        "deterministic_obligation_keys": []
+      },
+      {
+        "id": "C00029",
+        "text": "评阅人 技术职称 所在单位",
+        "evidence_ids": [
+          "E00029"
+        ],
+        "source_kind": "paragraph",
+        "location": {
+          "part": "document",
+          "child_index": 33,
+          "order": 28
+        },
+        "part_index": 0,
+        "source_span": {
+          "evidence_id": "E00029",
+          "start_offset": 0,
+          "end_offset": 31,
+          "text": "评阅人          技术职称          所在单位",
+          "source_sha256": "8cf209750d78f6b2957482a5a602eaaa6379d50444afa8ef83d86e918462014b",
+          "location": {
+            "part": "document",
+            "child_index": 33,
+            "order": 28
+          }
+        },
+        "source_text_full": "评阅人 技术职称 所在单位",
+        "deterministic_obligation_keys": []
+      },
+      {
+        "id": "C00030",
+        "text": "委员 技术职称 所在单位",
+        "evidence_ids": [
+          "E00030"
+        ],
+        "source_kind": "paragraph",
+        "location": {
+          "part": "document",
+          "child_index": 34,
+          "order": 29
+        },
+        "part_index": 0,
+        "source_span": {
+          "evidence_id": "E00030",
+          "start_offset": 0,
+          "end_offset": 32,
+          "text": "委员            技术职称          所在单位",
+          "source_sha256": "716d670e0224d04a344e84a014ad08c294c503d4fe8b01a3e21e3260a2072ae8",
+          "location": {
+            "part": "document",
+            "child_index": 34,
+            "order": 29
+          }
+        },
+        "source_text_full": "委员 技术职称 所在单位",
+        "deterministic_obligation_keys": []
+      },
+      {
+        "id": "C00031",
+        "text": "秘书 技术职称 所在单位",
+        "evidence_ids": [
+          "E00031"
+        ],
+        "source_kind": "paragraph",
+        "location": {
+          "part": "document",
+          "child_index": 35,
+          "order": 30
+        },
+        "part_index": 0,
+        "source_span": {
+          "evidence_id": "E00031",
+          "start_offset": 0,
+          "end_offset": 32,
+          "text": "秘书            技术职称          所在单位",
+          "source_sha256": "e465aedf8e3addb5742cf3d77ba84a8e8752e16fe3c98e631333f00e3641499d",
+          "location": {
+            "part": "document",
+            "child_index": 35,
+            "order": 30
+          }
+        },
+        "source_text_full": "秘书 技术职称 所在单位",
+        "deterministic_obligation_keys": []
+      },
+      {
+        "id": "C00032",
+        "text": "年 月",
+        "evidence_ids": [
+          "E00032"
+        ],
+        "source_kind": "paragraph",
+        "location": {
+          "part": "document",
+          "child_index": 38,
+          "order": 31
+        },
+        "part_index": 0,
+        "source_span": {
+          "evidence_id": "E00032",
+          "start_offset": 0,
+          "end_offset": 4,
+          "text": "年  月",
+          "source_sha256": "07d6ed42b1f5ff061cb93d2e6119614996dab8f1a8a115e7ddad84dad95fb64a",
+          "location": {
+            "part": "document",
+            "child_index": 38,
+            "order": 31
+          }
+        },
+        "source_text_full": "年 月",
+        "deterministic_obligation_keys": []
+      },
+      {
+        "id": "C00033",
+        "text": "北京体育大学学位论文原创性声明",
+        "evidence_ids": [
+          "E00033"
+        ],
+        "source_kind": "paragraph",
+        "location": {
+          "part": "document",
+          "child_index": 39,
+          "order": 32
+        },
+        "part_index": 0,
+        "source_span": {
+          "evidence_id": "E00033",
+          "start_offset": 0,
+          "end_offset": 15,
+          "text": "北京体育大学学位论文原创性声明",
+          "source_sha256": "dee65d50fd4d5d8005c286b6a46703d0c73d22949826314586197a67cb836ea5",
+          "location": {
+            "part": "document",
+            "child_index": 39,
+            "order": 32
+          }
+        },
+        "source_text_full": "北京体育大学学位论文原创性声明",
+        "deterministic_obligation_keys": []
+      },
+      {
+        "id": "C00034",
+        "text": "本人郑重声明：所呈交的学位论文，是本人在导师指导下进行研究工作所取得的研究成果",
+        "evidence_ids": [
+          "E00034"
+        ],
+        "source_kind": "paragraph",
+        "location": {
+          "part": "document",
+          "child_index": 40,
+          "order": 33
+        },
+        "part_index": 0,
+        "source_span": {
+          "evidence_id": "E00034",
+          "start_offset": 0,
+          "end_offset": 39,
+          "text": "本人郑重声明：所呈交的学位论文，是本人在导师指导下进行研究工作所取得的研究成果",
+          "source_sha256": "3c772473c3c41981f85b35ecd3f5b5e1eaf06db289dbeb1cce1c9683d6d09e90",
+          "location": {
+            "part": "document",
+            "child_index": 40,
+            "order": 33
+          }
+        },
+        "source_text_full": "本人郑重声明：所呈交的学位论文，是本人在导师指导下进行研究工作所取得的研究成果。除文中已经注明引用的内容外，本学位论文的研究成果不包含任何他人创作的、已公开发表或者没有公开发表的作品的内容。对本论文所涉及的研究工作做出贡献的其他个人和集体，均已在文中以明确方式标明。本学位论文原创性声明的法律责任由本人承担。",
+        "deterministic_obligation_keys": []
+      },
+      {
+        "id": "C00035",
+        "text": "除文中已经注明引用的内容外，本学位论文的研究成果不包含任何他人创作的、已公开发表或者没有公开发表的作品的内容",
+        "evidence_ids": [
+          "E00034"
+        ],
+        "source_kind": "paragraph",
+        "location": {
+          "part": "document",
+          "child_index": 40,
+          "order": 33
+        },
+        "part_index": 1,
+        "source_span": {
+          "evidence_id": "E00034",
+          "start_offset": 40,
+          "end_offset": 94,
+          "text": "除文中已经注明引用的内容外，本学位论文的研究成果不包含任何他人创作的、已公开发表或者没有公开发表的作品的内容",
+          "source_sha256": "3c772473c3c41981f85b35ecd3f5b5e1eaf06db289dbeb1cce1c9683d6d09e90",
+          "location": {
+            "part": "document",
+            "child_index": 40,
+            "order": 33
+          }
+        },
+        "source_text_full": "本人郑重声明：所呈交的学位论文，是本人在导师指导下进行研究工作所取得的研究成果。除文中已经注明引用的内容外，本学位论文的研究成果不包含任何他人创作的、已公开发表或者没有公开发表的作品的内容。对本论文所涉及的研究工作做出贡献的其他个人和集体，均已在文中以明确方式标明。本学位论文原创性声明的法律责任由本人承担。",
+        "deterministic_obligation_keys": []
+      },
+      {
+        "id": "C00036",
+        "text": "对本论文所涉及的研究工作做出贡献的其他个人和集体，均已在文中以明确方式标明",
+        "evidence_ids": [
+          "E00034"
+        ],
+        "source_kind": "paragraph",
+        "location": {
+          "part": "document",
+          "child_index": 40,
+          "order": 33
+        },
+        "part_index": 2,
+        "source_span": {
+          "evidence_id": "E00034",
+          "start_offset": 95,
+          "end_offset": 132,
+          "text": "对本论文所涉及的研究工作做出贡献的其他个人和集体，均已在文中以明确方式标明",
+          "source_sha256": "3c772473c3c41981f85b35ecd3f5b5e1eaf06db289dbeb1cce1c9683d6d09e90",
+          "location": {
+            "part": "document",
+            "child_index": 40,
+            "order": 33
+          }
+        },
+        "source_text_full": "本人郑重声明：所呈交的学位论文，是本人在导师指导下进行研究工作所取得的研究成果。除文中已经注明引用的内容外，本学位论文的研究成果不包含任何他人创作的、已公开发表或者没有公开发表的作品的内容。对本论文所涉及的研究工作做出贡献的其他个人和集体，均已在文中以明确方式标明。本学位论文原创性声明的法律责任由本人承担。",
+        "deterministic_obligation_keys": []
+      },
+      {
+        "id": "C00037",
+        "text": "本学位论文原创性声明的法律责任由本人承担",
+        "evidence_ids": [
+          "E00034"
+        ],
+        "source_kind": "paragraph",
+        "location": {
+          "part": "document",
+          "child_index": 40,
+          "order": 33
+        },
+        "part_index": 3,
+        "source_span": {
+          "evidence_id": "E00034",
+          "start_offset": 133,
+          "end_offset": 153,
+          "text": "本学位论文原创性声明的法律责任由本人承担",
+          "source_sha256": "3c772473c3c41981f85b35ecd3f5b5e1eaf06db289dbeb1cce1c9683d6d09e90",
+          "location": {
+            "part": "document",
+            "child_index": 40,
+            "order": 33
+          }
+        },
+        "source_text_full": "本人郑重声明：所呈交的学位论文，是本人在导师指导下进行研究工作所取得的研究成果。除文中已经注明引用的内容外，本学位论文的研究成果不包含任何他人创作的、已公开发表或者没有公开发表的作品的内容。对本论文所涉及的研究工作做出贡献的其他个人和集体，均已在文中以明确方式标明。本学位论文原创性声明的法律责任由本人承担。",
+        "deterministic_obligation_keys": []
+      },
+      {
+        "id": "C00038",
+        "text": "学位论文作者签名： 年 月 日",
+        "evidence_ids": [
+          "E00035"
+        ],
+        "source_kind": "paragraph",
+        "location": {
+          "part": "document",
+          "child_index": 41,
+          "order": 34
+        },
+        "part_index": 0,
+        "source_span": {
+          "evidence_id": "E00035",
+          "start_offset": 0,
+          "end_offset": 43,
+          "text": "学位论文作者签名：                       年    月    日",
+          "source_sha256": "f4288e7735ee7bb8a205f845e21244ec8e69b7308a1f9c499a5d025a2780ed74",
+          "location": {
+            "part": "document",
+            "child_index": 41,
+            "order": 34
+          }
+        },
+        "source_text_full": "学位论文作者签名： 年 月 日",
+        "deterministic_obligation_keys": []
+      }
+    ],
+    "evidence_context": {
+      "E00021": {
+        "id": "E00021",
+        "kind": "paragraph",
+        "text": "（学术学位）",
+        "style_id": "Default",
+        "runs": [
+          {
+            "text": "（学术学位）",
+            "format": {
+              "fonts": {
+                "hAnsi": "宋体"
+              },
+              "size_pt": 16.0
+            }
+          }
+        ],
+        "location": {
+          "part": "document",
+          "child_index": 24,
+          "order": 20
+        },
+        "context_before": [
+          "密级：",
+          "硕 士 学 位 论 文"
+        ],
+        "context_after": [
+          "论文题目（中文）",
+          "English title（英文）"
+        ],
+        "style_name": "Default",
+        "xml_locator": {
+          "part": "document",
+          "child_index": 24,
+          "order": 20
+        }
+      },
+      "E00022": {
+        "id": "E00022",
+        "kind": "paragraph",
+        "text": "论文题目（中文）",
+        "style_id": "Default",
+        "runs": [
+          {
+            "text": "论文题目",
+            "format": {
+              "fonts": {
+                "eastAsia": "黑体",
+                "ascii": "黑体",
+                "hAnsi": "黑体"
+              },
+              "size_pt": 16.0
+            }
+          },
+          {
+            "text": "（中文）",
+            "format": {
+              "fonts": {
+                "eastAsia": "黑体",
+                "ascii": "黑体",
+                "hAnsi": "黑体"
+              },
+              "size_pt": 16.0
+            }
+          }
+        ],
+        "location": {
+          "part": "document",
+          "child_index": 25,
+          "order": 21
+        },
+        "context_before": [
+          "硕 士 学 位 论 文",
+          "（学术学位）"
+        ],
+        "context_after": [
+          "English title（英文）",
+          "论文作者                          指导教师"
+        ],
+        "style_name": "Default",
+        "xml_locator": {
+          "part": "document",
+          "child_index": 25,
+          "order": 21
+        }
+      },
+      "E00023": {
+        "id": "E00023",
+        "kind": "paragraph",
+        "text": "English title（英文）",
+        "style_id": "Default",
+        "runs": [
+          {
+            "text": "English title",
+            "format": {
+              "fonts": {
+                "ascii": "Times New Roman"
+              },
+              "size_pt": 16.0
+            }
+          },
+          {
+            "text": "（英文）",
+            "format": {
+              "fonts": {
+                "ascii": "Times New Roman"
+              },
+              "size_pt": 16.0
+            }
+          }
+        ],
+        "location": {
+          "part": "document",
+          "child_index": 26,
+          "order": 22
+        },
+        "context_before": [
+          "（学术学位）",
+          "论文题目（中文）"
+        ],
+        "context_after": [
+          "论文作者                          指导教师",
+          "申请学位                          培养单位"
+        ],
+        "style_name": "Default",
+        "xml_locator": {
+          "part": "document",
+          "child_index": 26,
+          "order": 22
+        }
+      },
+      "E00024": {
+        "id": "E00024",
+        "kind": "paragraph",
+        "text": "论文作者                          指导教师",
+        "style_id": "af",
+        "runs": [
+          {
+            "text": "论文作者",
+            "format": {
+              "fonts": {},
+              "size_pt": 12.0
+            }
+          },
+          {
+            "text": "指导教师",
+            "format": {
+              "fonts": {},
+              "size_pt": 12.0
+            }
+          }
+        ],
+        "location": {
+          "part": "document",
+          "child_index": 28,
+          "order": 23
+        },
+        "context_before": [
+          "论文题目（中文）",
+          "English title（英文）"
+        ],
+        "context_after": [
+          "申请学位                          培养单位",
+          "一级学科                          二级学科"
+        ],
+        "style_name": "段",
+        "xml_locator": {
+          "part": "document",
+          "child_index": 28,
+          "order": 23
+        }
+      },
+      "E00025": {
+        "id": "E00025",
+        "kind": "paragraph",
+        "text": "申请学位                          培养单位",
+        "style_id": "af",
+        "runs": [
+          {
+            "text": "申请学位",
+            "format": {
+              "fonts": {},
+              "size_pt": 12.0
+            }
+          },
+          {
+            "text": "培养单位",
+            "format": {
+              "fonts": {},
+              "size_pt": 12.0
+            }
+          }
+        ],
+        "location": {
+          "part": "document",
+          "child_index": 29,
+          "order": 24
+        },
+        "context_before": [
+          "English title（英文）",
+          "论文作者                          指导教师"
+        ],
+        "context_after": [
+          "一级学科                          二级学科",
+          "答辩委员会："
+        ],
+        "style_name": "段",
+        "xml_locator": {
+          "part": "document",
+          "child_index": 29,
+          "order": 24
+        }
+      },
+      "E00026": {
+        "id": "E00026",
+        "kind": "paragraph",
+        "text": "一级学科                          二级学科",
+        "style_id": "af",
+        "runs": [
+          {
+            "text": "一级学科",
+            "format": {
+              "fonts": {},
+              "size_pt": 12.0
+            }
+          },
+          {
+            "text": "二级学科",
+            "format": {
+              "fonts": {},
+              "size_pt": 12.0
+            }
+          }
+        ],
+        "location": {
+          "part": "document",
+          "child_index": 30,
+          "order": 25
+        },
+        "context_before": [
+          "论文作者                          指导教师",
+          "申请学位                          培养单位"
+        ],
+        "context_after": [
+          "答辩委员会：",
+          "主席            技术职称          所在单位"
+        ],
+        "style_name": "段",
+        "xml_locator": {
+          "part": "document",
+          "child_index": 30,
+          "order": 25
+        }
+      },
+      "E00027": {
+        "id": "E00027",
+        "kind": "paragraph",
+        "text": "答辩委员会：",
+        "style_id": "af",
+        "runs": [
+          {
+            "text": "答辩委员会",
+            "format": {
+              "fonts": {},
+              "size_pt": 12.0
+            }
+          },
+          {
+            "text": "：",
+            "format": {
+              "fonts": {},
+              "size_pt": 12.0
+            }
+          }
+        ],
+        "location": {
+          "part": "document",
+          "child_index": 31,
+          "order": 26
+        },
+        "context_before": [
+          "申请学位                          培养单位",
+          "一级学科                          二级学科"
+        ],
+        "context_after": [
+          "主席            技术职称          所在单位",
+          "评阅人          技术职称          所在单位"
+        ],
+        "style_name": "段",
+        "xml_locator": {
+          "part": "document",
+          "child_index": 31,
+          "order": 26
+        }
+      },
+      "E00028": {
+        "id": "E00028",
+        "kind": "paragraph",
+        "text": "主席            技术职称          所在单位",
+        "style_id": "af",
+        "runs": [
+          {
+            "text": "主席",
+            "format": {
+              "fonts": {},
+              "size_pt": 12.0
+            }
+          },
+          {
+            "text": "技术职称",
+            "format": {
+              "fonts": {},
+              "size_pt": 12.0
+            }
+          },
+          {
+            "text": "所在单位",
+            "format": {
+              "fonts": {},
+              "size_pt": 12.0
+            }
+          }
+        ],
+        "location": {
+          "part": "document",
+          "child_index": 32,
+          "order": 27
+        },
+        "context_before": [
+          "一级学科                          二级学科",
+          "答辩委员会："
+        ],
+        "context_after": [
+          "评阅人          技术职称          所在单位",
+          "委员            技术职称          所在单位"
+        ],
+        "style_name": "段",
+        "xml_locator": {
+          "part": "document",
+          "child_index": 32,
+          "order": 27
+        }
+      },
+      "E00029": {
+        "id": "E00029",
+        "kind": "paragraph",
+        "text": "评阅人          技术职称          所在单位",
+        "style_id": "af",
+        "runs": [
+          {
+            "text": "评阅人",
+            "format": {
+              "fonts": {},
+              "size_pt": 12.0
+            }
+          },
+          {
+            "text": "技术职称",
+            "format": {
+              "fonts": {},
+              "size_pt": 12.0
+            }
+          },
+          {
+            "text": "所在单位",
+            "format": {
+              "fonts": {},
+              "size_pt": 12.0
+            }
+          }
+        ],
+        "location": {
+          "part": "document",
+          "child_index": 33,
+          "order": 28
+        },
+        "context_before": [
+          "答辩委员会：",
+          "主席            技术职称          所在单位"
+        ],
+        "context_after": [
+          "委员            技术职称          所在单位",
+          "秘书            技术职称          所在单位"
+        ],
+        "style_name": "段",
+        "xml_locator": {
+          "part": "document",
+          "child_index": 33,
+          "order": 28
+        }
+      },
+      "E00030": {
+        "id": "E00030",
+        "kind": "paragraph",
+        "text": "委员            技术职称          所在单位",
+        "style_id": "af",
+        "runs": [
+          {
+            "text": "委员",
+            "format": {
+              "fonts": {},
+              "size_pt": 12.0
+            }
+          },
+          {
+            "text": "技术职称",
+            "format": {
+              "fonts": {},
+              "size_pt": 12.0
+            }
+          },
+          {
+            "text": "所在单位",
+            "format": {
+              "fonts": {},
+              "size_pt": 12.0
+            }
+          }
+        ],
+        "location": {
+          "part": "document",
+          "child_index": 34,
+          "order": 29
+        },
+        "context_before": [
+          "主席            技术职称          所在单位",
+          "评阅人          技术职称          所在单位"
+        ],
+        "context_after": [
+          "秘书            技术职称          所在单位",
+          "年  月"
+        ],
+        "style_name": "段",
+        "xml_locator": {
+          "part": "document",
+          "child_index": 34,
+          "order": 29
+        }
+      },
+      "E00031": {
+        "id": "E00031",
+        "kind": "paragraph",
+        "text": "秘书            技术职称          所在单位",
+        "style_id": "af",
+        "runs": [
+          {
+            "text": "秘书",
+            "format": {
+              "fonts": {},
+              "size_pt": 12.0
+            }
+          },
+          {
+            "text": "技术职称",
+            "format": {
+              "fonts": {},
+              "size_pt": 12.0
+            }
+          },
+          {
+            "text": "所在单位",
+            "format": {
+              "fonts": {},
+              "size_pt": 12.0
+            }
+          }
+        ],
+        "location": {
+          "part": "document",
+          "child_index": 35,
+          "order": 30
+        },
+        "context_before": [
+          "评阅人          技术职称          所在单位",
+          "委员            技术职称          所在单位"
+        ],
+        "context_after": [
+          "年  月",
+          "北京体育大学学位论文原创性声明"
+        ],
+        "style_name": "段",
+        "xml_locator": {
+          "part": "document",
+          "child_index": 35,
+          "order": 30
+        }
+      },
+      "E00032": {
+        "id": "E00032",
+        "kind": "paragraph",
+        "text": "年  月",
+        "style_id": null,
+        "runs": [
+          {
+            "text": "年",
+            "format": {
+              "fonts": {},
+              "size_pt": 14.0
+            }
+          },
+          {
+            "text": "月",
+            "format": {
+              "fonts": {},
+              "size_pt": 14.0
+            }
+          }
+        ],
+        "location": {
+          "part": "document",
+          "child_index": 38,
+          "order": 31
+        },
+        "context_before": [
+          "委员            技术职称          所在单位",
+          "秘书            技术职称          所在单位"
+        ],
+        "context_after": [
+          "北京体育大学学位论文原创性声明",
+          "本人郑重声明：所呈交的学位论文，是本人在导师指导下进行研究工作所取得的研究成果。除文中已经注明引用的内容外，本学位论文的研究成果不包含任何他人创作的、已公开发表或者没有公开发表的作品的内容。对本论文所涉及的研究工作做出贡献的其他个人和集体，均已在文中以明确方式标明。本学位论文原创性声明的法律责任由本人承担。"
+        ],
+        "style_name": null,
+        "xml_locator": {
+          "part": "document",
+          "child_index": 38,
+          "order": 31
+        }
+      },
+      "E00033": {
+        "id": "E00033",
+        "kind": "paragraph",
+        "text": "北京体育大学学位论文原创性声明",
+        "style_id": null,
+        "runs": [
+          {
+            "text": "北京体育大学",
+            "format": {
+              "fonts": {
+                "eastAsia": "黑体"
+              },
+              "size_pt": 16.0,
+              "bold": true
+            }
+          },
+          {
+            "text": "学位论文原创性声明",
+            "format": {
+              "fonts": {
+                "eastAsia": "黑体"
+              },
+              "size_pt": 16.0,
+              "bold": true
+            }
+          }
+        ],
+        "location": {
+          "part": "document",
+          "child_index": 39,
+          "order": 32
+        },
+        "context_before": [
+          "秘书            技术职称          所在单位",
+          "年  月"
+        ],
+        "context_after": [
+          "本人郑重声明：所呈交的学位论文，是本人在导师指导下进行研究工作所取得的研究成果。除文中已经注明引用的内容外，本学位论文的研究成果不包含任何他人创作的、已公开发表或者没有公开发表的作品的内容。对本论文所涉及的研究工作做出贡献的其他个人和集体，均已在文中以明确方式标明。本学位论文原创性声明的法律责任由本人承担。",
+          "学位论文作者签名：                       年    月    日"
+        ],
+        "style_name": null,
+        "xml_locator": {
+          "part": "document",
+          "child_index": 39,
+          "order": 32
+        }
+      },
+      "E00034": {
+        "id": "E00034",
+        "kind": "paragraph",
+        "text": "本人郑重声明：所呈交的学位论文，是本人在导师指导下进行研究工作所取得的研究成果。除文中已经注明引用的内容外，本学位论文的研究成果不包含任何他人创作的、已公开发表或者没有公开发表的作品的内容。对本论文所涉及的研究工作做出贡献的其他个人和集体，均已在文中以明确方式标明。本学位论文原创性声明的法律责任由本人承担。",
+        "style_id": null,
+        "runs": [
+          {
+            "text": "本人郑重声明：所呈交的学位论文，是本人在导师指导下进行研究工作所取得的研究成果。除文中已经注明引用的内容外，本学位论文的研究成果不包含任何他人创作的、已公开发表或者没有公开发表的作品的内容。对本论文所涉及的研究工作做出贡献的其他个人和集体，均已在文中以明确方式标明。本学位论文原创性声明的法律责任由本人承担。",
+            "format": {
+              "fonts": {
+                "eastAsia": "宋体",
+                "ascii": "宋体",
+                "hAnsi": "宋体"
+              },
+              "size_pt": 14.0
+            }
+          }
+        ],
+        "location": {
+          "part": "document",
+          "child_index": 40,
+          "order": 33
+        },
+        "context_before": [
+          "年  月",
+          "北京体育大学学位论文原创性声明"
+        ],
+        "context_after": [
+          "学位论文作者签名：                       年    月    日",
+          "非公开学位论文标注说明"
+        ],
+        "style_name": null,
+        "xml_locator": {
+          "part": "document",
+          "child_index": 40,
+          "order": 33
+        }
+      },
+      "E00035": {
+        "id": "E00035",
+        "kind": "paragraph",
+        "text": "学位论文作者签名：                       年    月    日",
+        "style_id": null,
+        "runs": [
+          {
+            "text": "学位论文作者签名：",
+            "format": {
+              "fonts": {
+                "eastAsia": "宋体",
+                "ascii": "宋体",
+                "hAnsi": "宋体"
+              },
+              "size_pt": 14.0
+            }
+          },
+          {
+            "text": "年",
+            "format": {
+              "fonts": {
+                "eastAsia": "宋体",
+                "ascii": "宋体",
+                "hAnsi": "宋体"
+              },
+              "size_pt": 14.0
+            }
+          },
+          {
+            "text": "月",
+            "format": {
+              "fonts": {
+                "eastAsia": "宋体",
+                "ascii": "宋体",
+                "hAnsi": "宋体"
+              },
+              "size_pt": 14.0
+            }
+          },
+          {
+            "text": "日",
+            "format": {
+              "fonts": {
+                "eastAsia": "宋体",
+                "ascii": "宋体",
+                "hAnsi": "宋体"
+              },
+              "size_pt": 14.0
+            }
+          }
+        ],
+        "location": {
+          "part": "document",
+          "child_index": 41,
+          "order": 34
+        },
+        "context_before": [
+          "北京体育大学学位论文原创性声明",
+          "本人郑重声明：所呈交的学位论文，是本人在导师指导下进行研究工作所取得的研究成果。除文中已经注明引用的内容外，本学位论文的研究成果不包含任何他人创作的、已公开发表或者没有公开发表的作品的内容。对本论文所涉及的研究工作做出贡献的其他个人和集体，均已在文中以明确方式标明。本学位论文原创性声明的法律责任由本人承担。"
+        ],
+        "context_after": [
+          "非公开学位论文标注说明",
+          "根据北京体育大学有关规定，非公开学位论文须经指导教师同意、作者本人申请和相关部门批准方能标注。未经批准的均为公开学位论文（公开的学位论文本项为空白）。"
+        ],
+        "style_name": null,
+        "xml_locator": {
+          "part": "document",
+          "child_index": 41,
+          "order": 34
+        }
+      }
+    },
+    "declaration_anchor_preference": "abstract_title_zh"
+  },
+  "parent": {
+    "contract_version": "3.0",
+    "requirements": [
+      {
+        "clause_ids": [
+          "C00033",
+          "C00034",
+          "C00035",
+          "C00036",
+          "C00037"
+        ],
+        "evidence_ids": [
+          "E00033",
+          "E00034"
+        ],
+        "confidence": 0.99,
+        "reason": "The supplied fixed-declaration candidate provides the exact heading and body source evidence for a declaration to be inserted at the verified Chinese-abstract anchor; the document text is printable, while truthfulness and legal responsibility remain human obligations.",
+        "verification": {
+          "mode": "static_docx",
+          "checks": [
+            "Verify the declaration heading and body are materialized exactly once from the cited source evidence.",
+            "Verify blank author and date placeholders are preserved without asserting completion."
+          ]
+        },
+        "role": "declarations",
+        "properties": {
+          "before_role": "abstract_title_zh",
+          "items": [
+            {
+              "id": "decl-bsu-originality-0001",
+              "source_evidence_ids": [
+                "E00033",
+                "E00034",
+                "E00035"
+              ],
+              "signature_placeholders": [
+                {
+                  "role": "author",
+                  "label": "学位论文作者签名",
+                  "attestation_scope": "placeholder_presence_only"
+                },
+                {
+                  "role": "date",
+                  "label": "年 月 日",
+                  "attestation_scope": "placeholder_presence_only"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    ],
+    "clause_reviews": [
+      {
+        "clause_id": "C00021",
+        "classification": "informational",
+        "reason": "This is a degree-category label in supplied source content without explicit normative language requiring a DOCX operation.",
+        "normative_basis": "sample_content"
+      },
+      {
+        "clause_id": "C00022",
+        "classification": "informational",
+        "reason": "This is a Chinese title field label in supplied source content; the clause does not prescribe an executable formatting rule.",
+        "normative_basis": "sample_content"
+      },
+      {
+        "clause_id": "C00023",
+        "classification": "informational",
+        "reason": "This is an English title field label in supplied source content; the clause does not prescribe an executable formatting rule.",
+        "normative_basis": "sample_content"
+      },
+      {
+        "clause_id": "C00024",
+        "classification": "informational",
+        "reason": "This is a sample author and supervisor field label grouping without explicit normative wording.",
+        "normative_basis": "sample_content"
+      },
+      {
+        "clause_id": "C00025",
+        "classification": "informational",
+        "reason": "This is a sample degree and training-unit field label grouping without explicit normative wording.",
+        "normative_basis": "sample_content"
+      },
+      {
+        "clause_id": "C00026",
+        "classification": "informational",
+        "reason": "This is a sample first-level and second-level discipline field label grouping without explicit normative wording.",
+        "normative_basis": "sample_content"
+      },
+      {
+        "clause_id": "C00027",
+        "classification": "informational",
+        "reason": "This is a sample defense-committee label without explicit normative wording or an executable layout instruction.",
+        "normative_basis": "sample_content"
+      },
+      {
+        "clause_id": "C00028",
+        "classification": "informational",
+        "reason": "This is a sample committee-chair field grouping without explicit normative wording.",
+        "normative_basis": "sample_content"
+      },
+      {
+        "clause_id": "C00029",
+        "classification": "informational",
+        "reason": "This is a sample reviewer field grouping without explicit normative wording.",
+        "normative_basis": "sample_content"
+      },
+      {
+        "clause_id": "C00030",
+        "classification": "informational",
+        "reason": "This is a sample committee-member field grouping without explicit normative wording.",
+        "normative_basis": "sample_content"
+      },
+      {
+        "clause_id": "C00031",
+        "classification": "informational",
+        "reason": "This is a sample secretary field grouping without explicit normative wording.",
+        "normative_basis": "sample_content"
+      },
+      {
+        "clause_id": "C00032",
+        "classification": "informational",
+        "reason": "This is a sample year-and-month line without an explicit executable formatting requirement.",
+        "normative_basis": "sample_content"
+      },
+      {
+        "clause_id": "C00033",
+        "classification": "covered",
+        "reason": "The clause is the exact fixed heading of the supplied originality declaration candidate and is represented by the declarations requirement.",
+        "obligations": [
+          {
+            "id": "fixed_declaration_heading",
+            "status": "covered",
+            "reason": "The fixed heading is materialized from E00033 by the declaration candidate.",
+            "actor": "document generator",
+            "action": "include",
+            "target": "originality declaration heading",
+            "source_quote": "北京体育大学学位论文原创性声明",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "automatic"
+          }
+        ],
+        "normative_basis": "fixed_statement"
+      },
+      {
+        "clause_id": "C00034",
+        "classification": "executable_with_external_check",
+        "reason": "The clause supplies fixed declaration body text that must be printed, while the author's assertion about the research results remains a separate human truthfulness obligation.",
+        "obligations": [
+          {
+            "id": "fixed_declaration_body_1",
+            "status": "covered",
+            "reason": "The declaration body is materialized exactly from the cited E00034 paragraph.",
+            "actor": "document generator",
+            "action": "include",
+            "target": "originality declaration body",
+            "source_quote": "本人郑重声明：所呈交的学位论文，是本人在导师指导下进行研究工作所取得的研究成果",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "automatic"
+          },
+          {
+            "id": "author_truthfulness_assertion_1",
+            "status": "unverifiable",
+            "reason": "Printing the declaration does not verify the author's assertion that the thesis is the author's research result under supervisor guidance.",
+            "actor": "author",
+            "action": "confirm truthfulness of declaration",
+            "target": "research-result assertion",
+            "source_quote": "本人郑重声明：所呈交的学位论文，是本人在导师指导下进行研究工作所取得的研究成果",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "human"
+          }
+        ],
+        "normative_basis": "fixed_statement"
+      },
+      {
+        "clause_id": "C00035",
+        "classification": "executable_with_external_check",
+        "reason": "The clause supplies fixed originality-declaration text that must be printed, while the substantive absence-of-uncited-work claim remains a human verification duty.",
+        "obligations": [
+          {
+            "id": "fixed_declaration_body_2",
+            "status": "covered",
+            "reason": "The declaration body is materialized exactly from the cited E00034 paragraph.",
+            "actor": "document generator",
+            "action": "include",
+            "target": "originality declaration body",
+            "source_quote": "除文中已经注明引用的内容外，本学位论文的研究成果不包含任何他人创作的、已公开发表或者没有公开发表的作品的内容",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "automatic"
+          },
+          {
+            "id": "author_originality_confirmation",
+            "status": "unverifiable",
+            "reason": "Printing the statement does not verify that the thesis contains no other persons' works beyond properly indicated citations.",
+            "actor": "author",
+            "action": "confirm originality and citation truthfulness",
+            "target": "originality claim",
+            "source_quote": "除文中已经注明引用的内容外，本学位论文的研究成果不包含任何他人创作的、已公开发表或者没有公开发表的作品的内容",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "human"
+          }
+        ],
+        "normative_basis": "fixed_statement"
+      },
+      {
+        "clause_id": "C00036",
+        "classification": "executable_with_external_check",
+        "reason": "The clause supplies fixed declaration text that must be printed, while the completeness of contribution attribution remains a human verification duty.",
+        "obligations": [
+          {
+            "id": "fixed_declaration_body_3",
+            "status": "covered",
+            "reason": "The declaration body is materialized exactly from the cited E00034 paragraph.",
+            "actor": "document generator",
+            "action": "include",
+            "target": "originality declaration body",
+            "source_quote": "对本论文所涉及的研究工作做出贡献的其他个人和集体，均已在文中以明确方式标明",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "automatic"
+          },
+          {
+            "id": "author_contribution_attribution_confirmation",
+            "status": "unverifiable",
+            "reason": "Printing the statement does not verify that all contributors have been clearly identified in the thesis.",
+            "actor": "author",
+            "action": "confirm completeness of contribution attribution",
+            "target": "contribution attribution claim",
+            "source_quote": "对本论文所涉及的研究工作做出贡献的其他个人和集体，均已在文中以明确方式标明",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "human"
+          }
+        ],
+        "normative_basis": "fixed_statement"
+      },
+      {
+        "clause_id": "C00037",
+        "classification": "executable_with_external_check",
+        "reason": "The clause supplies fixed declaration text that must be printed, while accepting legal responsibility is a distinct human obligation.",
+        "obligations": [
+          {
+            "id": "fixed_declaration_body_4",
+            "status": "covered",
+            "reason": "The declaration body is materialized exactly from the cited E00034 paragraph.",
+            "actor": "document generator",
+            "action": "include",
+            "target": "originality declaration body",
+            "source_quote": "本学位论文原创性声明的法律责任由本人承担",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "automatic"
+          },
+          {
+            "id": "author_legal_responsibility_acceptance",
+            "status": "unverifiable",
+            "reason": "Printing the sentence cannot establish that the author has actually accepted or bears the stated legal responsibility.",
+            "actor": "author",
+            "action": "accept legal responsibility",
+            "target": "originality declaration",
+            "source_quote": "本学位论文原创性声明的法律责任由本人承担",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "human"
+          }
+        ],
+        "normative_basis": "fixed_statement"
+      },
+      {
+        "clause_id": "C00038",
+        "classification": "external_compliance",
+        "reason": "The clause is a blank signature and date line adjacent to the fixed declaration; printing placeholders is document structure, while actual signing and dating are human completion duties.",
+        "obligations": [
+          {
+            "id": "author_signature",
+            "status": "unverifiable",
+            "reason": "The document may preserve a blank signature placeholder, but only the author can provide the actual signature.",
+            "actor": "author",
+            "action": "sign",
+            "target": "originality declaration",
+            "source_quote": "学位论文作者签名：                       年    月    日",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "human"
+          },
+          {
+            "id": "author_date",
+            "status": "unverifiable",
+            "reason": "The document may preserve a blank date placeholder, but the actual date must be supplied by the author.",
+            "actor": "author",
+            "action": "date",
+            "target": "originality declaration",
+            "source_quote": "学位论文作者签名：                       年    月    日",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "human"
+          }
+        ],
+        "normative_basis": "external_duty"
+      }
+    ],
+    "unsupported_items": [],
+    "reported_conflicts": []
+  },
+  "model_retry": {
+    "contract_version": "3.0",
+    "requirements": [
+      {
+        "clause_ids": [
+          "C00033",
+          "C00034",
+          "C00035",
+          "C00036",
+          "C00037"
+        ],
+        "evidence_ids": [
+          "E00033",
+          "E00034"
+        ],
+        "confidence": 0.99,
+        "reason": "The supplied fixed-declaration candidate provides the exact heading and body source evidence for a declaration to be inserted at the verified Chinese-abstract anchor; the document text is printable, while truthfulness and legal responsibility remain human obligations.",
+        "verification": {
+          "mode": "static_docx",
+          "checks": [
+            "Verify the declaration heading and body are materialized exactly once from the cited source evidence.",
+            "Verify blank author and date placeholders are preserved without asserting completion."
+          ]
+        },
+        "role": "declarations",
+        "properties": {
+          "before_role": "abstract_title_zh",
+          "items": [
+            {
+              "id": "decl-bsu-originality-0001",
+              "source_evidence_ids": [
+                "E00033",
+                "E00034"
+              ],
+              "signature_placeholders": [
+                {
+                  "role": "author",
+                  "label": "学位论文作者签名",
+                  "attestation_scope": "placeholder_presence_only"
+                },
+                {
+                  "role": "date",
+                  "label": "年 月 日",
+                  "attestation_scope": "placeholder_presence_only"
+                }
+              ]
+            }
+          ]
+        }
+      }
+    ],
+    "clause_reviews": [
+      {
+        "clause_id": "C00021",
+        "classification": "informational",
+        "reason": "This is a degree-category label in supplied source content without explicit normative language requiring a DOCX operation.",
+        "normative_basis": "sample_content"
+      },
+      {
+        "clause_id": "C00022",
+        "classification": "informational",
+        "reason": "This is a Chinese title field label in supplied source content; the clause does not prescribe an executable formatting rule.",
+        "normative_basis": "sample_content"
+      },
+      {
+        "clause_id": "C00023",
+        "classification": "informational",
+        "reason": "This is an English title field label in supplied source content; the clause does not prescribe an executable formatting rule.",
+        "normative_basis": "sample_content"
+      },
+      {
+        "clause_id": "C00024",
+        "classification": "informational",
+        "reason": "This is a sample author and supervisor field label grouping without explicit normative wording.",
+        "normative_basis": "sample_content"
+      },
+      {
+        "clause_id": "C00025",
+        "classification": "informational",
+        "reason": "This is a sample degree and training-unit field label grouping without explicit normative wording.",
+        "normative_basis": "sample_content"
+      },
+      {
+        "clause_id": "C00026",
+        "classification": "informational",
+        "reason": "This is a sample first-level and second-level discipline field label grouping without explicit normative wording.",
+        "normative_basis": "sample_content"
+      },
+      {
+        "clause_id": "C00027",
+        "classification": "informational",
+        "reason": "This is a sample defense-committee label without explicit normative wording or an executable layout instruction.",
+        "normative_basis": "sample_content"
+      },
+      {
+        "clause_id": "C00028",
+        "classification": "informational",
+        "reason": "This is a sample committee-chair field grouping without explicit normative wording.",
+        "normative_basis": "sample_content"
+      },
+      {
+        "clause_id": "C00029",
+        "classification": "informational",
+        "reason": "This is a sample reviewer field grouping without explicit normative wording.",
+        "normative_basis": "sample_content"
+      },
+      {
+        "clause_id": "C00030",
+        "classification": "informational",
+        "reason": "This is a sample committee-member field grouping without explicit normative wording.",
+        "normative_basis": "sample_content"
+      },
+      {
+        "clause_id": "C00031",
+        "classification": "informational",
+        "reason": "This is a sample secretary field grouping without explicit normative wording.",
+        "normative_basis": "sample_content"
+      },
+      {
+        "clause_id": "C00032",
+        "classification": "informational",
+        "reason": "This is a sample year-and-month line without an explicit executable formatting requirement.",
+        "normative_basis": "sample_content"
+      },
+      {
+        "clause_id": "C00033",
+        "classification": "covered",
+        "reason": "The clause is the exact fixed heading of the supplied originality declaration candidate and is represented by the declarations requirement.",
+        "obligations": [
+          {
+            "id": "fixed_declaration_heading",
+            "status": "covered",
+            "reason": "The fixed heading is materialized from E00033 by the declaration candidate.",
+            "actor": "document generator",
+            "action": "include",
+            "target": "originality declaration heading",
+            "source_quote": "北京体育大学学位论文原创性声明",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "automatic"
+          }
+        ],
+        "normative_basis": "fixed_statement"
+      },
+      {
+        "clause_id": "C00034",
+        "classification": "executable_with_external_check",
+        "reason": "The clause supplies fixed declaration body text that must be printed, while the author's assertion about the research results remains a separate human truthfulness obligation.",
+        "obligations": [
+          {
+            "id": "fixed_declaration_body_1",
+            "status": "covered",
+            "reason": "The declaration body is materialized exactly from the cited E00034 paragraph.",
+            "actor": "document generator",
+            "action": "include",
+            "target": "originality declaration body",
+            "source_quote": "本人郑重声明：所呈交的学位论文，是本人在导师指导下进行研究工作所取得的研究成果",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "automatic"
+          },
+          {
+            "id": "author_truthfulness_assertion_1",
+            "status": "unverifiable",
+            "reason": "Printing the declaration does not verify the author's assertion that the thesis is the author's research result under supervisor guidance.",
+            "actor": "author",
+            "action": "confirm truthfulness of declaration",
+            "target": "research-result assertion",
+            "source_quote": "本人郑重声明：所呈交的学位论文，是本人在导师指导下进行研究工作所取得的研究成果",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "human"
+          }
+        ],
+        "normative_basis": "fixed_statement"
+      },
+      {
+        "clause_id": "C00035",
+        "classification": "executable_with_external_check",
+        "reason": "The clause supplies fixed originality-declaration text that must be printed, while the substantive absence-of-uncited-work claim remains a human verification duty.",
+        "obligations": [
+          {
+            "id": "fixed_declaration_body_2",
+            "status": "covered",
+            "reason": "The declaration body is materialized exactly from the cited E00034 paragraph.",
+            "actor": "document generator",
+            "action": "include",
+            "target": "originality declaration body",
+            "source_quote": "除文中已经注明引用的内容外，本学位论文的研究成果不包含任何他人创作的、已公开发表或者没有公开发表的作品的内容",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "automatic"
+          },
+          {
+            "id": "author_originality_confirmation",
+            "status": "unverifiable",
+            "reason": "Printing the statement does not verify that the thesis contains no other persons' works beyond properly indicated citations.",
+            "actor": "author",
+            "action": "confirm originality and citation truthfulness",
+            "target": "originality claim",
+            "source_quote": "除文中已经注明引用的内容外，本学位论文的研究成果不包含任何他人创作的、已公开发表或者没有公开发表的作品的内容",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "human"
+          }
+        ],
+        "normative_basis": "fixed_statement"
+      },
+      {
+        "clause_id": "C00036",
+        "classification": "executable_with_external_check",
+        "reason": "The clause supplies fixed declaration text that must be printed, while the completeness of contribution attribution remains a human verification duty.",
+        "obligations": [
+          {
+            "id": "fixed_declaration_body_3",
+            "status": "covered",
+            "reason": "The declaration body is materialized exactly from the cited E00034 paragraph.",
+            "actor": "document generator",
+            "action": "include",
+            "target": "originality declaration body",
+            "source_quote": "对本论文所涉及的研究工作做出贡献的其他个人和集体，均已在文中以明确方式标明",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "automatic"
+          },
+          {
+            "id": "author_contribution_attribution_confirmation",
+            "status": "unverifiable",
+            "reason": "Printing the statement does not verify that all contributors have been clearly identified in the thesis.",
+            "actor": "author",
+            "action": "confirm completeness of contribution attribution",
+            "target": "contribution attribution claim",
+            "source_quote": "对本论文所涉及的研究工作做出贡献的其他个人和集体，均已在文中以明确方式标明",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "human"
+          }
+        ],
+        "normative_basis": "fixed_statement"
+      },
+      {
+        "clause_id": "C00037",
+        "classification": "executable_with_external_check",
+        "reason": "The clause supplies fixed declaration text that must be printed, while accepting legal responsibility is a distinct human obligation.",
+        "obligations": [
+          {
+            "id": "fixed_declaration_body_4",
+            "status": "covered",
+            "reason": "The declaration body is materialized exactly from the cited E00034 paragraph.",
+            "actor": "document generator",
+            "action": "include",
+            "target": "originality declaration body",
+            "source_quote": "本学位论文原创性声明的法律责任由本人承担",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "automatic"
+          },
+          {
+            "id": "author_legal_responsibility_acceptance",
+            "status": "unverifiable",
+            "reason": "Printing the sentence cannot establish that the author has actually accepted or bears the stated legal responsibility.",
+            "actor": "author",
+            "action": "accept legal responsibility",
+            "target": "originality declaration",
+            "source_quote": "本学位论文原创性声明的法律责任由本人承担",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "human"
+          }
+        ],
+        "normative_basis": "fixed_statement"
+      },
+      {
+        "clause_id": "C00038",
+        "classification": "external_compliance",
+        "reason": "The clause is a blank signature and date line adjacent to the fixed declaration; printing placeholders is document structure, while actual signing and dating are human completion duties.",
+        "obligations": [
+          {
+            "id": "author_signature",
+            "status": "unverifiable",
+            "reason": "The document may preserve a blank signature placeholder, but only the author can provide the actual signature.",
+            "actor": "author",
+            "action": "sign",
+            "target": "originality declaration",
+            "source_quote": "学位论文作者签名：                       年    月    日",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "human"
+          },
+          {
+            "id": "author_date",
+            "status": "unverifiable",
+            "reason": "The document may preserve a blank date placeholder, but the actual date must be supplied by the author.",
+            "actor": "author",
+            "action": "date",
+            "target": "originality declaration",
+            "source_quote": "学位论文作者签名：                       年    月    日",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "human"
+          }
+        ],
+        "normative_basis": "external_duty"
+      }
+    ],
+    "unsupported_items": [],
+    "reported_conflicts": []
+  }
+}

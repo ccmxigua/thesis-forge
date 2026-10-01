@@ -217,6 +217,17 @@ new properties, a passing score, or submission readiness. Exhaustion fails close
 Native providers that omit unsupported `minItems` still require the local
 non-empty-reference check; schema generation is not proof of semantic completeness.
 
+Source-atom coverage uses a complete one-to-one assignment when exact quotations
+overlap; a greedy first match must not consume the only atom for another duty.
+One represented atom can never cover two distinct source facts. Typed-primary
+mapping, quotation or condition disagreements remain rejected, but may receive
+one fresh independent read of the identical candidate. Corrective feedback is
+bound to current checks, primary identities and content hashes, provenance, run
+and candidate hash. A reviewer may preserve an agreed interpretation's exact
+representation only after reassessing the source; code never fills semantic
+fields from the primary answer. Both failed and corrected artifacts are retained,
+and persistent disagreement or changed inputs fail closed without a success ledger.
+
 When a user confirms that an unresolved clause is a real semantic ambiguity but
 does not provide its authoritative interpretation, record that acknowledgement
 in a run-bound `semantic-issue-confirmation` sidecar and pass it with

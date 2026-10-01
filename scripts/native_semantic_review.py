@@ -104,6 +104,87 @@ class UnlinkedRepresentedObligationError(NativeSemanticReviewError):
         )
 
 
+class TypedSourceAtomAlignmentError(NativeSemanticReviewError):
+    """Typed interpretations disagree; only a fresh unchanged-candidate review may retry."""
+
+    code = "typed_source_atom_alignment_disagreement"
+
+    def __init__(self, clause_id: str, disagreements: list[dict[str, Any]]) -> None:
+        self.clause_ids = (clause_id,)
+        self.disagreements = copy.deepcopy(disagreements)
+        fields = sorted({key for item in disagreements for key in item["fields"]})
+        super().__init__(
+            f"independent typed-primary mapping missing, duplicate, or source-atom "
+            f"modality/applicability/condition disagreement for {clause_id}: {', '.join(fields)}"
+        )
+
+
+def typed_alignment_retry_feedback_is_bound(request: dict[str, Any]) -> bool:
+    """Bind corrective feedback to the complete current checks and typed inventory."""
+    feedback = request.get("retry_feedback")
+    checks = request.get("checks")
+    if not isinstance(feedback, dict) or not isinstance(checks, list):
+        return False
+    if (feedback.get("code") != TypedSourceAtomAlignmentError.code
+            or feedback.get("checks_sha256") != sha256_json(checks)
+            or feedback.get("run_id") != request.get("run_id")
+            or feedback.get("provenance") != request.get("provenance")):
+        return False
+    by_id = {check.get("check_id"): check for check in checks if isinstance(check, dict)}
+    clause_ids = feedback.get("clause_ids")
+    disagreements = feedback.get("disagreements")
+    if (not isinstance(clause_ids, list) or not clause_ids
+            or any(not isinstance(value, str) for value in clause_ids)
+            or len(set(clause_ids)) != len(clause_ids)
+            or not isinstance(disagreements, list) or not disagreements):
+        return False
+    seen = set()
+    for item in disagreements:
+        if (not isinstance(item, dict) or not isinstance(item.get("check_id"), str)
+                or item.get("check_id") not in by_id
+                or not isinstance(item.get("primary_obligation_id"), str)):
+            return False
+        check_id = item["check_id"]
+        context = by_id[check_id].get("review_context") or {}
+        primaries = [p for p in context.get("primary_obligations", [])
+                     if isinstance(p, dict) and p.get("id") == item.get("primary_obligation_id")]
+        identity = (check_id, item.get("primary_obligation_id"))
+        fields = item.get("fields")
+        if (len(primaries) != 1 or identity in seen or not isinstance(fields, list) or not fields
+                or any(not isinstance(k, str) for k in fields)
+                or len(set(fields)) != len(fields)
+                or any(k not in {"primary_obligation_id", "actor", "action", "target", "source_quote",
+                                "force", "applicability", "condition"} for k in fields)
+                or item.get("primary_sha256") != sha256_json(primaries[0])):
+            return False
+        seen.add(identity)
+    return sorted({item["check_id"] for item in disagreements}) == sorted(clause_ids)
+
+
+def _distinct_source_atom_matching(facts: list[dict[str, Any]], identified: list[dict[str, Any]]) -> bool:
+    """Find a complete injective assignment, not a greedy first quotation match."""
+    edges = [[index for index, obligation in enumerate(identified)
+              if isinstance(obligation, dict)
+              and obligation.get("disposition") == "represented"
+              and obligation.get("requirement_refs")
+              and isinstance(obligation.get("source_quote"), str)
+              and fact["evidence_text"] in obligation["source_quote"]]
+             for fact in facts]
+    assignments: dict[int, int] = {}
+
+    def assign(fact_index: int, visited: set[int]) -> bool:
+        for index in edges[fact_index]:
+            if index in visited:
+                continue
+            visited.add(index)
+            if index not in assignments or assign(assignments[index], visited):
+                assignments[index] = fact_index
+                return True
+        return False
+
+    return all(assign(index, set()) for index in range(len(facts)))
+
+
 # Preserve the public import name used by earlier callers while broadening the
 # invariant from executable requirements to all non-informational clauses.
 MissingExecutableObligationInventoryError = MissingSourceObligationInventoryError
@@ -620,23 +701,11 @@ def validate_obligation_coverage_response(
             # Source quotes can include context, but two different effects
             # must occupy two different inventory entries.  A single broad
             # quotation or a list of machine IDs is not atomic coverage.
-            matched_indexes: set[int] = set()
-            for fact in publication_facts:
-                matching = [
-                    index for index, obligation in enumerate(identified)
-                    if isinstance(obligation, dict)
-                    and obligation.get("disposition") == "represented"
-                    and obligation.get("requirement_refs")
-                    and isinstance(obligation.get("source_quote"), str)
-                    and fact["evidence_text"] in obligation["source_quote"]
-                    and index not in matched_indexes
-                ]
-                if not matching:
-                    raise NativeSemanticReviewError(
-                        f"independent obligation review has no separate represented "
-                        f"source atom {fact['id']} for {check_id}"
-                    )
-                matched_indexes.add(matching[0])
+            if not _distinct_source_atom_matching(publication_facts, identified):
+                raise NativeSemanticReviewError(
+                    f"independent obligation review has no separate represented "
+                    f"source atom assignment for {check_id}"
+                )
         linked = context.get("linked_requirements") if isinstance(context.get("linked_requirements"), list) else []
         safely_unresolved = context.get("classification") == "unresolved" and not linked
         live_manual_codes = compile_unresolved_manual_review_codes(source_text)
@@ -664,6 +733,7 @@ def validate_obligation_coverage_response(
             if isinstance(item, dict) and isinstance(item.get("requirement_ref"), str)
         }
         represented = unrepresented = ambiguous = external_pending = authoring_pending = 0
+        typed_disagreements = []
         for primary in context.get("primary_obligations") or []:
             if (not isinstance(primary, dict) or primary.get("force", "unknown") == "unknown"
                     or not all(primary.get(k) not in {None, "", "unknown"}
@@ -671,19 +741,17 @@ def validate_obligation_coverage_response(
                 continue
             matching = [o for o in result.get("identified_obligations", [])
                         if o.get("primary_obligation_id") == primary.get("id")]
-            if len(matching) != 1:
-                raise NativeSemanticReviewError(
-                    f"independent typed-primary mapping missing or duplicate for {check_id}"
-                )
-            if any(matching[0].get(k) != primary.get(k, "unknown")
-                    for k in ("actor", "action", "target", "source_quote", "force", "applicability")):
-                raise NativeSemanticReviewError(
-                    f"independent source-atom modality/applicability disagreement for {check_id}"
-                )
-            if matching[0].get("condition") != primary.get("condition"):
-                raise NativeSemanticReviewError(
-                    f"independent source-atom condition disagreement for {check_id}"
-                )
+            fields = ["primary_obligation_id"] if len(matching) != 1 else [
+                k for k in ("actor", "action", "target", "source_quote", "force", "applicability", "condition")
+                if matching[0].get(k) != primary.get(k)
+            ]
+            if fields:
+                typed_disagreements.append({
+                    "check_id": check_id, "primary_obligation_id": primary.get("id"),
+                    "primary_sha256": sha256_json(primary), "fields": fields,
+                })
+        if typed_disagreements:
+            raise TypedSourceAtomAlignmentError(check_id, typed_disagreements)
         source_verification_pending = 0
         scope_unresolved = 0
         backend_unsupported = 0
@@ -1289,7 +1357,24 @@ def _prompt(request: dict[str, Any]) -> str:
             else []
         )
         retry_instruction = ""
-        if isinstance(retry_feedback, dict) and retry_feedback.get("code") == TableContextUncertaintyError.code:
+        if isinstance(retry_feedback, dict) and retry_feedback.get("code") == TypedSourceAtomAlignmentError.code:
+            if not typed_alignment_retry_feedback_is_bound(request):
+                raise NativeSemanticReviewError("typed alignment retry feedback is not current-source bound")
+            retry_instruction = (
+                "\nThe previous independent review disagreed with typed primary atom fields: "
+                + strict_json_dumps(retry_feedback["disagreements"])
+                + ". This is one corrective review of the identical candidate and exact source. "
+                "Re-assess each interpretation independently, not by copying to pass. A source_ref "
+                "selects a precise code-owned range: choose the specific atomic range rather than a "
+                "larger contextual span when it states the same duty. Where the primary typed dimensions "
+                "and condition are genuinely faithful to the source, preserve their exact representation "
+                "instead of paraphrasing them; cite each matching primary_obligation_id exactly once. "
+                "If meaning, target, strength, condition or applicability actually differs, preserve the "
+                "disagreement and explain it. Never invent approval facts, normalize a semantic conflict, "
+                "delete an obligation, or change source, candidate, provenance or requirement links. "
+                "All original validation checks remain in force; unresolved disagreements still block.\n"
+            )
+        elif isinstance(retry_feedback, dict) and retry_feedback.get("code") == TableContextUncertaintyError.code:
             retry_instruction = (
                 "\nThe previous review called a date placeholder ambiguous for check(s) "
                 + strict_json_dumps(retry_feedback.get("clause_ids", []))
@@ -1412,6 +1497,9 @@ def _prompt(request: dict[str, Any]) -> str:
             "If a primary obligation proposes typed actor/action/target/source_quote and a known force, "
             "independently assess those dimensions and applicability from the source, return them with "
             "its primary_obligation_id, and report any disagreement rather than copying to pass validation. "
+            "If those typed dimensions and condition are independently confirmed faithful, retain their "
+            "exact representation; do not paraphrase a confirmed condition or select a wider contextual "
+            "source_ref where a precise atomic source span is available. "
             "represented only when a linked requirement property and its verification contract "
             "faithfully preserve its meaning, scope, modality, strength, and qualifiers. "
             "Every represented obligation must select at least one requirement_ref from this check's "

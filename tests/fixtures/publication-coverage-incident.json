@@ -1,0 +1,869 @@
+{
+  "incident_commit": "797de88fddd75b93080fd2d0719c12816b532c9c",
+  "check": {
+    "check_id": "C00041",
+    "document_text": "未经批准的均为公开学位论文（公开的学位论文本项为空白）",
+    "review_context": {
+      "semantic_clause_text": "未经批准的均为公开学位论文（公开的学位论文本项为空白）",
+      "classification": "covered",
+      "requires_requirement": true,
+      "reason": "The clause contains two source-defined cover obligations: unapproved theses default to public status, and the administrative item is blank for public theses.",
+      "primary_obligations": [
+        {
+          "id": "C00041-unapproved-public",
+          "status": "covered",
+          "reason": "The cover requirement preserves the source policy unapproved_is_public without inferring any approval state.",
+          "actor": "document generator",
+          "action": "preserve policy",
+          "target": "publication status of an unapproved thesis",
+          "condition": "When approval is absent or not established",
+          "source_quote": "未经批准的均为公开学位论文",
+          "force": "required",
+          "applicability": "applicable",
+          "route": "automatic"
+        },
+        {
+          "id": "C00041-public-blank",
+          "status": "covered",
+          "reason": "The cover requirement sets the administrative region public_policy to blank for public theses.",
+          "actor": "document generator",
+          "action": "leave blank",
+          "target": "non-public administrative item",
+          "condition": "When thesis_profile.security_level is public",
+          "source_quote": "公开的学位论文本项为空白",
+          "force": "required",
+          "applicability": "applicable",
+          "route": "automatic"
+        }
+      ],
+      "primary_obligation_quote_bindings": [
+        {
+          "primary_obligation_id": "C00041-unapproved-public",
+          "original_source_quote": "未经批准的均为公开学位论文",
+          "review_source_quote": "未经批准的均为公开学位论文",
+          "source_binding": {
+            "policy": "current_source_occurrence_quote_v1",
+            "clause_binding": {
+              "text": "未经批准的均为公开学位论文（公开的学位论文本项为空白）",
+              "source_fragments": [
+                {
+                  "clause_id": "C00041",
+                  "evidence_id": "E00037",
+                  "start_offset": 47,
+                  "end_offset": 74,
+                  "source_sha256": "f3818f81346ef81482f4a42671b3042f4241b2497af569a26e22e9553305d834",
+                  "text": "未经批准的均为公开学位论文（公开的学位论文本项为空白）",
+                  "source_kind": "paragraph",
+                  "separator_before": "",
+                  "location": {
+                    "part": "document",
+                    "child_index": 44,
+                    "order": 36
+                  }
+                }
+              ]
+            },
+            "quote_start_offset": 47,
+            "quote_end_offset": 60,
+            "quote_sha256": "dbe55d946de76613b5ccdd27751582dcdf4c36995814e3f59e09bbdcdbf0ae9d",
+            "context_is_not_execution_scope": true
+          },
+          "original_quote_sha256": "dbe55d946de76613b5ccdd27751582dcdf4c36995814e3f59e09bbdcdbf0ae9d",
+          "review_quote_sha256": "dbe55d946de76613b5ccdd27751582dcdf4c36995814e3f59e09bbdcdbf0ae9d",
+          "semantic_dimensions_unchanged": true
+        },
+        {
+          "primary_obligation_id": "C00041-public-blank",
+          "original_source_quote": "公开的学位论文本项为空白",
+          "review_source_quote": "公开的学位论文本项为空白",
+          "source_binding": {
+            "policy": "current_source_occurrence_quote_v1",
+            "clause_binding": {
+              "text": "未经批准的均为公开学位论文（公开的学位论文本项为空白）",
+              "source_fragments": [
+                {
+                  "clause_id": "C00041",
+                  "evidence_id": "E00037",
+                  "start_offset": 47,
+                  "end_offset": 74,
+                  "source_sha256": "f3818f81346ef81482f4a42671b3042f4241b2497af569a26e22e9553305d834",
+                  "text": "未经批准的均为公开学位论文（公开的学位论文本项为空白）",
+                  "source_kind": "paragraph",
+                  "separator_before": "",
+                  "location": {
+                    "part": "document",
+                    "child_index": 44,
+                    "order": 36
+                  }
+                }
+              ]
+            },
+            "quote_start_offset": 61,
+            "quote_end_offset": 73,
+            "quote_sha256": "52de36f3862148a40859bb8a66440e4a607a8ef0f97dfca4763e188211bc0fd4",
+            "context_is_not_execution_scope": true
+          },
+          "original_quote_sha256": "52de36f3862148a40859bb8a66440e4a607a8ef0f97dfca4763e188211bc0fd4",
+          "review_quote_sha256": "52de36f3862148a40859bb8a66440e4a607a8ef0f97dfca4763e188211bc0fd4",
+          "semantic_dimensions_unchanged": true
+        }
+      ],
+      "linked_requirements": [
+        {
+          "requirement_ref": "RR77684762490b757ba640",
+          "source_requirement_id": null,
+          "role": "cover",
+          "properties": {
+            "institution": "——",
+            "fields": [],
+            "non_public_administration": {
+              "applicability": {
+                "status": "conditional",
+                "conditions": [
+                  {
+                    "fact": "thesis_profile.security_level",
+                    "operator": "in",
+                    "value": [
+                      "restricted",
+                      "classified"
+                    ]
+                  }
+                ],
+                "exceptions": [
+                  "Public theses keep the administrative region blank."
+                ]
+              },
+              "fields": [
+                {
+                  "id": "security_marking",
+                  "label": "申请密级",
+                  "value_from": "thesis_profile.cover_metadata.security_marking",
+                  "display_policy": "blank_when_public",
+                  "order": 1
+                },
+                {
+                  "id": "embargo_start",
+                  "label": "保密期限（起始日期）",
+                  "value_from": "thesis_profile.cover_metadata.embargo_start",
+                  "display_policy": "blank_when_public",
+                  "order": 2
+                },
+                {
+                  "id": "embargo_until",
+                  "label": "保密期限（终止日期）",
+                  "value_from": "thesis_profile.cover_metadata.embargo_until",
+                  "display_policy": "blank_when_public",
+                  "order": 3
+                },
+                {
+                  "id": "approval_number",
+                  "label": "审批表编号",
+                  "value_from": "thesis_profile.cover_metadata.approval_number",
+                  "display_policy": "blank_when_public",
+                  "order": 4
+                },
+                {
+                  "id": "approval_date",
+                  "label": "批准日期",
+                  "value_from": "thesis_profile.cover_metadata.approval_date",
+                  "display_policy": "blank_when_public",
+                  "order": 5
+                }
+              ],
+              "public_policy": "blank",
+              "publication_default_policy": "unapproved_is_public",
+              "source_region": "非公开学位论文标注说明",
+              "security_marking_options": [
+                {
+                  "label": "限制",
+                  "maximum_duration": {
+                    "value": 2,
+                    "unit": "年"
+                  },
+                  "shorter_duration_allowed": true
+                },
+                {
+                  "label": "秘密",
+                  "maximum_duration": {
+                    "value": 10,
+                    "unit": "年"
+                  },
+                  "shorter_duration_allowed": true
+                },
+                {
+                  "label": "机密",
+                  "maximum_duration": {
+                    "value": 20,
+                    "unit": "年"
+                  },
+                  "shorter_duration_allowed": true
+                }
+              ]
+            },
+            "before_role": "document_start",
+            "missing_value_policy": "placeholder",
+            "missing_value_placeholder": "——",
+            "layout_id": "linear"
+          },
+          "evidence_ids": [
+            "E00036",
+            "E00037",
+            "E00039",
+            "E00040",
+            "E00041",
+            "E00042",
+            "E00043",
+            "E00044",
+            "E00045",
+            "E00047"
+          ],
+          "verification": {
+            "mode": "external",
+            "checks": [
+              "Verify the conditional administrative region, field order, source-derived duration options, and blank behavior for public theses.",
+              "Verify that approval-number and approval-date labels are bound to their corresponding administrative fields.",
+              "核对非公开行政区域的选项及期限与当前来源一致；此项不代表已生成或验证 DOCX 行政表。"
+            ],
+            "checker_ids": [
+              "cover_non_public_administration"
+            ]
+          }
+        }
+      ],
+      "source_clause_support": [
+        {
+          "requirement_ref": "RR77684762490b757ba640",
+          "clause_id": "C00039",
+          "document_text": "非公开学位论文标注说明",
+          "semantic_clause_text": "非公开学位论文标注说明",
+          "evidence_ids": [
+            "E00036"
+          ]
+        },
+        {
+          "requirement_ref": "RR77684762490b757ba640",
+          "clause_id": "C00043",
+          "document_text": "申请密级",
+          "semantic_clause_text": "申请密级",
+          "evidence_ids": [
+            "E00039"
+          ]
+        },
+        {
+          "requirement_ref": "RR77684762490b757ba640",
+          "clause_id": "C00044",
+          "document_text": "□限制(≤2年)     □秘密(≤10年)     □机密(≤20年)",
+          "semantic_clause_text": "□限制(≤2年) □秘密(≤10年) □机密(≤20年)",
+          "evidence_ids": [
+            "E00040"
+          ]
+        },
+        {
+          "requirement_ref": "RR77684762490b757ba640",
+          "clause_id": "C00045",
+          "document_text": "保密期限",
+          "semantic_clause_text": "保密期限",
+          "evidence_ids": [
+            "E00041"
+          ]
+        },
+        {
+          "requirement_ref": "RR77684762490b757ba640",
+          "clause_id": "C00046",
+          "document_text": "年    月    日  至        年     月     日",
+          "semantic_clause_text": "年 月 日 至 年 月 日",
+          "evidence_ids": [
+            "E00042"
+          ]
+        },
+        {
+          "requirement_ref": "RR77684762490b757ba640",
+          "clause_id": "C00047",
+          "document_text": "审批表编号",
+          "semantic_clause_text": "审批表编号",
+          "evidence_ids": [
+            "E00043"
+          ]
+        },
+        {
+          "requirement_ref": "RR77684762490b757ba640",
+          "clause_id": "C00048",
+          "document_text": "批准日期",
+          "semantic_clause_text": "批准日期",
+          "evidence_ids": [
+            "E00044"
+          ]
+        },
+        {
+          "requirement_ref": "RR77684762490b757ba640",
+          "clause_id": "C00049",
+          "document_text": "年    月    日",
+          "semantic_clause_text": "年 月 日",
+          "evidence_ids": [
+            "E00045"
+          ]
+        },
+        {
+          "requirement_ref": "RR77684762490b757ba640",
+          "clause_id": "C00051",
+          "document_text": "注：限制★2年(可少于2年)",
+          "semantic_clause_text": "注：限制★2年(可少于2年)",
+          "evidence_ids": [
+            "E00047"
+          ]
+        },
+        {
+          "requirement_ref": "RR77684762490b757ba640",
+          "clause_id": "C00052",
+          "document_text": "秘密★10年(可少于10年)",
+          "semantic_clause_text": "秘密★10年(可少于10年)",
+          "evidence_ids": [
+            "E00047"
+          ]
+        },
+        {
+          "requirement_ref": "RR77684762490b757ba640",
+          "clause_id": "C00053",
+          "document_text": "机密★20年(可少于20年)",
+          "semantic_clause_text": "机密★20年(可少于20年)",
+          "evidence_ids": [
+            "E00047"
+          ]
+        }
+      ],
+      "cited_evidence": {
+        "E00037": {
+          "id": "E00037",
+          "kind": "paragraph",
+          "text": "根据北京体育大学有关规定，非公开学位论文须经指导教师同意、作者本人申请和相关部门批准方能标注。未经批准的均为公开学位论文（公开的学位论文本项为空白）。",
+          "style_id": null,
+          "runs": [
+            {
+              "text": "根据北京体育大学有关规定，非公开学位论文须经指导教师同意、作者本人申请和相关部门批准方能标注。未经批准的均为公开学位论文（公开",
+              "format": {
+                "fonts": {
+                  "eastAsia": "宋体",
+                  "ascii": "宋体",
+                  "hAnsi": "宋体"
+                },
+                "size_pt": 14.0
+              }
+            },
+            {
+              "text": "的",
+              "format": {
+                "fonts": {
+                  "eastAsia": "宋体",
+                  "ascii": "宋体",
+                  "hAnsi": "宋体"
+                },
+                "size_pt": 14.0
+              }
+            },
+            {
+              "text": "学位论文本",
+              "format": {
+                "fonts": {
+                  "eastAsia": "宋体",
+                  "ascii": "宋体",
+                  "hAnsi": "宋体"
+                },
+                "size_pt": 14.0
+              }
+            },
+            {
+              "text": "项",
+              "format": {
+                "fonts": {
+                  "eastAsia": "宋体",
+                  "ascii": "宋体",
+                  "hAnsi": "宋体"
+                },
+                "size_pt": 14.0
+              }
+            },
+            {
+              "text": "为空白）。",
+              "format": {
+                "fonts": {
+                  "eastAsia": "宋体",
+                  "ascii": "宋体",
+                  "hAnsi": "宋体"
+                },
+                "size_pt": 14.0
+              }
+            }
+          ],
+          "location": {
+            "part": "document",
+            "child_index": 44,
+            "order": 36
+          },
+          "context_before": [
+            "学位论文作者签名：                       年    月    日",
+            "非公开学位论文标注说明"
+          ],
+          "context_after": [
+            "论文题目",
+            "申请密级"
+          ],
+          "style_name": null,
+          "xml_locator": {
+            "part": "document",
+            "child_index": 44,
+            "order": 36
+          }
+        }
+      },
+      "machine_obligation_ids": [
+        "cover.publication_default.public_blank",
+        "cover.publication_default.unapproved_is_public"
+      ],
+      "manual_review_codes": [],
+      "source_content_verification_codes": [],
+      "pending_source_work": []
+    }
+  },
+  "independent_result": {
+    "check_id": "C00041",
+    "verdict": "consistent",
+    "rationale": "The source has two obligations: unapproved theses are treated as public, and the administrative item is blank for public theses. The linked requirement preserves both policies and their scope.",
+    "identified_obligations": [
+      {
+        "force": "required",
+        "applicability": "applicable",
+        "actor": "document generator",
+        "action": "preserve policy",
+        "target": "publication status of an unapproved thesis",
+        "condition": "When approval is absent or not established",
+        "obligation_summary": "Treat an unapproved thesis as public.",
+        "primary_obligation_id": "C00041-unapproved-public",
+        "requirement_refs": [
+          "RR77684762490b757ba640"
+        ],
+        "disposition": "represented",
+        "source_quote": "未经批准的均为公开学位论文（公开的学位论文本项为空白）"
+      },
+      {
+        "force": "required",
+        "applicability": "applicable",
+        "actor": "document generator",
+        "action": "leave blank",
+        "target": "non-public administrative item",
+        "condition": "When the thesis is public",
+        "obligation_summary": "Leave the non-public administrative item blank for public theses.",
+        "primary_obligation_id": "C00041-public-blank",
+        "requirement_refs": [
+          "RR77684762490b757ba640"
+        ],
+        "disposition": "represented",
+        "source_quote": "公开的学位论文本项为空白"
+      }
+    ],
+    "evidence_quotes": [
+      "未经批准的均为公开学位论文（公开的学位论文本项为空白）",
+      "未经批准的均为公开学位论文",
+      "公开的学位论文本项为空白"
+    ],
+    "machine_obligation_ids": [
+      "cover.publication_default.public_blank",
+      "cover.publication_default.unapproved_is_public"
+    ]
+  },
+  "clause": {
+    "id": "C00041",
+    "text": "未经批准的均为公开学位论文（公开的学位论文本项为空白）",
+    "source_text_full": "根据北京体育大学有关规定，非公开学位论文须经指导教师同意、作者本人申请和相关部门批准方能标注。未经批准的均为公开学位论文（公开的学位论文本项为空白）。",
+    "source_evidence_text": "根据北京体育大学有关规定，非公开学位论文须经指导教师同意、作者本人申请和相关部门批准方能标注。未经批准的均为公开学位论文（公开的学位论文本项为空白）。",
+    "source_span": {
+      "evidence_id": "E00037",
+      "start_offset": 47,
+      "end_offset": 74,
+      "text": "未经批准的均为公开学位论文（公开的学位论文本项为空白）",
+      "source_sha256": "f3818f81346ef81482f4a42671b3042f4241b2497af569a26e22e9553305d834",
+      "location": {
+        "part": "document",
+        "child_index": 44,
+        "order": 36
+      }
+    },
+    "evidence_ids": [
+      "E00037"
+    ],
+    "source_kind": "paragraph",
+    "context_before": [
+      "学位论文作者签名：                       年    月    日",
+      "非公开学位论文标注说明"
+    ],
+    "context_after": [
+      "论文题目",
+      "申请密级"
+    ],
+    "location": {
+      "part": "document",
+      "child_index": 44,
+      "order": 36
+    },
+    "part_index": 1,
+    "evidence_context": {
+      "id": "E00037",
+      "kind": "paragraph",
+      "style_id": null,
+      "style_name": null,
+      "runs": [
+        {
+          "text": "根据北京体育大学有关规定，非公开学位论文须经指导教师同意、作者本人申请和相关部门批准方能标注。未经批准的均为公开学位论文（公开",
+          "format": {
+            "fonts": {
+              "eastAsia": "宋体",
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            },
+            "size_pt": 14.0
+          }
+        },
+        {
+          "text": "的",
+          "format": {
+            "fonts": {
+              "eastAsia": "宋体",
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            },
+            "size_pt": 14.0
+          }
+        },
+        {
+          "text": "学位论文本",
+          "format": {
+            "fonts": {
+              "eastAsia": "宋体",
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            },
+            "size_pt": 14.0
+          }
+        },
+        {
+          "text": "项",
+          "format": {
+            "fonts": {
+              "eastAsia": "宋体",
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            },
+            "size_pt": 14.0
+          }
+        },
+        {
+          "text": "为空白）。",
+          "format": {
+            "fonts": {
+              "eastAsia": "宋体",
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            },
+            "size_pt": 14.0
+          }
+        }
+      ],
+      "location": {
+        "part": "document",
+        "child_index": 44,
+        "order": 36
+      },
+      "xml_locator": {
+        "part": "document",
+        "child_index": 44,
+        "order": 36
+      },
+      "context_before": [
+        "学位论文作者签名：                       年    月    日",
+        "非公开学位论文标注说明"
+      ],
+      "context_after": [
+        "论文题目",
+        "申请密级"
+      ]
+    }
+  },
+  "evidence_context": {
+    "E00037": {
+      "id": "E00037",
+      "kind": "paragraph",
+      "text": "根据北京体育大学有关规定，非公开学位论文须经指导教师同意、作者本人申请和相关部门批准方能标注。未经批准的均为公开学位论文（公开的学位论文本项为空白）。",
+      "style_id": null,
+      "runs": [
+        {
+          "text": "根据北京体育大学有关规定，非公开学位论文须经指导教师同意、作者本人申请和相关部门批准方能标注。未经批准的均为公开学位论文（公开",
+          "format": {
+            "fonts": {
+              "eastAsia": "宋体",
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            },
+            "size_pt": 14.0
+          }
+        },
+        {
+          "text": "的",
+          "format": {
+            "fonts": {
+              "eastAsia": "宋体",
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            },
+            "size_pt": 14.0
+          }
+        },
+        {
+          "text": "学位论文本",
+          "format": {
+            "fonts": {
+              "eastAsia": "宋体",
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            },
+            "size_pt": 14.0
+          }
+        },
+        {
+          "text": "项",
+          "format": {
+            "fonts": {
+              "eastAsia": "宋体",
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            },
+            "size_pt": 14.0
+          }
+        },
+        {
+          "text": "为空白）。",
+          "format": {
+            "fonts": {
+              "eastAsia": "宋体",
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            },
+            "size_pt": 14.0
+          }
+        }
+      ],
+      "location": {
+        "part": "document",
+        "child_index": 44,
+        "order": 36
+      },
+      "context_before": [
+        "学位论文作者签名：                       年    月    日",
+        "非公开学位论文标注说明"
+      ],
+      "context_after": [
+        "论文题目",
+        "申请密级"
+      ],
+      "style_name": null,
+      "xml_locator": {
+        "part": "document",
+        "child_index": 44,
+        "order": 36
+      }
+    }
+  },
+  "review": {
+    "clause_id": "C00041",
+    "classification": "covered",
+    "reason": "The clause contains two source-defined cover obligations: unapproved theses default to public status, and the administrative item is blank for public theses.",
+    "obligations": [
+      {
+        "id": "C00041-unapproved-public",
+        "status": "covered",
+        "reason": "The cover requirement preserves the source policy unapproved_is_public without inferring any approval state.",
+        "actor": "document generator",
+        "action": "preserve policy",
+        "target": "publication status of an unapproved thesis",
+        "condition": "When approval is absent or not established",
+        "source_quote": "未经批准的均为公开学位论文",
+        "force": "required",
+        "applicability": "applicable",
+        "route": "automatic"
+      },
+      {
+        "id": "C00041-public-blank",
+        "status": "covered",
+        "reason": "The cover requirement sets the administrative region public_policy to blank for public theses.",
+        "actor": "document generator",
+        "action": "leave blank",
+        "target": "non-public administrative item",
+        "condition": "When thesis_profile.security_level is public",
+        "source_quote": "公开的学位论文本项为空白",
+        "force": "required",
+        "applicability": "applicable",
+        "route": "automatic"
+      }
+    ],
+    "normative_basis": "explicit_normative_text"
+  },
+  "requirements": [
+    {
+      "field_key": "non_public_thesis_administration",
+      "clause_ids": [
+        "C00039",
+        "C00041",
+        "C00043",
+        "C00044",
+        "C00045",
+        "C00046",
+        "C00047",
+        "C00048",
+        "C00049",
+        "C00051",
+        "C00052",
+        "C00053"
+      ],
+      "evidence_ids": [
+        "E00036",
+        "E00037",
+        "E00039",
+        "E00040",
+        "E00041",
+        "E00042",
+        "E00043",
+        "E00044",
+        "E00045",
+        "E00047"
+      ],
+      "confidence": 0.99,
+      "reason": "The source defines a non-public thesis administrative region with conditional security-marking fields, a two-ended confidentiality period, approval-number and approval-date fields, source-derived marking durations, shorter-duration allowances, and a public-thesis blank policy.",
+      "applicability": {
+        "status": "conditional",
+        "conditions": [
+          {
+            "fact": "thesis_profile.security_level",
+            "operator": "in",
+            "value": [
+              "restricted",
+              "classified"
+            ]
+          }
+        ],
+        "exceptions": [
+          "Public theses keep the administrative region blank."
+        ]
+      },
+      "input_prerequisites": [
+        {
+          "kind": "metadata",
+          "key": "thesis_profile.security_level",
+          "required": true,
+          "reason": "The administrative region applies according to the confirmed thesis security level."
+        }
+      ],
+      "verification": {
+        "mode": "external",
+        "checks": [
+          "Verify the conditional administrative region, field order, source-derived duration options, and blank behavior for public theses.",
+          "Verify that approval-number and approval-date labels are bound to their corresponding administrative fields.",
+          "核对非公开行政区域的选项及期限与当前来源一致；此项不代表已生成或验证 DOCX 行政表。"
+        ],
+        "checker_ids": [
+          "cover_non_public_administration"
+        ]
+      },
+      "role": "cover",
+      "properties": {
+        "institution": "——",
+        "fields": [],
+        "non_public_administration": {
+          "applicability": {
+            "status": "conditional",
+            "conditions": [
+              {
+                "fact": "thesis_profile.security_level",
+                "operator": "in",
+                "value": [
+                  "restricted",
+                  "classified"
+                ]
+              }
+            ],
+            "exceptions": [
+              "Public theses keep the administrative region blank."
+            ]
+          },
+          "fields": [
+            {
+              "id": "security_marking",
+              "label": "申请密级",
+              "value_from": "thesis_profile.cover_metadata.security_marking",
+              "display_policy": "blank_when_public",
+              "order": 1
+            },
+            {
+              "id": "embargo_start",
+              "label": "保密期限（起始日期）",
+              "value_from": "thesis_profile.cover_metadata.embargo_start",
+              "display_policy": "blank_when_public",
+              "order": 2
+            },
+            {
+              "id": "embargo_until",
+              "label": "保密期限（终止日期）",
+              "value_from": "thesis_profile.cover_metadata.embargo_until",
+              "display_policy": "blank_when_public",
+              "order": 3
+            },
+            {
+              "id": "approval_number",
+              "label": "审批表编号",
+              "value_from": "thesis_profile.cover_metadata.approval_number",
+              "display_policy": "blank_when_public",
+              "order": 4
+            },
+            {
+              "id": "approval_date",
+              "label": "批准日期",
+              "value_from": "thesis_profile.cover_metadata.approval_date",
+              "display_policy": "blank_when_public",
+              "order": 5
+            }
+          ],
+          "public_policy": "blank",
+          "publication_default_policy": "unapproved_is_public",
+          "source_region": "非公开学位论文标注说明",
+          "security_marking_options": [
+            {
+              "label": "限制",
+              "maximum_duration": {
+                "value": 2,
+                "unit": "年"
+              },
+              "shorter_duration_allowed": true
+            },
+            {
+              "label": "秘密",
+              "maximum_duration": {
+                "value": 10,
+                "unit": "年"
+              },
+              "shorter_duration_allowed": true
+            },
+            {
+              "label": "机密",
+              "maximum_duration": {
+                "value": 20,
+                "unit": "年"
+              },
+              "shorter_duration_allowed": true
+            }
+          ]
+        },
+        "before_role": "document_start",
+        "missing_value_policy": "placeholder",
+        "missing_value_placeholder": "——",
+        "layout_id": "linear"
+      }
+    }
+  ]
+}

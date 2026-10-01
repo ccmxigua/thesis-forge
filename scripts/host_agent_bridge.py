@@ -252,6 +252,7 @@ from declaration_signature_projection import project_signature_only_declarations
 from responsibility_ledger import canonical_review_atom
 from repair_transaction import repair_receipt
 from source_atom_metadata import project_atom_metadata, bind_atom_quote
+from source_quote_reassessment import quote_context_reassessment, RULE_ID as QUOTE_REASSESSMENT_RULE
 from semantic_source_references import (  # noqa: E402
     REFERENCE_PROTOCOL,
     bind_validated_source_reference_selections,
@@ -2736,11 +2737,16 @@ def _retry_changes_allowed(
     previous_response: Any = None, current_response: Any = None,
     chunk: dict[str, Any] | None = None,
 ) -> bool:
-    """Allow only explicitly mechanical contract corrections on a retry."""
+    """Allow named bounded corrections; semantic proposals still need review."""
     if not changed_paths:
         return True
     if _requires_fresh_semantic_split(records):
         return False
+    if quote_context_reassessment(
+        previous_response, current_response, records, changed_paths, chunk,
+        validate=validate_host_agent_response,
+    ) is not None:
+        return True
     codes = {str(item.get("code")) for item in records if isinstance(item, dict)}
     if contract_version == HOST_REVIEW_CONTRACT_V3 and (
         "source_fragment_binding_violation" in codes
@@ -5888,6 +5894,12 @@ def _retry_authorization_ledger(
     """Explain each authorized retry path with validator evidence and hashes."""
     codes = {str(record.get("code") or "") for record in records if isinstance(record, dict)}
     special_rule: str | None = None
+    quote_reassessment = quote_context_reassessment(
+        previous_response, current_response, records, changed_paths, chunk,
+        validate=validate_host_agent_response,
+    )
+    if quote_reassessment is not None:
+        special_rule = QUOTE_REASSESSMENT_RULE
     if contract_version == HOST_REVIEW_CONTRACT_V3 and _source_fragment_binding_retry_allowed(
         previous_response, current_response, records, changed_paths, chunk=chunk,
     ):
@@ -6185,6 +6197,11 @@ def _retry_authorization_ledger(
                 }
                 for item in rule_records
             ] if special_rule else [],
+            **({"source_quote_reassessment": next(
+                proof for proof in quote_reassessment if proof["json_pointer"] == path),
+                "semantic_review_required": True, "independent_review_required": True,
+                "mechanical_equivalence_claimed": False}
+               if special_rule == QUOTE_REASSESSMENT_RULE else {}),
         })
     return ledger
 
@@ -10199,6 +10216,13 @@ def _host_prompt(*, request_path: Path, chunk_path: Path,
         contract_version == HOST_REVIEW_CONTRACT_V3
         and "source_fragment_binding_violation" in retry_codes
     )
+    quote_context_retry = bool(retry_error_records) and contract_version == HOST_REVIEW_CONTRACT_V3 and all(
+        isinstance(record, dict) and record.get("code") == "contract_validation_error"
+        and re.fullmatch(r"\$\.clause_reviews\[\d+\]\.obligations\[\d+\]\.source_quote",
+                         str(record.get("json_pointer") or ""))
+        and record.get("raw_error") == f"{record.get('json_pointer')}: must_equal_current_source_subspan"
+        for record in retry_error_records
+    )
     if retry_parent_response_path is not None:
         if retry_parent_response_sha256 is not None:
             observed_parent_sha256 = sha256_file(retry_parent_response_path)
@@ -10285,6 +10309,19 @@ minimum change. The embedded payload excludes bridge-owned provenance:
         )
     if retry_parent_response_path is None:
         retry_invariant = ""
+    elif quote_context_retry:
+        retry_invariant = """\nFINAL RETRY INVARIANT: preserve the entire parent response, requirement graph,
+clause/review order and every atom field except the validator-named source_quote
+fields. Recover exact whitespace only when the original quote has one unique
+current-source occurrence. If its whitespace pattern occurs more than once in
+the SAME clause, do not guess an occurrence or date role. You may explicitly
+select that clause's exact complete source_span.text as evidence context. This
+is a primary semantic reassessment, NOT code-proven lexical equivalence, and
+must pass a fresh independent source-first review. Context never expands an
+atom's execution scope. Do not change targets, conditions, applicability,
+status, action, actor, force, route, IDs, classification, relations or any other
+payload. An invented quote, another evidence/clause, stale span or simultaneous
+non-quote error cannot use this context-selection rule; return unchanged."""
     elif v3_source_fragment_binding_retry:
         retry_invariant = """\nFINAL RETRY INVARIANT: preserve the complete requirement graph, every clause_ids/evidence_ids relation, every clause review, and all existing role-native payloads. For each source_fragment_binding_violation record, add or correct only source_fragment_clause_ids on the same requirement. A role that declares top-level properties.text may set only that field to the exact current-source composition (or null for deterministic materialization). For declarations, preserve properties.items[].heading/body/body_parts exactly and never add properties.text; the bridge binds source fragments to those role-native fields. No requirement identity, clause/evidence links, classification, or other payload changes are authorized. Use current cited clause IDs in source order; no guessed adjacency, paraphrase, unrelated clause, or other change is authorized. The bridge rechecks hashes, evidence, spans, order, and boundaries, then runs the full validator and both raw-to-raw and candidate-to-candidate drift checks. If no exact binding or role-native destination is provable, return unchanged and fail closed."""
     elif v3_external_action_inventory_retry:
@@ -10312,6 +10349,8 @@ paths named by the structured validator records above. If a review is already
 classified executable, repair its missing relation only; do not turn an unresolved or informational review into executable. If a safe local repair is not possible
 without changing semantics, return the parent object unchanged and let the
 bridge fail closed."""
+    if quote_context_retry:
+        parent_text += "\nThe quote-context exception below is a bounded primary proposal requiring semantic re-review, not a mechanical equivalence claim.\n"
     return f"""You are the current Host Agent for one fresh thesis-format semantic-review run.
 
 Return exactly ONE JSON object and nothing else. Do not use Markdown fences,
@@ -13768,7 +13807,10 @@ def run_bridge(
                         audit["retry_stage_comparison"] = comparison_audit
                         if semantic_changes:
                             audit["semantic_retry_changes"] = semantic_changes
-                            if (
+                            if any(item.get("rule_id") == QUOTE_REASSESSMENT_RULE
+                                   for item in pending_retry_authorizations):
+                                audit["semantic_retry_change_policy"] = QUOTE_REASSESSMENT_RULE
+                            elif (
                                 isinstance(retry_field_projection, dict)
                                 and retry_field_projection.get("status") == "projected"
                             ):

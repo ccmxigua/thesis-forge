@@ -62,6 +62,20 @@ condition or classification is guessed or changed by this projection, and
 complete contract validation plus fresh independent semantic review remain
 mandatory before acceptance.
 
+A repeated whitespace-normalized atom quote is not mechanically recoverable:
+code must not pick a first/last occurrence. With complete current validator
+feedback and a receipt-bound parent, a primary retry may explicitly select
+only the same clause's exact complete source span as quotation context. This
+bounded semantic reassessment may change only the named `source_quote` fields;
+every atom field, condition, status, route, requirement edge and ordering stays
+unchanged. Both old and new quotes, ambiguous match count, full source binding,
+validator/parent/candidate hashes and the reassessment policy are recorded in
+the retry authorization ledger. It is not code-proven equivalence or a broader
+execution scope. An already valid quote, lexical change, foreign/stale source,
+unrelated error or another semantic edit does not qualify. Complete contract
+validation and a fresh independent source-first review of the new candidate
+are mandatory; independent disagreement still fails closed.
+
 Existing requirement IDs are selectors into the current input, never IDs for
 the model to allocate. Each freshly prepared chunk constrains the selector to
 its supplied candidates before computing its request hash. A new requirement

@@ -2315,6 +2315,8 @@ class HostAgentBridgeTests(unittest.TestCase):
         )
         self.assertIn("runtime_context.*", retry)
         self.assertIn("operator equals or in", retry)
+        self.assertIn("exact whole-profile key thesis_profile", retry)
+        self.assertIn("Do not replace thesis_profile with thesis_profile.cover_metadata", retry)
 
     def test_invalid_retry_cannot_change_classification_to_escape_a_contract_error(self) -> None:
         previous = self._executable_response({"provenance": {}})

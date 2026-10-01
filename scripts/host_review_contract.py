@@ -12,7 +12,7 @@ from source_atom_metadata import bind_atom_quote
 from document_text_font import document_font_scope_errors
 from evidence_context_guards import sample_content_guard
 from format_spec_validation import schema_support_errors, validate_instance
-from format_contract_guards import cover_binding_errors
+from format_contract_guards import cover_binding_errors, input_prerequisite_errors
 from fixed_declaration_source import derive_fixed_declaration_candidates, bound_signature_lines
 from semantic_contract import strict_json_loads
 from existing_requirement_contract import (
@@ -1650,6 +1650,7 @@ def validate_response(response: Any, chunk: dict[str, Any]) -> list[str]:
     if not isinstance(requirements, list):
         return errors + ["requirements_must_be_array"]
 
+    errors.extend(input_prerequisite_errors(response))
     requirement_clause_sets: list[set[str]] = []
     for index, item in enumerate(requirements):
         if not isinstance(item, dict):

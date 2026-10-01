@@ -18,6 +18,9 @@ REGISTERED_PROFILE_FIELDS = frozenset({
 REGISTERED_PROFILE_OBJECTS = frozenset({
     "cover_metadata",
 })
+# An exact whole-input selector, not an alias for cover_metadata and not
+# permission to treat every nested field as supplied/confirmed.
+REGISTERED_AGGREGATE_INPUTS = {"thesis_profile": "metadata"}
 REGISTERED_COVER_FIELDS = frozenset({
     "trust", "classification_number", "unit_code", "title_zh", "title_en",
     "subtitle_zh", "subtitle_en", "author_name", "student_id", "college_name",
@@ -104,6 +107,8 @@ def registered_input_key(key: Any) -> bool:
     """Return whether an input prerequisite key belongs to a known namespace."""
     if not isinstance(key, str) or not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_.-]*", key):
         return False
+    if key in REGISTERED_AGGREGATE_INPUTS:
+        return True
     prefix, _, path = key.partition(".")
     if not path:
         return False
@@ -277,7 +282,10 @@ def input_prerequisite_errors(spec: dict[str, Any]) -> list[str]:
     for index, requirement in enumerate(spec.get("requirements", []) if isinstance(spec, dict) else []):
         if not isinstance(requirement, dict):
             continue
-        for pindex, prerequisite in enumerate(requirement.get("input_prerequisites", [])):
+        prerequisites = requirement.get("input_prerequisites", [])
+        if not isinstance(prerequisites, list):
+            continue  # The schema reports malformed containers separately.
+        for pindex, prerequisite in enumerate(prerequisites):
             if not isinstance(prerequisite, dict):
                 continue
             key = prerequisite.get("key")
@@ -292,7 +300,13 @@ def input_prerequisite_errors(spec: dict[str, Any]) -> list[str]:
                 "template_resource": "template_profile.",
                 "runtime": "runtime.",
             }.get(prerequisite.get("kind"))
-            if expected_prefix and (not isinstance(key, str) or not key.startswith(expected_prefix)):
+            aggregate_kind_matches = (
+                isinstance(key, str)
+                and key in REGISTERED_AGGREGATE_INPUTS
+                and REGISTERED_AGGREGATE_INPUTS.get(key) == prerequisite.get("kind")
+            )
+            if expected_prefix and not aggregate_kind_matches and (
+                    not isinstance(key, str) or not key.startswith(expected_prefix)):
                 errors.append(
                     f"$.requirements[{index}].input_prerequisites[{pindex}].key: "
                     f"kind {prerequisite.get('kind')!r} must use namespace {expected_prefix!r}"

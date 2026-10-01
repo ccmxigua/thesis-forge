@@ -1335,7 +1335,7 @@
         "key": {
           "type": "string",
           "minLength": 1,
-          "pattern": "^(thesis_profile|source_inventory|template_profile|runtime)\\."
+          "pattern": "^(?:thesis_profile$|(?:thesis_profile|source_inventory|template_profile|runtime)\\.)"
         },
         "required": {
           "type": "boolean"

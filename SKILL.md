@@ -43,6 +43,18 @@ to an arbitrary chat agent's model merely because that agent loaded this file.
 - Fail closed when a clause is missing, ambiguous, unsupported, stale, or not
   backed by the supplied evidence. Never fill gaps with a plausible guess.
 
+Metadata prerequisites may select the exact aggregate key `thesis_profile`
+for the whole supplied profile, or a registered dotted field/sub-object.
+Only `kind: metadata` may use this aggregate. It resolves the current explicit
+metadata object (or the explicitly namespaced legacy profile), never unrelated
+source data. Supplied stable field types and contradictory profile inputs are
+checked; presence is not completeness, provenance validation, approval or
+compliance. Specific missing fields require their own prerequisites and checks.
+The whole profile and `thesis_profile.cover_metadata` are distinct scopes;
+neither code nor schema feedback may silently substitute one for the other.
+Raw responses, source bindings and ordinary retry/independent-review gates
+remain unchanged.
+
 ## Existing requirement reference integrity
 
 Typed obligation quotations bind to the exact current evidence occurrence,

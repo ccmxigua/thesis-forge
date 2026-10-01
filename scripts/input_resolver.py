@@ -49,6 +49,23 @@ def input_value_type_valid(key: str, value: Any) -> bool:
     and must not be satisfied by a list/dict accidentally serialized under a
     scalar field name.
     """
+    if key == "thesis_profile":
+        if not isinstance(value, dict):
+            return False
+        # Presence is not completeness or attestation. Check supplied stable
+        # field types only; absent fields still need their own prerequisites.
+        for field, child in value.items():
+            if child is None and field in {"degree_level", "writing_language"}:
+                continue  # Canonical pending profiles explicitly allow null.
+            if field == "cover_metadata":
+                if not isinstance(child, dict):
+                    return False
+                if not all(input_value_type_valid(f"thesis_profile.cover_metadata.{name}", item)
+                           for name, item in child.items()):
+                    return False
+            elif not input_value_type_valid(f"thesis_profile.{field}", child):
+                return False
+        return True
     if not isinstance(key, str) or not key.startswith("thesis_profile."):
         return True
     path = key.removeprefix("thesis_profile.")
@@ -120,6 +137,14 @@ def resolve_input(
     if not isinstance(key, str) or not key.strip():
         return False, None, None
     key = key.strip()
+    if key == "thesis_profile":
+        value = metadata
+        if (value is None or (isinstance(value, dict) and not value)) and isinstance(source_inventory, dict):
+            value = source_inventory.get("thesis_profile")
+        # Preserve malformed supplied values so the type guard can reject
+        # them. Never promote cover_metadata or flat source data to a profile.
+        present = value_present(value) or (value is not None and not isinstance(value, dict))
+        return present, "thesis_profile", value
     if key.startswith("source_inventory."):
         value = resolve_dotted(source_inventory, key.removeprefix("source_inventory."))
         return value_present(value), "source_inventory", value
@@ -159,13 +184,19 @@ def input_conflicts(
     runtime_inventory: dict[str, Any] | None = None,
 ) -> list[dict[str, Any]]:
     """Detect contradictory values across explicitly supplied namespaces."""
-    if not isinstance(key, str) or not key.startswith("thesis_profile."):
+    if key == "thesis_profile":
+        metadata_value = metadata
+        inventory_value = (source_inventory.get("thesis_profile")
+                           if isinstance(source_inventory, dict) else None)
+        legacy_inventory_value = None
+    elif isinstance(key, str) and key.startswith("thesis_profile."):
+        path = key.removeprefix("thesis_profile.")
+        metadata_value = resolve_metadata(metadata, path)
+        inventory_value = resolve_dotted(source_inventory, key)
+        legacy_inventory_value = resolve_dotted(source_inventory, path)
+    else:
         return []
-    path = key.removeprefix("thesis_profile.")
     sources: list[tuple[str, Any]] = []
-    metadata_value = resolve_metadata(metadata, path)
-    inventory_value = resolve_dotted(source_inventory, key)
-    legacy_inventory_value = resolve_dotted(source_inventory, path)
     if value_present(metadata_value):
         sources.append(("metadata", metadata_value))
     if value_present(inventory_value):

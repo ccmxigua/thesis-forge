@@ -288,6 +288,7 @@ from source_obligation_compiler import (  # noqa: E402
     has_explicit_authoring_action_cue,
     has_mixed_external_document_action_signal,
     materialize_complete_abstract_source_constraints,
+    materialize_registered_abstract_quality_guidance,
     materialize_known_source_verification,
     materialize_source_verification_classifications,
     materialize_source_keyword_constraints,
@@ -2315,6 +2316,7 @@ def _v3_source_inventory_completion_allowed(
     candidate still has to pass the ordinary response validator and the fresh
     source-first obligation review before it can be accepted.
     """
+    inventory_codes = {"executable_review_obligations_missing", "external_action_obligations_missing"}
     if (
         not isinstance(previous_response, dict)
         or not isinstance(current_response, dict)
@@ -2323,16 +2325,27 @@ def _v3_source_inventory_completion_allowed(
         or not records
         or any(
             not isinstance(record, dict)
-            or record.get("code") not in {
-                "executable_review_obligations_missing",
-                "external_action_obligations_missing",
-            }
             or not isinstance(record.get("response_sha256"), str)
             or record.get("response_sha256") != _response_sha256(previous_response)
             for record in records
         )
     ):
         return False
+    inventory_targets = {str(r.get("json_pointer") or "") for r in records
+                         if r.get("code") in inventory_codes}
+    if not inventory_targets:
+        return False
+    companion_records = []
+    for record in records:
+        if record.get("code") in inventory_codes:
+            continue
+        pointer = str(record.get("json_pointer") or "")
+        if (record.get("code") != "contract_validation_error"
+                or pointer + ".obligations" not in inventory_targets
+                or record.get("raw_error") != pointer + ": must match at least one schema in anyOf"):
+            return False
+        companion_records.append(record)
+    extended_inventory = bool(companion_records)
 
     fingerprints = _retry_input_fingerprints(chunk)
     if not _retry_fingerprints_complete(fingerprints):
@@ -2403,8 +2416,9 @@ def _v3_source_inventory_completion_allowed(
             return False
         old_present, old_inventory = _retry_pointer_lookup(previous_response, path)
         new_present, new_inventory = _retry_pointer_lookup(current_response, path)
-        if (old_present and old_inventory is not None) or not new_present:
+        if (old_present and old_inventory is not None and old_inventory != []) or not new_present:
             return False
+        extended_inventory |= old_present and old_inventory == []
         if not isinstance(new_inventory, list) or not new_inventory:
             return False
 
@@ -2415,6 +2429,9 @@ def _v3_source_inventory_completion_allowed(
             if classification != "external_compliance":
                 return False
             allowed_statuses = {"unverifiable"}
+        elif classification == "executable_with_external_check":
+            allowed_statuses = {"covered", "unverifiable"}
+            extended_inventory = True
         elif classification_requires_requirement(str(classification)):
             allowed_statuses = {"covered"}
         else:
@@ -2432,7 +2449,6 @@ def _v3_source_inventory_completion_allowed(
         for obligation in new_inventory:
             if (
                 not isinstance(obligation, dict)
-                or set(obligation) != {"id", "status", "reason"}
                 or not isinstance(obligation.get("id"), str)
                 or not obligation["id"].strip()
                 or obligation["id"] in obligation_ids
@@ -2441,6 +2457,7 @@ def _v3_source_inventory_completion_allowed(
                 or not obligation["reason"].strip()
             ):
                 return False
+            extended_inventory |= set(obligation) != {"id", "status", "reason"}
             obligation_ids.add(obligation["id"])
 
         clause = clause_map.get(clause_id)
@@ -2508,6 +2525,22 @@ def _v3_source_inventory_completion_allowed(
             path, previous_response, current_response, matching_records, chunk,
         )
         if not source_binding_complete or not _retry_fingerprints_complete(source_binding):
+            return False
+
+    if extended_inventory:
+        # Empty arrays and typed atoms use the complete local contract, not an
+        # ad-hoc field whitelist. Generic anyOf reports are only companions of
+        # the exact missing inventories, never standalone repair authority.
+        # Recompute the entire parent bundle; omitted/unrelated/stale feedback
+        # cannot grant this transition. The completed candidate must have no
+        # remaining contract failures before fresh source-first semantic review.
+        actual = contract_error_records(
+            validate_host_agent_response(previous_response, chunk),
+            response=previous_response, chunk=chunk,
+        )
+        actual += _external_action_obligation_retry_records(previous_response, actual, chunk)
+        if (sorted(_response_sha256(r) for r in actual) != sorted(_response_sha256(r) for r in records)
+                or validate_host_agent_response(current_response, chunk)):
             return False
 
     # Restore only the validator-identified old inventory values in a copy of
@@ -5853,7 +5886,7 @@ def _project_validator_targeted_obligation_fields(
         parent_has_value, parent_value = _retry_pointer_lookup(parent_response, path)
         model_has_value, model_value = _retry_pointer_lookup(model_retry_response, path)
         if (
-            (parent_has_value and parent_value is not None)
+            (parent_has_value and parent_value is not None and parent_value != [])
             or not model_has_value
             or not isinstance(model_value, list)
             or not model_value
@@ -9908,6 +9941,9 @@ def prepare_native_response_candidate(
     response, abstract_source_projections = materialize_complete_abstract_source_constraints(
         response, chunk.get("clauses"),
     )
+    response, abstract_quality_projections = materialize_registered_abstract_quality_guidance(
+        response, chunk.get("clauses"), evidence_context=chunk.get("evidence_context"),
+    )
     response, source_keyword_constraint_projections = materialize_source_keyword_constraints(
         response, chunk.get("clauses"),
         evidence_context=chunk.get("evidence_context"), allow_standalone=True,
@@ -9984,6 +10020,7 @@ def prepare_native_response_candidate(
         error.source_literal_occurrence_projections = copy.deepcopy(  # type: ignore[attr-defined]
             source_literal_occurrence_projections
         )
+        error.abstract_quality_projections = copy.deepcopy(abstract_quality_projections)
 
     contract_errors = validate_host_agent_response(response, chunk)
     if contract_errors:
@@ -10171,6 +10208,7 @@ def prepare_native_response_candidate(
         "source_heading_binding_policy_version": SOURCE_HEADING_BINDING_POLICY_VERSION,
         "existing_requirement_payload_projections": existing_payload_projections,
         "complete_abstract_source_projections": abstract_source_projections,
+        "abstract_quality_projections": abstract_quality_projections,
         "source_keyword_constraint_projections": source_keyword_constraint_projections,
         "source_heading_binding_projections": source_heading_binding_projections,
         "publication_default_projections": publication_default_projections,
@@ -11166,6 +11204,7 @@ def run_host_agent_chunk(
         "complete_abstract_source_projections": candidate_audit[
             "complete_abstract_source_projections"
         ],
+        "abstract_quality_projections": candidate_audit["abstract_quality_projections"],
         "source_keyword_constraint_projections": candidate_audit[
             "source_keyword_constraint_projections"
         ],
@@ -11198,6 +11237,7 @@ def run_host_agent_chunk(
             "complete_abstract_source": len(candidate_audit[
                 "complete_abstract_source_projections"
             ]),
+            "abstract_quality": len(candidate_audit["abstract_quality_projections"]),
             "source_keyword_constraints": len(candidate_audit[
                 "source_keyword_constraint_projections"
             ]),
@@ -13658,7 +13698,7 @@ def run_bridge(
                                 projected_error, projected_changes = _retry_semantic_change_error(
                                     previous_raw,
                                     projected_raw,
-                                    obligation_projection_records,
+                                    semantic_parent_error_records,
                                     contract_version=contract_version,
                                     chunk=chunk,
                                     authorization_out=projected_authorizations,
@@ -13841,6 +13881,7 @@ def run_bridge(
                                 "document_font_projections",
                                 "existing_requirement_payload_projections",
                                 "complete_abstract_source_projections",
+                                "abstract_quality_projections",
                                 "source_keyword_constraint_projections",
                                 "source_heading_binding_projections",
                                 "publication_default_projections",
@@ -14227,6 +14268,9 @@ def run_bridge(
                         "source_verification_classification_projections": copy.deepcopy(
                             getattr(exc, "source_verification_classification_projections", [])
                         ),
+                        "abstract_quality_projections": copy.deepcopy(
+                            getattr(exc, "abstract_quality_projections", [])
+                        ),
                     }
                     with lifecycle_lock:
                         if chunk_lifecycle[index].get("attempts"):
@@ -14239,6 +14283,7 @@ def run_bridge(
                     # projection audit even when no chunk is accepted.
                     projection_fields = (
                         "document_font_projections",
+                        "abstract_quality_projections",
                         "source_keyword_constraint_projection_policy_version",
                         "source_keyword_constraint_projections",
                         "source_heading_binding_policy_version",

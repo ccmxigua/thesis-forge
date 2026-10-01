@@ -1985,6 +1985,130 @@ def materialize_soft_keyword_count_guidance(
     return projected, audit
 
 
+def _registered_abstract_quality_flags(quote: str) -> list[str]:
+    """Closed target-owned claims, not substring-based semantic inference.
+
+    Unknown prose retains the model/human path. Extra qualifying or target-
+    switching words cannot borrow the positive vocabulary in a registered
+    phrase. The one registered length exception qualifies length only.
+    """
+    if any(char in quote for char in '“”‘’"\'「」『』'):
+        return []
+    phrases = sorted({p for values in _ABSTRACT_QUALITY_MAP.values() for p in values}, key=len, reverse=True)
+    phrase_pattern = "(?:" + "|".join(re.escape(p) for p in phrases) + ")"
+    quality_claim = re.compile(
+        r"(?:中文摘要(?:是|为)|是(?:一篇)?(?:具有)?|一篇具有|具有|具备|能|能够|使用|采用|"
+        r"应使用|须使用|必须使用|应|须|必须|要)?"
+        + phrase_pattern + r"(?:(?:[、和]|并且|且)" + phrase_pattern + r")?(?:的短文|短文|等)?"
+    )
+    other_claim = re.compile(
+        r"一般以第三人称语气撰写|"
+        r"\d+[～~–—-]\d+字(?:（如遇特殊需要字数可以略多）)?|"
+        r"不加评论和解释"
+    )
+    keys = set()
+    for segment in re.split(r"[，,。；;\n]", quote):
+        segment = segment.strip()
+        if not segment:
+            continue
+        if not quality_claim.fullmatch(segment):
+            if other_claim.fullmatch(segment):
+                continue
+            return []
+        keys.update(key for key, values in _ABSTRACT_QUALITY_MAP.items()
+                    if any(phrase in segment for phrase in values))
+    return [key for key in _ABSTRACT_QUALITY_MAP if key in keys]
+
+
+def materialize_registered_abstract_quality_guidance(
+    response: Any, clauses: Any, *, evidence_context: Any,
+) -> tuple[Any, list[dict[str, Any]]]:
+    """Append registered, exact-source guidance to an existing unique target.
+
+    A fragment need not contain the entire abstract bundle to state a quality
+    criterion. This does not create a requirement, classify a clause, fill its
+    obligation inventory or harden guidance. Unknown/conditional/quoted targets
+    and conflicting declarations remain on the ordinary semantic path.
+    """
+    projected = copy.deepcopy(response)
+    if (not isinstance(projected, dict) or not isinstance(clauses, list)
+            or projected.get("reported_conflicts") or projected.get("conflicts")):
+        return projected, []
+    requirements, reviews = projected.get("requirements"), projected.get("clause_reviews")
+    if not isinstance(requirements, list) or not isinstance(reviews, list):
+        return projected, []
+    ids = [c.get("id") if isinstance(c, dict) else None for c in clauses]
+    if any(not isinstance(c, str) or not c for c in ids) or len(set(ids)) != len(ids):
+        return projected, []
+    audit = []
+    for clause in clauses:
+        clause_id = clause["id"]
+        matching_reviews = [r for r in reviews if isinstance(r, dict) and r.get("clause_id") == clause_id]
+        if (len(matching_reviews) != 1 or matching_reviews[0].get("classification")
+                not in {"executable", "covered", "verify_existing"}):
+            continue
+        binding = verified_current_source_span(clause, evidence_context)
+        if binding is None:
+            continue
+        evidence_id, quote = binding
+        evidence = evidence_context[evidence_id]
+        if evidence.get("id") != evidence_id:
+            continue
+        if (not re.match(r"^\s*中文摘要(?:是|为)", quote)
+                or quote.count("中文摘要") != 1
+                or re.search(r"英文摘要|English\s+abstract|Chinese\s+abstract", quote, re.I)
+                or _CONTEXT_UNSAFE.search(quote) or _ABSTRACT_SOURCE_MANUAL_REVIEW.search(quote)):
+            continue
+        # Don't interpret positive vocabulary inside a negated or quoted rule.
+        if re.search(r"不(?:是|应|需|必|使用|要求|具备|具有|反映|体现|突出)|不能|并非|无需|不得|禁止|反例|错误", quote):
+            continue
+        keys = _registered_abstract_quality_flags(quote)
+        if not keys:
+            continue
+        linked = [(i, r) for i, r in enumerate(requirements)
+                  if isinstance(r, dict) and isinstance(r.get("clause_ids"), list)
+                  and clause_id in r["clause_ids"]]
+        if len(linked) != 1:
+            continue
+        index, requirement = linked[0]
+        properties = requirement.get("properties")
+        abstract = properties.get("abstract_zh") if isinstance(properties, dict) else None
+        if (requirement.get("role") != "content_constraints" or not isinstance(abstract, dict)
+                or evidence_id not in (requirement.get("evidence_ids") or [])
+                or requirement.get("existing_requirement_id")
+                or any(requirement.get(k) for k in ("condition", "conditions", "selector"))):
+            continue
+        existing = abstract.get("quality_guidance")
+        if existing is not None and (not isinstance(existing, list)
+                or any(not isinstance(k, str) or k not in _ABSTRACT_QUALITY_MAP for k in existing)
+                or len(set(existing)) != len(existing)):
+            continue
+        additions = [key for key in keys if key not in (existing or [])]
+        # These enum flags are a set, not ordered prose. Use one versioned
+        # representation on both attempts so insertion order isn't semantic
+        # drift; never remove a value or canonicalize other payload arrays.
+        merged = [key for key in _ABSTRACT_QUALITY_MAP if key in [*(existing or []), *additions]]
+        if merged == existing:
+            continue
+        before = copy.deepcopy(requirement)
+        abstract["quality_guidance"] = merged
+        audit.append({
+            "policy": "registered_abstract_quality_guidance_v1", "clause_id": clause_id,
+            "requirement_index": index, "source_evidence_ids": [evidence_id],
+            "source_sha256": clause["source_span"]["source_sha256"],
+            "source_quote_sha256": hashlib.sha256(quote.encode("utf-8")).hexdigest(),
+            "source_span": copy.deepcopy(clause["source_span"]),
+            "added_quality_guidance": additions, "original_requirement": before,
+            "before_sha256": hashlib.sha256(json.dumps(before, sort_keys=True,
+                ensure_ascii=False, separators=(",", ":")).encode()).hexdigest(),
+            "after_sha256": hashlib.sha256(json.dumps(requirement, sort_keys=True,
+                ensure_ascii=False, separators=(",", ":")).encode()).hexdigest(),
+            "semantic_review_preserved": True, "independent_review_required": True,
+            "submission_ready": False,
+        })
+    return projected, audit
+
+
 def materialize_complete_abstract_source_constraints(
     response: Any, clauses: Any,
 ) -> tuple[Any, list[dict[str, Any]]]:

@@ -1841,8 +1841,11 @@ def run_native_semantic_review(
     obligation_coverage_mode = request.get("protocol") == OBLIGATION_COVERAGE_PROTOCOL
     if adapter_id == "openclaw" and (not isinstance(model, str) or not model.strip()):
         raise NativeSemanticReviewError("OpenClaw semantic review requires an explicit model route")
-    if adapter_id == "codex" and model is not None and (not isinstance(model, str) or not model.strip()):
-        raise NativeSemanticReviewError("native Codex semantic review model must be non-empty when supplied")
+    if adapter_id == "codex":
+        try:
+            model = codex_adapter.resolve_model(model)
+        except ValueError as exc:
+            raise NativeSemanticReviewError(str(exc)) from exc
     canonical_schema = OBLIGATION_COVERAGE_SCHEMA if obligation_coverage_mode else RESPONSE_SCHEMA
     response_validator = validate_obligation_coverage_response if obligation_coverage_mode else validate_response
     checks = request.get("checks")

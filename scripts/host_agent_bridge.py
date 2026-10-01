@@ -10777,6 +10777,8 @@ def run_host_agent_chunk(
 ) -> dict[str, Any]:
     if controller is not None:
         controller.check()
+    if adapter_id == "codex":
+        codex_model = codex_adapter.resolve_model(codex_model)
     prompt_path.parent.mkdir(parents=True, exist_ok=True)
     model_packet_path = prompt_path.with_name(prompt_path.stem.replace("prompt", "input") + ".json")
     _write_json(model_packet_path, compact_model_packet(chunk))
@@ -12888,11 +12890,15 @@ def run_bridge(
         raise ValueError("invalid host review output policy")
     host_context = require_host_runtime(host_runtime)
     adapter_id = automatic_adapter_id(host_context)
+    codex_model_source = (
+        "project-default-native-codex-model" if codex_model is None
+        else "explicit-native-codex-model"
+    )
     if adapter_id == "codex":
-        if codex_model is not None:
-            codex_model = codex_model.strip()
-            if not codex_model:
-                raise HostRuntimeError("Codex model must be non-empty when explicitly supplied")
+        try:
+            codex_model = codex_adapter.resolve_model(codex_model)
+        except ValueError as exc:
+            raise HostRuntimeError(str(exc)) from exc
     if adapter_id == "openclaw" and model is None and not inherit_parent_model and not host_context.parent_session_id:
         raise HostRuntimeError(
             "automatic OpenClaw execution requires an explicit model route or a bound parent session; refusing the gateway default"
@@ -13023,8 +13029,7 @@ def run_bridge(
         "source": (
             "explicit-model" if model else "gateway-default"
         ) if adapter_id == "openclaw" else (
-            "explicit-native-codex-model" if codex_model
-            else "native-codex-cli-current-config"
+            codex_model_source
         ),
         "parent_session_key": None,
         "parent_model_override": None,
@@ -13191,8 +13196,7 @@ def run_bridge(
             "route_policy": (
                 "parent-effective-route-snapshot"
                 if adapter_id == "openclaw" else (
-                    "explicit-native-codex-model" if codex_model
-                    else "native-codex-cli-current-config"
+                    codex_model_source
                 )
             ),
             "route_verification": (
@@ -14800,8 +14804,7 @@ def run_bridge(
         "route_policy": (
             "parent-effective-route-snapshot"
             if adapter_id == "openclaw" else (
-                "explicit-native-codex-model" if codex_model
-                else "native-codex-cli-current-config"
+                codex_model_source
             )
         ),
         "route_verification": (
@@ -14864,7 +14867,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--codex-bin",
                         help="optional path to the native codex executable")
     parser.add_argument("--codex-model",
-                        help="optional explicit native Codex model; omitted means the current Codex CLI configuration")
+                        help=f"native Codex model override (project default: {codex_adapter.DEFAULT_MODEL})")
     parser.add_argument(
         "--allow-prompt-only", action="store_true",
         help="explicit non-release override when native Codex lacks --output-schema",

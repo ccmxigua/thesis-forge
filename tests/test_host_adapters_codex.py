@@ -38,7 +38,7 @@ class CodexAdapterTests(unittest.TestCase):
         self.assertIn("--output-last-message", command)
         self.assertNotIn("openclaw", " ".join(command).lower())
 
-    def test_build_command_without_model_preserves_native_cli_configuration(self) -> None:
+    def test_build_command_without_model_uses_project_default(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             prompt = root / "prompt.txt"
@@ -50,7 +50,14 @@ class CodexAdapterTests(unittest.TestCase):
                 last_message_path=output,
                 cwd=root,
             )
-        self.assertNotIn("--model", command)
+        self.assertEqual(command[command.index("--model") + 1], "gpt-6-luna")
+
+    def test_model_resolution_rejects_invalid_overrides_without_fallback(self) -> None:
+        self.assertEqual(codex.resolve_model(None), "gpt-6-luna")
+        self.assertEqual(codex.resolve_model(" gpt-5.6-luna "), "gpt-5.6-luna")
+        for invalid in ("", "  ", False, 6):
+            with self.subTest(model=invalid), self.assertRaises(ValueError):
+                codex.resolve_model(invalid)
 
     def test_build_command_binds_native_output_schema_when_requested(self) -> None:
         with tempfile.TemporaryDirectory() as td:

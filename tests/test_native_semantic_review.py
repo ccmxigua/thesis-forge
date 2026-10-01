@@ -2097,7 +2097,7 @@ class NativeSemanticReviewTests(unittest.TestCase):
             with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
                 audit = native_review.run_native_semantic_review(
                     request,
-                    output_dir=output_dir, host_runtime="codex", model="gpt-5.6-luna",
+                    output_dir=output_dir, host_runtime="codex", model=None,
                     timeout=5,
                 )
 
@@ -2114,6 +2114,8 @@ class NativeSemanticReviewTests(unittest.TestCase):
             )
             self.assertEqual(canonical_schema, OBLIGATION_COVERAGE_SCHEMA)
             self.assertEqual(observed["output_schema_path"], provider_schema_path)
+            self.assertEqual(observed["model"], "gpt-6-luna")
+            self.assertEqual(audit["model_requested"], "gpt-6-luna")
             self.assertEqual(native_schema_support_errors(provider_schema), [])
 
             def contains_unique_items(node):

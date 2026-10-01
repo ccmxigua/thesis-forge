@@ -496,10 +496,14 @@ OpenClaw route parameters.  The Codex CLI's provider/model identity is not
 inferred from the binary name; when it is not exposed, the run audit records
 route visibility as `unobservable`.
 
-No model is silently selected by this skill: omitting `--codex-model` preserves
-the current native Codex CLI configuration.  Pin a model only when the
-invocation explicitly requires reproducibility, for example
-`--codex-model gpt-5.6-luna`.
+The project's native Codex default is `gpt-6-luna`. Omitting `--codex-model`
+uses this versioned project policy for both primary and independent review;
+the post-format review follows the selected host model unless explicitly
+overridden. Use `--codex-model` or `--semantic-review-model` for an explicit
+override. This does not modify global Codex settings or other native hosts'
+routes. An unavailable model fails closed; it is not replaced with an older
+model. Requested model identity is recorded separately from actual route
+visibility, which may remain `unobservable`.
 
 For a Codex host, use the current Codex CLI and its configured native account:
 

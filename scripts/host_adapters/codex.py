@@ -18,9 +18,17 @@ from typing import Any
 
 from semantic_contract import strict_json_loads
 
-# ``None`` means use the model selected by the current native Codex account.
-# A reproducible route must be supplied explicitly by the caller.
-DEFAULT_MODEL: str | None = None
+# Project policy, not a change to the user's global Codex configuration.
+DEFAULT_MODEL = "gpt-6-luna"
+
+
+def resolve_model(model: str | None) -> str:
+    """Resolve the project default without silently replacing invalid overrides."""
+    if model is None:
+        return DEFAULT_MODEL
+    if not isinstance(model, str) or not model.strip():
+        raise ValueError("Codex model must be a non-empty string when supplied")
+    return model.strip()
 
 
 def resolve_binary(binary: str | None) -> str:
@@ -79,10 +87,7 @@ def build_command(
         command[command.index("-C"):command.index("-C")] = [
             "--output-schema", str(schema_path),
         ]
-    if model is not None:
-        if not isinstance(model, str) or not model.strip():
-            raise ValueError("Codex model must be a non-empty string when supplied")
-        command[4:4] = ["--model", model.strip()]
+    command[4:4] = ["--model", resolve_model(model)]
     return command
 
 

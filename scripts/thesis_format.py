@@ -39,7 +39,11 @@ def pipeline_command(args: argparse.Namespace, *, prepare_host_review: bool = Fa
                      requirements_dir: Path | None = None,
                      host_agent_audit: Path | None = None,
                      merge_receipt: Path | None = None,
-                     offline_merge_receipt: Path | None = None) -> list[str]:
+                     offline_merge_receipt: Path | None = None,
+                     semantic_review_runtime: str | None = None,
+                     semantic_review_model: str | None = None) -> list[str]:
+    if bool(semantic_review_runtime) != bool(semantic_review_model):
+        raise ValueError("semantic review runtime and model must be supplied together")
     output_policy = getattr(
         args,
         "output_policy",
@@ -73,6 +77,9 @@ def pipeline_command(args: argparse.Namespace, *, prepare_host_review: bool = Fa
         command += ["--merge-receipt", str(merge_receipt)]
     if offline_merge_receipt:
         command += ["--allow-offline-review", "--offline-merge-receipt", str(offline_merge_receipt)]
+    if semantic_review_runtime:
+        command += ["--semantic-review-runtime", semantic_review_runtime,
+                    "--semantic-review-model", str(semantic_review_model)]
     for option, value in (("--style-template", args.style_template),
                           ("--thesis-profile", args.thesis_profile),
                           ("--template-profile", args.template_profile),
@@ -142,7 +149,7 @@ def main(argv: list[str]) -> int:
     p.add_argument("--codex-bin",
                    help="optional native codex executable used by --auto-host-agent")
     p.add_argument("--codex-model",
-                   help="optional explicit native Codex model; omitted means the current Codex CLI configuration")
+                   help=f"native Codex model override (project default: {codex_adapter.DEFAULT_MODEL})")
     p.add_argument("--allow-prompt-only", action="store_true",
                    help="explicit non-release override when native Codex lacks --output-schema")
     p.add_argument("--render-report", type=Path)
@@ -183,6 +190,10 @@ def main(argv: list[str]) -> int:
         except HostRuntimeError as exc:
             p.error(str(exc))
         if adapter_id == "codex":
+            try:
+                args.codex_model = codex_adapter.resolve_model(args.codex_model)
+            except ValueError as exc:
+                p.error(str(exc))
             forbidden = []
             if args.host_agent_model:
                 forbidden.append("--host-agent-model")
@@ -270,6 +281,8 @@ def main(argv: list[str]) -> int:
             requirements_dir=execution_requirements,
             host_agent_audit=review_requirements / "host-agent-run.json",
             merge_receipt=review_requirements / "merge-receipt.json",
+            semantic_review_runtime=runtime.runtime if adapter_id == "codex" else None,
+            semantic_review_model=args.codex_model if adapter_id == "codex" else None,
         )
         return run_stage(
             final,

@@ -1585,6 +1585,8 @@ def run_case(base: Path, source: Path, case: dict[str, Any], *, prepare_host_rev
              word_open_timeout: int = 45,
              word_timeout: int = 180,
              stage_timeout: int = 1800) -> dict[str, Any]:
+    if host_adapter_id == "codex":
+        codex_model = codex_adapter.resolve_model(codex_model)
     case_dir = base / str(case["id"])
     work = case_dir / "work"
     review_requirements = work / "review" / "requirements"
@@ -1903,7 +1905,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--codex-bin",
                         help="optional native codex executable used by --auto-host-agent")
     parser.add_argument("--codex-model",
-                        help="optional explicit native Codex model; omitted means the current Codex CLI configuration")
+                        help=f"native Codex model override (project default: {codex_adapter.DEFAULT_MODEL})")
     parser.add_argument("--semantic-review-model",
                         help="explicit model route for the post-format semantic review; defaults to the selected host model")
     parser.add_argument(

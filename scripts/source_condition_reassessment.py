@@ -1,7 +1,7 @@
 """Bounded primary scope proposals after a source-first review disagrees.
 
 The rejected review authorizes a new proposal, not an interpretation. No
-condition or target is copied from the reviewer, and no old candidate is accepted.
+scope value is copied from the reviewer, and no old candidate is accepted.
 """
 from __future__ import annotations
 
@@ -20,7 +20,9 @@ CODE = "primary_condition_reassessment_required"
 RULE_ID = "v3_source_bound_condition_reassessment"
 TARGET_CODE = "primary_target_reassessment_required"
 TARGET_RULE_ID = "v3_source_bound_target_reassessment"
-REASSESSMENT_CODES = frozenset({CODE, TARGET_CODE})
+APPLICABILITY_CODE = "primary_applicability_reassessment_required"
+APPLICABILITY_RULE_ID = "v3_source_bound_applicability_reassessment"
+REASSESSMENT_CODES = frozenset({CODE, TARGET_CODE, APPLICABILITY_CODE})
 RETRY_BUDGET_POLICY = "v3_regular_attempts_plus_one_verified_scope_proposal"
 MAX_PRIMARY_CONDITION_PROPOSALS = 1
 
@@ -31,11 +33,12 @@ def condition_feedback(candidate, chunk, request, rejected_review):
 
 
 def source_atom_feedback(candidate, chunk, request, rejected_review):
-    """A rejected target/condition is a proposal opportunity, never equivalence.
+    """Rejected scope fields authorize a proposal opportunity, never equivalence.
 
     Validate the complete rejected review before authorizing any named field.
     Conditions-only feedback retains its existing contract. Target feedback
     freezes every other dimension and may include separately disputed conditions.
+    Applicability feedback never supplies a default or a replacement value.
     """
     return _scope_feedback(candidate, chunk, request, rejected_review, allow_target=True)
 
@@ -75,7 +78,7 @@ def _scope_feedback(candidate, chunk, request, rejected_review, *, allow_target)
             except TypedSourceAtomAlignmentError as error:
                 for disagreement in error.disagreements:
                     fields = disagreement["fields"]
-                    allowed = {"target", "condition"} if allow_target else {"condition"}
+                    allowed = {"target", "condition", "applicability"} if allow_target else {"condition"}
                     if not fields or any(field not in allowed for field in fields):
                         return None
                     oid = disagreement["primary_obligation_id"]
@@ -91,12 +94,13 @@ def _scope_feedback(candidate, chunk, request, rejected_review, *, allow_target)
         if not changes:
             return None
         target_dispute = any("target" in change["fields"] for change in changes)
-        if not target_dispute:
+        applicability_dispute = any("applicability" in change["fields"] for change in changes)
+        if not target_dispute and not applicability_dispute:
             # Preserve the existing conditions-only record representation.
             for change in changes:
                 change.pop("fields")
-        atoms_key = "source_atoms" if target_dispute else "condition_atoms"
-        return {"code": TARGET_CODE if target_dispute else CODE,
+        atoms_key = "source_atoms" if target_dispute or applicability_dispute else "condition_atoms"
+        return {"code": APPLICABILITY_CODE if applicability_dispute else TARGET_CODE if target_dispute else CODE,
             "candidate_response_sha256": sha256_json(candidate),
             "source_chunk_sha256": sha256_json(chunk), "run_id": provenance["run_id"],
             "provenance": copy.deepcopy(provenance), atoms_key: changes,
@@ -133,7 +137,7 @@ def condition_proposal_budget_receipt(candidate, chunk, records, normalized_raw_
                                  record.get("rejected_review"))
     if rebuilt is None or any(record.get(key) != value for key, value in rebuilt.items()):
         return None
-    atoms_key = "source_atoms" if rebuilt["code"] == TARGET_CODE else "condition_atoms"
+    atoms_key = "condition_atoms" if rebuilt["code"] == CODE else "source_atoms"
     return {"policy_version": RETRY_BUDGET_POLICY,
             "reassessment_code": rebuilt["code"],
             "proposal_limit": MAX_PRIMARY_CONDITION_PROPOSALS,
@@ -153,7 +157,7 @@ def condition_reassessment(previous, current, records, paths, chunk, *, prepare,
     """Authorize only named scope fields; label display is condition-only.
 
 Raw and projected candidates must each satisfy the same narrow transition.
-The code never chooses a replacement target, condition or metadata value.
+The code never chooses a replacement target, condition, applicability or metadata value.
 """
     if (not isinstance(previous, dict) or not isinstance(current, dict)
             or not isinstance(chunk, dict) or not isinstance(records, list)
@@ -176,7 +180,7 @@ The code never chooses a replacement target, condition or metadata value.
             return None
         expected = copy.deepcopy(previous)
         permitted = {}
-        atoms_key = "source_atoms" if rebuilt["code"] == TARGET_CODE else "condition_atoms"
+        atoms_key = "condition_atoms" if rebuilt["code"] == CODE else "source_atoms"
         for entry in rebuilt[atoms_key]:
             cid, oid = entry["clause_id"], entry["obligation_id"]
             matching = [(i, j) for i, review in enumerate(previous["clause_reviews"])
@@ -194,6 +198,12 @@ The code never chooses a replacement target, condition or metadata value.
                     return None
                 if field == "condition" and value is not None and not isinstance(value, str):
                     return None
+                if field == "applicability" and (not isinstance(value, str) or value not in {
+                        "applicable", "not_applicable", "unknown", "conflicted"}):
+                    return None
+                if (field == "applicability" and value in {"unknown", "conflicted"}
+                        and after.get("status") == "covered"):
+                    return None  # An undecided scope cannot establish coverage.
                 if field in after:
                     expected["clause_reviews"][i]["obligations"][j][field] = value
                 else:
@@ -234,7 +244,9 @@ The code never chooses a replacement target, condition or metadata value.
         proposed["provenance"] = copy.deepcopy(chunk["provenance"])
         if validate(proposed, chunk):
             return None
-        return [{"rule_id": TARGET_RULE_ID if rebuilt["code"] == TARGET_CODE else RULE_ID,
+        rule_id = {CODE: RULE_ID, TARGET_CODE: TARGET_RULE_ID,
+                   APPLICABILITY_CODE: APPLICABILITY_RULE_ID}[rebuilt["code"]]
+        return [{"rule_id": rule_id,
             "json_pointer": path,
             "source_binding": permitted[path]["source_binding"],
             "clause_id": permitted[path]["clause_id"],

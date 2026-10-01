@@ -1,0 +1,165 @@
+{
+  "origin": {
+    "commit": "026c835198d7d86a3653887fcbc0c55fbf2f784c",
+    "run": "fresh-bsu-codex-6luna-20261001T122703Z-026c835",
+    "boundary": "Exact captured single-clause source, raw proposal and rejected reviewer; regenerated request IDs in tests are not production acceptance.",
+    "files": {
+      "llm-request-chunks.json": "c868eb6f6fd0439093fd8f151434970a31027573339a12b47861dc7672ff4483",
+      "llm-response-chunk-0001.attempt-01.raw.json": "f73b43dfaf4f2c17108c87d4078c6f6578d27a408ddef3b9f12d4d275e5f053b",
+      "compiled-response.json": "cb2d849d8bf364bb6b4cd152b01c6114fe64f0694d18448106d187949e8ea415"
+    }
+  },
+  "clause": {
+    "id": "C00011",
+    "text": "二级学科",
+    "evidence_ids": [
+      "E00011"
+    ],
+    "source_kind": "paragraph",
+    "location": {
+      "part": "document",
+      "child_index": 12,
+      "order": 10
+    },
+    "part_index": 0,
+    "source_span": {
+      "evidence_id": "E00011",
+      "start_offset": 0,
+      "end_offset": 4,
+      "text": "二级学科",
+      "source_sha256": "2dcc1f21070617af91660d231fc40f878d80b025fd46e8049a15444a9e39c1ca",
+      "location": {
+        "part": "document",
+        "child_index": 12,
+        "order": 10
+      }
+    },
+    "source_text_full": "二级学科：",
+    "deterministic_obligation_keys": []
+  },
+  "evidence_context": {
+    "E00011": {
+      "id": "E00011",
+      "kind": "paragraph",
+      "text": "二级学科：",
+      "style_id": null,
+      "runs": [
+        {
+          "text": "二级学科：",
+          "format": {
+            "fonts": {
+              "eastAsia": "黑体",
+              "ascii": "黑体",
+              "hAnsi": "黑体"
+            },
+            "size_pt": 14.0
+          }
+        }
+      ],
+      "location": {
+        "part": "document",
+        "child_index": 12,
+        "order": 10
+      },
+      "context_before": [
+        "培养单位：",
+        "一级学科："
+      ],
+      "context_after": [
+        "论文作者：",
+        "指导教师："
+      ],
+      "style_name": null,
+      "xml_locator": {
+        "part": "document",
+        "child_index": 12,
+        "order": 10
+      }
+    }
+  },
+  "requirements": [
+    {
+      "existing_requirement_id": null,
+      "field_key": null,
+      "clause_ids": [
+        "C00011"
+      ],
+      "source_fragment_clause_ids": [
+        "C00011"
+      ],
+      "evidence_ids": [
+        "E00011"
+      ],
+      "confidence": 0.99,
+      "reason": "The current cover template contains this fixed field label.",
+      "applicability": null,
+      "input_prerequisites": null,
+      "verification": {
+        "mode": "static_docx",
+        "checks": [
+          "Verify the source-bound cover label is present."
+        ],
+        "checker_ids": null
+      },
+      "role": "cover_field_label",
+      "properties": {
+        "font": null,
+        "paragraph": null,
+        "numbering": null,
+        "position": null,
+        "prefix": null,
+        "separator": null,
+        "style_hint": null,
+        "text": null,
+        "header_content": null,
+        "bottom_border": null
+      }
+    }
+  ],
+  "review": {
+    "clause_id": "C00011",
+    "classification": "executable",
+    "reason": "The label is a fixed part of the cover template.",
+    "obligations": [
+      {
+        "id": "C00011_label",
+        "status": "covered",
+        "reason": "Represented by the source-bound cover label requirement.",
+        "actor": "document template",
+        "action": "include",
+        "target": "cover field label",
+        "condition": null,
+        "source_quote": "二级学科",
+        "force": "required",
+        "applicability": null,
+        "route": "automatic"
+      }
+    ],
+    "normative_basis": "template_structure"
+  },
+  "independent_result": {
+    "check_id": "C00011",
+    "verdict": "consistent",
+    "rationale": "The source is a cover-field label, and the linked static check verifies that exact label.",
+    "identified_obligations": [
+      {
+        "force": "required",
+        "applicability": "applicable",
+        "actor": "document template",
+        "action": "include",
+        "target": "cover field label",
+        "obligation_summary": "Include the cover field label.",
+        "primary_obligation_id": "C00011_label",
+        "requirement_refs": [
+          "RRc9dc4db9affb61471181"
+        ],
+        "disposition": "represented",
+        "source_quote": "二级学科"
+      }
+    ],
+    "evidence_quotes": [
+      "二级学科"
+    ],
+    "machine_obligation_ids": []
+  }
+}

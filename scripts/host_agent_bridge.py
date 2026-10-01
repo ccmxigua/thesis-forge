@@ -201,6 +201,7 @@ from host_review_contract import (  # noqa: E402
 )
 from host_review_schema import (  # noqa: E402
     native_output_schema,
+    primary_generation_schema,
     normalize_native_response,
     require_native_schema,
 )
@@ -262,6 +263,8 @@ from source_condition_reassessment import (
     source_atom_feedback, condition_reassessment, CODE as CONDITION_REASSESSMENT_CODE,
     RULE_ID as CONDITION_REASSESSMENT_RULE,
     TARGET_CODE as TARGET_REASSESSMENT_CODE, TARGET_RULE_ID as TARGET_REASSESSMENT_RULE,
+    APPLICABILITY_CODE as APPLICABILITY_REASSESSMENT_CODE,
+    APPLICABILITY_RULE_ID as APPLICABILITY_REASSESSMENT_RULE,
     REASSESSMENT_CODES,
     condition_proposal_budget_receipt, MAX_PRIMARY_CONDITION_PROPOSALS,
     RETRY_BUDGET_POLICY as CONDITION_RETRY_BUDGET_POLICY,
@@ -330,7 +333,7 @@ def _write_json(path: Path, value: Any) -> None:
     )
 
 
-def compact_model_packet(chunk: dict[str, Any]) -> dict[str, Any]:
+def compact_model_packet(chunk: dict[str, Any], *, fresh_primary: bool = True) -> dict[str, Any]:
     """Keep the current chunk's semantic data while dropping redundant evidence.
 
     The on-disk chunk remains the exact provenance source.  The model-facing
@@ -421,7 +424,8 @@ def compact_model_packet(chunk: dict[str, Any]) -> dict[str, Any]:
         "page_evidence": chunk.get("page_evidence", {}),
         "allowed_roles": contract.get("allowed_roles", []) if isinstance(contract, dict) else [],
         "requirement_contract": compact_contract,
-        "response_schema": copy.deepcopy(response_schema) if isinstance(response_schema, dict) else {},
+        "response_schema": (primary_generation_schema(response_schema) if fresh_primary
+                            else copy.deepcopy(response_schema)) if isinstance(response_schema, dict) else {},
         "declarations_schema": role_properties.get("declarations") if isinstance(role_properties, dict) else None,
         "rule_spec_advisory": {
             key: rule_spec[key]
@@ -6416,12 +6420,14 @@ def _retry_authorization_ledger(
                 "semantic_review_required": True, "independent_review_required": True,
                 "mechanical_equivalence_claimed": False}
                if special_rule == QUOTE_REASSESSMENT_RULE else {}),
-            **({("target_reassessment" if special_rule == TARGET_REASSESSMENT_RULE
+            **({("applicability_reassessment" if special_rule == APPLICABILITY_REASSESSMENT_RULE
+                 else "target_reassessment" if special_rule == TARGET_REASSESSMENT_RULE
                  else "condition_reassessment"): next(
                 proof for proof in condition_proofs if proof["json_pointer"] == path),
                 "semantic_review_required": True, "independent_review_required": True,
                 "mechanical_equivalence_claimed": False}
-               if special_rule in {CONDITION_REASSESSMENT_RULE, TARGET_REASSESSMENT_RULE} else {}),
+               if special_rule in {CONDITION_REASSESSMENT_RULE, TARGET_REASSESSMENT_RULE,
+                                   APPLICABILITY_REASSESSMENT_RULE} else {}),
         })
     return ledger
 
@@ -10471,6 +10477,11 @@ def _host_prompt(*, request_path: Path, chunk_path: Path,
         and len(retry_error_records) == 1
         and retry_error_records[0].get("code") == TARGET_REASSESSMENT_CODE
     )
+    applicability_retry = (
+        contract_version == HOST_REVIEW_CONTRACT_V3 and bool(retry_error_records)
+        and len(retry_error_records) == 1
+        and retry_error_records[0].get("code") == APPLICABILITY_REASSESSMENT_CODE
+    )
     if retry_parent_response_path is not None:
         if retry_parent_response_sha256 is not None:
             observed_parent_sha256 = sha256_file(retry_parent_response_path)
@@ -10567,6 +10578,19 @@ conditions, properties, source links and provenance. Never fabricate approval
 or move an external duty across clause boundaries. This is a primary proposal,
 not mechanical equivalence; complete validation and fresh source-first
 independent review remain mandatory."""
+    elif applicability_retry:
+        retry_invariant = """\nFINAL RETRY INVARIANT: source-bound PRIMARY APPLICABILITY REASSESSMENT.
+This is not an instruction to copy the reviewer or fill missing values as applicable.
+Re-read the current source/context for ONLY the source_atoms named in the record.
+Change ONLY the applicability, target and/or condition fields explicitly listed
+in each atom's fields array; preserve all unlisted fields and every other atom,
+ID, order, classification, force, route, reason, requirement/property and source
+edge. A missing applicability is not proof of applicable or not_applicable.
+Unknown/conflicted judgments do not establish coverage or submission readiness.
+Do not delete obligations, invent a DOCX property, or force agreement with the
+rejected review. This is one primary proposal requiring full local validation
+AND a fresh independent source-first review. If no source-supported correction
+fits the named scope, return unchanged and fail closed."""
     elif target_retry:
         retry_invariant = """\nFINAL RETRY INVARIANT: this is a source-bound PRIMARY TARGET REASSESSMENT,
 not an instruction to copy the independent reviewer's wording or force agreement.
@@ -10644,6 +10668,8 @@ bridge fail closed."""
         parent_text += "\nThe condition-reassessment exception below allows only a source-first proposal, not a reviewer-driven pass projection.\n"
     if target_retry:
         parent_text += "\nThe target-reassessment exception below permits only named source-bound scope fields, never a reviewer-driven pass projection.\n"
+    if applicability_retry:
+        parent_text += "\nThe applicability exception is a bounded semantic proposal, never an automatic default or pass.\n"
     return f"""You are the current Host Agent for one fresh thesis-format semantic-review run.
 
 Return exactly ONE JSON object and nothing else. Do not use Markdown fences,
@@ -10660,6 +10686,13 @@ allowed roles, the complete machine-readable requirement_contract and
 response_schema, declaration instructions, and structure summary. The trusted
 provenance remains in the bridge-owned request packet and is not a model input;
 the bridge will bind it only after the semantic contract passes.
+
+For a NEW primary response, explicitly provide force and applicability for every
+obligation atom using their declared enums. Do not omit them or use null. Assess
+them from the current source, never from confidence or missing instance data.
+Use unknown/conflicted when evidence cannot decide, and preserve the pending
+status; those values do not establish executable coverage. During a retry,
+preserve parent fields except the specifically authorized fields below.
 If the packet contains fixed_declaration_candidates, they are deterministic
 source-text groupings, not lists of executable obligations. Link a declarations
 requirement only to independently executable/covered/verify_existing clauses
@@ -10895,7 +10928,8 @@ def run_host_agent_chunk(
         codex_model = codex_adapter.resolve_model(codex_model)
     prompt_path.parent.mkdir(parents=True, exist_ok=True)
     model_packet_path = prompt_path.with_name(prompt_path.stem.replace("prompt", "input") + ".json")
-    _write_json(model_packet_path, compact_model_packet(chunk))
+    model_packet = compact_model_packet(chunk, fresh_primary=retry_parent_response_path is None)
+    _write_json(model_packet_path, model_packet)
     prompt_path.write_text(
         _host_prompt(
             request_path=request_path, chunk_path=model_packet_path,
@@ -10961,7 +10995,7 @@ def run_host_agent_chunk(
         response_schema = chunk.get("response_schema")
         if not isinstance(response_schema, dict) or not response_schema:
             raise ValueError("current Host Agent chunk has no response schema")
-        provider_schema = native_output_schema(response_schema)
+        provider_schema = native_output_schema(model_packet["response_schema"])
         require_native_schema(provider_schema)
         _write_json(output_schema_path, provider_schema)
         command = codex_adapter.build_command(
@@ -13435,7 +13469,8 @@ def run_bridge(
                 "scope_proposal_limit": MAX_PRIMARY_CONDITION_PROPOSALS,
                 "scope_reassessment_code": (proposal_reservation or {}).get("reassessment_code"),
                 "current_attempt_kind": (
-                    ("target_proposal" if proposal_reservation.get("reassessment_code")
+                    ("applicability_proposal" if proposal_reservation.get("reassessment_code")
+                     == APPLICABILITY_REASSESSMENT_CODE else "target_proposal" if proposal_reservation.get("reassessment_code")
                      == TARGET_REASSESSMENT_CODE else "condition_proposal")
                     if proposal_reservation is not None else "ordinary"
                 ),
@@ -14174,6 +14209,9 @@ def run_bridge(
                             elif any(item.get("rule_id") == QUOTE_REASSESSMENT_RULE
                                    for item in pending_retry_authorizations):
                                 audit["semantic_retry_change_policy"] = QUOTE_REASSESSMENT_RULE
+                            elif any(item.get("rule_id") == APPLICABILITY_REASSESSMENT_RULE
+                                     for item in pending_retry_authorizations):
+                                audit["semantic_retry_change_policy"] = APPLICABILITY_REASSESSMENT_RULE
                             elif any(item.get("rule_id") == TARGET_REASSESSMENT_RULE
                                      for item in pending_retry_authorizations):
                                 audit["semantic_retry_change_policy"] = TARGET_REASSESSMENT_RULE

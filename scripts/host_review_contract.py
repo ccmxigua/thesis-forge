@@ -1318,6 +1318,12 @@ def _validate_obligations(
             )
         if not isinstance(obligation.get("reason"), str) or not obligation["reason"].strip():
             errors.append(f"$.clause_reviews[{review_index}].obligations[{index}].reason: must_be_non_empty")
+        if (obligation.get("status") == "covered"
+                and obligation.get("applicability") in ("unknown", "conflicted")):
+            errors.append(
+                f"$.clause_reviews[{review_index}].obligations[{index}].applicability: "
+                "undecided_scope_cannot_be_covered"
+            )
     if classification_requires_requirement(str(review.get("classification"))) and classification != "executable_with_external_check" and any(
         isinstance(item, dict) and item.get("status") != "covered" for item in obligations
     ):

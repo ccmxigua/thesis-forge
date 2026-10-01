@@ -145,6 +145,32 @@ def _project_native_schema(node: Any) -> Any:
     return projected
 
 
+def primary_generation_schema(response_schema: dict[str, Any]) -> dict[str, Any]:
+    """Require explicit modality/scope in NEW v3 primary proposals, on any host.
+
+    This is not the canonical historical-response schema, not an interpretation,
+    and not the independent-review schema. Retries keep their parent contract;
+    an omitted field may only change through authenticated named reassessment.
+    No value is inserted into a response. Unknown/conflicted values remain
+    explicit semantic judgments, never a compliance pass.
+    """
+    schema = copy.deepcopy(response_schema)
+    properties = schema.get("properties", {})
+    if properties.get("contract_version", {}).get("const") != "3.0":
+        return schema
+    items = properties.get("clause_reviews", {}).get("items", {})
+    for branch in items.get("anyOf", [items]):
+        atom = branch.get("properties", {}).get("obligations", {}).get("items", {})
+        fields = atom.get("properties", {})
+        if not all(name in fields for name in ("force", "applicability")):
+            continue
+        required = atom.setdefault("required", [])
+        for name in ("force", "applicability"):
+            if name not in required:
+                required.append(name)
+    return schema
+
+
 def native_output_schema(response_schema: dict[str, Any]) -> dict[str, Any]:
     """Return the strict schema sent to a native structured-output provider.
 

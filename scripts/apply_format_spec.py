@@ -695,6 +695,17 @@ def _cover_field_value(cover: dict[str, Any], metadata: dict[str, Any], field: d
     return "", False
 
 
+def _cover_field_text(field: dict[str, Any], value: str) -> str | None:
+    """Keep label visibility distinct from missing/optional instance values."""
+    if field.get("id") in {"title_zh", "title_en"}:
+        return value or None
+    if not value and field.get("label_display_policy", "with_value") != "always":
+        return None
+    label = str(field.get("label", ""))
+    delimiter = "" if label.endswith(("：", ":")) else "："
+    return f"{label}{delimiter}{value}"
+
+
 def _compile_non_public_administration(cover: dict[str, Any], profile: dict[str, Any],
                                        metadata: dict[str, Any], trusted: bool) -> dict[str, Any] | None:
     administration = cover.get("non_public_administration")
@@ -769,6 +780,7 @@ def compile_cover_contract(cover: dict[str, Any], profile: dict[str, Any]) -> di
         fields.append({
             "id": field["id"], "label": field["label"], "order": field["order"],
             "required": field.get("display_policy") == "required", "value": value,
+            "label_display_policy": field.get("label_display_policy", "with_value"),
             "value_kind": "placeholder" if placeholder else ("trusted" if value else "omitted"),
             "source": field.get("value_from"),
             "style_role": field["id"] if field["id"] in {"title_zh", "title_en"} else "cover_field_value",
@@ -787,6 +799,16 @@ def compile_cover_contract(cover: dict[str, Any], profile: dict[str, Any]) -> di
     administration = _compile_non_public_administration(cover, profile, metadata, trusted)
     if administration is not None:
         contract["non_public_administration"] = administration
+        # An explicitly source-required printed label is not an approval or
+        # security value. Keep it in source order even when values remain
+        # blank/pending; never synthesize or render administrative completion.
+        for field in cover["non_public_administration"].get("fields", []):
+            if field.get("label_display_policy") == "always":
+                fields.append({"id": field["id"], "label": field["label"], "order": field["order"],
+                    "required": False, "value": "", "value_kind": "label_only",
+                    "label_display_policy": "always", "source": "source_label_only",
+                    "style_role": "cover_field_value"})
+        fields.sort(key=lambda item: item["order"])
     return contract
 
 
@@ -795,6 +817,7 @@ def apply_cover(doc: Document, cover: dict[str, Any], profile: dict[str, Any],
                 mappings: dict[str, Any] | None = None) -> dict[str, Any]:
     counts: dict[str, Any] = {"removed_generated_paragraphs": 0, "fields_written": 0,
                               "trusted_fields_written": 0, "placeholder_fields_written": 0,
+                              "label_only_fields_written": 0,
                               "metadata_status": "not_applicable", "metadata_pending_fields": []}
     if not cover: return counts
     contract = contract or compile_cover_contract(cover, profile)
@@ -822,11 +845,12 @@ def apply_cover(doc: Document, cover: dict[str, Any], profile: dict[str, Any],
     last_cover_paragraph = institution
     for field in contract["fields"]:
         value = field["value"]; placeholder = field["value_kind"] == "placeholder"
-        if not value: continue
+        text = _cover_field_text(field, value)
+        if text is None: continue
         style = styles["value"]
         if field["id"] == "title_zh": style = styles["title_zh"]
         elif field["id"] == "title_en": style = styles["title_en"]
-        paragraph = _insert_paragraph_before(anchor, value if field["id"] in {"title_zh", "title_en"} else f"{field['label']}：{value}", style)
+        paragraph = _insert_paragraph_before(anchor, text, style)
         if field["id"] == "title_zh":
             paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
             for run in paragraph.runs: run.font.name = "SimHei"; run.font.size = Pt(22)
@@ -838,8 +862,10 @@ def apply_cover(doc: Document, cover: dict[str, Any], profile: dict[str, Any],
         if placeholder:
             counts["placeholder_fields_written"] += 1
             counts["metadata_pending_fields"].append(field["id"])
-        else:
+        elif value:
             counts["trusted_fields_written"] += 1
+        else:
+            counts["label_only_fields_written"] += 1
     # A generated cover is an independent front-matter page even when the
     # input is only a chapter/body fragment and contains no abstract at all.
     last_cover_paragraph.add_run().add_break(WD_BREAK.PAGE)
@@ -983,16 +1009,20 @@ def audit_cover(doc: Document, cover: dict[str, Any], profile: dict[str, Any],
     if not generated_cover or not _paragraph_has_page_break(generated_cover[-1]):
         findings.append({"role": "cover", "property": "page_break", "template_value": False,
                          "required_value": "explicit page break after generated cover"})
-    for field in cover.get("fields", []):
-        value, placeholder = _cover_field_value(cover, metadata, field)
-        if not value: continue
-        expected = value if field["id"] in {"title_zh", "title_en"} else f"{field['label']}：{value}"
+    label_fields = [field for field in cover.get("non_public_administration", {}).get("fields", [])
+                    if field.get("label_display_policy") == "always"]
+    for field in [*cover.get("fields", []), *label_fields]:
+        value, placeholder = ("", False) if field in label_fields else _cover_field_value(cover, metadata, field)
+        expected = _cover_field_text(field, value)
+        if expected is None: continue
         expected_style = {"title_zh": mappings.get("thesis_title_zh", {}).get("style_name") or generated_style("thesis_title_zh") or "Thesis Cover Title ZH",
                           "title_en": mappings.get("thesis_title_en", {}).get("style_name") or generated_style("thesis_title_en") or "Thesis Cover Title EN"}.get(
             field["id"], generated_style("cover_field_value") or "Thesis Cover Field Value")
         matches = [p for p in cover_block if p.text.strip() == expected and p.style.name == expected_style]
         if len(matches) != 1:
-            requirement = "exactly one neutral placeholder on the generated cover" if placeholder else "exactly one trusted metadata value on the generated cover"
+            requirement = ("exactly one source label on the generated cover" if not value else
+                           "exactly one neutral placeholder on the generated cover" if placeholder else
+                           "exactly one trusted metadata value on the generated cover")
             findings.append({"role": "cover", "property": f"fields.{field['id']}", "template_value": len(matches), "required_value": requirement})
     administration = compile_cover_contract(cover, profile).get("non_public_administration")
     if isinstance(administration, dict):
@@ -3783,10 +3813,11 @@ def _receipt_semantic_actuals(
             for field in cover.get("fields", []):
                 field_id = field.get("id")
                 contract = contract_by_id.get(field_id)
-                if not contract or not contract.get("value"):
+                if not contract:
+                    break
+                expected_text = _cover_field_text(contract, contract.get("value", ""))
+                if expected_text is None:
                     continue
-                expected_text = (contract["value"] if field_id in {"title_zh", "title_en"}
-                                 else f"{contract.get('label')}：{contract['value']}")
                 if any(paragraph.text.strip() == expected_text for paragraph in block):
                     continue
                 break

@@ -42,6 +42,12 @@ class TypedPrimaryCoverageTests(unittest.TestCase):
             self.assertEqual(primary[key], reviewer[key])
         self.assertNotIn("primary_obligation_id", reviewer)
         original = copy.deepcopy(case["independent_result"])
+        # Regenerated schemas have current selectors. The unchanged historical
+        # selector is rejected before semantic routing, not silently rebound.
+        with self.assertRaisesRegex(NativeSemanticReviewError, "linked an unrelated requirement"):
+            validate_obligation_coverage_response({"results": [original]}, request["checks"])
+        original["identified_obligations"][0]["requirement_refs"] = [
+            request["checks"][0]["review_context"]["linked_requirements"][0]["requirement_ref"]]
         with self.assertRaisesRegex(NativeSemanticReviewError, "typed-primary mapping missing"):
             validate_obligation_coverage_response({"results": [original]}, request["checks"])
         corrected_protocol = self.valid_response(case, request)  # Test simulation, not provider evidence.

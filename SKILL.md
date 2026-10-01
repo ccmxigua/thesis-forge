@@ -76,6 +76,27 @@ unrelated error or another semantic edit does not qualify. Complete contract
 validation and a fresh independent source-first review of the new candidate
 are mandatory; independent disagreement still fails closed.
 
+After the unchanged-candidate independent review budget is exhausted, a pure
+typed `condition` disagreement may authorize one separate primary proposal
+within the existing primary attempt budget. Code reconstructs the complete
+current source review and rejects missing/duplicate/foreign selectors, changed
+source/run identity, another disputed typed field, or any other invalid check.
+Only named atom conditions may change; the reviewer does not dictate a value.
+For an existing field bound to the same exact printed source label, the primary
+may additionally declare `label_display_policy: always`. Value policy, value
+bindings, source quotes, all other semantic fields and the graph stay fixed.
+Raw and projected stages are checked separately against the same authorization,
+and the new candidate must pass full validation plus a fresh independent review.
+Rejected artifacts never become a successful ledger or submission evidence.
+
+Cover field `label_display_policy` defaults to `with_value` for compatibility;
+`always` is an explicit source-supported rendering duty, not an inference from
+missing metadata. An optional empty value can therefore leave its label visible
+without fabricating a value, placeholder, approval or trusted-data receipt.
+Administrative labels with this policy are printed blank while approval/value
+verification remains unchanged. Serialized cover audits check the labels and
+do not count them as trusted metadata. Real Word/visual acceptance is separate.
+
 Existing requirement IDs are selectors into the current input, never IDs for
 the model to allocate. Each freshly prepared chunk constrains the selector to
 its supplied candidates before computing its request hash. A new requirement

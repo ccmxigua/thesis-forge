@@ -253,6 +253,10 @@ from responsibility_ledger import canonical_review_atom
 from repair_transaction import repair_receipt
 from source_atom_metadata import project_atom_metadata, bind_atom_quote
 from source_quote_reassessment import quote_context_reassessment, RULE_ID as QUOTE_REASSESSMENT_RULE
+from source_condition_reassessment import (
+    condition_feedback, condition_reassessment, CODE as CONDITION_REASSESSMENT_CODE,
+    RULE_ID as CONDITION_REASSESSMENT_RULE,
+)
 from semantic_source_references import (  # noqa: E402
     REFERENCE_PROTOCOL,
     bind_validated_source_reference_selections,
@@ -2742,6 +2746,11 @@ def _retry_changes_allowed(
         return True
     if _requires_fresh_semantic_split(records):
         return False
+    if condition_reassessment(
+        previous_response, current_response, records, changed_paths, chunk,
+        prepare=prepare_native_response_candidate, validate=validate_host_agent_response,
+    ) is not None:
+        return True
     if quote_context_reassessment(
         previous_response, current_response, records, changed_paths, chunk,
         validate=validate_host_agent_response,
@@ -5894,6 +5903,12 @@ def _retry_authorization_ledger(
     """Explain each authorized retry path with validator evidence and hashes."""
     codes = {str(record.get("code") or "") for record in records if isinstance(record, dict)}
     special_rule: str | None = None
+    condition_proofs = condition_reassessment(
+        previous_response, current_response, records, changed_paths, chunk,
+        prepare=prepare_native_response_candidate, validate=validate_host_agent_response,
+    )
+    if condition_proofs is not None:
+        special_rule = CONDITION_REASSESSMENT_RULE
     quote_reassessment = quote_context_reassessment(
         previous_response, current_response, records, changed_paths, chunk,
         validate=validate_host_agent_response,
@@ -6202,6 +6217,11 @@ def _retry_authorization_ledger(
                 "semantic_review_required": True, "independent_review_required": True,
                 "mechanical_equivalence_claimed": False}
                if special_rule == QUOTE_REASSESSMENT_RULE else {}),
+            **({"condition_reassessment": next(
+                proof for proof in condition_proofs if proof["json_pointer"] == path),
+                "semantic_review_required": True, "independent_review_required": True,
+                "mechanical_equivalence_claimed": False}
+               if special_rule == CONDITION_REASSESSMENT_RULE else {}),
         })
     return ledger
 
@@ -6618,7 +6638,8 @@ def _project_source_bound_cover_security_marking(
         or field.get("display_policy") not in {"required", "if_present"}
         or type(field.get("order")) is not int
         or field["order"] < 1
-        or set(field) != {"id", "label", "value_from", "display_policy", "order"}
+        or set(field) - {"label_display_policy"} != {"id", "label", "value_from", "display_policy", "order"}
+        or field.get("label_display_policy", "with_value") not in {"with_value", "always"}
     ):
         return None
     raw_error = str(record.get("raw_error") or "")
@@ -10223,6 +10244,11 @@ def _host_prompt(*, request_path: Path, chunk_path: Path,
         and record.get("raw_error") == f"{record.get('json_pointer')}: must_equal_current_source_subspan"
         for record in retry_error_records
     )
+    condition_retry = (
+        contract_version == HOST_REVIEW_CONTRACT_V3 and bool(retry_error_records)
+        and len(retry_error_records) == 1
+        and retry_error_records[0].get("code") == CONDITION_REASSESSMENT_CODE
+    )
     if retry_parent_response_path is not None:
         if retry_parent_response_sha256 is not None:
             observed_parent_sha256 = sha256_file(retry_parent_response_path)
@@ -10309,6 +10335,23 @@ minimum change. The embedded payload excludes bridge-owned provenance:
         )
     if retry_parent_response_path is None:
         retry_invariant = ""
+    elif condition_retry:
+        retry_invariant = """\nFINAL RETRY INVARIANT: this is a source-bound PRIMARY CONDITION REASSESSMENT,
+not an instruction to copy the reviewer's condition or to force agreement.
+Re-read the current source and context for ONLY the condition_atoms named in
+the structured record. Preserve the complete parent response and all IDs,
+atoms, source quotes, reasons, classifications, forces, applicability, routes,
+requirement count, roles, properties and source edges. You may change only the
+named atom's condition (including absence/null for an unconditional duty).
+An optional instance value does not by itself make a printed template label
+conditional. For an existing cover field whose EXACT source label belongs to
+that named clause, you may additionally set label_display_policy='always' to
+keep its label visible even when its optional value is absent. Preserve that
+field's id, label, value_from, display_policy and order; do not invent a value,
+make the value required, or change another field. No other property or semantic
+change is authorized. This is a new proposal requiring full contract checks
+AND a fresh independent source-first review. If not provable, return unchanged
+and fail closed. The reviewer's rejected result is diagnostic, never truth."""
     elif quote_context_retry:
         retry_invariant = """\nFINAL RETRY INVARIANT: preserve the entire parent response, requirement graph,
 clause/review order and every atom field except the validator-named source_quote
@@ -10351,6 +10394,8 @@ without changing semantics, return the parent object unchanged and let the
 bridge fail closed."""
     if quote_context_retry:
         parent_text += "\nThe quote-context exception below is a bounded primary proposal requiring semantic re-review, not a mechanical equivalence claim.\n"
+    if condition_retry:
+        parent_text += "\nThe condition-reassessment exception below allows only a source-first proposal, not a reviewer-driven pass projection.\n"
     return f"""You are the current Host Agent for one fresh thesis-format semantic-review run.
 
 Return exactly ONE JSON object and nothing else. Do not use Markdown fences,
@@ -10379,7 +10424,14 @@ a declarations requirement. Never add an empty or title-only declaration.
 The requirement_contract and response_schema are authoritative. Follow their
 role-specific properties and nested schemas exactly; do not invent aliases or
 free-form replacements for fields such as applicability, input_prerequisites,
-verification, or confidence.
+verification, or confidence. Do not invent conditions from missing instance data.
+A required printed cover label and its
+optional metadata value are different duties: display_policy governs the value,
+while an explicitly source-supported label_display_policy='always' preserves
+the printed label without asserting that the value or an approval exists.
+This also applies to printed labels inside non_public_administration: its
+approval/value applicability does not by itself prove that a label is absent.
+Do not invent unconditional labels when the source makes the label conditional.
 Do not read the full llm-request-chunks.json file, because it contains other
 chunks that are outside this subtask.
 
@@ -12533,6 +12585,19 @@ def _run_independent_obligation_coverage_review(
             "provider_attempt_history": attempt_history,
         }  # type: ignore[attr-defined]
         error.retryable = False  # type: ignore[attr-defined]
+        if (isinstance(review_error, TypedSourceAtomAlignmentError)
+                and _provider_attempt >= INDEPENDENT_REVIEW_PROVIDER_MAX_ATTEMPTS):
+            compiled_path = output_dir / "compiled-response.json"
+            if compiled_path.is_file():
+                proposal_record = condition_feedback(
+                    response, chunk, coverage_request,
+                    _read_json(compiled_path, label="rejected independent condition review"),
+                )
+                if proposal_record is not None:
+                    # The immutable-candidate review budget is exhausted. This
+                    # permits one source-bound primary proposal, never a pass.
+                    error.error_records = [proposal_record]  # type: ignore[attr-defined]
+                    error.retryable = True  # type: ignore[attr-defined]
         raise error from review_error
     except IndependentObligationReviewError:
         raise
@@ -13810,6 +13875,9 @@ def run_bridge(
                             if any(item.get("rule_id") == QUOTE_REASSESSMENT_RULE
                                    for item in pending_retry_authorizations):
                                 audit["semantic_retry_change_policy"] = QUOTE_REASSESSMENT_RULE
+                            elif any(item.get("rule_id") == CONDITION_REASSESSMENT_RULE
+                                     for item in pending_retry_authorizations):
+                                audit["semantic_retry_change_policy"] = CONDITION_REASSESSMENT_RULE
                             elif (
                                 isinstance(retry_field_projection, dict)
                                 and retry_field_projection.get("status") == "projected"
@@ -14040,6 +14108,16 @@ def run_bridge(
                             structured_error_records=copy.deepcopy(error_records),
                         )
                     raise
+                if isinstance(exc, IndependentObligationReviewError) and getattr(exc, "retryable", False):
+                    records = getattr(exc, "error_records", [])
+                    if (len(records) == 1 and records[0].get("code") == CONDITION_REASSESSMENT_CODE):
+                        raw_path = attempt_response_path.with_name(
+                            f"{attempt_response_path.stem}.raw{attempt_response_path.suffix}")
+                        normalized_parent = normalize_native_response(
+                            _read_json(raw_path, label="condition-reassessment raw parent"),
+                            chunk.get("response_schema", {}),
+                        )
+                        records[0]["response_sha256"] = _response_sha256(normalized_parent)
                 semantic_drift_records = getattr(exc, "error_records", None)
                 if (
                     isinstance(semantic_drift_records, list)

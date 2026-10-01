@@ -1956,12 +1956,20 @@
             "if_present"
           ]
         },
+        "label_display_policy": {
+          "description": "Source-supported label visibility independent of instance value; absent means with_value.",
+          "enum": ["with_value", "always"]
+        },
         "order": {
           "type": "integer",
           "minimum": 1
         }
       },
-      "additionalProperties": false
+      "additionalProperties": false,
+      "allOf": [{
+        "if": {"type": "object", "properties": {"id": {"enum": ["title_zh", "title_en"]}}},
+        "then": {"type": "object", "properties": {"label_display_policy": {"enum": ["with_value"]}}}
+      }]
     },
     "coverSpec": {
       "type": "object",
@@ -2044,6 +2052,10 @@
             "if_present",
             "blank_when_public"
           ]
+        },
+        "label_display_policy": {
+          "description": "Printed source label visibility, independent of administrative value/approval applicability.",
+          "enum": ["with_value", "always"]
         },
         "order": {
           "type": "integer",

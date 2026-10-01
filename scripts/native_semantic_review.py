@@ -107,7 +107,11 @@ class UnlinkedRepresentedObligationError(NativeSemanticReviewError):
 
 
 class TypedSourceAtomAlignmentError(NativeSemanticReviewError):
-    """Typed interpretations disagree; only a fresh unchanged-candidate review may retry."""
+    """Typed interpretations disagree; no rejected interpretation is a pass.
+
+    The bridge may authorize a separate bounded primary condition proposal
+    after unchanged-candidate review exhaustion; it still needs fresh review.
+    """
 
     code = "typed_source_atom_alignment_disagreement"
 
@@ -696,6 +700,7 @@ def validate_obligation_coverage_response(
     missing_source_inventory: list[str] = []
     external_compliance_corrections: list[dict[str, Any]] = []
     source_verification_classification_corrections: list[dict[str, Any]] = []
+    typed_alignment_errors: list[tuple[str, list[dict[str, Any]]]] = []
     for result in results:
         check_id = result.get("check_id") if isinstance(result, dict) else None
         if not isinstance(check_id, str) or check_id not in expected:
@@ -810,7 +815,10 @@ def validate_obligation_coverage_response(
                     "primary_sha256": sha256_json(primary), "fields": fields,
                 })
         if typed_disagreements:
-            raise TypedSourceAtomAlignmentError(check_id, typed_disagreements)
+            # Do not let a semantic disagreement hide invalid quotes, refs,
+            # inventories or dispositions later in this same review. Retain
+            # the rejection, but finish the structural checks before routing.
+            typed_alignment_errors.append((check_id, typed_disagreements))
         source_verification_pending = 0
         scope_unresolved = 0
         backend_unsupported = 0
@@ -1190,7 +1198,7 @@ def validate_obligation_coverage_response(
             raise NativeSemanticReviewError(
                 f"independent obligation review verdict conflicts with its findings for {check_id}"
             )
-        if verdict == "incomplete" and not unrepresented:
+        if verdict == "incomplete" and not unrepresented and not typed_disagreements:
             raise InconsistentObligationVerdictError([check_id])
         if verdict == "uncertain" and (
             not ambiguous or scope_unresolved or not safely_unresolved
@@ -1233,6 +1241,9 @@ def validate_obligation_coverage_response(
         raise SourceVerificationClassificationCorrectionRequiredError(
             source_verification_classification_corrections,
         )
+    if typed_alignment_errors:
+        check_id, disagreements = typed_alignment_errors[0]
+        raise TypedSourceAtomAlignmentError(check_id, disagreements)
     return [by_id[key] for key in sorted(by_id)]
 
 

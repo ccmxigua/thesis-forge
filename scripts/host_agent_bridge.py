@@ -255,8 +255,10 @@ from repair_transaction import repair_receipt
 from source_atom_metadata import project_atom_metadata, bind_atom_quote
 from source_quote_reassessment import quote_context_reassessment, RULE_ID as QUOTE_REASSESSMENT_RULE
 from source_condition_reassessment import (
-    condition_feedback, condition_reassessment, CODE as CONDITION_REASSESSMENT_CODE,
+    source_atom_feedback, condition_reassessment, CODE as CONDITION_REASSESSMENT_CODE,
     RULE_ID as CONDITION_REASSESSMENT_RULE,
+    TARGET_CODE as TARGET_REASSESSMENT_CODE, TARGET_RULE_ID as TARGET_REASSESSMENT_RULE,
+    REASSESSMENT_CODES,
     condition_proposal_budget_receipt, MAX_PRIMARY_CONDITION_PROPOSALS,
     RETRY_BUDGET_POLICY as CONDITION_RETRY_BUDGET_POLICY,
 )
@@ -6077,7 +6079,7 @@ def _retry_authorization_ledger(
         prepare=prepare_native_response_candidate, validate=validate_host_agent_response,
     )
     if condition_proofs is not None:
-        special_rule = CONDITION_REASSESSMENT_RULE
+        special_rule = condition_proofs[0]["rule_id"]
     quote_reassessment = quote_context_reassessment(
         previous_response, current_response, records, changed_paths, chunk,
         validate=validate_host_agent_response,
@@ -6386,11 +6388,12 @@ def _retry_authorization_ledger(
                 "semantic_review_required": True, "independent_review_required": True,
                 "mechanical_equivalence_claimed": False}
                if special_rule == QUOTE_REASSESSMENT_RULE else {}),
-            **({"condition_reassessment": next(
+            **({("target_reassessment" if special_rule == TARGET_REASSESSMENT_RULE
+                 else "condition_reassessment"): next(
                 proof for proof in condition_proofs if proof["json_pointer"] == path),
                 "semantic_review_required": True, "independent_review_required": True,
                 "mechanical_equivalence_claimed": False}
-               if special_rule == CONDITION_REASSESSMENT_RULE else {}),
+               if special_rule in {CONDITION_REASSESSMENT_RULE, TARGET_REASSESSMENT_RULE} else {}),
         })
     return ledger
 
@@ -10435,6 +10438,11 @@ def _host_prompt(*, request_path: Path, chunk_path: Path,
         and len(retry_error_records) == 1
         and retry_error_records[0].get("code") == CONDITION_REASSESSMENT_CODE
     )
+    target_retry = (
+        contract_version == HOST_REVIEW_CONTRACT_V3 and bool(retry_error_records)
+        and len(retry_error_records) == 1
+        and retry_error_records[0].get("code") == TARGET_REASSESSMENT_CODE
+    )
     if retry_parent_response_path is not None:
         if retry_parent_response_sha256 is not None:
             observed_parent_sha256 = sha256_file(retry_parent_response_path)
@@ -10521,6 +10529,20 @@ minimum change. The embedded payload excludes bridge-owned provenance:
         )
     if retry_parent_response_path is None:
         retry_invariant = ""
+    elif target_retry:
+        retry_invariant = """\nFINAL RETRY INVARIANT: this is a source-bound PRIMARY TARGET REASSESSMENT,
+not an instruction to copy the independent reviewer's wording or force agreement.
+Re-read ONLY the current source/context for source_atoms named in the record.
+Change only the target and/or condition fields explicitly listed in each atom's
+fields array. Preserve all other fields: atom IDs/order/count, actor, action,
+source_quote, force, applicability, status, route, reasons, classifications,
+every requirement/property and every clause/evidence edge. A broad paragraph
+and one sentence are not automatically equivalent. Do not delete obligations,
+alter source quotes, regenerate the inventory, or modify a DOCX payload merely
+to satisfy this feedback. The rejected review is diagnostic, not semantic truth.
+This is one proposal requiring full contract checks AND a fresh independent
+source-first review. If the current source does not support a correction within
+those fields, return unchanged and fail closed."""
     elif condition_retry:
         retry_invariant = """\nFINAL RETRY INVARIANT: this is a source-bound PRIMARY CONDITION REASSESSMENT,
 not an instruction to copy the reviewer's condition or to force agreement.
@@ -10582,6 +10604,8 @@ bridge fail closed."""
         parent_text += "\nThe quote-context exception below is a bounded primary proposal requiring semantic re-review, not a mechanical equivalence claim.\n"
     if condition_retry:
         parent_text += "\nThe condition-reassessment exception below allows only a source-first proposal, not a reviewer-driven pass projection.\n"
+    if target_retry:
+        parent_text += "\nThe target-reassessment exception below permits only named source-bound scope fields, never a reviewer-driven pass projection.\n"
     return f"""You are the current Host Agent for one fresh thesis-format semantic-review run.
 
 Return exactly ONE JSON object and nothing else. Do not use Markdown fences,
@@ -12785,9 +12809,9 @@ def _run_independent_obligation_coverage_review(
                 and _provider_attempt >= INDEPENDENT_REVIEW_PROVIDER_MAX_ATTEMPTS):
             compiled_path = output_dir / "compiled-response.json"
             if compiled_path.is_file():
-                proposal_record = condition_feedback(
+                proposal_record = source_atom_feedback(
                     response, chunk, coverage_request,
-                    _read_json(compiled_path, label="rejected independent condition review"),
+                    _read_json(compiled_path, label="rejected independent scope review"),
                 )
                 if proposal_record is not None:
                     # The immutable-candidate review budget is exhausted. This
@@ -13232,6 +13256,7 @@ def run_bridge(
             "max_concurrency": max_concurrency,
             "max_attempts": max_attempts,
             "primary_condition_proposal_limit": MAX_PRIMARY_CONDITION_PROPOSALS,
+            "primary_scope_proposal_limit": MAX_PRIMARY_CONDITION_PROPOSALS,
             "retry_budget_policy": CONDITION_RETRY_BUDGET_POLICY,
             "model": effective_model,
             "codex_capabilities": copy.deepcopy(codex_capabilities),
@@ -13368,8 +13393,13 @@ def run_bridge(
                 "ordinary_attempts_started": ordinary_attempts_started,
                 "condition_proposal_limit": MAX_PRIMARY_CONDITION_PROPOSALS,
                 "condition_proposals_started": condition_proposals_started,
+                "scope_proposals_started": condition_proposals_started,
+                "scope_proposal_limit": MAX_PRIMARY_CONDITION_PROPOSALS,
+                "scope_reassessment_code": (proposal_reservation or {}).get("reassessment_code"),
                 "current_attempt_kind": (
-                    "condition_proposal" if proposal_reservation is not None else "ordinary"
+                    ("target_proposal" if proposal_reservation.get("reassessment_code")
+                     == TARGET_REASSESSMENT_CODE else "condition_proposal")
+                    if proposal_reservation is not None else "ordinary"
                 ),
             }
             audit: dict[str, Any] = {}
@@ -14103,6 +14133,9 @@ def run_bridge(
                             if any(item.get("rule_id") == QUOTE_REASSESSMENT_RULE
                                    for item in pending_retry_authorizations):
                                 audit["semantic_retry_change_policy"] = QUOTE_REASSESSMENT_RULE
+                            elif any(item.get("rule_id") == TARGET_REASSESSMENT_RULE
+                                     for item in pending_retry_authorizations):
+                                audit["semantic_retry_change_policy"] = TARGET_REASSESSMENT_RULE
                             elif any(item.get("rule_id") == CONDITION_REASSESSMENT_RULE
                                      for item in pending_retry_authorizations):
                                 audit["semantic_retry_change_policy"] = CONDITION_REASSESSMENT_RULE
@@ -14349,7 +14382,7 @@ def run_bridge(
                     normalized_condition_parent = None
                     if (isinstance(records, list) and len(records) == 1
                             and isinstance(records[0], dict)
-                            and records[0].get("code") == CONDITION_REASSESSMENT_CODE):
+                            and records[0].get("code") in REASSESSMENT_CODES):
                         raw_path = attempt_response_path.with_name(
                             f"{attempt_response_path.stem}.raw{attempt_response_path.suffix}")
                         normalized_parent = normalize_native_response(
@@ -14359,14 +14392,14 @@ def run_bridge(
                         records[0]["response_sha256"] = _response_sha256(normalized_parent)
                         normalized_condition_parent = normalized_parent
                 # Ordinary repair budget must not suppress the first valid
-                # candidate's independently authorized condition proposal.
+                # candidate's independently authorized scope proposal.
                 # It is a separate one-shot phase: never an unlimited retry
                 # and never permission to change other semantic fields.
                 condition_error = (
                     isinstance(exc, IndependentObligationReviewError)
                     and getattr(exc, "retryable", False)
                     and any(isinstance(record, dict)
-                            and record.get("code") == CONDITION_REASSESSMENT_CODE
+                            and record.get("code") in REASSESSMENT_CODES
                             for record in (getattr(exc, "error_records", None) or []))
                 )
                 if condition_error and condition_proposals_started < MAX_PRIMARY_CONDITION_PROPOSALS:
@@ -14838,6 +14871,7 @@ def run_bridge(
         "max_concurrency": max_concurrency,
         "max_attempts": max_attempts,
         "primary_condition_proposal_limit": MAX_PRIMARY_CONDITION_PROPOSALS,
+        "primary_scope_proposal_limit": MAX_PRIMARY_CONDITION_PROPOSALS,
         "retry_budget_policy": CONDITION_RETRY_BUDGET_POLICY,
         "model": effective_model,
         "codex_capabilities": copy.deepcopy(codex_capabilities),

@@ -142,22 +142,29 @@ validation and a fresh independent source-first review of the new candidate
 are mandatory; independent disagreement still fails closed.
 
 After the unchanged-candidate independent review budget is exhausted, a pure
-typed `condition` disagreement may authorize one separate primary proposal
-under a separate one-shot condition-proposal budget. Ordinary parse/schema
+typed `target` and/or `condition` disagreement may authorize one separate primary
+proposal under a shared one-shot scope-proposal budget. Ordinary parse/schema
 repair attempts cannot consume this opportunity before a valid candidate first
 reaches independent review. The bridge reconstructs the complete rejected
 source-bound feedback before reserving it and records both budget categories,
 the feedback/candidate/source hashes and the reservation in the attempt receipt.
-At most one condition proposal may start per chunk; another disagreement or
+At most one scope proposal may start per chunk; changing from target to condition
+does not reset that budget. Another disagreement or
 any failure of that proposal is terminal even if ordinary slots remain. This
-does not expand ordinary retries or authorize any other type of reassessment.
+does not expand ordinary retries or authorize other typed dimensions.
 Code reconstructs the complete
 current source review and rejects missing/duplicate/foreign selectors, changed
-source/run identity, another disputed typed field, or any other invalid check.
-Only named atom conditions may change; the reviewer does not dictate a value.
-For an existing field bound to the same exact printed source label, the primary
-may additionally declare `label_display_policy: always`. Value policy, value
-bindings, source quotes, all other semantic fields and the graph stay fixed.
+source/run identity, a disputed actor/action/quote/force/applicability, or any
+other invalid check. Only the exact named atom target/condition fields may
+change; the reviewer does not dictate a value. A whole paragraph and an
+individual sentence are not automatically equivalent, and an empty or
+`unknown` target cannot avoid the typed comparison.
+Only for a named condition disagreement, an existing field bound to the same
+exact printed source label may additionally declare
+`label_display_policy: always`. A target-only dispute never authorizes cover edits.
+The primary
+keeps value policy, value bindings, source quotes, all other semantic fields
+and the graph fixed.
 Raw and projected stages are checked separately against the same authorization,
 and the new candidate must pass full validation plus a fresh independent review.
 Rejected artifacts never become a successful ledger or submission evidence.

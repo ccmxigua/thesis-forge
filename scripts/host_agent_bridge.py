@@ -247,6 +247,7 @@ from native_semantic_review import (  # noqa: E402
 from obligation_workflow import OBLIGATION_ANALYSIS_LEDGER_PROTOCOL, work_type_for_disposition
 from table_source_context import table_context_retry_is_source_bound, table_retry_feedback_is_source_bound
 from document_text_font import materialize_document_font_references
+from section_description import project_section_description_claims
 from administrative_relation_projection import (
     project_administrative_copies, project_copied_administrative_qualifiers,
 )
@@ -9934,6 +9935,7 @@ def prepare_native_response_candidate(
         raise ValueError("current Host Agent chunk has no local response schema")
     response = normalize_native_response(raw_response, response_schema)
     stage_candidates = [{"stage": "normalized_raw", "response": copy.deepcopy(response)}]
+    response, section_description_projections = project_section_description_claims(response, chunk)
     response, source_literal_occurrence_projections = _project_repeated_literal_occurrences(
         response, chunk,
         source_projection_validation_sha256=source_projection_validation_sha256,
@@ -10037,6 +10039,7 @@ def prepare_native_response_candidate(
         # A later, unrelated contract failure must not erase the provenance
         # of source-bound changes already made to this rejected candidate.
         error.stage_candidates = copy.deepcopy(stage_candidates)
+        error.section_description_projections = copy.deepcopy(section_description_projections)
         error.document_font_projections = copy.deepcopy(document_font_projections)
         error.source_keyword_constraint_projection_policy_version = (  # type: ignore[attr-defined]
             SOURCE_KEYWORD_CONSTRAINT_PROJECTION_POLICY_VERSION
@@ -10237,6 +10240,7 @@ def prepare_native_response_candidate(
     return response, {
         "repair_transaction": transaction,
         "stage_candidates": stage_candidates,
+        "section_description_projections": section_description_projections,
         "document_font_projections": document_font_projections,
         "source_verification_classification_policy_version": (
             SOURCE_VERIFICATION_CLASSIFICATION_POLICY_VERSION
@@ -11270,6 +11274,7 @@ def run_host_agent_chunk(
         "codex_output_schema_sha256": sha256_file(output_schema_path) if output_schema_path else None,
         "status": envelope.get("status", "ok"),
         "candidate_status": "locally_validated_pending_independent_review",
+        "section_description_projections": candidate_audit["section_description_projections"],
         "returncode": result.returncode,
         "elapsed_s": elapsed,
         "runner": "codex-exec" if adapter_id == "codex" else (
@@ -11339,6 +11344,7 @@ def run_host_agent_chunk(
             "bounded-source-bound-projections-v3"
         ),
         "enabled_projection_audits": {
+            "section_description": len(candidate_audit["section_description_projections"]),
             "existing_requirement_payload": len(existing_payload_projections),
             "complete_abstract_source": len(candidate_audit[
                 "complete_abstract_source_projections"
@@ -14005,6 +14011,7 @@ def run_bridge(
                                 retry_field_projection_receipt
                             )
                             for field in (
+                                "section_description_projections",
                                 "document_font_projections",
                                 "existing_requirement_payload_projections",
                                 "complete_abstract_source_projections",
@@ -14387,6 +14394,9 @@ def run_bridge(
                 controller.check()
                 if isinstance(getattr(exc, "source_keyword_constraint_projections", None), list):
                     source_projection_failure_audit = {
+                        "section_description_projections": copy.deepcopy(
+                            getattr(exc, "section_description_projections", [])
+                        ),
                         "source_keyword_constraint_projection_policy_version": getattr(
                             exc, "source_keyword_constraint_projection_policy_version", None
                         ),
@@ -14419,6 +14429,7 @@ def run_bridge(
                     # candidate has been compiled. Preserve that attempt's
                     # projection audit even when no chunk is accepted.
                     projection_fields = (
+                        "section_description_projections",
                         "document_font_projections",
                         "abstract_quality_projections",
                         "source_keyword_constraint_projection_policy_version",

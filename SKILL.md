@@ -1269,6 +1269,16 @@ contract response and immutable host receipts.
 
 ## Handling failures
 
+- A standalone section description is not evidence that manuscript content is
+  missing. The versioned `section_description.py` grammar may retract a pure
+  `requires_source_content` inference only for a complete, hash-bound current
+  paragraph with no linked/catalog requirement, condition, mixed duty, or
+  reported conflict. Original typed claims remain in the projection audit;
+  the corrected candidate still requires independent review. This does not
+  create content, remove a document requirement, assess manuscript presence,
+  or grant submission readiness. Unrecognized descriptions remain on the
+  existing semantic path; no clause/evidence/school IDs authorize this rule.
+
 - Independent coverage generation couples external pending verdicts to pending
   atoms with current primary IDs; mixed pending verdicts separate represented
   DOCX atoms from external actions using their current primary status. Unknown

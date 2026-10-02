@@ -2617,6 +2617,9 @@ _KEYWORD_ORIGIN_SELECTION_ACTION = re.compile(
     # Choosing existing thesis terms is an origin relation, not authorization
     # to write new content. The complete pure-source and evidence guards below
     # are mandatory; this grammar alone never changes responsibility.
+    r"(?:select|choose|extract|pick)\s+(?:thesis|paper|manuscript)-derived\s+"
+    r"(?:keywords?|key\s+terms?)\s+with\s+(?:clear\s+)?(?:source\s+)?support\s+"
+    r"in\s+(?:the\s+)?(?:thesis|paper|manuscript)\Z|"
     r"(?:select|choose|extract|pick)\s+(?:the\s+)?(?:keywords?|key\s+terms?)\s+"
     r"from\s+(?:the\s+)?(?:thesis|paper|manuscript)"
     r"(?:\s+and\s+(?:ensure|verify|confirm|check)\s+(?:that\s+)?"
@@ -2627,7 +2630,9 @@ _KEYWORD_ORIGIN_SELECTION_ACTION = re.compile(
     re.IGNORECASE,
 )
 _KEYWORD_VERIFICATION_ACTOR = re.compile(
-    r"(?:author|reviewer|student|writer)(?:\s+(?:or|and)\s+(?:author|reviewer|student|writer))*\Z|"
+    r"(?:(?:thesis|paper|manuscript)\s+)?(?:author|reviewer|student|writer|source[- ]content\s+provider)"
+    r"(?:\s+(?:or|and)\s+(?:(?:thesis|paper|manuscript)\s+)?"
+    r"(?:author|reviewer|student|writer|source[- ]content\s+provider))*\Z|"
     r"(?:作者|审查人|审核人|学生)(?:(?:或|和|与)(?:作者|审查人|审核人|学生))*\Z", re.IGNORECASE,
 )
 
@@ -2651,16 +2656,22 @@ def typed_source_verification_inventory_is_bound(
         return False
     ids = []
     for atom in obligations:
+        # Sentence punctuation is a comparison view, never a rewrite of model
+        # semantics or exact source text. The pure-source, status, evidence,
+        # no-authoring and no-mixed-duty guards still own this authorization.
+        labels = {key: atom.get(key, "").strip().rstrip(".。")
+                  if isinstance(atom, dict) and isinstance(atom.get(key), str) else ""
+                  for key in ("actor", "action", "target")}
         if (not isinstance(atom, dict) or not set(atom) <= allowed
                 or not all(isinstance(atom.get(k), str) and atom[k].strip()
                            and atom[k] != "unknown"
                            for k in ("id", "reason", "actor", "action", "target", "source_quote"))
                 or atom.get("status") != expected_status
                 or atom.get("condition") is not None
-                or _KEYWORD_VERIFICATION_ACTOR.fullmatch(atom["actor"]) is None
-                or not (_KEYWORD_VERIFICATION_ACTION.fullmatch(atom["action"])
-                        or _KEYWORD_ORIGIN_SELECTION_ACTION.fullmatch(atom["action"]))
-                or _KEYWORD_VERIFICATION_TARGET.fullmatch(atom["target"]) is None
+                or _KEYWORD_VERIFICATION_ACTOR.fullmatch(labels["actor"]) is None
+                or not (_KEYWORD_VERIFICATION_ACTION.fullmatch(labels["action"])
+                        or _KEYWORD_ORIGIN_SELECTION_ACTION.fullmatch(labels["action"]))
+                or _KEYWORD_VERIFICATION_TARGET.fullmatch(labels["target"]) is None
                 or re.search(r"关键词|关键字|\bkeywords?\b", atom["target"], re.IGNORECASE) is None
                 or not isinstance(atom.get("force"), str)
                 or atom.get("force") != "required"

@@ -20,6 +20,7 @@ from process_runner import run_process
 from artifact_io import atomic_write_text
 from semantic_contract import sha256_json, strict_json_dumps
 from source_atom_metadata import bind_atom_quote
+from section_description import compile_section_description
 from obligation_workflow import (
     OBLIGATION_COVERAGE_PROTOCOL,
     SCOPE_DEPENDENCY_DIMENSIONS,
@@ -607,6 +608,7 @@ def build_obligation_coverage_request(
                     compile_source_content_verification_codes(source_text)
                 ),
                 "pending_source_work": compile_pending_source_work(source_text),
+                "section_description": compile_section_description(source_text),
             },
         })
         try:
@@ -1759,6 +1761,11 @@ def _prompt(request: dict[str, Any]) -> str:
             "or section-omission code. Never borrow a code from another check. "
             "Do not attach pending_work_code to other dispositions or unknown work. Additional executable, "
             "external or unknown obligations remain separate and blocking; the registered inventory is only a floor. "
+            "A code-owned section_description records only what a standalone section-description sentence says, "
+            "not whether manuscript content exists. A nominative description is not an authoring instruction. "
+            "Never derive a writing/supply duty or missing manuscript fact from that description or from an empty linked_requirements array. "
+            "For an informational standalone description with no other source duties, return consistent with an empty identified_obligations array and exact source evidence. "
+            "Do not extend this rule to adjacent paragraphs, explicit instructions, conditions, or formatting requirements. "
             "For a clause classified requires_source_content, use source_content_pending only when "
             "the exact source explicitly requires the author to provide genuine thesis content; identify each such "
             "writing/synthesis passage as authoring_content_pending; registered human checks use the separate "

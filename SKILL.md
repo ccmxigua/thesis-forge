@@ -1269,6 +1269,13 @@ contract response and immutable host receipts.
 
 ## Handling failures
 
+- A review cannot declare `consistent` while retaining a pending human
+  source-content verification atom. A source/quote/ref-valid contradiction
+  permits at most one fresh independent reread of the unchanged candidate;
+  pending factual verification may coexist with separately represented DOCX
+  wording, but never becomes satisfied merely because that wording exists.
+  Repeated contradictions remain rejected with their attempts and hashes.
+
 - A standalone section description is not evidence that manuscript content is
   missing. The versioned `section_description.py` grammar may retract a pure
   `requires_source_content` inference only for a complete, hash-bound current

@@ -230,6 +230,9 @@ from native_semantic_review import (  # noqa: E402
     OBLIGATION_COVERAGE_SCHEMA,
     SourceVerificationClassificationCorrectionRequiredError,
     SourceVerificationMislabelledAsAuthoringError,
+    PendingVerificationVerdictError,
+    pending_verification_retry_feedback_is_bound,
+    validate_pending_verification_retry_result,
     TableContextUncertaintyError,
     UnlinkedRepresentedObligationError,
     TypedSourceAtomAlignmentError,
@@ -11461,6 +11464,7 @@ def _validate_completed_obligation_ledger_chain(
         "independent_obligation_review_incomplete",
         InconsistentObligationVerdictError.code,
         SourceVerificationMislabelledAsAuthoringError.code,
+        PendingVerificationVerdictError.code,
         TableContextUncertaintyError.code,
         UnlinkedRepresentedObligationError.code,
         TypedSourceAtomAlignmentError.code,
@@ -11488,6 +11492,9 @@ def _validate_completed_obligation_ledger_chain(
                  or retry_feedback.get("candidate_response_sha256") != _response_sha256(accepted_response)))
         or (isinstance(retry_feedback, dict) and retry_feedback.get("code") == SourceReferenceContractError.code
             and (not source_reference_retry_feedback_is_bound(review_request)
+                 or retry_feedback.get("candidate_response_sha256") != _response_sha256(accepted_response)))
+        or (isinstance(retry_feedback, dict) and retry_feedback.get("code") == PendingVerificationVerdictError.code
+            and (not pending_verification_retry_feedback_is_bound(review_request)
                  or retry_feedback.get("candidate_response_sha256") != _response_sha256(accepted_response)))
         or request_sha != review_audit.get("request_sha256")
         or request_sha != independent_envelope.get("review_request_sha256")
@@ -11565,6 +11572,7 @@ def _validate_completed_obligation_ledger_chain(
             f"Host Agent chunk {chunk_index} source-reference compilation does not reproduce"
         )
 
+    validate_pending_verification_retry_result(review_response, review_request)
     results = review_response.get("results")
     if not isinstance(checks, list) or not isinstance(results, list):
         raise ValueError(f"Host Agent chunk {chunk_index} source review lacks checks/results")
@@ -12161,6 +12169,10 @@ def _run_independent_obligation_coverage_review(
             and (not source_reference_retry_feedback_is_bound(coverage_request)
                  or _retry_feedback.get("candidate_response_sha256") != response_sha)):
         raise IndependentObligationReviewError("source-reference retry is not bound to the immutable candidate")
+    if (_retry_feedback is not None and _retry_feedback.get("code") == PendingVerificationVerdictError.code
+            and (not pending_verification_retry_feedback_is_bound(coverage_request)
+                 or _retry_feedback.get("candidate_response_sha256") != response_sha)):
+        raise IndependentObligationReviewError("pending-verification retry is not bound to the immutable candidate")
     base_output_dir = review_dir / f"independent-review-chunk-{chunk_index:04d}-attempt-{attempt:02d}"
     output_dir = base_output_dir if _provider_attempt == 1 else base_output_dir.with_name(
         f"{base_output_dir.name}-provider-attempt-{_provider_attempt:02d}"
@@ -12183,6 +12195,7 @@ def _run_independent_obligation_coverage_review(
             **({"reasoning_effort": codex_reasoning_effort}
                if codex_reasoning_effort is not None else {}),
         )
+        validate_pending_verification_retry_result(review_result, coverage_request)
         ledger_pointer = _write_obligation_analysis_ledger(
             review_result, response, chunk,
             coverage_request=coverage_request,
@@ -12724,6 +12737,7 @@ def _run_independent_obligation_coverage_review(
         MissingSourceObligationInventoryError,
         InconsistentObligationVerdictError,
         SourceVerificationMislabelledAsAuthoringError,
+        PendingVerificationVerdictError,
         TableContextUncertaintyError,
         UnlinkedRepresentedObligationError,
         TypedSourceAtomAlignmentError,
@@ -12781,6 +12795,12 @@ def _run_independent_obligation_coverage_review(
             bound_mislabel = bool(review_error.clause_ids) and all(
                 clause_id in checks_by_id for clause_id in review_error.clause_ids
             )
+        if isinstance(review_error, PendingVerificationVerdictError):
+            # This authorizes a second independent read only, never a primary
+            # semantic edit or a projection of pending work to compliance.
+            bound_mislabel = bool(review_error.clause_ids) and all(
+                clause_id in checks_by_id for clause_id in review_error.clause_ids
+            )
         retryable = (
             _provider_attempt < INDEPENDENT_REVIEW_PROVIDER_MAX_ATTEMPTS
             and bool(review_error.clause_ids)
@@ -12790,6 +12810,21 @@ def _run_independent_obligation_coverage_review(
             "code": review_error.code,
             "clause_ids": list(review_error.clause_ids),
         }
+        if isinstance(review_error, PendingVerificationVerdictError):
+            retry_feedback.update({
+                "rejected_results": copy.deepcopy(review_error.rejected_results),
+                "rejected_results_sha256": sha256_json(review_error.rejected_results),
+                "rejected_request_sha256": sha256_json(coverage_request),
+                "checks_sha256": sha256_json(coverage_request["checks"]),
+                "candidate_response_sha256": response_sha,
+                "run_id": run_id,
+                "provenance": copy.deepcopy(coverage_request.get("provenance")),
+            })
+            bound_mislabel = pending_verification_retry_feedback_is_bound({
+                **coverage_request, "provider_attempt": _provider_attempt + 1,
+                "retry_feedback": retry_feedback,
+            })
+            retryable = retryable and bound_mislabel
         if isinstance(review_error, TypedSourceAtomAlignmentError):
             retry_feedback.update({
                 "disagreements": copy.deepcopy(review_error.disagreements),

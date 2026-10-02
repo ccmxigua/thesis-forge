@@ -316,6 +316,71 @@ class SourceVerificationMislabelledAsAuthoringError(NativeSemanticReviewError):
         )
 
 
+class PendingVerificationVerdictError(NativeSemanticReviewError):
+    """A review reports pending human verification as consistent coverage."""
+
+    code = "pending_verification_verdict_conflict"
+
+    def __init__(self, clause_ids: list[str], rejected_results: list[dict[str, Any]]) -> None:
+        self.rejected_results = copy.deepcopy(rejected_results)
+        self.clause_ids = tuple(sorted(set(clause_ids)))
+        super().__init__("pending human verification cannot be marked consistent for "
+                         + ", ".join(self.clause_ids))
+
+
+def pending_verification_retry_feedback_is_bound(request: dict[str, Any]) -> bool:
+    """Replay a rejected review against this exact invocation before correction."""
+    feedback = request.get("retry_feedback")
+    if (not isinstance(feedback, dict) or feedback.get("code") != PendingVerificationVerdictError.code
+            or request.get("provider_attempt") != 2
+            or feedback.get("checks_sha256") != sha256_json(request.get("checks"))
+            or feedback.get("run_id") != request.get("run_id")
+            or feedback.get("provenance") != request.get("provenance")):
+        return False
+    prior = copy.deepcopy(request)
+    prior.pop("retry_feedback", None)
+    prior["provider_attempt"] = 1
+    if feedback.get("rejected_request_sha256") != sha256_json(prior):
+        return False
+    rejected = feedback.get("rejected_results")
+    if (not isinstance(rejected, list) or not rejected
+            or feedback.get("rejected_results_sha256") != sha256_json(rejected)):
+        return False
+    checks = {c.get("check_id"): c for c in request.get("checks", []) if isinstance(c, dict)}
+    seen = []
+    for result in rejected:
+        cid = result.get("check_id") if isinstance(result, dict) else None
+        if not isinstance(cid, str) or cid not in checks or cid in seen:
+            return False
+        try:
+            validate_obligation_coverage_response({"results": [copy.deepcopy(result)]}, [checks[cid]])
+        except PendingVerificationVerdictError as exc:
+            if exc.rejected_results != [result]:
+                return False
+        except NativeSemanticReviewError:
+            return False
+        else:
+            return False
+        seen.append(cid)
+    return sorted(seen) == feedback.get("clause_ids")
+
+
+def validate_pending_verification_retry_result(response: dict[str, Any], request: dict[str, Any]) -> None:
+    """Only the conflicting verdict/rationale may change; no duty may disappear."""
+    feedback = request.get("retry_feedback")
+    if not isinstance(feedback, dict) or feedback.get("code") != PendingVerificationVerdictError.code:
+        return
+    if not pending_verification_retry_feedback_is_bound(request):
+        raise NativeSemanticReviewError("pending-verification retry authorization is stale or invalid")
+    by_id = {r.get("check_id"): r for r in response.get("results", []) if isinstance(r, dict)}
+    for prior in feedback["rejected_results"]:
+        result = by_id.get(prior["check_id"])
+        if (not isinstance(result, dict) or result.get("verdict") != "source_content_verification_pending"
+                or any(result.get(key) != prior.get(key)
+                       for key in ("identified_obligations", "evidence_quotes", "machine_obligation_ids"))):
+            raise NativeSemanticReviewError("pending-verification retry changed or removed a source duty")
+
+
 def is_explicit_authoring_content_quote(quote: Any, *, source_text: Any = None) -> bool:
     """Compatibility wrapper for the shared source-owned authoring guard."""
     return _is_explicit_authoring_content_quote(quote, source_text=source_text)
@@ -973,6 +1038,16 @@ def validate_obligation_coverage_response(
             verdict == "source_content_verification_pending"
             or (verdict == "source_content_pending" and mixed_author_work)
         ):
+            if (verdict == "consistent" and not unrepresented and not ambiguous
+                    and not external_pending and not authoring_pending and not scope_unresolved
+                    and not backend_unsupported
+                    and source_verification_pending + represented == len(identified)
+                    and all(not item.get("requirement_refs") for item in identified
+                            if item.get("disposition") == "source_content_verification_pending")):
+                # Every quote/ref was checked above. Reject the contradiction;
+                # only a fresh review of this immutable candidate may correct
+                # the verdict. No pending atom becomes a satisfied DOCX duty.
+                raise PendingVerificationVerdictError([check_id], [result])
             raise NativeSemanticReviewError(
                 f"existing-content verification must remain a human-verification disposition for {check_id}"
             )
@@ -1612,6 +1687,27 @@ def _prompt(request: dict[str, Any]) -> str:
                 "unrepresented obligations alongside it and keep the overall verdict manual_review_required; if no "
                 "authorized scope_unresolved obligation remains, use incomplete for any unrepresented obligation.\n"
             )
+        elif isinstance(retry_feedback, dict) and retry_feedback.get("code") == PendingVerificationVerdictError.code:
+            if not pending_verification_retry_feedback_is_bound(request):
+                raise NativeSemanticReviewError("pending-verification retry authorization is stale or invalid")
+            retry_instruction = (
+                "\nThe prior independent review of this same unchanged candidate reported consistent "
+                "while retaining source_content_verification_pending atoms for check(s) "
+                + strict_json_dumps(retry_feedback.get("clause_ids", []))
+                + ". Re-read the complete source and linked requirements. Preserve separately represented "
+                "DOCX work and every outstanding human verification item, with exact source references. "
+                "When the source supports pending human verification, use source_content_verification_pending "
+                "as the verdict, including when that work coexists with represented DOCX duties. A factual "
+                "declaration being present does not prove its assertion true. Do not remove or relabel a "
+                "pending item as represented to obtain consistent. If other duties are missing, unknown, "
+                "or contradictory, report them; this feedback does not settle them. Never change the "
+                "candidate, its provenance, source, primary atoms, or requirement graph. This is a rejected "
+                "review and a bounded reread, never compliance or release approval.\n"
+                "The rejected_results in this feedback freeze identified_obligations, evidence_quotes and "
+                "machine_obligation_ids. Copy those arrays exactly for affected checks; only change verdict "
+                "to source_content_verification_pending and explain the correction in rationale. If further "
+                "errors prevent that result, remain rejected; never delete, add or rewrite an atom.\n"
+            )
         elif inconsistent_clause_ids:
             retry_instruction = (
                 "\nA prior independent review of this same unchanged candidate returned verdict=incomplete "
@@ -2053,6 +2149,7 @@ def run_native_semantic_review(
             response, checks, allow_draft_disputes=request.get("output_policy") == "review_draft",
         ) if obligation_coverage_mode else response_validator(response, checks))
         if obligation_coverage_mode:
+            validate_pending_verification_retry_result(response, request)
             _validate_external_compliance_retry_result(response, request)
             compilation = bind_validated_source_reference_selections(
                 compilation, compiled_response, response, request,

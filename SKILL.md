@@ -1338,3 +1338,15 @@ contract response and immutable host receipts.
 The final artifacts and JSON manifests under the selected work directory are
 the audit trail. Do not delete or overwrite an earlier run while diagnosing a
 failure.
+
+For a retry whose complete authenticated parent feedback consists only of
+`missing_derived_requirement`, the bridge may extract the model's newly proposed
+requirements for those exact executable targets as a bounded patch. It retains
+every old requirement and all other parent fields verbatim, including quotations
+and pending human duties. Unrequested model edits stay in the immutable raw
+response and discarded-path audit, not in the accepted candidate. Current source
+spans, unique identities, exact parent-bound validator records, complete target
+coverage, role schemas and the full contract must validate. Mixed or unrelated
+parent errors cannot use this path. The additions still require a fresh
+independent source-first review; neither projection nor a score proves compliance
+or permits submission.

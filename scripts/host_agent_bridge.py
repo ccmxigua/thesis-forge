@@ -6020,6 +6020,11 @@ def _project_validator_targeted_obligation_fields(
         }
     ]
     if not target_records:
+        relation_candidate, relation_audit = _project_validator_targeted_missing_requirements(
+            parent_response, model_retry_response, records, chunk=chunk,
+        )
+        if relation_candidate is not None:
+            return relation_candidate, relation_audit
         qualifier_candidate, qualifier_audit = _project_validator_targeted_qualifier_fields(
             parent_response, model_retry_response, records, chunk=chunk,
         )
@@ -6114,6 +6119,95 @@ def _project_validator_targeted_obligation_fields(
         "projected_changed_paths": projected_changes,
         "projected_response_sha256": _response_sha256(projected),
     })
+    return projected, audit
+
+
+def _project_validator_targeted_missing_requirements(parent, proposed, records, *, chunk):
+    """Extract only new requirements for authenticated missing executable edges.
+
+    The whole model replacement is an observation, not a repair authority.
+    Retain every parent field; additions remain semantic proposals requiring
+    the full local contract and a fresh independent source-first review.
+    """
+    audit = {"policy": "validator_targeted_missing_requirements_v1", "status": "not_applicable"}
+    if (not isinstance(chunk, dict) or not isinstance(parent, dict) or not isinstance(proposed, dict)
+            or parent.get("contract_version") != HOST_REVIEW_CONTRACT_V3
+            or proposed.get("contract_version") != HOST_REVIEW_CONTRACT_V3
+            or not _retry_fingerprints_complete(_retry_input_fingerprints(chunk))):
+        return None, audit
+    for response in (parent, proposed):
+        if response.get("provenance") is not None and response["provenance"] != chunk.get("provenance"):
+            return None, audit
+    current_records = contract_error_records(
+        validate_host_agent_response(parent, chunk), response=parent, chunk=chunk,
+    )
+    if (not current_records or any(r.get("code") != "missing_derived_requirement" for r in current_records)
+            or not records or any(not isinstance(r, dict) for r in records)
+            or sorted(_response_sha256(r) for r in current_records)
+               != sorted(_response_sha256(r) for r in records)):
+        return None, audit
+    clauses = chunk.get("clauses", [])
+    reviews = parent.get("clause_reviews", [])
+    if not isinstance(clauses, list) or not isinstance(reviews, list):
+        return None, audit
+    clause_map = {c.get("id"): c for c in clauses if isinstance(c, dict)}
+    if len(clause_map) != len(clauses) or len({r.get("clause_id") for r in reviews if isinstance(r, dict)}) != len(reviews):
+        return None, audit
+    targets = set()
+    source_bindings = []
+    try:
+        for record in current_records:
+            match = re.fullmatch(r"\$\.clause_reviews\[(\d+)\]", str(record.get("json_pointer")))
+            if match is None or record.get("raw_error") != f"{record['json_pointer']}: executable_review_requires_derived_requirement":
+                return None, audit
+            review = reviews[int(match.group(1))]
+            cid = review["clause_id"]
+            if (cid in targets or record.get("clause_id") != cid or cid not in clause_map
+                    or review.get("classification") not in {"covered", "executable", "verify_existing"}):
+                return None, audit
+            text = _exact_clause_source_text(clause_map[cid], chunk["evidence_context"])
+            if not text.strip():
+                return None, audit
+            targets.add(cid)
+            source_bindings.append(copy.deepcopy(clause_map[cid]))
+        additions = []
+        proposed_items = proposed.get("requirements")
+        parent_items = parent.get("requirements")
+        if not isinstance(proposed_items, list) or not isinstance(parent_items, list):
+            return None, audit
+        for item in proposed_items:
+            ids = item.get("clause_ids") if isinstance(item, dict) else None
+            if not isinstance(ids, list):
+                return None, audit
+            if not set(ids) & targets:
+                continue  # Old payload edits are observations, never accepted.
+            if (not ids or len(set(ids)) != len(ids) or not set(ids) <= targets
+                    or item.get("existing_requirement_id") is not None):
+                return None, audit
+            eids = item.get("evidence_ids")
+            allowed_eids = {e for cid in ids for e in clause_map[cid].get("evidence_ids", [])}
+            if (not isinstance(eids, list) or not eids or len(set(eids)) != len(eids)
+                    or not set(eids) <= allowed_eids
+                    or any(not set(eids) & set(clause_map[cid].get("evidence_ids", [])) for cid in ids)):
+                return None, audit
+            additions.append(copy.deepcopy(item))
+        if (not additions or len({_response_sha256(a) for a in additions}) != len(additions)
+                or {cid for a in additions for cid in a["clause_ids"]} != targets):
+            return None, audit
+        projected = copy.deepcopy(parent)
+        projected["requirements"].extend(additions)
+        if validate_host_agent_response(projected, chunk):
+            return None, audit
+    except (KeyError, IndexError, TypeError, ValueError, NativeSemanticReviewError):
+        return None, audit
+    audit.update(status="projected", parent_response_sha256=_response_sha256(parent),
+        model_retry_response_sha256=_response_sha256(proposed), projected_response_sha256=_response_sha256(projected),
+        applied_paths=["$.requirements"], projected_changed_paths=_retry_change_paths(parent, projected),
+        discarded_unrequested_paths=_retry_change_paths(proposed, projected),
+        model_retry_changed_paths=_retry_change_paths(parent, proposed),
+        accepted_additions=copy.deepcopy(additions), source_bindings=source_bindings,
+        input_fingerprints=_retry_input_fingerprints(chunk), validator_records_sha256=_response_sha256(records),
+        independent_review_required=True, submission_ready=False)
     return projected, audit
 
 
@@ -14119,7 +14213,10 @@ def run_bridge(
                                     chunk=chunk,
                                 )
                             )
-                            if projection_audit.get("policy") == "validator_targeted_administrative_qualifiers_v1":
+                            if projection_audit.get("policy") in {
+                                "validator_targeted_administrative_qualifiers_v1",
+                                "validator_targeted_missing_requirements_v1",
+                            }:
                                 obligation_projection_records = semantic_parent_error_records
                             if projected_raw is not None and obligation_projection_records:
                                 projected_authorizations: list[dict[str, Any]] = []

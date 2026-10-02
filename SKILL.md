@@ -1283,6 +1283,14 @@ contract response and immutable host receipts.
 
 ## Handling failures
 
+- An independent uncertain/pending/mixed/unsupported verdict with no identified
+  atoms is a protocol conflict, not permission to invent an obligation. One
+  same-candidate corrective read must replay source-bound rejection feedback
+  and captured parent artifacts; already validated siblings stay fixed. All
+  semantic validators and the two-call limit remain. Bridge and final pipeline
+  consumers reconstruct the scope proof; neither scores nor red markers waive
+  it. See `docs/empty-inventory-verdict-correction.md`.
+
 - A review cannot declare `consistent` while retaining a pending human
   source-content verification atom. A source/quote/ref-valid contradiction
   permits at most one fresh independent reread of the unchanged candidate;

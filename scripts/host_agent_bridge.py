@@ -223,6 +223,8 @@ from host_runtime import (  # noqa: E402
 from native_semantic_review import (  # noqa: E402
     ExternalComplianceCorrectionRequiredError,
     InconsistentObligationVerdictError,
+    EmptyInventoryVerdictError,
+    empty_inventory_retry_feedback_is_bound,
     MissingExecutableObligationInventoryError,
     MissingSourceObligationInventoryError,
     NativeSemanticReviewError,
@@ -12061,6 +12063,7 @@ def _validate_completed_obligation_ledger_chain(
         "missing_source_obligation_inventory",
         "independent_obligation_review_incomplete",
         InconsistentObligationVerdictError.code,
+        EmptyInventoryVerdictError.code,
         SourceVerificationMislabelledAsAuthoringError.code,
         PendingVerificationVerdictError.code,
         TableContextUncertaintyError.code,
@@ -12083,6 +12086,9 @@ def _validate_completed_obligation_ledger_chain(
         or review_request.get("provider_attempt") != provider_attempt
         or review_request.get("provenance") != provenance
         or review_request.get("retry_feedback") != retry_feedback
+        or (isinstance(retry_feedback, dict) and retry_feedback.get("code") == EmptyInventoryVerdictError.code
+            and (not empty_inventory_retry_feedback_is_bound(review_request)
+                 or retry_feedback.get("candidate_response_sha256") != _response_sha256(accepted_response)))
         or (isinstance(retry_feedback, dict) and retry_feedback.get("code") == TableContextUncertaintyError.code
             and not table_retry_feedback_is_source_bound(review_request))
         or (isinstance(retry_feedback, dict) and retry_feedback.get("code") == TypedSourceAtomAlignmentError.code
@@ -12128,6 +12134,8 @@ def _validate_completed_obligation_ledger_chain(
         raise ValueError(
             f"Host Agent chunk {chunk_index} source-review request is not reconstructed from its accepted response"
         )
+    from independent_retry_scope import validate_persisted_empty_inventory_scope
+    validate_persisted_empty_inventory_scope(review_request, request_path.parent, raw_response, review_audit)
     validate_draft_dispute_envelope(independent_envelope, review_request, output_policy=output_policy)
 
     reconstructed_response, reconstructed_compilation = compile_source_reference_response(
@@ -12765,6 +12773,10 @@ def _run_independent_obligation_coverage_review(
             f"independent obligation review has no clauses for chunk {chunk_index}"
         )
     response_sha = _response_sha256(response)
+    if (_retry_feedback is not None and _retry_feedback.get("code") == EmptyInventoryVerdictError.code
+            and (not empty_inventory_retry_feedback_is_bound(coverage_request)
+                 or _retry_feedback.get("candidate_response_sha256") != response_sha)):
+        raise IndependentObligationReviewError("empty-inventory retry is not bound to the immutable candidate")
     if (_retry_feedback is not None and _retry_feedback.get("code") == TypedSourceAtomAlignmentError.code
             and (not typed_alignment_retry_feedback_is_bound(coverage_request)
                  or _retry_feedback.get("candidate_response_sha256") != response_sha)):
@@ -13340,6 +13352,7 @@ def _run_independent_obligation_coverage_review(
     except (
         MissingSourceObligationInventoryError,
         InconsistentObligationVerdictError,
+        EmptyInventoryVerdictError,
         SourceVerificationMislabelledAsAuthoringError,
         PendingVerificationVerdictError,
         TableContextUncertaintyError,
@@ -13414,6 +13427,20 @@ def _run_independent_obligation_coverage_review(
             "code": review_error.code,
             "clause_ids": list(review_error.clause_ids),
         }
+        if isinstance(review_error, EmptyInventoryVerdictError):
+            retry_feedback.update({
+                "rejected_results": copy.deepcopy(review_error.rejected_results),
+                "rejected_results_sha256": sha256_json(review_error.rejected_results),
+                "rejected_request_sha256": sha256_json(coverage_request),
+                "checks_sha256": sha256_json(coverage_request["checks"]),
+                "candidate_response_sha256": response_sha,
+                "run_id": run_id,
+                "provenance": copy.deepcopy(coverage_request.get("provenance")),
+            })
+            retryable = retryable and empty_inventory_retry_feedback_is_bound({
+                **coverage_request, "provider_attempt": _provider_attempt + 1,
+                "retry_feedback": retry_feedback,
+            })
         if isinstance(review_error, PendingVerificationVerdictError):
             retry_feedback.update({
                 "rejected_results": copy.deepcopy(review_error.rejected_results),

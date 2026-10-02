@@ -1,0 +1,1471 @@
+{
+  "request": {
+    "protocol": "native_source_obligation_coverage_review_v8",
+    "run_id": "e238435b-756f-4383-bac2-cf089d68cdbc",
+    "chunk_index": 1,
+    "case_id": "bsu",
+    "provenance": {
+      "version": "1.0",
+      "origin": "fresh_host_agent",
+      "source_sha256": "1e9d38b307dbef8c3bf97b85ba5def70eaf7e2dba50cf25da978e007fc907059",
+      "evidence_sha256": "6f5a3c4091141dccd90c0c77332a9e3d369490b733e61082da87736e85c00c4b",
+      "clause_sha256": "c8c5b74ac492e5db4fd00b56c3b4ab087a8960b45e01eba3888bee2c76be656e",
+      "request_sha256": "6a7726f698a5b221ccc530f6d9009b2aee831f580ce5e5392842d402190ff10e",
+      "run_id": "e238435b-756f-4383-bac2-cf089d68cdbc"
+    },
+    "source_sha256": "1e9d38b307dbef8c3bf97b85ba5def70eaf7e2dba50cf25da978e007fc907059",
+    "clause_sha256": "c8c5b74ac492e5db4fd00b56c3b4ab087a8960b45e01eba3888bee2c76be656e",
+    "evidence_sha256": "6f5a3c4091141dccd90c0c77332a9e3d369490b733e61082da87736e85c00c4b",
+    "request_sha256": "6a7726f698a5b221ccc530f6d9009b2aee831f580ce5e5392842d402190ff10e",
+    "content_context": {
+      "artifact": "thesis_manuscript",
+      "availability": "not_included_in_obligation_review_request",
+      "meaning": "This request omits manuscript body text; it does not assert whether the user supplied a manuscript to the pipeline."
+    },
+    "checks": [
+      {
+        "check_id": "C00001",
+        "document_text": "分类号",
+        "review_context": {
+          "semantic_clause_text": "分类号",
+          "classification": "informational",
+          "requires_requirement": false,
+          "reason": "“分类号：” appears as a label in a filled sample cover, with no current-source instruction requiring this field or its format.",
+          "primary_obligations": [],
+          "primary_obligation_quote_bindings": [],
+          "linked_requirements": [],
+          "source_clause_support": [],
+          "cited_evidence": {
+            "E00001": {
+              "id": "E00001",
+              "kind": "table_cell",
+              "text": "分类号：",
+              "style_id": null,
+              "runs": [
+                {
+                  "text": "分类号：",
+                  "format": {
+                    "fonts": {
+                      "eastAsia": "宋体",
+                      "ascii": "宋体",
+                      "hAnsi": "宋体"
+                    },
+                    "size_pt": 14
+                  }
+                }
+              ],
+              "location": {
+                "part": "document",
+                "table_child_index": 0,
+                "row": 0,
+                "column": 0,
+                "paragraph": 0,
+                "order": 0
+              },
+              "table_row_context": {
+                "protocol": "current-source-table-row/v1",
+                "part": "document",
+                "table_child_index": 0,
+                "row": 0,
+                "table_grid_columns": 4,
+                "bidi_visual": false,
+                "grid_before": 0,
+                "grid_after": 0,
+                "cells": [
+                  {
+                    "column": 0,
+                    "paragraphs": [
+                      {
+                        "paragraph": 0,
+                        "text": "分类号：",
+                        "text_sha256": "d6faa287076f0dd00ace75a523b8f0658d28f00c32d82731eb18b6465c074635",
+                        "evidence_id": "E00001"
+                      }
+                    ],
+                    "grid_span": 1,
+                    "vertical_merge": null,
+                    "horizontal_merge": null,
+                    "has_nested_table": false
+                  },
+                  {
+                    "column": 1,
+                    "paragraphs": [
+                      {
+                        "paragraph": 0,
+                        "text": "",
+                        "text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                        "evidence_id": null
+                      }
+                    ],
+                    "grid_span": 1,
+                    "vertical_merge": null,
+                    "horizontal_merge": null,
+                    "has_nested_table": false
+                  },
+                  {
+                    "column": 2,
+                    "paragraphs": [
+                      {
+                        "paragraph": 0,
+                        "text": "学校代码：",
+                        "text_sha256": "42d630ad9eced7630d8d46bb5add5474db0e378bc2f724d09851d111f5668c5a",
+                        "evidence_id": "E00002"
+                      }
+                    ],
+                    "grid_span": 1,
+                    "vertical_merge": null,
+                    "horizontal_merge": null,
+                    "has_nested_table": false
+                  },
+                  {
+                    "column": 3,
+                    "paragraphs": [
+                      {
+                        "paragraph": 0,
+                        "text": "10043",
+                        "text_sha256": "2b08a540da4b46beb4613aae4c542e9b7e1bbcacbd525d10d59bc29ebca59168",
+                        "evidence_id": "E00003"
+                      }
+                    ],
+                    "grid_span": 1,
+                    "vertical_merge": null,
+                    "horizontal_merge": null,
+                    "has_nested_table": false
+                  }
+                ],
+                "row_sha256": "1cde9084bf441623b9041ed84f884e60eecfbdabe453824a51a35e99ad8869ba"
+              },
+              "context_before": [],
+              "context_after": [
+                "学校代码：",
+                "10043"
+              ],
+              "style_name": null,
+              "xml_locator": {
+                "part": "document",
+                "table_child_index": 0,
+                "row": 0,
+                "column": 0,
+                "paragraph": 0,
+                "order": 0
+              }
+            }
+          },
+          "machine_obligation_ids": [],
+          "manual_review_codes": [],
+          "source_content_verification_codes": [],
+          "pending_source_work": [],
+          "section_description": null,
+          "table_structure_context": {
+            "protocol": "current-source-table-row/v1",
+            "source_row": {
+              "protocol": "current-source-table-row/v1",
+              "part": "document",
+              "table_child_index": 0,
+              "row": 0,
+              "table_grid_columns": 4,
+              "bidi_visual": false,
+              "grid_before": 0,
+              "grid_after": 0,
+              "cells": [
+                {
+                  "column": 0,
+                  "paragraphs": [
+                    {
+                      "paragraph": 0,
+                      "text": "分类号：",
+                      "text_sha256": "d6faa287076f0dd00ace75a523b8f0658d28f00c32d82731eb18b6465c074635",
+                      "evidence_id": "E00001"
+                    }
+                  ],
+                  "grid_span": 1,
+                  "vertical_merge": null,
+                  "horizontal_merge": null,
+                  "has_nested_table": false
+                },
+                {
+                  "column": 1,
+                  "paragraphs": [
+                    {
+                      "paragraph": 0,
+                      "text": "",
+                      "text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                      "evidence_id": null
+                    }
+                  ],
+                  "grid_span": 1,
+                  "vertical_merge": null,
+                  "horizontal_merge": null,
+                  "has_nested_table": false
+                },
+                {
+                  "column": 2,
+                  "paragraphs": [
+                    {
+                      "paragraph": 0,
+                      "text": "学校代码：",
+                      "text_sha256": "42d630ad9eced7630d8d46bb5add5474db0e378bc2f724d09851d111f5668c5a",
+                      "evidence_id": "E00002"
+                    }
+                  ],
+                  "grid_span": 1,
+                  "vertical_merge": null,
+                  "horizontal_merge": null,
+                  "has_nested_table": false
+                },
+                {
+                  "column": 3,
+                  "paragraphs": [
+                    {
+                      "paragraph": 0,
+                      "text": "10043",
+                      "text_sha256": "2b08a540da4b46beb4613aae4c542e9b7e1bbcacbd525d10d59bc29ebca59168",
+                      "evidence_id": "E00003"
+                    }
+                  ],
+                  "grid_span": 1,
+                  "vertical_merge": null,
+                  "horizontal_merge": null,
+                  "has_nested_table": false
+                }
+              ],
+              "row_sha256": "1cde9084bf441623b9041ed84f884e60eecfbdabe453824a51a35e99ad8869ba"
+            },
+            "target_evidence_id": "E00001",
+            "target_column": 0,
+            "immediate_left_column": null,
+            "relationship": "geometry_not_unique",
+            "meaning": "Source geometry only; field meaning and candidate coverage require independent semantic review."
+          }
+        }
+      },
+      {
+        "check_id": "C00002",
+        "document_text": "学校代码",
+        "review_context": {
+          "semantic_clause_text": "学校代码",
+          "classification": "informational",
+          "requires_requirement": false,
+          "reason": "“学校代码：” appears as a label in a filled sample cover, with no current-source instruction requiring this field or its format.",
+          "primary_obligations": [],
+          "primary_obligation_quote_bindings": [],
+          "linked_requirements": [],
+          "source_clause_support": [],
+          "cited_evidence": {
+            "E00002": {
+              "id": "E00002",
+              "kind": "table_cell",
+              "text": "学校代码：",
+              "style_id": null,
+              "runs": [
+                {
+                  "text": "学校代码：",
+                  "format": {
+                    "fonts": {
+                      "eastAsia": "宋体",
+                      "ascii": "宋体",
+                      "hAnsi": "宋体"
+                    },
+                    "size_pt": 14
+                  }
+                }
+              ],
+              "location": {
+                "part": "document",
+                "table_child_index": 0,
+                "row": 0,
+                "column": 2,
+                "paragraph": 0,
+                "order": 1
+              },
+              "table_row_context": {
+                "protocol": "current-source-table-row/v1",
+                "part": "document",
+                "table_child_index": 0,
+                "row": 0,
+                "table_grid_columns": 4,
+                "bidi_visual": false,
+                "grid_before": 0,
+                "grid_after": 0,
+                "cells": [
+                  {
+                    "column": 0,
+                    "paragraphs": [
+                      {
+                        "paragraph": 0,
+                        "text": "分类号：",
+                        "text_sha256": "d6faa287076f0dd00ace75a523b8f0658d28f00c32d82731eb18b6465c074635",
+                        "evidence_id": "E00001"
+                      }
+                    ],
+                    "grid_span": 1,
+                    "vertical_merge": null,
+                    "horizontal_merge": null,
+                    "has_nested_table": false
+                  },
+                  {
+                    "column": 1,
+                    "paragraphs": [
+                      {
+                        "paragraph": 0,
+                        "text": "",
+                        "text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                        "evidence_id": null
+                      }
+                    ],
+                    "grid_span": 1,
+                    "vertical_merge": null,
+                    "horizontal_merge": null,
+                    "has_nested_table": false
+                  },
+                  {
+                    "column": 2,
+                    "paragraphs": [
+                      {
+                        "paragraph": 0,
+                        "text": "学校代码：",
+                        "text_sha256": "42d630ad9eced7630d8d46bb5add5474db0e378bc2f724d09851d111f5668c5a",
+                        "evidence_id": "E00002"
+                      }
+                    ],
+                    "grid_span": 1,
+                    "vertical_merge": null,
+                    "horizontal_merge": null,
+                    "has_nested_table": false
+                  },
+                  {
+                    "column": 3,
+                    "paragraphs": [
+                      {
+                        "paragraph": 0,
+                        "text": "10043",
+                        "text_sha256": "2b08a540da4b46beb4613aae4c542e9b7e1bbcacbd525d10d59bc29ebca59168",
+                        "evidence_id": "E00003"
+                      }
+                    ],
+                    "grid_span": 1,
+                    "vertical_merge": null,
+                    "horizontal_merge": null,
+                    "has_nested_table": false
+                  }
+                ],
+                "row_sha256": "1cde9084bf441623b9041ed84f884e60eecfbdabe453824a51a35e99ad8869ba"
+              },
+              "context_before": [
+                "分类号："
+              ],
+              "context_after": [
+                "10043",
+                "密  级："
+              ],
+              "style_name": null,
+              "xml_locator": {
+                "part": "document",
+                "table_child_index": 0,
+                "row": 0,
+                "column": 2,
+                "paragraph": 0,
+                "order": 1
+              }
+            }
+          },
+          "machine_obligation_ids": [],
+          "manual_review_codes": [],
+          "source_content_verification_codes": [],
+          "pending_source_work": [],
+          "section_description": null,
+          "table_structure_context": {
+            "protocol": "current-source-table-row/v1",
+            "source_row": {
+              "protocol": "current-source-table-row/v1",
+              "part": "document",
+              "table_child_index": 0,
+              "row": 0,
+              "table_grid_columns": 4,
+              "bidi_visual": false,
+              "grid_before": 0,
+              "grid_after": 0,
+              "cells": [
+                {
+                  "column": 0,
+                  "paragraphs": [
+                    {
+                      "paragraph": 0,
+                      "text": "分类号：",
+                      "text_sha256": "d6faa287076f0dd00ace75a523b8f0658d28f00c32d82731eb18b6465c074635",
+                      "evidence_id": "E00001"
+                    }
+                  ],
+                  "grid_span": 1,
+                  "vertical_merge": null,
+                  "horizontal_merge": null,
+                  "has_nested_table": false
+                },
+                {
+                  "column": 1,
+                  "paragraphs": [
+                    {
+                      "paragraph": 0,
+                      "text": "",
+                      "text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                      "evidence_id": null
+                    }
+                  ],
+                  "grid_span": 1,
+                  "vertical_merge": null,
+                  "horizontal_merge": null,
+                  "has_nested_table": false
+                },
+                {
+                  "column": 2,
+                  "paragraphs": [
+                    {
+                      "paragraph": 0,
+                      "text": "学校代码：",
+                      "text_sha256": "42d630ad9eced7630d8d46bb5add5474db0e378bc2f724d09851d111f5668c5a",
+                      "evidence_id": "E00002"
+                    }
+                  ],
+                  "grid_span": 1,
+                  "vertical_merge": null,
+                  "horizontal_merge": null,
+                  "has_nested_table": false
+                },
+                {
+                  "column": 3,
+                  "paragraphs": [
+                    {
+                      "paragraph": 0,
+                      "text": "10043",
+                      "text_sha256": "2b08a540da4b46beb4613aae4c542e9b7e1bbcacbd525d10d59bc29ebca59168",
+                      "evidence_id": "E00003"
+                    }
+                  ],
+                  "grid_span": 1,
+                  "vertical_merge": null,
+                  "horizontal_merge": null,
+                  "has_nested_table": false
+                }
+              ],
+              "row_sha256": "1cde9084bf441623b9041ed84f884e60eecfbdabe453824a51a35e99ad8869ba"
+            },
+            "target_evidence_id": "E00002",
+            "target_column": 2,
+            "immediate_left_column": null,
+            "relationship": "geometry_not_unique",
+            "meaning": "Source geometry only; field meaning and candidate coverage require independent semantic review."
+          }
+        }
+      },
+      {
+        "check_id": "C00003",
+        "document_text": "10043",
+        "review_context": {
+          "semantic_clause_text": "10043",
+          "classification": "informational",
+          "requires_requirement": false,
+          "reason": "“10043” is a filled school-code value in the sample and does not prescribe a value to copy.",
+          "primary_obligations": [],
+          "primary_obligation_quote_bindings": [],
+          "linked_requirements": [],
+          "source_clause_support": [],
+          "cited_evidence": {
+            "E00003": {
+              "id": "E00003",
+              "kind": "table_cell",
+              "text": "10043",
+              "style_id": null,
+              "runs": [
+                {
+                  "text": "10043",
+                  "format": {
+                    "fonts": {
+                      "eastAsia": "宋体",
+                      "ascii": "宋体",
+                      "hAnsi": "宋体"
+                    },
+                    "size_pt": 14
+                  }
+                }
+              ],
+              "location": {
+                "part": "document",
+                "table_child_index": 0,
+                "row": 0,
+                "column": 3,
+                "paragraph": 0,
+                "order": 2
+              },
+              "table_row_context": {
+                "protocol": "current-source-table-row/v1",
+                "part": "document",
+                "table_child_index": 0,
+                "row": 0,
+                "table_grid_columns": 4,
+                "bidi_visual": false,
+                "grid_before": 0,
+                "grid_after": 0,
+                "cells": [
+                  {
+                    "column": 0,
+                    "paragraphs": [
+                      {
+                        "paragraph": 0,
+                        "text": "分类号：",
+                        "text_sha256": "d6faa287076f0dd00ace75a523b8f0658d28f00c32d82731eb18b6465c074635",
+                        "evidence_id": "E00001"
+                      }
+                    ],
+                    "grid_span": 1,
+                    "vertical_merge": null,
+                    "horizontal_merge": null,
+                    "has_nested_table": false
+                  },
+                  {
+                    "column": 1,
+                    "paragraphs": [
+                      {
+                        "paragraph": 0,
+                        "text": "",
+                        "text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                        "evidence_id": null
+                      }
+                    ],
+                    "grid_span": 1,
+                    "vertical_merge": null,
+                    "horizontal_merge": null,
+                    "has_nested_table": false
+                  },
+                  {
+                    "column": 2,
+                    "paragraphs": [
+                      {
+                        "paragraph": 0,
+                        "text": "学校代码：",
+                        "text_sha256": "42d630ad9eced7630d8d46bb5add5474db0e378bc2f724d09851d111f5668c5a",
+                        "evidence_id": "E00002"
+                      }
+                    ],
+                    "grid_span": 1,
+                    "vertical_merge": null,
+                    "horizontal_merge": null,
+                    "has_nested_table": false
+                  },
+                  {
+                    "column": 3,
+                    "paragraphs": [
+                      {
+                        "paragraph": 0,
+                        "text": "10043",
+                        "text_sha256": "2b08a540da4b46beb4613aae4c542e9b7e1bbcacbd525d10d59bc29ebca59168",
+                        "evidence_id": "E00003"
+                      }
+                    ],
+                    "grid_span": 1,
+                    "vertical_merge": null,
+                    "horizontal_merge": null,
+                    "has_nested_table": false
+                  }
+                ],
+                "row_sha256": "1cde9084bf441623b9041ed84f884e60eecfbdabe453824a51a35e99ad8869ba"
+              },
+              "context_before": [
+                "分类号：",
+                "学校代码："
+              ],
+              "context_after": [
+                "密  级：",
+                "学    号："
+              ],
+              "style_name": null,
+              "xml_locator": {
+                "part": "document",
+                "table_child_index": 0,
+                "row": 0,
+                "column": 3,
+                "paragraph": 0,
+                "order": 2
+              }
+            }
+          },
+          "machine_obligation_ids": [],
+          "manual_review_codes": [],
+          "source_content_verification_codes": [],
+          "pending_source_work": [],
+          "section_description": null,
+          "table_structure_context": {
+            "protocol": "current-source-table-row/v1",
+            "source_row": {
+              "protocol": "current-source-table-row/v1",
+              "part": "document",
+              "table_child_index": 0,
+              "row": 0,
+              "table_grid_columns": 4,
+              "bidi_visual": false,
+              "grid_before": 0,
+              "grid_after": 0,
+              "cells": [
+                {
+                  "column": 0,
+                  "paragraphs": [
+                    {
+                      "paragraph": 0,
+                      "text": "分类号：",
+                      "text_sha256": "d6faa287076f0dd00ace75a523b8f0658d28f00c32d82731eb18b6465c074635",
+                      "evidence_id": "E00001"
+                    }
+                  ],
+                  "grid_span": 1,
+                  "vertical_merge": null,
+                  "horizontal_merge": null,
+                  "has_nested_table": false
+                },
+                {
+                  "column": 1,
+                  "paragraphs": [
+                    {
+                      "paragraph": 0,
+                      "text": "",
+                      "text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                      "evidence_id": null
+                    }
+                  ],
+                  "grid_span": 1,
+                  "vertical_merge": null,
+                  "horizontal_merge": null,
+                  "has_nested_table": false
+                },
+                {
+                  "column": 2,
+                  "paragraphs": [
+                    {
+                      "paragraph": 0,
+                      "text": "学校代码：",
+                      "text_sha256": "42d630ad9eced7630d8d46bb5add5474db0e378bc2f724d09851d111f5668c5a",
+                      "evidence_id": "E00002"
+                    }
+                  ],
+                  "grid_span": 1,
+                  "vertical_merge": null,
+                  "horizontal_merge": null,
+                  "has_nested_table": false
+                },
+                {
+                  "column": 3,
+                  "paragraphs": [
+                    {
+                      "paragraph": 0,
+                      "text": "10043",
+                      "text_sha256": "2b08a540da4b46beb4613aae4c542e9b7e1bbcacbd525d10d59bc29ebca59168",
+                      "evidence_id": "E00003"
+                    }
+                  ],
+                  "grid_span": 1,
+                  "vertical_merge": null,
+                  "horizontal_merge": null,
+                  "has_nested_table": false
+                }
+              ],
+              "row_sha256": "1cde9084bf441623b9041ed84f884e60eecfbdabe453824a51a35e99ad8869ba"
+            },
+            "target_evidence_id": "E00003",
+            "target_column": 3,
+            "immediate_left_column": 2,
+            "relationship": "same_row_immediate_left_unmerged",
+            "meaning": "Source geometry only; field meaning and candidate coverage require independent semantic review."
+          }
+        }
+      },
+      {
+        "check_id": "C00004",
+        "document_text": "密  级",
+        "review_context": {
+          "semantic_clause_text": "密 级",
+          "classification": "informational",
+          "requires_requirement": false,
+          "reason": "“密级：” appears as a label in a filled sample cover, with no current-source instruction requiring this field or its format.",
+          "primary_obligations": [],
+          "primary_obligation_quote_bindings": [],
+          "linked_requirements": [],
+          "source_clause_support": [],
+          "cited_evidence": {
+            "E00004": {
+              "id": "E00004",
+              "kind": "table_cell",
+              "text": "密  级：",
+              "style_id": null,
+              "runs": [
+                {
+                  "text": "密",
+                  "format": {
+                    "fonts": {
+                      "eastAsia": "宋体",
+                      "ascii": "宋体",
+                      "hAnsi": "宋体"
+                    },
+                    "size_pt": 14
+                  }
+                },
+                {
+                  "text": "级：",
+                  "format": {
+                    "fonts": {
+                      "eastAsia": "宋体",
+                      "ascii": "宋体",
+                      "hAnsi": "宋体"
+                    },
+                    "size_pt": 14
+                  }
+                }
+              ],
+              "location": {
+                "part": "document",
+                "table_child_index": 0,
+                "row": 1,
+                "column": 0,
+                "paragraph": 0,
+                "order": 3
+              },
+              "table_row_context": {
+                "protocol": "current-source-table-row/v1",
+                "part": "document",
+                "table_child_index": 0,
+                "row": 1,
+                "table_grid_columns": 4,
+                "bidi_visual": false,
+                "grid_before": 0,
+                "grid_after": 0,
+                "cells": [
+                  {
+                    "column": 0,
+                    "paragraphs": [
+                      {
+                        "paragraph": 0,
+                        "text": "密  级：",
+                        "text_sha256": "7762abf17cd65b525c0a1d2da44ca2a194ed26e5cff1f455378afd1189480651",
+                        "evidence_id": "E00004"
+                      }
+                    ],
+                    "grid_span": 1,
+                    "vertical_merge": null,
+                    "horizontal_merge": null,
+                    "has_nested_table": false
+                  },
+                  {
+                    "column": 1,
+                    "paragraphs": [
+                      {
+                        "paragraph": 0,
+                        "text": "",
+                        "text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                        "evidence_id": null
+                      }
+                    ],
+                    "grid_span": 1,
+                    "vertical_merge": null,
+                    "horizontal_merge": null,
+                    "has_nested_table": false
+                  },
+                  {
+                    "column": 2,
+                    "paragraphs": [
+                      {
+                        "paragraph": 0,
+                        "text": "学    号：",
+                        "text_sha256": "aedc84e4c45b1223130e8b391a664bed5dfb1c92903401759f77ef906c719b71",
+                        "evidence_id": "E00005"
+                      }
+                    ],
+                    "grid_span": 1,
+                    "vertical_merge": null,
+                    "horizontal_merge": null,
+                    "has_nested_table": false
+                  },
+                  {
+                    "column": 3,
+                    "paragraphs": [
+                      {
+                        "paragraph": 0,
+                        "text": "",
+                        "text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                        "evidence_id": null
+                      }
+                    ],
+                    "grid_span": 1,
+                    "vertical_merge": null,
+                    "horizontal_merge": null,
+                    "has_nested_table": false
+                  }
+                ],
+                "row_sha256": "1247f4f253c33fbf458cd91c74a529fdff7f59448d2386e5138afc80327103ee"
+              },
+              "context_before": [
+                "学校代码：",
+                "10043"
+              ],
+              "context_after": [
+                "学    号：",
+                "论文题目："
+              ],
+              "style_name": null,
+              "xml_locator": {
+                "part": "document",
+                "table_child_index": 0,
+                "row": 1,
+                "column": 0,
+                "paragraph": 0,
+                "order": 3
+              }
+            }
+          },
+          "machine_obligation_ids": [],
+          "manual_review_codes": [],
+          "source_content_verification_codes": [],
+          "pending_source_work": [],
+          "section_description": null,
+          "table_structure_context": {
+            "protocol": "current-source-table-row/v1",
+            "source_row": {
+              "protocol": "current-source-table-row/v1",
+              "part": "document",
+              "table_child_index": 0,
+              "row": 1,
+              "table_grid_columns": 4,
+              "bidi_visual": false,
+              "grid_before": 0,
+              "grid_after": 0,
+              "cells": [
+                {
+                  "column": 0,
+                  "paragraphs": [
+                    {
+                      "paragraph": 0,
+                      "text": "密  级：",
+                      "text_sha256": "7762abf17cd65b525c0a1d2da44ca2a194ed26e5cff1f455378afd1189480651",
+                      "evidence_id": "E00004"
+                    }
+                  ],
+                  "grid_span": 1,
+                  "vertical_merge": null,
+                  "horizontal_merge": null,
+                  "has_nested_table": false
+                },
+                {
+                  "column": 1,
+                  "paragraphs": [
+                    {
+                      "paragraph": 0,
+                      "text": "",
+                      "text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                      "evidence_id": null
+                    }
+                  ],
+                  "grid_span": 1,
+                  "vertical_merge": null,
+                  "horizontal_merge": null,
+                  "has_nested_table": false
+                },
+                {
+                  "column": 2,
+                  "paragraphs": [
+                    {
+                      "paragraph": 0,
+                      "text": "学    号：",
+                      "text_sha256": "aedc84e4c45b1223130e8b391a664bed5dfb1c92903401759f77ef906c719b71",
+                      "evidence_id": "E00005"
+                    }
+                  ],
+                  "grid_span": 1,
+                  "vertical_merge": null,
+                  "horizontal_merge": null,
+                  "has_nested_table": false
+                },
+                {
+                  "column": 3,
+                  "paragraphs": [
+                    {
+                      "paragraph": 0,
+                      "text": "",
+                      "text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                      "evidence_id": null
+                    }
+                  ],
+                  "grid_span": 1,
+                  "vertical_merge": null,
+                  "horizontal_merge": null,
+                  "has_nested_table": false
+                }
+              ],
+              "row_sha256": "1247f4f253c33fbf458cd91c74a529fdff7f59448d2386e5138afc80327103ee"
+            },
+            "target_evidence_id": "E00004",
+            "target_column": 0,
+            "immediate_left_column": null,
+            "relationship": "geometry_not_unique",
+            "meaning": "Source geometry only; field meaning and candidate coverage require independent semantic review."
+          }
+        }
+      },
+      {
+        "check_id": "C00005",
+        "document_text": "学    号",
+        "review_context": {
+          "semantic_clause_text": "学 号",
+          "classification": "informational",
+          "requires_requirement": false,
+          "reason": "“学号：” appears as a label in a filled sample cover, with no current-source instruction requiring this field or its format.",
+          "primary_obligations": [],
+          "primary_obligation_quote_bindings": [],
+          "linked_requirements": [],
+          "source_clause_support": [],
+          "cited_evidence": {
+            "E00005": {
+              "id": "E00005",
+              "kind": "table_cell",
+              "text": "学    号：",
+              "style_id": null,
+              "runs": [
+                {
+                  "text": "学",
+                  "format": {
+                    "fonts": {
+                      "eastAsia": "宋体",
+                      "ascii": "宋体",
+                      "hAnsi": "宋体"
+                    },
+                    "size_pt": 14
+                  }
+                },
+                {
+                  "text": "号：",
+                  "format": {
+                    "fonts": {
+                      "eastAsia": "宋体",
+                      "ascii": "宋体",
+                      "hAnsi": "宋体"
+                    },
+                    "size_pt": 14
+                  }
+                }
+              ],
+              "location": {
+                "part": "document",
+                "table_child_index": 0,
+                "row": 1,
+                "column": 2,
+                "paragraph": 0,
+                "order": 4
+              },
+              "table_row_context": {
+                "protocol": "current-source-table-row/v1",
+                "part": "document",
+                "table_child_index": 0,
+                "row": 1,
+                "table_grid_columns": 4,
+                "bidi_visual": false,
+                "grid_before": 0,
+                "grid_after": 0,
+                "cells": [
+                  {
+                    "column": 0,
+                    "paragraphs": [
+                      {
+                        "paragraph": 0,
+                        "text": "密  级：",
+                        "text_sha256": "7762abf17cd65b525c0a1d2da44ca2a194ed26e5cff1f455378afd1189480651",
+                        "evidence_id": "E00004"
+                      }
+                    ],
+                    "grid_span": 1,
+                    "vertical_merge": null,
+                    "horizontal_merge": null,
+                    "has_nested_table": false
+                  },
+                  {
+                    "column": 1,
+                    "paragraphs": [
+                      {
+                        "paragraph": 0,
+                        "text": "",
+                        "text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                        "evidence_id": null
+                      }
+                    ],
+                    "grid_span": 1,
+                    "vertical_merge": null,
+                    "horizontal_merge": null,
+                    "has_nested_table": false
+                  },
+                  {
+                    "column": 2,
+                    "paragraphs": [
+                      {
+                        "paragraph": 0,
+                        "text": "学    号：",
+                        "text_sha256": "aedc84e4c45b1223130e8b391a664bed5dfb1c92903401759f77ef906c719b71",
+                        "evidence_id": "E00005"
+                      }
+                    ],
+                    "grid_span": 1,
+                    "vertical_merge": null,
+                    "horizontal_merge": null,
+                    "has_nested_table": false
+                  },
+                  {
+                    "column": 3,
+                    "paragraphs": [
+                      {
+                        "paragraph": 0,
+                        "text": "",
+                        "text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                        "evidence_id": null
+                      }
+                    ],
+                    "grid_span": 1,
+                    "vertical_merge": null,
+                    "horizontal_merge": null,
+                    "has_nested_table": false
+                  }
+                ],
+                "row_sha256": "1247f4f253c33fbf458cd91c74a529fdff7f59448d2386e5138afc80327103ee"
+              },
+              "context_before": [
+                "10043",
+                "密  级："
+              ],
+              "context_after": [
+                "论文题目：",
+                "硕  士  学  位  论  文"
+              ],
+              "style_name": null,
+              "xml_locator": {
+                "part": "document",
+                "table_child_index": 0,
+                "row": 1,
+                "column": 2,
+                "paragraph": 0,
+                "order": 4
+              }
+            }
+          },
+          "machine_obligation_ids": [],
+          "manual_review_codes": [],
+          "source_content_verification_codes": [],
+          "pending_source_work": [],
+          "section_description": null,
+          "table_structure_context": {
+            "protocol": "current-source-table-row/v1",
+            "source_row": {
+              "protocol": "current-source-table-row/v1",
+              "part": "document",
+              "table_child_index": 0,
+              "row": 1,
+              "table_grid_columns": 4,
+              "bidi_visual": false,
+              "grid_before": 0,
+              "grid_after": 0,
+              "cells": [
+                {
+                  "column": 0,
+                  "paragraphs": [
+                    {
+                      "paragraph": 0,
+                      "text": "密  级：",
+                      "text_sha256": "7762abf17cd65b525c0a1d2da44ca2a194ed26e5cff1f455378afd1189480651",
+                      "evidence_id": "E00004"
+                    }
+                  ],
+                  "grid_span": 1,
+                  "vertical_merge": null,
+                  "horizontal_merge": null,
+                  "has_nested_table": false
+                },
+                {
+                  "column": 1,
+                  "paragraphs": [
+                    {
+                      "paragraph": 0,
+                      "text": "",
+                      "text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                      "evidence_id": null
+                    }
+                  ],
+                  "grid_span": 1,
+                  "vertical_merge": null,
+                  "horizontal_merge": null,
+                  "has_nested_table": false
+                },
+                {
+                  "column": 2,
+                  "paragraphs": [
+                    {
+                      "paragraph": 0,
+                      "text": "学    号：",
+                      "text_sha256": "aedc84e4c45b1223130e8b391a664bed5dfb1c92903401759f77ef906c719b71",
+                      "evidence_id": "E00005"
+                    }
+                  ],
+                  "grid_span": 1,
+                  "vertical_merge": null,
+                  "horizontal_merge": null,
+                  "has_nested_table": false
+                },
+                {
+                  "column": 3,
+                  "paragraphs": [
+                    {
+                      "paragraph": 0,
+                      "text": "",
+                      "text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                      "evidence_id": null
+                    }
+                  ],
+                  "grid_span": 1,
+                  "vertical_merge": null,
+                  "horizontal_merge": null,
+                  "has_nested_table": false
+                }
+              ],
+              "row_sha256": "1247f4f253c33fbf458cd91c74a529fdff7f59448d2386e5138afc80327103ee"
+            },
+            "target_evidence_id": "E00005",
+            "target_column": 2,
+            "immediate_left_column": null,
+            "relationship": "geometry_not_unique",
+            "meaning": "Source geometry only; field meaning and candidate coverage require independent semantic review."
+          }
+        }
+      },
+      {
+        "check_id": "C00006",
+        "document_text": "论文题目",
+        "review_context": {
+          "semantic_clause_text": "论文题目",
+          "classification": "informational",
+          "requires_requirement": false,
+          "reason": "“论文题目：” appears as a label in the sample document; no current-source instruction establishes a required cover-field specification.",
+          "primary_obligations": [],
+          "primary_obligation_quote_bindings": [],
+          "linked_requirements": [],
+          "source_clause_support": [],
+          "cited_evidence": {
+            "E00006": {
+              "id": "E00006",
+              "kind": "paragraph",
+              "text": "论文题目：",
+              "style_id": null,
+              "runs": [
+                {
+                  "text": "论文题目：",
+                  "format": {
+                    "fonts": {
+                      "eastAsia": "黑体",
+                      "ascii": "黑体",
+                      "hAnsi": "黑体"
+                    },
+                    "size_pt": 16
+                  }
+                }
+              ],
+              "location": {
+                "part": "document",
+                "child_index": 4,
+                "order": 5
+              },
+              "context_before": [
+                "密  级：",
+                "学    号："
+              ],
+              "context_after": [
+                "硕  士  学  位  论  文",
+                "MASTER'S THESIS"
+              ],
+              "style_name": null,
+              "xml_locator": {
+                "part": "document",
+                "child_index": 4,
+                "order": 5
+              }
+            }
+          },
+          "machine_obligation_ids": [],
+          "manual_review_codes": [],
+          "source_content_verification_codes": [],
+          "pending_source_work": [],
+          "section_description": null
+        }
+      },
+      {
+        "check_id": "C00007",
+        "document_text": "硕  士  学  位  论  文",
+        "review_context": {
+          "semantic_clause_text": "硕 士 学 位 论 文",
+          "classification": "informational",
+          "requires_requirement": false,
+          "reason": "“硕士学位论文” is sample cover text and does not establish a required thesis-type label or format.",
+          "primary_obligations": [],
+          "primary_obligation_quote_bindings": [],
+          "linked_requirements": [],
+          "source_clause_support": [],
+          "cited_evidence": {
+            "E00007": {
+              "id": "E00007",
+              "kind": "paragraph",
+              "text": "硕  士  学  位  论  文",
+              "style_id": null,
+              "runs": [
+                {
+                  "text": "硕",
+                  "format": {
+                    "fonts": {
+                      "eastAsia": "黑体",
+                      "ascii": "黑体",
+                      "hAnsi": "黑体"
+                    },
+                    "size_pt": 22
+                  }
+                },
+                {
+                  "text": "士  学",
+                  "format": {
+                    "fonts": {
+                      "eastAsia": "黑体",
+                      "ascii": "黑体",
+                      "hAnsi": "黑体"
+                    },
+                    "size_pt": 22
+                  }
+                },
+                {
+                  "text": "位  论",
+                  "format": {
+                    "fonts": {
+                      "eastAsia": "黑体",
+                      "ascii": "黑体",
+                      "hAnsi": "黑体"
+                    },
+                    "size_pt": 22
+                  }
+                },
+                {
+                  "text": "文",
+                  "format": {
+                    "fonts": {
+                      "eastAsia": "黑体",
+                      "ascii": "黑体",
+                      "hAnsi": "黑体"
+                    },
+                    "size_pt": 22
+                  }
+                }
+              ],
+              "location": {
+                "part": "document",
+                "child_index": 7,
+                "order": 6
+              },
+              "context_before": [
+                "学    号：",
+                "论文题目："
+              ],
+              "context_after": [
+                "MASTER'S THESIS",
+                "培养单位："
+              ],
+              "style_name": null,
+              "xml_locator": {
+                "part": "document",
+                "child_index": 7,
+                "order": 6
+              }
+            }
+          },
+          "machine_obligation_ids": [],
+          "manual_review_codes": [],
+          "source_content_verification_codes": [],
+          "pending_source_work": [],
+          "section_description": null
+        }
+      },
+      {
+        "check_id": "C00008",
+        "document_text": "MASTER'S THESIS",
+        "review_context": {
+          "semantic_clause_text": "MASTER'S THESIS",
+          "classification": "informational",
+          "requires_requirement": false,
+          "reason": "“MASTER'S THESIS” is sample cover text and does not establish a required thesis-type label or format.",
+          "primary_obligations": [],
+          "primary_obligation_quote_bindings": [],
+          "linked_requirements": [],
+          "source_clause_support": [],
+          "cited_evidence": {
+            "E00008": {
+              "id": "E00008",
+              "kind": "paragraph",
+              "text": "MASTER'S THESIS",
+              "style_id": null,
+              "runs": [
+                {
+                  "text": "MASTER",
+                  "format": {
+                    "fonts": {
+                      "eastAsia": "黑体",
+                      "ascii": "黑体",
+                      "hAnsi": "黑体"
+                    },
+                    "size_pt": 22
+                  }
+                },
+                {
+                  "text": "'",
+                  "format": {
+                    "fonts": {
+                      "eastAsia": "黑体",
+                      "ascii": "黑体",
+                      "hAnsi": "黑体"
+                    },
+                    "size_pt": 22
+                  }
+                },
+                {
+                  "text": "S",
+                  "format": {
+                    "fonts": {
+                      "eastAsia": "黑体",
+                      "ascii": "黑体",
+                      "hAnsi": "黑体"
+                    },
+                    "size_pt": 22
+                  }
+                },
+                {
+                  "text": "THESIS",
+                  "format": {
+                    "fonts": {
+                      "eastAsia": "黑体",
+                      "ascii": "黑体",
+                      "hAnsi": "黑体"
+                    },
+                    "size_pt": 22
+                  }
+                }
+              ],
+              "location": {
+                "part": "document",
+                "child_index": 8,
+                "order": 7
+              },
+              "context_before": [
+                "论文题目：",
+                "硕  士  学  位  论  文"
+              ],
+              "context_after": [
+                "培养单位：",
+                "一级学科："
+              ],
+              "style_name": null,
+              "xml_locator": {
+                "part": "document",
+                "child_index": 8,
+                "order": 7
+              }
+            }
+          },
+          "machine_obligation_ids": [],
+          "manual_review_codes": [],
+          "source_content_verification_codes": [],
+          "pending_source_work": [],
+          "section_description": null
+        }
+      }
+    ],
+    "attempt": 1,
+    "provider_attempt": 1,
+    "output_policy": "review_draft"
+  },
+  "first_compiled": {
+    "results": [
+      {
+        "check_id": "C00001",
+        "verdict": "uncertain",
+        "rationale": "Source text is the standalone form label “分类号”; the source does not establish a required field value or format, and the row geometry does not uniquely resolve its target.",
+        "identified_obligations": [],
+        "evidence_quotes": [
+          "分类号"
+        ],
+        "machine_obligation_ids": []
+      },
+      {
+        "check_id": "C00002",
+        "verdict": "uncertain",
+        "rationale": "Source text is the standalone form label “学校代码”; it does not prescribe a value or format, and the row geometry does not uniquely resolve its target.",
+        "identified_obligations": [],
+        "evidence_quotes": [
+          "学校代码"
+        ],
+        "machine_obligation_ids": []
+      },
+      {
+        "check_id": "C00003",
+        "verdict": "consistent",
+        "rationale": "The source is the sample value “10043”. It establishes no duty to copy or prescribe that value; its adjacent label is contextual and does not change the source inventory.",
+        "identified_obligations": [],
+        "evidence_quotes": [
+          "10043"
+        ],
+        "machine_obligation_ids": []
+      },
+      {
+        "check_id": "C00004",
+        "verdict": "uncertain",
+        "rationale": "Source text is the standalone form label “密  级”; it does not establish a required value or format, and the row geometry does not uniquely resolve its target.",
+        "identified_obligations": [],
+        "evidence_quotes": [
+          "密  级"
+        ],
+        "machine_obligation_ids": []
+      },
+      {
+        "check_id": "C00005",
+        "verdict": "uncertain",
+        "rationale": "Source text is the standalone form label “学    号”; it does not establish a required value or format, and the row geometry does not uniquely resolve its target.",
+        "identified_obligations": [],
+        "evidence_quotes": [
+          "学    号"
+        ],
+        "machine_obligation_ids": []
+      },
+      {
+        "check_id": "C00006",
+        "verdict": "uncertain",
+        "rationale": "Source text is the standalone form label “论文题目”; it identifies a field but does not specify a required title or format.",
+        "identified_obligations": [],
+        "evidence_quotes": [
+          "论文题目"
+        ],
+        "machine_obligation_ids": []
+      },
+      {
+        "check_id": "C00007",
+        "verdict": "consistent",
+        "rationale": "The source text “硕  士  学  位  论  文” is sample cover wording and contains no instruction prescribing a thesis-type label or format.",
+        "identified_obligations": [],
+        "evidence_quotes": [
+          "硕  士  学  位  论  文"
+        ],
+        "machine_obligation_ids": []
+      },
+      {
+        "check_id": "C00008",
+        "verdict": "consistent",
+        "rationale": "The source text “MASTER'S THESIS” is sample cover wording and contains no instruction prescribing a thesis-type label or format.",
+        "identified_obligations": [],
+        "evidence_quotes": [
+          "MASTER'S THESIS"
+        ],
+        "machine_obligation_ids": []
+      }
+    ]
+  }
+}

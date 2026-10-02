@@ -102,6 +102,55 @@ class InconsistentObligationVerdictError(NativeSemanticReviewError):
         )
 
 
+class EmptyInventoryVerdictError(NativeSemanticReviewError):
+    """A non-consistent assessment claimed findings but supplied no atoms."""
+
+    code = "empty_inventory_verdict_conflict"
+
+    def __init__(self, rejected_results: list[dict[str, Any]]) -> None:
+        self.rejected_results = copy.deepcopy(sorted(rejected_results, key=lambda r: r["check_id"]))
+        self.clause_ids = tuple(r["check_id"] for r in self.rejected_results)
+        super().__init__("independent verdict requires an explicit source inventory for "
+                         + ", ".join(self.clause_ids))
+
+
+def empty_inventory_retry_feedback_is_bound(request: dict[str, Any]) -> bool:
+    """Reproduce the rejection, not merely a caller-supplied hash or label."""
+    feedback = request.get("retry_feedback")
+    if (not isinstance(feedback, dict) or feedback.get("code") != EmptyInventoryVerdictError.code
+            or type(request.get("provider_attempt")) is not int or request["provider_attempt"] != 2
+            or set(feedback) != {"code", "clause_ids", "rejected_results", "rejected_results_sha256",
+                "rejected_request_sha256", "checks_sha256", "candidate_response_sha256", "run_id", "provenance"}
+            or not isinstance(feedback.get("candidate_response_sha256"), str)
+            or re.fullmatch(r"[0-9a-f]{64}", feedback["candidate_response_sha256"]) is None
+            or feedback.get("checks_sha256") != sha256_json(request.get("checks"))
+            or feedback.get("run_id") != request.get("run_id")
+            or feedback.get("provenance") != request.get("provenance")):
+        return False
+    prior = copy.deepcopy(request)
+    prior.pop("retry_feedback", None)
+    prior["provider_attempt"] = 1
+    if feedback.get("rejected_request_sha256") != sha256_json(prior):
+        return False
+    try:
+        rejected = feedback.get("rejected_results")
+        ids = feedback.get("clause_ids")
+        if (not isinstance(rejected, list) or not rejected or not isinstance(ids, list)
+                or ids != sorted(set(ids)) or len(ids) != len(rejected)
+                or [r.get("check_id") for r in rejected] != ids
+                or feedback.get("rejected_results_sha256") != sha256_json(rejected)):
+            return False
+        checks = {c["check_id"]: c for c in prior["checks"]}
+        selected = [checks[cid] for cid in ids]
+        validate_obligation_coverage_response({"results": copy.deepcopy(rejected)}, selected,
+            allow_draft_disputes=prior.get("output_policy") == "review_draft")
+    except EmptyInventoryVerdictError as exc:
+        return list(exc.clause_ids) == ids and exc.rejected_results == rejected
+    except (NativeSemanticReviewError, ValueError, TypeError, KeyError, AttributeError):
+        return False
+    return False
+
+
 class UnlinkedRepresentedObligationError(NativeSemanticReviewError):
     """A reviewer claimed coverage without any current requirement selector."""
 
@@ -813,6 +862,7 @@ def validate_obligation_coverage_response(
     external_compliance_corrections: list[dict[str, Any]] = []
     source_verification_classification_corrections: list[dict[str, Any]] = []
     typed_alignment_errors: list[tuple[str, list[dict[str, Any]]]] = []
+    empty_inventory_verdicts: list[dict[str, Any]] = []
     for result in results:
         check_id = result.get("check_id") if isinstance(result, dict) else None
         if not isinstance(check_id, str) or check_id not in expected:
@@ -858,6 +908,11 @@ def validate_obligation_coverage_response(
             raise NativeSemanticReviewError(
                 f"independent obligation review omitted or changed code-owned source facts for {check_id}"
             )
+        if not identified and result["verdict"] not in {"consistent", "incomplete"}:
+            # This rejects the contradictory representation, not the underlying
+            # source interpretation. Never fabricate ambiguity or pending work.
+            empty_inventory_verdicts.append(copy.deepcopy(result))
+            continue
         publication_facts = [
             fact for fact in compile_known_source_obligations(source_text)
             if fact["id"] in {
@@ -1374,6 +1429,8 @@ def validate_obligation_coverage_response(
         raise NativeSemanticReviewError(
             "independent obligation review omitted clauses: " + ", ".join(missing)
         )
+    if empty_inventory_verdicts:
+        raise EmptyInventoryVerdictError(empty_inventory_verdicts)
     if missing_source_inventory:
         raise MissingSourceObligationInventoryError(missing_source_inventory)
     if external_compliance_corrections:
@@ -1715,6 +1772,23 @@ def _prompt(request: dict[str, Any], *, retained_results: dict[str, Any] | None 
                 "machine_obligation_ids. Copy those arrays exactly for affected checks; only change verdict "
                 "to source_content_verification_pending and explain the correction in rationale. If further "
                 "errors prevent that result, remain rejected; never delete, add or rewrite an atom.\n"
+            )
+        elif (isinstance(retry_feedback, dict)
+              and retry_feedback.get("code") == EmptyInventoryVerdictError.code):
+            if not empty_inventory_retry_feedback_is_bound(request):
+                raise NativeSemanticReviewError("empty-inventory feedback is not current-source bound")
+            retry_instruction = (
+                "\nA prior independent review of this same unchanged candidate supplied an empty "
+                "inventory with a verdict that requires explicit findings for checks "
+                + ", ".join(retry_feedback["clause_ids"])
+                + ". Re-read the exact selected source spans. If they establish no duty, return "
+                "consistent with an empty inventory and exact evidence_refs. That is not proof from "
+                "the primary informational label. If you identify a genuine duty or ambiguity, enumerate "
+                "it accurately with exact source references and the applicable disposition; existing "
+                "classification, mapping and uncertainty validators still apply and may reject it. "
+                "Never invent a duty just to fill an array, erase a known duty, or change the candidate, "
+                "its primary classification, source, provenance or graph. This is one bounded corrective "
+                "read, not a pass projection or submission approval.\n"
             )
         elif inconsistent_clause_ids:
             retry_instruction = (

@@ -45,6 +45,8 @@ from manual_review import (
 )
 from native_semantic_review import (
     OBLIGATION_COVERAGE_SCHEMA,
+    EmptyInventoryVerdictError,
+    empty_inventory_retry_feedback_is_bound,
     OBLIGATION_COVERAGE_PROTOCOL,
     build_obligation_coverage_request,
     validate_obligation_coverage_response,
@@ -453,6 +455,7 @@ def _validate_independent_obligation_receipts(
         allowed_retry_feedback_codes = {
             "external_compliance_unrepresented_obligation",
             "missing_source_obligation_inventory",
+            EmptyInventoryVerdictError.code,
             "independent_obligation_review_incomplete",
             TABLE_CONTEXT_RETRY_CODE,
         }
@@ -477,6 +480,9 @@ def _validate_independent_obligation_receipts(
             ))
             or envelope.get("retry_feedback") != retry_feedback
             or independent.get("retry_feedback") != retry_feedback
+            or (isinstance(retry_feedback, dict) and retry_feedback.get("code") == EmptyInventoryVerdictError.code
+                and (not empty_inventory_retry_feedback_is_bound(review_request)
+                     or retry_feedback.get("candidate_response_sha256") != candidate_sha))
             or (isinstance(retry_feedback, dict) and retry_feedback.get("code") == TABLE_CONTEXT_RETRY_CODE
                 and not table_retry_feedback_is_source_bound(review_request))
         ):
@@ -584,6 +590,8 @@ def _validate_independent_obligation_receipts(
         persisted_source_packet = read_json(source_packet_path)
         raw_review_response = read_json(raw_response_path)
         persisted_compiled_response = read_json(compiled_response_path)
+        from independent_retry_scope import validate_persisted_empty_inventory_scope
+        validate_persisted_empty_inventory_scope(review_request, request_path.parent, raw_review_response, review_audit)
         if persisted_source_packet != source_packet:
             raise ValueError(f"independent source-reference packet {index} does not match the canonical request")
         reconstructed_response, reconstructed_compilation = compile_source_reference_response(

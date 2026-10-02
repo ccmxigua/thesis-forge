@@ -60,6 +60,12 @@ class NativeSemanticReviewError(RuntimeError):
     """A native semantic review could not be proven valid for this run."""
 
 
+class NativeOutputLimitError(NativeSemanticReviewError):
+    """A structured terminal output limit: no semantic response was accepted."""
+
+    code = "max_output_tokens"
+
+
 class RetryableNativeSemanticReviewError(NativeSemanticReviewError):
     """A narrowly classified provider-side failure that may be retried safely."""
 
@@ -2106,6 +2112,12 @@ def run_native_semantic_review(
             f"native semantic review exceeded {timeout} seconds"
         )
     if adapter_id == "codex":
+        if codex_adapter.output_limit_failure_code(completed.stdout or "") is not None:
+            raise NativeOutputLimitError(
+                "native Codex semantic review terminated at max_output_tokens; "
+                "no partial response accepted; prepare a fresh source-atomic run "
+                "with a smaller --host-review-chunk-size (never truncate source)"
+            )
         retry_code = codex_adapter.retryable_failure_code(completed.stdout or "")
         if retry_code is not None:
             raise RetryableNativeSemanticReviewError(

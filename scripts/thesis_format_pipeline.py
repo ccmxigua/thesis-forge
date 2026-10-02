@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any
 
 from host_adapters.codex import resolve_reasoning_effort
+from review_limits import DEFAULT_HOST_REVIEW_CHUNK_SIZE
 
 from compliance import report as compliance_report
 from docx import Document
@@ -2400,8 +2401,8 @@ def _main(argv: list[str]) -> int:
                    help="school-neutral DOCX baseline for synthetic conversion/render validation; disables official template/profile checks")
     p.add_argument("--prepare-host-review", action="store_true",
                    help="prepare evidence-bound packets for the current host Agent; never calls a provider")
-    p.add_argument("--host-review-chunk-size", type=int, default=20,
-                   help="number of clauses per host-Agent packet (default: 20)")
+    p.add_argument("--host-review-chunk-size", type=int, default=DEFAULT_HOST_REVIEW_CHUNK_SIZE,
+                   help="target clauses per host-Agent packet (default: %(default)s; source-atomic groups may exceed target)")
     p.add_argument(
         "--llm-response", type=Path,
         help="offline complete host-review response produced by the native Host Agent",

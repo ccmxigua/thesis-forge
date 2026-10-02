@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import hashlib
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
@@ -157,6 +158,28 @@ def _strip_json_wrapper(text: str) -> dict[str, Any]:
     return parsed
 
 
+def _terminal_failure(stdout: str) -> dict[str, Any] | None:
+    """A single failed terminal of one intact stream, never mixed outcomes."""
+    events = []
+    for line in stdout.splitlines():
+        if not line.strip():
+            continue
+        try:
+            event = strict_json_loads(line)
+        except (ValueError, json.JSONDecodeError):
+            return None
+        if not isinstance(event, dict):
+            return None
+        events.append(event)
+    if not events or events[-1].get("type") != "turn.failed":
+        return None
+    if sum(event.get("type") == "turn.failed" for event in events) != 1:
+        return None
+    if any(event.get("type") == "turn.completed" for event in events):
+        return None
+    return events[-1]
+
+
 def retryable_failure_code(stdout: str) -> str | None:
     """Classify only explicit Codex terminal capacity failures as retryable.
 
@@ -169,24 +192,37 @@ def retryable_failure_code(stdout: str) -> str | None:
         "model is at capacity",
         "model at capacity",
     )
-    for line in stdout.splitlines():
-        if not line.strip():
-            continue
-        try:
-            event = strict_json_loads(line)
-        except (ValueError, json.JSONDecodeError):
-            continue
-        if not isinstance(event, dict) or event.get("type") != "turn.failed":
-            continue
-        error = event.get("error")
-        detail = event.get("message")
-        if isinstance(error, dict):
-            detail = error.get("message") or error.get("code") or detail
-        if not isinstance(detail, str):
-            continue
+    event = _terminal_failure(stdout)
+    if event is None:
+        return None
+    error = event.get("error")
+    detail = event.get("message")
+    if isinstance(error, dict):
+        detail = error.get("message") or error.get("code") or detail
+    if isinstance(detail, str):
         normalized = " ".join(detail.casefold().split())
         if any(marker in normalized for marker in capacity_markers):
             return "model_capacity"
+    return None
+
+
+def output_limit_failure_code(stdout: str) -> str | None:
+    """Classify explicit native terminal truncation; never assistant prose.
+
+    Unlike transient capacity, an identical oversized request is not eligible
+    for automatic retry. Malformed/duplicate-key JSONL cannot authorize even
+    this failure classification. The normal parser still rejects such streams.
+    """
+    event = _terminal_failure(stdout)
+    if event is None:
+        return None
+    error = event.get("error")
+    detail = error.get("message") if isinstance(error, dict) else None
+    if isinstance(detail, str) and re.search(
+        r"\bIncomplete response returned,\s*reason:\s*max_output_tokens\b",
+        detail, flags=re.IGNORECASE,
+    ):
+        return "max_output_tokens"
     return None
 
 

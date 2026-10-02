@@ -890,6 +890,44 @@ class HostAgentBridgeTests(unittest.TestCase):
                     )
             self.assertEqual(review_call.call_count, 1)
 
+    def test_independent_output_limit_records_nonretryable_bound_failure(self) -> None:
+        self._independent_review_patch.stop()
+        chunk, response, _ = self._missing_inventory_review_case()
+        original = copy.deepcopy(response)
+        with tempfile.TemporaryDirectory() as td:
+            def fail_with_stream(request, *, output_dir, **kwargs):
+                output_dir.mkdir(parents=True)
+                (output_dir / "stdout.jsonl").write_text("captured native failure\n")
+                (output_dir / "stderr.txt").write_text("diagnostic stderr\n")
+                raise bridge.NativeOutputLimitError("native review terminated at max_output_tokens")
+            with patch.object(bridge, "run_native_semantic_review", side_effect=fail_with_stream
+            ) as review_call, patch.object(bridge.time, "sleep") as sleep:
+                with self.assertRaises(bridge.IndependentObligationReviewError) as caught:
+                    bridge._run_independent_obligation_coverage_review(
+                        response, chunk, review_dir=Path(td), run_id="run-output-limit",
+                        chunk_index=2, attempt=1, host_runtime="codex", model="gpt-6-luna",
+                        timeout=10, agent_id="main", runner="exec", binary="codex",
+                        config_path=None, controller=bridge.RunController(),
+                    )
+            self.assertEqual(review_call.call_count, 1)
+            sleep.assert_not_called()
+            self.assertFalse(caught.exception.retryable)
+            record = caught.exception.error_records[0]
+            self.assertEqual(record["code"], "independent_obligation_review_output_limit")
+            self.assertFalse(record["retryable"])
+            audit = json.loads((Path(td) / record["audit_path"]).read_text())
+            self.assertEqual(audit["run_id"], "run-output-limit")
+            self.assertEqual(audit["candidate_response_sha256"], bridge._response_sha256(original))
+            self.assertEqual(audit["checks_count"], len(review_call.call_args.args[0]["checks"]))
+            self.assertEqual(audit["failure_code"], "max_output_tokens")
+            self.assertFalse(audit["retryable"])
+            self.assertEqual(set(audit["failure_artifacts"]), {"stdout.jsonl", "stderr.txt"})
+            for name, artifact in audit["failure_artifacts"].items():
+                self.assertEqual(artifact["sha256"], bridge.sha256_file(Path(td) / artifact["path"]))
+            self.assertEqual(record["failure_artifacts"], audit["failure_artifacts"])
+            self.assertFalse((Path(td) / "independent-review-chunk-0002-attempt-01/response.json").exists())
+        self.assertEqual(response, original)
+
     def test_independent_coverage_capacity_exhaustion_fails_closed_after_two_calls(self) -> None:
         self._independent_review_patch.stop()
         source = "表格应居中"

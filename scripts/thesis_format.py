@@ -36,6 +36,7 @@ from host_runtime import (  # noqa: E402
 )
 from process_runner import run_process  # noqa: E402
 from semantic_contract import strict_json_read  # noqa: E402
+from review_limits import DEFAULT_HOST_REVIEW_CHUNK_SIZE  # noqa: E402
 
 
 def pipeline_command(args: argparse.Namespace, *, prepare_host_review: bool = False,
@@ -136,8 +137,8 @@ def main(argv: list[str]) -> int:
                    help="offline complete contract-3.0 response, or an explicitly bound legacy 2.1 response, produced by the current host Agent")
     p.add_argument("--offline-review-draft", action="store_true",
                    help="complete the current agent's merged packet response as a non-release draft without Codex/OpenClaw CLI; never submission-ready")
-    p.add_argument("--host-review-chunk-size", type=int, default=20,
-                   help="clauses per fresh Host Agent packet (default: 20)")
+    p.add_argument("--host-review-chunk-size", type=int, default=DEFAULT_HOST_REVIEW_CHUNK_SIZE,
+                   help="target clauses per fresh Host Agent packet (default: %(default)s; source-atomic groups may exceed target)")
     p.add_argument("--host-agent-timeout", type=int, default=900,
                    help="per-chunk native host adapter timeout in seconds (default: 900)")
     p.add_argument("--host-agent-max-concurrency", type=int, default=4,

@@ -21,6 +21,7 @@ from uuid import uuid4
 import xml.etree.ElementTree as ET
 
 from artifact_io import atomic_write_text
+from review_limits import DEFAULT_HOST_REVIEW_CHUNK_SIZE
 from declaration_body import declaration_body_parts
 from table_source_context import TABLE_CONTEXT_PROTOCOL, text_sha256
 from document_text_font import (TEXT_FONT_ROLES, compile_document_latin_font,
@@ -3478,7 +3479,7 @@ def prepare_host_agent_review_packets(
     source_sha256: str,
     out: Path,
     *,
-    chunk_size: int = 20,
+    chunk_size: int = DEFAULT_HOST_REVIEW_CHUNK_SIZE,
 ) -> dict[str, Any]:
     """Persist the offline protocol consumed by the current host Agent."""
     write_json(out / "llm-request.json", full_request)
@@ -4620,8 +4621,8 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     )
     p.add_argument("--prepare-host-review", action="store_true",
                    help="write evidence-bound packets for the current host Agent; never calls a provider")
-    p.add_argument("--host-review-chunk-size", type=int, default=20,
-                   help="number of clauses per host-Agent packet (default: 20)")
+    p.add_argument("--host-review-chunk-size", type=int, default=DEFAULT_HOST_REVIEW_CHUNK_SIZE,
+                   help="target clauses per host-Agent packet (default: %(default)s; source-atomic groups may exceed target)")
     p.add_argument("--strict-provenance", action="store_true",
                    help="require a fresh response bound to this extraction and exact LLM request")
     p.add_argument("--run-id",

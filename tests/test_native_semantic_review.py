@@ -2057,6 +2057,32 @@ class NativeSemanticReviewTests(unittest.TestCase):
             self.assertIn("provider capacity response", (output_dir / "stderr.txt").read_text())
             self.assertFalse((output_dir / "response.json").exists())
 
+    def test_native_output_limit_is_terminal_and_never_accepts_partial_results(self) -> None:
+        stdout = json.dumps({
+            "type": "turn.failed", "error": {"message":
+                "stream disconnected before completion: Incomplete response returned, reason: max_output_tokens"},
+        })
+        for returncode in (0, 1):
+            with self.subTest(returncode=returncode), tempfile.TemporaryDirectory() as td:
+                output_dir = Path(td) / "native"
+                patches = self._stub_codex_host(CompletedProcess(
+                    ["codex"], returncode, stdout, "output was incomplete",
+                ))
+                with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5]:
+                    with patch.object(native_review.codex_adapter, "parse_result") as parse:
+                        with self.assertRaises(native_review.NativeOutputLimitError) as caught:
+                            native_review.run_native_semantic_review(
+                                {"case_id": "case", "run_id": "run", "checks": self.checks},
+                                output_dir=output_dir, host_runtime="codex", model="gpt-6-luna", timeout=5,
+                            )
+                        parse.assert_not_called()
+                self.assertEqual(caught.exception.code, "max_output_tokens")
+                self.assertNotIsInstance(caught.exception, RetryableNativeSemanticReviewError)
+                self.assertEqual((output_dir / "stdout.jsonl").read_text(), stdout)
+                self.assertEqual((output_dir / "stderr.txt").read_text(), "output was incomplete")
+                for name in ("response.json", "compiled-response.json", "raw-response.json"):
+                    self.assertFalse((output_dir / name).exists())
+
     def test_codex_runner_uses_provider_compatible_projection_and_keeps_local_constraints(self) -> None:
         check = {
             "check_id": "C1", "document_text": "该处约3cm",

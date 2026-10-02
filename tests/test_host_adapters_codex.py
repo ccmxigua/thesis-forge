@@ -183,6 +183,27 @@ class CodexAdapterTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "turn failed"):
             codex.parse_result(stdout, last_message='{"value": 1}')
 
+    def test_output_limit_requires_explicit_well_formed_terminal_failure(self) -> None:
+        message = "stream disconnected before completion: Incomplete response returned, reason: max_output_tokens"
+        terminal = json.dumps({"type": "turn.failed", "error": {"message": message}})
+        self.assertEqual(codex.output_limit_failure_code(terminal), "max_output_tokens")
+        self.assertIsNone(codex.retryable_failure_code(terminal))
+        for event in (
+            {"type": "error", "message": message},
+            {"type": "turn.completed", "error": {"message": message}},
+            {"type": "item.completed", "item": {"type": "agent_message", "text": message}},
+            {"type": "turn.failed", "error": {"message": "No such config key: max_output_tokens"}},
+            {"type": "turn.failed", "error": {"message": "Invalid output schema"}},
+        ):
+            with self.subTest(event=event):
+                self.assertIsNone(codex.output_limit_failure_code(json.dumps(event)))
+        for malformed in ("{broken", '{"type":"turn.failed","type":"turn.completed"}'):
+            for stream in (malformed + "\n" + terminal, terminal + "\n" + malformed):
+                with self.subTest(stream=stream):
+                    self.assertIsNone(codex.output_limit_failure_code(stream))
+        with self.assertRaisesRegex(ValueError, "turn failed"):
+            codex.parse_result(terminal, last_message='{"results": []}')
+
     def test_retryable_failure_classifier_requires_structured_terminal_capacity_error(self) -> None:
         capacity_failure = "\n".join([
             json.dumps({"type": "error", "message": "Selected model is at capacity."}),
@@ -205,6 +226,22 @@ class CodexAdapterTests(unittest.TestCase):
         self.assertIsNone(codex.retryable_failure_code(
             json.dumps({"type": "turn.completed", "message": "Selected model is at capacity."})
         ))
+
+    def test_failure_classifiers_reject_corrupt_and_mixed_terminal_streams(self) -> None:
+        for detail, classifier in (
+            ("Selected model is at capacity.", codex.retryable_failure_code),
+            ("Incomplete response returned, reason: max_output_tokens", codex.output_limit_failure_code),
+        ):
+            failed = json.dumps({"type": "turn.failed", "error": {"message": detail}})
+            for stream in (
+                "{broken\n" + failed, failed + "\n{broken",
+                failed + "\n" + failed,
+                json.dumps({"type": "turn.completed"}) + "\n" + failed,
+                failed + "\n" + json.dumps({"type": "error", "message": detail}),
+                '{"type":"turn.completed","type":"error"}\n' + failed,
+            ):
+                with self.subTest(stream=stream):
+                    self.assertIsNone(classifier(stream))
 
 
 if __name__ == "__main__":

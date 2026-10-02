@@ -226,6 +226,7 @@ from native_semantic_review import (  # noqa: E402
     MissingExecutableObligationInventoryError,
     MissingSourceObligationInventoryError,
     NativeSemanticReviewError,
+    NativeOutputLimitError,
     OBLIGATION_COVERAGE_PROTOCOL,
     OBLIGATION_COVERAGE_SCHEMA,
     SourceVerificationClassificationCorrectionRequiredError,
@@ -13626,6 +13627,13 @@ def _run_independent_obligation_coverage_review(
         }  # type: ignore[attr-defined]
         raise error from review_error
     except Exception as review_error:
+        output_limit = isinstance(review_error, NativeOutputLimitError)
+        failure_artifacts = {
+            name: {"path": (output_dir / name).relative_to(review_dir).as_posix(),
+                   "sha256": sha256_file(output_dir / name)}
+            for name in ("request.json", "prompt.txt", "response-schema.json", "stdout.jsonl", "stderr.txt")
+            if output_limit and (output_dir / name).is_file()
+        }
         failure_envelope = {
             "schema_version": "1.0",
             "protocol": OBLIGATION_COVERAGE_PROTOCOL,
@@ -13640,20 +13648,30 @@ def _run_independent_obligation_coverage_review(
             "error_type": type(review_error).__name__,
             "error": str(review_error),
             "review_output_dir": str(output_dir.resolve()),
+            **({"failure_code": "max_output_tokens", "retryable": False,
+                "checks_count": len(coverage_request["checks"]),
+                "failure_artifacts": failure_artifacts,
+                "recovery": "fresh_source_atomic_run_with_smaller_chunk_target"}
+               if output_limit else {}),
         }
         if not audit_path.exists():
             _write_json(audit_path, failure_envelope)
         error = IndependentObligationReviewError(
             f"independent source-obligation review failed for chunk {chunk_index}: {review_error}"
         )
+        error.retryable = False  # type: ignore[attr-defined]
         error.error_records = [{
-            "code": "independent_obligation_review_failed",
+            "code": ("independent_obligation_review_output_limit" if output_limit
+                     else "independent_obligation_review_failed"),
             "provider_attempt": _provider_attempt,
             "provider_attempt_history": retry_history,
             "candidate_response_sha256": response_sha,
             "error_type": type(review_error).__name__,
             "message": str(review_error),
             "audit_path": audit_path.relative_to(review_dir).as_posix(),
+            **({"failure_code": "max_output_tokens", "retryable": False,
+                "checks_count": len(coverage_request["checks"]),
+                "failure_artifacts": failure_artifacts} if output_limit else {}),
         }]  # type: ignore[attr-defined]
         error.independent_review_audit = {
             "status": "failed",

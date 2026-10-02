@@ -31,6 +31,7 @@ DEFAULT_MANIFEST = Path("inputs/ten-school-template-manifest.json")
 if str(ROOT / "scripts") not in sys.path:
     sys.path.insert(0, str(ROOT / "scripts"))
 from artifact_io import atomic_write_text  # noqa: E402
+from review_limits import DEFAULT_HOST_REVIEW_CHUNK_SIZE  # noqa: E402
 from draft_scorecard import audit_scorecard, validate_bound_scorecard  # noqa: E402
 from property_receipts import evaluation_unit_receipt_errors  # noqa: E402
 from host_adapters import codex as codex_adapter  # noqa: E402
@@ -399,7 +400,7 @@ def pipeline_command(case: dict[str, Any], source: Path, work_dir: Path, output_
                      requirements_dir: Path | None = None,
                      host_agent_audit: Path | None = None,
                      merge_receipt: Path | None = None,
-                     host_review_chunk_size: int = 20,
+                     host_review_chunk_size: int = DEFAULT_HOST_REVIEW_CHUNK_SIZE,
                      semantic_review_runtime: str | None = None,
                      semantic_review_model: str | None = None,
                      semantic_review_reasoning_effort: str | None = None) -> list[str]:
@@ -1585,7 +1586,7 @@ def run_case(base: Path, source: Path, case: dict[str, Any], *, prepare_host_rev
              host_runtime: str | None = None,
              host_adapter_id: str | None = None,
              inherit_parent_model: bool = True,
-             host_review_chunk_size: int = 20,
+             host_review_chunk_size: int = DEFAULT_HOST_REVIEW_CHUNK_SIZE,
              host_agent_id: str = "main", openclaw_bin: str | None = None,
              openclaw_config: Path | None = None,
              codex_bin: str | None = None,
@@ -1912,8 +1913,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="OpenClaw invocation path used by --auto-host-agent (default: exec)")
     parser.add_argument("--no-host-agent-model-inheritance", action="store_true",
                         help="disable parent inheritance only with an explicit --host-agent-model route")
-    parser.add_argument("--host-review-chunk-size", type=int, default=20,
-                        help="clauses per fresh Host Agent packet (default: 20)")
+    parser.add_argument("--host-review-chunk-size", type=int, default=DEFAULT_HOST_REVIEW_CHUNK_SIZE,
+                        help="target clauses per fresh Host Agent packet (default: %(default)s; source-atomic groups may exceed target)")
     parser.add_argument("--host-agent-id", default="main",
                         help="OpenClaw agent id used by --auto-host-agent (default: main)")
     parser.add_argument("--openclaw-bin",

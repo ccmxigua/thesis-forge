@@ -9172,6 +9172,78 @@ def _project_exact_duplicate_requirements(
     }
 
 
+def _project_exact_cover_label_terminal_colon(
+    response: dict[str, Any], error_records: list[dict[str, Any]], chunk: dict[str, Any],
+    *, source_projection_validation_sha256: str | None,
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    """Restore only a uniquely cited source's omitted terminal colon.
+
+    This is a partial textual projection, not semantic retry authority or an
+    acceptance receipt. The complete current validator bundle and invocation
+    identity are required; every other field and obligation stays unchanged.
+    """
+    if (source_projection_validation_sha256 != _response_sha256(chunk)
+            or not _retry_fingerprints_complete(_retry_input_fingerprints(chunk))):
+        return None, []
+    current = contract_error_records(
+        validate_host_agent_response(response, chunk), response=response, chunk=chunk,
+    )
+    if not current or sorted(map(_response_sha256, current)) != sorted(map(_response_sha256, error_records)):
+        return None, []
+    clauses = chunk.get("clauses")
+    if not isinstance(clauses, list):
+        return None, []
+    clause_map = {item.get("id"): item for item in clauses if isinstance(item, dict)}
+    if len(clause_map) != len(clauses):
+        return None, []
+    candidate = copy.deepcopy(response)
+    audit = []
+    for record in current:
+        match = re.fullmatch(
+            r"\$\.requirements\[(\d+)\]\.properties\.fields\[(\d+)\]\.label_display_policy",
+            str(record.get("json_pointer", "")),
+        )
+        if (record.get("code") not in {"cover_binding_violation", "schema_contract_violation"} or not match
+                or not str(record.get("raw_error", "")).endswith("must_be_bound_to_exact_linked_source_clause")):
+            continue
+        ri, fi = map(int, match.groups())
+        requirement = response["requirements"][ri]
+        field = requirement["properties"]["fields"][fi]
+        label = field.get("label")
+        ids, evidence_ids = requirement.get("clause_ids"), requirement.get("evidence_ids")
+        if (requirement.get("role") != "cover" or field.get("id") not in {"title_zh", "title_en"}
+                or field.get("label_display_policy") != "always" or not isinstance(label, str)
+                or not label or label.endswith((":", "：")) or not isinstance(ids, list)
+                or len(ids) != len(set(ids)) or not isinstance(evidence_ids, list)):
+            continue
+        matches = []
+        for cid in ids:
+            try:
+                binding = compose_source_fragments(
+                    [cid], clause_map, chunk.get("evidence_context"),
+                    requirement_clause_ids=ids, requirement_evidence_ids=evidence_ids,
+                    literal_role="cover_field_label",
+                )
+                if binding["text"] in {label + ":", label + "："}:
+                    matches.append(binding)
+            except (ValueError, KeyError, TypeError):
+                continue
+        if len(matches) != 1:
+            continue
+        before = _response_sha256(candidate)
+        candidate["requirements"][ri]["properties"]["fields"][fi]["label"] = matches[0]["text"]
+        audit.append({
+            "rule_id": "exact_cover_label_terminal_colon_v1",
+            "json_pointer": f"$.requirements[{ri}].properties.fields[{fi}].label",
+            "old_value": label, "new_value": matches[0]["text"],
+            "source_binding": matches[0], "invocation_fingerprints": _retry_input_fingerprints(chunk),
+            "plan_before_sha256": before, "plan_after_sha256": _response_sha256(candidate),
+            "partial_candidate_only": True, "independent_review_required": True,
+            "submission_ready": False,
+        })
+    return (candidate, audit) if audit else (None, [])
+
+
 def _apply_safe_mechanical_repairs(
     response: Any, error_records: list[dict[str, Any]],
     *, chunk: dict[str, Any] | None = None,
@@ -9198,6 +9270,12 @@ def _apply_safe_mechanical_repairs(
                 == sorted(_response_sha256(item) for item in error_records)):
             fingerprints = _retry_input_fingerprints(chunk)
             if _retry_fingerprints_complete(fingerprints):
+                labelled, label_audit = _project_exact_cover_label_terminal_colon(
+                    response, error_records, chunk,
+                    source_projection_validation_sha256=source_projection_validation_sha256,
+                )
+                if labelled is not None:
+                    return labelled, label_audit
                 contextual, context_audit = project_context_edges(
                     response, chunk, error_records, validate=validate_host_agent_response,
                     source_projection_validation_sha256=source_projection_validation_sha256,

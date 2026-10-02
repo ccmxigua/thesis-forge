@@ -15,6 +15,7 @@ import unicodedata
 import json
 from typing import Any
 from fixed_declaration_source import is_blank_signature_line
+from declaration_body import declaration_body_parts
 
 
 SCHEMA_VERSION = "1.0"
@@ -40,15 +41,7 @@ def fixed_text_sha256(text: str) -> str:
 
 
 def _body_parts(item: dict[str, Any]) -> list[str]:
-    parts = item.get("body_parts")
-    if isinstance(parts, list):
-        result = [part.strip() for part in parts if isinstance(part, str) and part.strip()]
-        if result:
-            return result
-    body = item.get("body")
-    if isinstance(body, str) and body.strip():
-        return [body.strip()]
-    return []
+    return declaration_body_parts(item)
 
 
 def _source_evidence_map(evidence: dict[str, Any]) -> dict[str, dict[str, Any]]:

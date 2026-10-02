@@ -13,7 +13,7 @@ import re
 from typing import Any
 
 
-SOURCE_VERIFICATION_CLASSIFICATION_POLICY_VERSION = "source-verification-classification-v6"
+SOURCE_VERIFICATION_CLASSIFICATION_POLICY_VERSION = "source-verification-classification-v7"
 SOURCE_KEYWORD_CONSTRAINT_PROJECTION_POLICY_VERSION = "source-keyword-constraints-v3"
 SOURCE_HEADING_BINDING_POLICY_VERSION = "source-heading-binding-v1"
 
@@ -2637,7 +2637,8 @@ _KEYWORD_VERIFICATION_ACTOR = re.compile(
 )
 
 _KEYWORD_SPLIT_ORIGIN_ACTION = re.compile(
-    r"(?:select|choose|extract|pick|选取|选择|提取)\Z", re.IGNORECASE,
+    r"(?:(?:select|choose|extract|pick)(?:\s+and\s+(?:substantiate|verify|confirm|check))?"
+    r"|(?:选取|选择|提取)(?:并(?:佐证|核验|确认|检查))?)\Z", re.IGNORECASE,
 )
 _KEYWORD_SPLIT_ORIGIN_TARGET = re.compile(
     # A bare selection action alone is insufficient. The target must carry
@@ -2649,6 +2650,14 @@ _KEYWORD_SPLIT_ORIGIN_TARGET = re.compile(
     r"(?:\s+with\s+(?:clear\s+)?(?:provenance|source|origin))?)\Z|"
     r"(?:论文|正文)中(?:有明确出处|可追溯至原文)的(?:关键词|关键字)\Z",
     re.IGNORECASE,
+)
+
+_KEYWORD_ORIGIN_PREDICATE_QUOTE = re.compile(
+    # A subject may be outside the exact quotation only inside a whole,
+    # uniquely selected pure keyword-origin clause. Both predicates must
+    # still be quoted; a bare provenance fragment cannot authorize routing.
+    r"从论文中选取(?:出来)?(?:用以表示全文主题内容信息的单词或术语)?"
+    r"[，,；;]?(?:并|并且)?(?:在论文中)?(?:有明确出处|可追溯至对应原文)[。.]?\Z"
 )
 
 
@@ -2699,8 +2708,11 @@ def typed_source_verification_inventory_is_bound(
                 or not isinstance(atom.get("applicability"), str)
                 or atom.get("applicability") not in {"applicable", "not_applicable", "unknown", "conflicted"}
                 or atom["source_quote"] not in source_text
-                or compile_source_content_verification_codes(atom["source_quote"])
-                    != compile_source_content_verification_codes(source_text)
+                or not (
+                    compile_source_content_verification_codes(atom["source_quote"])
+                    == compile_source_content_verification_codes(source_text)
+                    or _KEYWORD_ORIGIN_PREDICATE_QUOTE.fullmatch(atom["source_quote"])
+                )
                 or atom.get("route") not in (
                     (None, "human", "input") if split_origin_selection
                     else (None, "input" if expected_status == "requires_source_content" else "human")

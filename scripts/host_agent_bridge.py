@@ -598,7 +598,7 @@ def _materialize_fixed_declaration_source_text(
         ):
             continue
         if (
-            item.get("body") not in (None, "")
+            item.get("body") is not None and not isinstance(item.get("body"), str)
             or item.get("heading") is not None and not isinstance(item.get("heading"), str)
             or item.get("body_parts") is not None and (
                 not isinstance(item.get("body_parts"), list)
@@ -636,6 +636,19 @@ def _materialize_fixed_declaration_source_text(
                 "text_sha256": hashlib.sha256(evidence_text.encode("utf-8")).hexdigest(),
             })
         if not expected_body_parts:
+            continue
+
+        # The legacy scalar is one paragraph, not a second rendering payload.
+        # Remove it only when it duplicates the first exact source paragraph
+        # AND the provider already selected the complete ordered body array.
+        # Other dual forms are ambiguous and remain untouched for rejection.
+        before_body = item.get("body")
+        redundant_body = bool(
+            isinstance(before_body, str) and before_body.strip()
+            and before_body == expected_body_parts[0]
+            and item.get("body_parts") == expected_body_parts
+        )
+        if before_body not in (None, "") and not redundant_body:
             continue
 
         # Do not turn this into a general text-repair path.  Every supplied
@@ -680,10 +693,12 @@ def _materialize_fixed_declaration_source_text(
             continue
         before_heading = supplied_heading
         before_body_parts = copy.deepcopy(supplied_body_parts)
-        if (before_heading == expected_heading and before_body_parts == expected_body_parts
+        if (not redundant_body and before_heading == expected_heading and before_body_parts == expected_body_parts
                 and (not signature_lines or item.get("source_signature_lines") == signature_lines)):
             continue
         before_sha256 = _response_sha256(projected)
+        if redundant_body:
+            item.pop("body")
         item["heading"] = expected_heading
         item["body_parts"] = expected_body_parts
         if signature_lines:
@@ -714,6 +729,12 @@ def _materialize_fixed_declaration_source_text(
                 if isinstance(before_heading, str) else None
             ),
             "input_body_parts_sha256": _response_sha256(before_body_parts),
+            "redundant_body_removed": redundant_body,
+            "original_body": before_body,
+            "input_body_sha256": (
+                hashlib.sha256(before_body.encode("utf-8")).hexdigest()
+                if isinstance(before_body, str) else None
+            ),
             "materialized_heading_sha256": hashlib.sha256(expected_heading.encode("utf-8")).hexdigest(),
             "materialized_body_parts_sha256": _response_sha256(expected_body_parts),
             "response_before_sha256": before_sha256,

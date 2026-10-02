@@ -138,11 +138,11 @@ class HostAgentReviewTests(unittest.TestCase):
             ledger = json.loads((review_dir / "semantic-review-ledger.json").read_text())
             self.assertEqual(
                 metadata["source_verification_classification_policy_version"],
-                "source-verification-classification-v6",
+                "source-verification-classification-v7",
             )
             self.assertEqual(
                 receipt["source_verification_classification_policy_version"],
-                "source-verification-classification-v6",
+                "source-verification-classification-v7",
             )
             self.assertEqual(receipt["aggregate_sha256"], engine.sha256_json(merged))
             self.assertEqual(receipt["semantic_review_ledger_sha256"], engine.sha256_json(ledger))
@@ -292,13 +292,13 @@ class HostAgentReviewTests(unittest.TestCase):
         self.assertEqual(receipt["semantic_transformation_policy_version"], "merge-semantic-guards-v2")
         self.assertEqual(
             receipt["source_verification_classification_policy_version"],
-            "source-verification-classification-v6",
+            "source-verification-classification-v7",
         )
         projections = receipt["source_verification_classification_projection"]
         self.assertEqual(len(projections), 1)
         self.assertEqual(projections[0]["clause_id"], "C00068")
         self.assertEqual(projections[0]["provenance"]["run_id"], "keyword-source-verification-merge-test")
-        self.assertEqual(projections[0]["policy_version"], "source-verification-classification-v6")
+        self.assertEqual(projections[0]["policy_version"], "source-verification-classification-v7")
         self.assertTrue(projections[0]["human_verification_required"])
         self.assertIs(projections[0]["submission_ready"], False)
         ledger_review = next(item for item in ledger["clauses"] if item["clause_id"] == "C00068")

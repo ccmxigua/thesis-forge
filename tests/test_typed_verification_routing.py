@@ -55,6 +55,84 @@ class TypedVerificationRoutingTests(unittest.TestCase):
         return materialize_source_verification_classifications(response, chunk["clauses"],
             provenance=chunk["provenance"], evidence_context=chunk["evidence_context"])
 
+    def origin_predicate_fixture(self):
+        response, chunk, _ = fixture()
+        source = "关键词是为了便于做文献索引和检索工作而从论文中选取出来用以表示全文主题内容信息的单词或术语，在论文中有明确出处"
+        clause = chunk["clauses"][0]
+        clause["text"] = source
+        for key in ("source_text_full", "source_evidence_text"):
+            if key in clause:
+                clause[key] = source
+        clause["source_span"].update(text=source, start_offset=0, end_offset=len(source),
+            source_sha256=hashlib.sha256(source.encode()).hexdigest())
+        chunk["evidence_context"][clause["source_span"]["evidence_id"]]["text"] = source
+        review = response["clause_reviews"][0]
+        review["classification"] = "unresolved"
+        review["obligations"][0].update(actor="author", action="select and substantiate",
+            target="Chinese keywords from the thesis", status="unresolved", route="human",
+            source_quote=source[source.index("从论文中"):])
+        return response, chunk
+
+    def test_compound_origin_predicate_routes_human_without_rewriting_quote(self):
+        response, chunk = self.origin_predicate_fixture()
+        original = copy.deepcopy(response)
+        candidate, audit = bridge.prepare_native_response_candidate(response, chunk)
+        self.assertEqual(bridge.validate_host_agent_response(candidate, chunk), [])
+        atom = candidate["clause_reviews"][0]["obligations"][0]
+        self.assertEqual(candidate["clause_reviews"][0]["classification"], "requires_source_verification")
+        for key in ("id", "actor", "action", "target", "condition", "source_quote", "force", "applicability"):
+            self.assertEqual(atom.get(key), original["clause_reviews"][0]["obligations"][0].get(key))
+        self.assertEqual((atom["status"], atom["route"]), ("unresolved", "human"))
+        self.assertFalse(audit["source_verification_classification_projections"][0]["submission_ready"])
+        self.assertEqual(response, original)
+
+    def test_compound_origin_fragment_cannot_authorize_partial_or_unrelated_duty(self):
+        mutations = ("half_quote", "selection_only", "wrong_target", "extra_action", "stale", "condition", "linked", "mixed")
+        for mutation in mutations:
+            response, chunk = self.origin_predicate_fixture()
+            atom = response["clause_reviews"][0]["obligations"][0]
+            if mutation == "half_quote": atom["source_quote"] = "在论文中有明确出处"
+            elif mutation == "selection_only": atom["source_quote"] = "从论文中选取出来"
+            elif mutation == "wrong_target": atom["target"] = "keywords from the internet"
+            elif mutation == "extra_action": atom["action"] += " and obtain approval"
+            elif mutation == "stale": chunk["clauses"][0]["source_span"]["source_sha256"] = "0" * 64
+            elif mutation == "condition": atom["condition"] = "if convenient"
+            elif mutation == "linked": response["requirements"] = [{"clause_ids": [chunk["clauses"][0]["id"]]}]
+            else:
+                clause = chunk["clauses"][0]
+                source = clause["text"] + "；关键词至少三个。"
+                clause["text"] = source
+                for key in ("source_text_full", "source_evidence_text"):
+                    if key in clause:
+                        clause[key] = source
+                clause["source_span"].update(text=source, end_offset=len(source), source_sha256=hashlib.sha256(source.encode()).hexdigest())
+                chunk["evidence_context"][clause["source_span"]["evidence_id"]]["text"] = source
+            with self.subTest(mutation=mutation):
+                self.assertEqual(self.project(response, chunk), (response, []))
+
+    def test_compound_predicate_still_requires_fresh_source_first_pending_review(self):
+        response, chunk = self.origin_predicate_fixture()
+        candidate, _ = bridge.prepare_native_response_candidate(response, chunk)
+        request = native.build_obligation_coverage_request(candidate, chunk, run_id="fresh-predicate", chunk_index=1)
+        _, _, result = fixture()
+        result["verdict"] = "source_content_verification_pending"
+        atom = candidate["clause_reviews"][0]["obligations"][0]
+        identified = result["identified_obligations"][0]
+        for key in ("actor", "action", "target", "source_quote", "force", "applicability", "condition"):
+            if key in atom:
+                identified[key] = atom[key]
+            else:
+                identified.pop(key, None)
+        identified["disposition"] = "source_content_verification_pending"
+        result["evidence_quotes"] = [atom["source_quote"]]
+        raw = wire_response(request, result)
+        compiled, _ = compile_source_reference_response(raw, request, native.OBLIGATION_COVERAGE_SCHEMA, coverage=True)
+        self.assertEqual(native.validate_obligation_coverage_response(compiled, request["checks"]), [result])
+        bad = copy.deepcopy(compiled)
+        bad["results"][0]["identified_obligations"] = []
+        with self.assertRaises(native.NativeSemanticReviewError):
+            native.validate_obligation_coverage_response(bad, request["checks"])
+
     def test_split_origin_action_target_preserves_pending_inventory_and_current_binding(self):
         targets = ("keywords with clear provenance in the thesis", "keywords from the paper",
                    "Chinese keywords with source in the manuscript", "论文中有明确出处的关键词")

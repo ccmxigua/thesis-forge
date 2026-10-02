@@ -1378,3 +1378,18 @@ rejected proposal in audit and leave source text/review/uncertainty unchanged.
 Require full revalidation and fresh independent source-obligation review. This
 does not resolve the clause, authorize model deletion, guess heading levels or
 release a submission-ready document. See `docs/unresolved-empty-proposals.md`.
+
+## Source responsibility and declaration representation
+
+For a uniquely bound pure keyword-origin clause, a complete exact predicate
+quotation may inherit its keyword subject from that same clause. A closed
+selection-plus-verification action and explicit thesis-origin target remain
+pending human work, never automatic compliance. Preserve typed fields and
+require fresh independent review. Half quotations and mixed duties fail closed.
+
+Fixed declarations use one body representation. A scalar duplicating the first
+paragraph may be removed only after proving the complete ordered paragraph
+array against the unique current source candidate; audit the original scalar.
+Otherwise competing `body`/`body_parts` are rejected by the contract, merger
+and resource registry. Legacy single-form inputs preserve original bytes.
+See `docs/source-routing-declaration-representation.md`.

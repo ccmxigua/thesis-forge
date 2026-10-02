@@ -21,6 +21,7 @@ from uuid import uuid4
 import xml.etree.ElementTree as ET
 
 from artifact_io import atomic_write_text
+from declaration_body import declaration_body_parts
 from table_source_context import TABLE_CONTEXT_PROTOCOL, text_sha256
 from document_text_font import (TEXT_FONT_ROLES, compile_document_latin_font,
                                 compile_document_font_applicability, document_font_policy,
@@ -1527,17 +1528,7 @@ def _merge_cover_projection(
 
 def _declaration_body_parts(item: dict[str, Any]) -> list[str]:
     """Return source-derived body paragraphs in their supplied order."""
-    parts: list[str] = []
-    body = item.get("body")
-    if isinstance(body, str) and body.strip():
-        parts.append(body)
-    body_parts = item.get("body_parts")
-    if isinstance(body_parts, list):
-        parts.extend(
-            value for value in body_parts
-            if isinstance(value, str) and value.strip()
-        )
-    return parts
+    return declaration_body_parts(item)
 
 
 def _declaration_has_fixed_text(item: dict[str, Any]) -> bool:

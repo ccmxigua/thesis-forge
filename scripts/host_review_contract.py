@@ -1823,6 +1823,14 @@ def validate_response(response: Any, chunk: dict[str, Any]) -> list[str]:
                         if isinstance(value, str) and value.strip():
                             fixed_text_atoms.append((field, value))
                     body_parts = declaration.get("body_parts")
+                    if (isinstance(declaration.get("body"), str)
+                            and declaration["body"].strip()
+                            and isinstance(body_parts, list)
+                            and any(isinstance(part, str) and part.strip() for part in body_parts)):
+                        errors.append(
+                            f"$.requirements[{index}].properties.items[{item_index}].body: "
+                            "ambiguous_declaration_body_forms; use body or body_parts, not both"
+                        )
                     if isinstance(body_parts, list):
                         fixed_text_atoms.extend(
                             (f"body_parts[{body_index}]", body)

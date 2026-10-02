@@ -201,13 +201,22 @@ review-draft markers under the separate policy below.
 ### Document-wide English font scope
 
 An explicitly document-wide English-font rule must not be narrowed to
-`body_text` alone. For the narrowly recognized unconditional wording, code may
+`body_text` alone. For the narrowly recognized document-wide wording, code may
 complete the current source-bound catalog's text-role references only when all
 catalog roles, exact properties, source spans and evidence match. It never
 changes a manual classification, fabricates missing catalog values, or guesses
 which clause/occurrence a model meant. Preserve the immutable native response
 and separate `document_font_projections` hashes; the completed candidate still
 requires the ordinary contract and a fresh independent obligation review.
+
+The recognized “论文中出现英文时” condition is compiled from current source
+text into `source_inventory.english_text` / `present` / `null` on every catalog
+and completed requirement. Completion requires the candidate to retain that
+exact condition; missing/changed conditions, additional conditions, exceptions
+and input prerequisites are not silently repaired or discarded. Missing
+inventory facts remain unknown at capability preflight. The font executor
+operates only on directly observed Latin runs and records their count as local
+execution evidence, not as an inferred global fact or submission approval.
 
 The formatter applies the bound Latin font directly to editable WordprocessingML
 English runs, including tables, headers, footers, hyperlinks, text boxes and

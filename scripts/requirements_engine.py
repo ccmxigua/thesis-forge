@@ -22,7 +22,9 @@ import xml.etree.ElementTree as ET
 
 from artifact_io import atomic_write_text
 from table_source_context import TABLE_CONTEXT_PROTOCOL, text_sha256
-from document_text_font import TEXT_FONT_ROLES, document_font_policy, materialize_document_font_references
+from document_text_font import (TEXT_FONT_ROLES, compile_document_latin_font,
+                                compile_document_font_applicability, document_font_policy,
+                                materialize_document_font_references)
 from existing_requirement_contract import (
     existing_reference_errors,
     normalized_source_text,
@@ -1001,6 +1003,8 @@ def identify_role(text: str) -> tuple[str | None, list[str]]:
             return role, [role]
     # A standalone document-wide Latin-font statement is executable for every
     # textual role. Explicit roles above (for example 正文…英文…) take priority.
+    if compile_document_latin_font(text):
+        return "all_text", ["all_text"]
     if (re.search(r"(?:全文|论文中出现英文|论文中的?西文|所有英文|英文字母|阿拉伯数字).*(?:Times\s+New\s+Roman)", text, re.I)
             and not re.search(r"(?:英文题目|英文摘要|英文关键词|页码|页眉|页脚)", text, re.I)):
         return "all_text", ["all_text"]
@@ -1759,6 +1763,12 @@ def build_rule_result(source: Path, clauses: list[dict[str, Any]]) -> tuple[dict
         page_props = parse_page_properties(clause["text"])
         role_text = _non_page_text(clause["text"]) if page_props else clause["text"]
         props = parse_properties(role_text)
+        document_font = compile_document_latin_font(role_text)
+        if document_font is not None:
+            # The exact whole-source compiler owns this narrow rule, including
+            # all fonts it recognizes. Do not rely on the broader style parser
+            # knowing the same spelling (or silently miss e.g. Helvetica).
+            props = {"font": {"latin": document_font}}
         if page_props:
             req = {"id": f"R{len(requirements)+1:05d}", "role": "page", "properties": page_props,
                    "evidence_ids": clause["evidence_ids"], "clause_ids": [str(clause["id"])],
@@ -1828,6 +1838,10 @@ def build_rule_result(source: Path, clauses: list[dict[str, Any]]) -> tuple[dict
                    "confidence": .98, "source_text": clause["text"]}
             if field_instance_ids:
                 req["field_instance_ids"] = list(field_instance_ids)
+            if role == "all_text" and compile_document_latin_font(clause["text"]):
+                applicability = compile_document_font_applicability(clause["text"])
+                if applicability is not None:
+                    req["applicability"] = applicability
             requirements.append(req)
     status = "needs_clarification" if questions or conflicts else "rule_resolved"
     spec = {"schema_version": "1.0", "source_document": str(source),

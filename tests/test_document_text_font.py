@@ -33,6 +33,7 @@ class DocumentTextFontTests(unittest.TestCase):
                                   "text": source, "source_sha256": hashlib.sha256(source.encode()).hexdigest()}}
         catalog = [{"id": f"dynamic-rule-{index}", "role": role, "source_text": source,
                     "properties": {"font": {"latin": "Times New Roman"}},
+                    "applicability": fonts.compile_document_font_applicability(source),
                     "clause_ids": [cid], "evidence_ids": [eid]}
                    for index, role in enumerate(fonts.TEXT_FONT_ROLES)]
         chunk = {"clauses": [clause], "evidence_context": {eid: {"id": eid, "text": source}},
@@ -40,6 +41,7 @@ class DocumentTextFontTests(unittest.TestCase):
         body = next(rule for rule in catalog if rule["role"] == "body_text")
         response = {"contract_version": "3.0", "requirements": [{
             "existing_requirement_id": body["id"], "role": "body_text", "properties": body["properties"],
+            "applicability": copy.deepcopy(body["applicability"]),
             "clause_ids": [cid], "evidence_ids": [eid], "confidence": 0.98, "reason": "Body-only coverage."}],
             "clause_reviews": [{"clause_id": cid, "classification": "covered", "reason": "Font rule."}]}
         return response, chunk
@@ -57,6 +59,121 @@ class DocumentTextFontTests(unittest.TestCase):
         self.assertEqual(fonts.materialize_document_font_references(projected, chunk), (projected, []))
         self.assertTrue(fonts.document_font_scope_errors(response, chunk))
         self.assertEqual(fonts.document_font_scope_errors(projected, chunk), [])
+        expected = fonts.compile_document_font_applicability(chunk["clauses"][0]["text"])
+        self.assertTrue(all(r["applicability"] == expected for r in projected["requirements"]))
+        self.assertEqual(audit[0]["source_applicability"], expected)
+        self.assertEqual(audit[0]["source_applicability_sha256"], fonts._digest(expected))
+
+    def test_changed_missing_or_extra_conditions_are_not_completed_or_executed(self):
+        expected = fonts.compile_document_font_applicability("论文中出现英文时需要使用Times New Roman字体")
+        extra = copy.deepcopy(expected)
+        extra["conditions"].append({"fact": "thesis_profile.degree", "operator": "equals", "value": "doctor"})
+        for declaration in (None, {}, {"status": "always"}, {"status": "excluded"},
+                            {"status": "conditional", "conditions": []}, extra,
+                            {**expected, "exceptions": ["正文除外"]},
+                            {**expected, "unknown": True},
+                            {"status": "conditional", "conditions": [{"fact": "runtime.english_text",
+                                                                       "operator": "present", "value": None}]},
+                            {"status": "conditional", "conditions": [{"fact": "source_inventory.english_text",
+                                                                       "operator": "equals", "value": True}]}):
+            with self.subTest(declaration=declaration):
+                response, chunk = self.fixture()
+                response["requirements"][0]["applicability"] = declaration
+                self.assertEqual(fonts.materialize_document_font_references(response, chunk), (response, []))
+                self.assertTrue(fonts.document_font_scope_errors(response, chunk))
+                spec = self.spec()
+                spec["requirements"][0]["applicability"] = declaration
+                doc = Document(); doc.add_paragraph("English")
+                before = etree.tostring(doc.element)
+                with self.assertRaisesRegex(ValueError, "incomplete"):
+                    fonts.apply_document_font(doc, spec)
+                self.assertEqual(etree.tostring(doc.element), before)
+
+    def test_empty_native_exceptions_are_preserved_but_prerequisites_are_not_guessed(self):
+        for empty in (None, []):
+            response, chunk = self.fixture()
+            response["requirements"][0]["applicability"]["exceptions"] = empty
+            candidate, audit = fonts.materialize_document_font_references(response, chunk)
+            self.assertEqual(len(audit), 1)
+            self.assertIn("exceptions", candidate["requirements"][0]["applicability"])
+            self.assertEqual(fonts.document_font_scope_errors(candidate, chunk), [])
+        for target in ("response", "catalog"):
+            response, chunk = self.fixture()
+            item = response["requirements"][0] if target == "response" else chunk["rule_spec"]["requirements"][0]
+            item["input_prerequisites"] = [{"kind": "runtime", "key": "runtime.unknown", "required": True}]
+            self.assertEqual(fonts.materialize_document_font_references(response, chunk), (response, []))
+
+    def test_catalog_cannot_drop_or_change_source_condition(self):
+        for declaration in (None, {"status": "always"}, {"status": "conditional", "conditions": []}):
+            response, chunk = self.fixture()
+            chunk["rule_spec"]["requirements"][0]["applicability"] = declaration
+            self.assertEqual(fonts.materialize_document_font_references(response, chunk), (response, []))
+
+    def test_unconditional_sources_do_not_gain_an_invented_condition(self):
+        for source in ("所有英文采用Arial字体。", "全文西文使用Calibri字体", "论文中的英文采用Helvetica字体"):
+            with self.subTest(source=source):
+                response, chunk = self.fixture()
+                font = fonts.compile_document_latin_font(source)
+                clause = chunk["clauses"][0]
+                clause["text"] = source
+                clause["source_span"].update(text=source, end_offset=len(source),
+                                             source_sha256=hashlib.sha256(source.encode()).hexdigest())
+                chunk["evidence_context"][clause["evidence_ids"][0]]["text"] = source
+                for rule in chunk["rule_spec"]["requirements"]:
+                    rule.update(source_text=source, properties={"font": {"latin": font}})
+                    rule.pop("applicability")
+                item = response["requirements"][0]
+                item["properties"] = {"font": {"latin": font}}
+                # A condition imported from another source is not accepted.
+                self.assertEqual(fonts.materialize_document_font_references(response, chunk), (response, []))
+                item.pop("applicability")
+                candidate, audit = fonts.materialize_document_font_references(response, chunk)
+                self.assertEqual(len(audit), 1)
+                self.assertEqual(fonts.document_font_scope_errors(candidate, chunk), [])
+                self.assertFalse(any("applicability" in r for r in candidate["requirements"]))
+                self.assertEqual(fonts.document_font_policy(chunk["rule_spec"]), font)
+
+    def test_rule_catalog_compiles_conditions_without_clause_id_or_font_special_cases(self):
+        for font in ("Times New Roman", "Arial", "Calibri", "Cambria", "Helvetica"):
+            response, chunk = self.fixture()
+            clause = chunk["clauses"][0]
+            clause.update(text=f"论文中出现英文时必须采用{font}字体", context_before="", context_after="")
+            spec, questions, conflicts = engine.build_rule_result(Path("other-school.docx"), [clause])
+            self.assertEqual(questions, [])
+            self.assertEqual(conflicts, [])
+            self.assertEqual({r["role"] for r in spec["requirements"]}, set(fonts.TEXT_FONT_ROLES))
+            self.assertTrue(all(r["applicability"] == fonts.compile_document_font_applicability(clause["text"])
+                                for r in spec["requirements"]))
+            self.assertEqual(fonts.document_font_policy(spec), font)
+
+    def test_missing_inventory_fact_stays_unknown_and_zero_runs_is_not_global_approval(self):
+        from applicability import evaluate_applicability
+        declaration = self.spec()["requirements"][0]["applicability"]
+        self.assertEqual(evaluate_applicability(declaration, source_inventory={})["result"], "unknown")
+        self.assertEqual(evaluate_applicability(declaration, source_inventory={"english_text": True})["result"], "true")
+        doc = Document(); doc.add_paragraph("只有中文和123")
+        before = etree.tostring(doc.element)
+        receipt = fonts.apply_document_font(doc, self.spec())
+        self.assertEqual(receipt["formatted_run_count"], 0)
+        self.assertFalse(receipt["applicability_evidence"]["global_source_inventory_inferred"])
+        self.assertEqual(etree.tostring(doc.element), before)
+
+    def test_capability_preflight_does_not_default_unknown_inventory_to_true(self):
+        import capability_planner
+        root = Path(__file__).resolve().parents[1]
+        registry = json.loads((root / "resources/backend-capabilities.default.json").read_text())
+        spec = self.spec()
+        missing = capability_planner.plan_capabilities(spec, registry, "full", source_inventory={})
+        observed = capability_planner.plan_capabilities(spec, registry, "full",
+                                                       source_inventory={"english_text": True})
+        self.assertEqual(missing["status"], "blocked")
+        self.assertFalse(missing["execution_ready"])
+        self.assertTrue(all(r["applicability_evaluation"]["result"] == "unknown"
+                            for r in missing["requirements"]))
+        self.assertTrue(all(r["applicability_evaluation"]["result"] == "true"
+                            for r in observed["requirements"]))
+        self.assertTrue(all(r["category"] == "runtime_manual_unverifiable"
+                            for r in missing["requirements"]))
 
     def test_stale_missing_conflicting_and_conditional_inputs_cannot_be_completed(self):
         base, chunk = self.fixture()
@@ -202,6 +319,7 @@ class DocumentTextFontTests(unittest.TestCase):
             raw = {"contract_version": "3.0", "provenance": chunk["provenance"], "requirements": [{
                 "existing_requirement_id": rule["id"], "clause_ids": ["C1"], "evidence_ids": ["E1"],
                 "role": rule["role"], "properties": rule["properties"],
+                "applicability": copy.deepcopy(rule["applicability"]),
                 "confidence": .98, "reason": "Reuse one role."}], "clause_reviews": [{
                     "clause_id": "C1", "classification": "covered", "reason": "Font rule.",
                     "normative_basis": "explicit_normative_text",
@@ -213,3 +331,9 @@ class DocumentTextFontTests(unittest.TestCase):
             self.assertEqual(bridge.validate_host_agent_response(candidate, chunk), [])
             spec, _, _ = engine.merge_llm_primary(Path("dynamic.docx"), chunk["rule_spec"], chunk["clauses"], candidate, {"E1"})
             self.assertEqual(fonts.document_font_policy(spec), "Times New Roman")
+            self.assertTrue(all(r["applicability"] == rule["applicability"] for r in spec["requirements"]))
+            doc = Document(); doc.add_paragraph("中文 English"); doc.add_table(rows=1, cols=1).cell(0, 0).text = "Table English"
+            receipt = fonts.apply_document_font(doc, spec)
+            path = Path(td) / "merged.docx"; doc.save(path)
+            self.assertEqual(receipt["formatted_run_count"], 2)
+            self.assertEqual(fonts.audit_document_font(path, spec), [])

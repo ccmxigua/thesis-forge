@@ -40,6 +40,34 @@ def compile_document_latin_font(source: Any) -> str | None:
     return _FONT_NAMES.get(value.casefold())
 
 
+def compile_document_font_applicability(source: Any) -> dict | None:
+    """Compile only the recognized source's English-presence condition.
+
+    Callers must first establish compile_document_latin_font(source); None
+    alone is not proof that an arbitrary source is unconditional.
+    """
+    if compile_document_latin_font(source) and source.strip().startswith("论文中出现英文时"):
+        return {"status": "conditional", "conditions": [{
+            "fact": "source_inventory.english_text", "operator": "present", "value": None,
+        }]}
+    return None
+
+
+def _source_applicability_matches(requirement: dict, source: str) -> bool:
+    declaration = requirement.get("applicability")
+    expected = compile_document_font_applicability(source)
+    if declaration is None:
+        return expected is None
+    if not isinstance(declaration, dict) or set(declaration) - {"status", "conditions", "exceptions"}:
+        return False
+    if declaration.get("exceptions") not in (None, []):
+        return False
+    if expected is None:
+        return declaration.get("status") == "always" and declaration.get("conditions") in (None, [])
+    return (declaration.get("status") == expected["status"]
+            and declaration.get("conditions") == expected["conditions"])
+
+
 def _digest(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True,
                                     separators=(",", ":")).encode()).hexdigest()
@@ -58,8 +86,9 @@ def _items(value: Any) -> list:
 def materialize_document_font_references(response: Any, chunk: dict) -> tuple[Any, list[dict]]:
     """Complete only exact, current-source catalog edges, never synthesize values.
 
-    A missing/inconsistent catalog, a conflicting model value, conditional
-    payload, or non-executable classification is not permission to guess.
+    A missing/inconsistent catalog, conflicting value or condition, or
+    non-executable classification is not permission to guess. The single
+    source-compiled English-presence condition is retained on every edge.
     """
     from source_obligation_compiler import verified_current_source_span
 
@@ -90,14 +119,16 @@ def materialize_document_font_references(response: Any, chunk: dict) -> tuple[An
                 or len({r.get("id") for r in eligible}) != len(eligible)
                 or any(not isinstance(r.get("id"), str)
                        or r.get("properties") != {"font": {"latin": font}}
-                       or any(r.get(key) for key in ("applicability", "input_prerequisites"))
+                       or not _source_applicability_matches(r, binding[1])
+                       or r.get("input_prerequisites")
                        for r in eligible)):
             continue
         by_id = {r["id"]: r for r in eligible}
         existing = [r for r in requirements if isinstance(r, dict) and cid in _items(r.get("clause_ids"))]
         if any(r.get("existing_requirement_id") not in by_id
                or r.get("clause_ids") != [cid] or r.get("evidence_ids") != clause.get("evidence_ids")
-               or any(r.get(key) for key in ("applicability", "input_prerequisites"))
+               or not _source_applicability_matches(r, binding[1])
+               or r.get("input_prerequisites")
                or (r.get("properties") is not None
                    and r["properties"] != by_id[r["existing_requirement_id"]]["properties"])
                or (r.get("role") is not None and r["role"] != by_id[r["existing_requirement_id"]]["role"])
@@ -111,13 +142,18 @@ def materialize_document_font_references(response: Any, chunk: dict) -> tuple[An
             continue
         before = _digest(projected)
         for rule in missing:
-            requirements.append({"existing_requirement_id": rule["id"], "role": rule["role"],
-                                 "properties": copy.deepcopy(rule["properties"]),
-                                 "clause_ids": [cid], "evidence_ids": copy.deepcopy(clause["evidence_ids"]),
-                                 "confidence": 1.0, "reason": "Code-bound complete document Latin-font scope."})
+            added = {"existing_requirement_id": rule["id"], "role": rule["role"],
+                     "properties": copy.deepcopy(rule["properties"]),
+                     "clause_ids": [cid], "evidence_ids": copy.deepcopy(clause["evidence_ids"]),
+                     "confidence": 1.0, "reason": "Code-bound complete document Latin-font scope."}
+            if rule.get("applicability") is not None:
+                added["applicability"] = copy.deepcopy(rule["applicability"])
+            requirements.append(added)
         audits.append({"policy": "current_source_document_font_catalog_completion_v1",
                        "clause_id": cid, "evidence_id": eid, "font": font,
                        "source_span": copy.deepcopy(clause["source_span"]),
+                       "source_applicability": compile_document_font_applicability(binding[1]),
+                       "source_applicability_sha256": _digest(compile_document_font_applicability(binding[1])),
                        "catalog_sha256": _digest(eligible), "added_existing_requirement_ids": [r["id"] for r in missing],
                        "response_before_sha256": before, "response_after_sha256": _digest(projected),
                        "provenance": copy.deepcopy(chunk.get("provenance")), "submission_ready": False})
@@ -141,7 +177,8 @@ def document_font_policy(spec: dict) -> str | None:
             or any(not key[0] or not key[1] or not set(TEXT_FONT_ROLES) <= {r.get("role") for r in group}
                    for key, group in source_groups.items())
             or any(_latin_font(r) != font
-                   or any(r.get(key) for key in ("applicability", "input_prerequisites")) for r in rules)):
+                   or not _source_applicability_matches(r, r["source_text"])
+                   or r.get("input_prerequisites") for r in rules)):
         raise ValueError("incomplete document-wide Latin-font scope")
     # Role-specific exceptions must be adjudicated, not silently overwritten.
     for requirement in _items(spec.get("requirements")):
@@ -166,7 +203,10 @@ def document_font_scope_errors(response: dict, chunk: dict) -> list[str]:
         rules = [r for r in _items(response.get("requirements")) if isinstance(r, dict)
                  and review["clause_id"] in _items(r.get("clause_ids"))]
         roles = {r.get("role") for r in rules if _latin_font(r) == font
-                 and not any(r.get(key) for key in ("applicability", "input_prerequisites"))}
+                 and _source_applicability_matches(r, binding[1])
+                 and not r.get("input_prerequisites")}
+        if any(not _source_applicability_matches(r, binding[1]) for r in rules):
+            errors.append(f"$.clause_reviews[{index}]: document_latin_font_applicability_mismatch")
         if not set(TEXT_FONT_ROLES) <= roles:
             errors.append(f"$.clause_reviews[{index}]: document_latin_font_scope_incomplete")
         if any(_latin_font(r) not in (None, font) for r in rules):
@@ -179,6 +219,10 @@ def _latin(text: str) -> bool:
 
 
 def apply_document_font(doc: Any, spec: dict) -> dict:
+    # Each touched run supplies direct evidence of Latin text; unknown global
+    # inventory facts are never defaulted to true. Other conditions are
+    # rejected before mutation. Capability preflight retains its independent
+    # three-valued source-inventory applicability gate.
     font = document_font_policy(spec)
     count = 0
     if font:
@@ -205,7 +249,10 @@ def apply_document_font(doc: Any, spec: dict) -> dict:
                 count += 1; touched = True
             if generic and touched:
                 part._blob = etree.tostring(root, encoding="UTF-8", xml_declaration=True)
-    return {"policy": "document_wordprocessingml_latin_font_v1", "font": font, "formatted_run_count": count}
+    return {"policy": "document_wordprocessingml_latin_font_v1", "font": font, "formatted_run_count": count,
+            "applicability_evidence": {"mode": "observed_wordprocessingml_latin_runs",
+                                       "observed_run_count": count,
+                                       "global_source_inventory_inferred": False}}
 
 
 def audit_document_font(path: Any, spec: dict) -> list[dict]:

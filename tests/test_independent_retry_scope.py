@@ -118,8 +118,95 @@ class RetryScopeTests(unittest.TestCase):
         bad = copy.deepcopy(self.case["first_compiled"])
         bad["results"][1]["identified_obligations"][0]["target"] = "different legal duty"
         self.write_parent(bad)
+        locks, proof, _ = self.scope()
+        self.assertEqual(locks, {})
+        self.assertEqual(proof["fresh_review_check_ids"], ["C00033", "C00037"])
+        self.assertEqual(proof["retained_check_ids"], [])
+        self.assertEqual(proof["additional_reproduced_rejections"][0]["code"],
+                         "typed_source_atom_alignment_disagreement")
+        # Scope construction is not acceptance or a semantic rewrite.
         with self.assertRaisesRegex(NativeSemanticReviewError, "target"):
+            validate_obligation_coverage_response({"results": [bad["results"][1]]}, [self.request["checks"][1]])
+
+    def test_hidden_condition_stays_rejected_after_fresh_review(self):
+        bad = copy.deepcopy(self.case["first_compiled"])
+        bad["results"][1]["identified_obligations"][0]["condition"] = "Except for already cited material."
+        self.write_parent(bad)
+        locks, proof, schema = self.scope()
+        self.assertEqual(locks, {})
+        self.assertIn("condition", proof["additional_reproduced_rejections"][0]["message"])
+        self.assertEqual(proof["additional_reproduced_rejections"][0]["rejected_result_sha256"],
+                         native_review.sha256_json(bad["results"][1]))
+        corrected = copy.deepcopy(self.case["second_compiled"])
+        corrected["results"][1] = bad["results"][1]
+        raw = self.wire(corrected, self.retry)
+        validate_retry_scope(raw, schema, locks, native=True)
+        compiled, _ = compile_source_reference_response(raw, self.retry, OBLIGATION_COVERAGE_SCHEMA,
+            coverage=True, provider_nullable_optionals=True)
+        with self.assertRaisesRegex(NativeSemanticReviewError, "condition"):
+            validate_obligation_coverage_response(compiled, self.retry["checks"])
+        self.assertIn("not an exhaustive error set", _prompt(self.retry, retained_results=locks))
+
+    def test_hidden_condition_reaches_native_reread_not_preflight_abort(self):
+        bad = copy.deepcopy(self.case["first_compiled"])
+        bad["results"][1]["identified_obligations"][0]["condition"] = "Except for already cited material."
+        self.write_parent(bad)
+        corrected = copy.deepcopy(self.case["second_compiled"])
+        corrected["results"][1] = bad["results"][1]
+        raw = self.wire(corrected, self.retry)
+        context = SimpleNamespace(runtime="codex", as_audit=lambda: {"host_runtime": "codex"})
+        def command(**kwargs):
+            kwargs["last_message_path"].write_text("{}", encoding="utf-8")
+            return ["codex"]
+        with ExitStack() as stack:
+            for obj, name, value in (
+                (native_review, "require_host_runtime", context),
+                (native_review, "automatic_adapter_id", "codex"),
+                (native_review.codex_adapter, "resolve_binary", "codex"),
+                (native_review.codex_adapter, "probe_capabilities", {"output_schema_supported": True}),
+                (native_review.codex_adapter, "parse_result", (raw, {"event_types": ["task_complete"]})),
+            ):
+                stack.enter_context(patch.object(obj, name, return_value=value))
+            transport = stack.enter_context(patch.object(native_review, "run_process",
+                return_value=CompletedProcess(["codex"], 0, "{}", "")))
+            stack.enter_context(patch.object(native_review.codex_adapter, "build_command", side_effect=command))
+            with self.assertRaisesRegex(native_review.TypedSourceAtomAlignmentError, "condition"):
+                native_review.run_native_semantic_review(self.retry, output_dir=self.output,
+                    host_runtime="codex", model="gpt-6-luna", timeout=5)
+        transport.assert_called_once()
+        self.assertEqual(json.loads((self.output / "compiled-response.json").read_text())["results"][1],
+                         bad["results"][1])
+        self.assertTrue((self.output / "request.json").is_file())
+        self.assertFalse((self.output / "response.json").exists())
+        proof = json.loads((self.output / "validated-retry-scope.json").read_text())
+        self.assertEqual(proof["fresh_review_check_ids"], ["C00033", "C00037"])
+        self.assertEqual(proof["retained_check_ids"], [])
+
+    def test_unknown_sibling_error_still_aborts_scope(self):
+        original_validator = native_review.validate_obligation_coverage_response
+        def validator(response, checks, **kwargs):
+            if len(checks) == 1 and checks[0]["check_id"] == "C00037":
+                raise NativeSemanticReviewError("unknown contract error")
+            return original_validator(response, checks, **kwargs)
+        with patch.object(native_review, "validate_obligation_coverage_response", side_effect=validator), \
+                self.assertRaisesRegex(NativeSemanticReviewError, "unknown contract error"):
             self.scope()
+
+    def test_mixed_errors_keep_only_proven_valid_siblings(self):
+        extra = copy.deepcopy(self.request["checks"][1])
+        extra["check_id"] = "extra-valid-check"
+        self.request["checks"].append(extra)
+        bad = copy.deepcopy(self.case["first_compiled"])
+        valid = copy.deepcopy(bad["results"][1]); valid["check_id"] = extra["check_id"]
+        bad["results"].append(valid)
+        bad["results"][1]["identified_obligations"][0]["condition"] = "Exception not recorded by primary"
+        self.retry = {**copy.deepcopy(self.request), "provider_attempt": 2,
+                      "retry_feedback": {"code": "missing_source_obligation_inventory", "clause_ids": ["C00033"]}}
+        self.write_parent(bad)
+        locks, proof, _ = self.scope()
+        self.assertEqual(list(locks), ["extra-valid-check"])
+        self.assertEqual(proof["fresh_review_check_ids"], ["C00033", "C00037"])
+        self.assertTrue(proof["retention_is_not_submission_approval"])
 
     def test_stale_run_source_candidate_or_feedback_is_rejected(self):
         mutations = [lambda r: r.update(run_id="old-run"),

@@ -139,8 +139,10 @@ def test_replayed_scope_locks_valid_siblings_but_not_hidden_errors(tmp_path):
     with pytest.raises(native.NativeSemanticReviewError): validate_retry_scope(changed, schema, locks, native=True)
     case["first_compiled"]["results"][1]["identified_obligations"][0]["target"] = "wrong target"
     helper.write_parent()
-    with pytest.raises(native.NativeSemanticReviewError):
-        prepare_retry_scope(retry, output, native.OBLIGATION_COVERAGE_SCHEMA, provider_nullable_optionals=True)
+    locks, proof = prepare_retry_scope(retry, output, native.OBLIGATION_COVERAGE_SCHEMA, provider_nullable_optionals=True)
+    assert locks == {}
+    assert proof["fresh_review_check_ids"] == ["other-template-label", "valid-sibling"]
+    assert proof["additional_reproduced_rejections"][0]["check_id"] == "valid-sibling"
 
 
 def test_missing_parent_and_persistent_ambiguity_fail_closed(tmp_path):

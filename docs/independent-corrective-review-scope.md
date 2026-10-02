@@ -36,3 +36,21 @@ The reduced captured fixture regenerates wire selectors and is not a provider
 receipt. Tests cover the production runner with mocked transport, full replay,
 hidden errors, identity changes, tampering and renamed IDs. Offline passes do
 not establish real BSU merge, DOCX/Word acceptance or submission readiness.
+
+## Multiple errors in one captured response
+
+The full validator reports one error class first. During sibling replay, a
+check-local inventory, empty-verdict, unsafe-uncertainty or typed-alignment
+rejection is **not retained**. It joins the fresh-read set within the same
+existing second-invocation budget. The proof records the reproduced error and
+the unchanged rejected result's hash; request feedback is not edited to invent
+authorization. Unknown/structural errors and validator mutations still stop
+scope construction. Only individually valid, unchanged siblings are locked.
+
+The complete new native response is compiled and validated as before. If a
+typed condition disagreement persists after that bounded reread, only the
+existing source-bound, one-shot primary proposal route may act, and only if
+the **complete** rejected review authorizes it. No condition is copied from
+the reviewer, no omitted inventory is ignored, and no partial review becomes
+approval. In the observed BSU incident, the preflight failure meant no second
+native invocation happened; a provider-attempt ordinal alone is not call proof.

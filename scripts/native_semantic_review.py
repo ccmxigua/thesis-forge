@@ -1925,7 +1925,10 @@ def _prompt(request: dict[str, Any], *, retained_results: dict[str, Any] | None 
                 "requirement_ref; if it is not represented, identify it as unrepresented and use "
                 "incomplete; if the source itself is genuinely ambiguous, use the authorized "
                 "uncertainty path. Never invent an obligation or add an item merely to satisfy the "
-                "validator.\n"
+                "validator. The feedback names the first reported error, not an exhaustive error set. "
+                "Every check not locked as a validated sibling requires an independent fresh read, "
+                "including additional failed checks. Preserve real condition or scope disagreements; "
+                "do not copy primary fields to make a rejection disappear.\n"
             )
         if retained_results:
             packet["validated_sibling_results"] = copy.deepcopy(retained_results)

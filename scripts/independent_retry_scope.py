@@ -45,6 +45,7 @@ def prepare_retry_scope(
         MissingSourceObligationInventoryError, NativeSemanticReviewError,
         EmptyInventoryVerdictError, empty_inventory_retry_feedback_is_bound,
         UnsafeUncertaintyVerdictError, unsafe_uncertainty_retry_feedback_is_bound,
+        TypedSourceAtomAlignmentError,
         validate_obligation_coverage_response,
     )
     feedback = request.get("retry_feedback")
@@ -116,6 +117,7 @@ def prepare_retry_scope(
     by_check = {check["check_id"]: check for check in prior["checks"]}
     by_result = {result["check_id"]: result for result in compiled["results"]}
     retained = {}
+    additional_rejections = []
     for cid, check in by_check.items():
         if cid in targets:
             continue
@@ -123,10 +125,24 @@ def prepare_retry_scope(
         validated = copy.deepcopy(original)
         # A hidden second error must not be frozen merely because the full
         # validator reported the missing-inventory error first.
-        validate_obligation_coverage_response(
-            {"results": [validated]}, [check],
-            allow_draft_disputes=prior.get("output_policy") == "review_draft",
-        )
+        try:
+            validate_obligation_coverage_response(
+                {"results": [validated]}, [check],
+                allow_draft_disputes=prior.get("output_policy") == "review_draft",
+            )
+        except (MissingSourceObligationInventoryError, EmptyInventoryVerdictError,
+                UnsafeUncertaintyVerdictError, TypedSourceAtomAlignmentError) as exc:
+            # The full validator reports one error class first, not an
+            # exhaustive failure set. A reproduced, check-local semantic
+            # rejection must receive a fresh read, never become a frozen pass.
+            # This grants no primary edit or interpretation; the unchanged
+            # full validator still rejects any persistent disagreement.
+            if list(exc.clause_ids) != [cid] or validated != original:
+                raise NativeSemanticReviewError("additional retry rejection is not check-local and unchanged") from exc
+            additional_rejections.append({"check_id": cid, "code": exc.code,
+                "error_type": type(exc).__name__, "message": str(exc),
+                "rejected_result_sha256": sha256_json(original)})
+            continue
         if validated != original or original.get("verdict") == "incomplete":
             raise NativeSemanticReviewError("missing-inventory sibling is not an unchanged validated result")
         retained[cid] = original
@@ -166,13 +182,16 @@ def prepare_retry_scope(
         "request_sha256": sha256_json(request), "parent_request_sha256": sha256_json(prior),
         "checks_sha256": sha256_json(request["checks"]),
         "provider_nullable_optionals": provider_nullable_optionals,
-        "fresh_review_check_ids": targets, "retained_check_ids": sorted(locks),
+        "fresh_review_check_ids": sorted(set(targets) | {r["check_id"] for r in additional_rejections}),
+        "retained_check_ids": sorted(locks),
         "retained_result_sha256": {cid: sha256_json(value) for cid, value in retained.items()},
         "parent_artifacts": [{"path": str(path.resolve()),
                               "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
                              for path in paths],
         "retention_is_not_submission_approval": True,
     }
+    if additional_rejections:
+        proof["additional_reproduced_rejections"] = sorted(additional_rejections, key=lambda r: r["check_id"])
     return locks, proof
 
 

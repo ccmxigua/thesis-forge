@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
+sys.path.insert(0, str(ROOT / "tests"))
 import host_agent_bridge as bridge
 import native_semantic_review as native
 import requirements_engine as engine
@@ -53,6 +54,49 @@ class TypedVerificationRoutingTests(unittest.TestCase):
     def project(self, response, chunk):
         return materialize_source_verification_classifications(response, chunk["clauses"],
             provenance=chunk["provenance"], evidence_context=chunk["evidence_context"])
+
+    def test_split_origin_action_target_preserves_pending_inventory_and_current_binding(self):
+        targets = ("keywords with clear provenance in the thesis", "keywords from the paper",
+                   "Chinese keywords with source in the manuscript", "论文中有明确出处的关键词")
+        for target in targets:
+            for route in ("human", "input", None):
+                response, chunk, _ = fixture()
+                review = response["clause_reviews"][0]
+                review["classification"] = "unresolved"
+                atom = review["obligations"][0]
+                atom.update(actor="author", action="select", target=target, status="unresolved", route=route)
+                frozen = copy.deepcopy(response)
+                candidate, audit = self.project(response, chunk)
+                with self.subTest(target=target, route=route):
+                    self.assertEqual(response, frozen)
+                    self.assertEqual(candidate["requirements"], [])
+                    self.assertEqual(candidate["clause_reviews"][0]["classification"], "requires_source_verification")
+                    projected = candidate["clause_reviews"][0]["obligations"][0]
+                    for key in ("id", "actor", "action", "target", "source_quote", "force", "applicability", "condition"):
+                        self.assertEqual(projected.get(key), atom.get(key))
+                    self.assertEqual((projected["status"], projected["route"]), ("unresolved", "human"))
+                    self.assertTrue(audit[0]["current_evidence_binding_verified"])
+                    self.assertEqual(audit[0]["original_primary_obligations"], [atom])
+                    self.assertFalse(audit[0]["submission_ready"])
+
+    def test_bare_selection_without_proven_source_origin_never_authorizes_projection(self):
+        for mutation in ("bare", "internet", "new_content", "extra_duty", "stale", "ellipsis", "condition", "linked", "automatic"):
+            response, chunk, _ = fixture()
+            review = response["clause_reviews"][0]
+            review["classification"] = "unresolved"
+            atom = review["obligations"][0]
+            atom.update(actor="author", action="select", target="keywords with clear provenance in the thesis", status="unresolved", route="input")
+            if mutation == "bare": atom["target"] = "keywords"
+            elif mutation == "internet": atom["target"] = "keywords from the internet"
+            elif mutation == "new_content": atom["action"] = "write"
+            elif mutation == "extra_duty": atom["target"] += " and new abstract content"
+            elif mutation == "stale": chunk["clauses"][0]["source_span"]["source_sha256"] = "0" * 64
+            elif mutation == "ellipsis": atom["source_quote"] = "关键词……有明确出处"
+            elif mutation == "condition": atom["condition"] = "if the author chooses"
+            elif mutation == "linked": response["requirements"] = [{"clause_ids": [chunk["clauses"][0]["id"]]}]
+            else: atom["route"] = "automatic"
+            with self.subTest(mutation=mutation):
+                self.assertEqual(self.project(response, chunk), (response, []))
 
     def test_origin_selection_variants_keep_typed_semantics_and_pending_human_responsibility(self):
         actions = (

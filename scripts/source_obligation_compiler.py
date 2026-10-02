@@ -13,7 +13,7 @@ import re
 from typing import Any
 
 
-SOURCE_VERIFICATION_CLASSIFICATION_POLICY_VERSION = "source-verification-classification-v5"
+SOURCE_VERIFICATION_CLASSIFICATION_POLICY_VERSION = "source-verification-classification-v6"
 SOURCE_KEYWORD_CONSTRAINT_PROJECTION_POLICY_VERSION = "source-keyword-constraints-v3"
 SOURCE_HEADING_BINDING_POLICY_VERSION = "source-heading-binding-v1"
 
@@ -2636,6 +2636,21 @@ _KEYWORD_VERIFICATION_ACTOR = re.compile(
     r"(?:作者|审查人|审核人|学生)(?:(?:或|和|与)(?:作者|审查人|审核人|学生))*\Z", re.IGNORECASE,
 )
 
+_KEYWORD_SPLIT_ORIGIN_ACTION = re.compile(
+    r"(?:select|choose|extract|pick|选取|选择|提取)\Z", re.IGNORECASE,
+)
+_KEYWORD_SPLIT_ORIGIN_TARGET = re.compile(
+    # A bare selection action alone is insufficient. The target must carry
+    # the complete current-thesis origin relation, with no added content duty.
+    r"(?:(?:Chinese|English)\s+)?(?:keywords?|key\s+terms?)\s+"
+    r"(?:with\s+(?:clear\s+)?(?:provenance|source|origin)\s+in\s+"
+    r"(?:the\s+)?(?:thesis|paper|manuscript)|"
+    r"from\s+(?:the\s+)?(?:thesis|paper|manuscript)"
+    r"(?:\s+with\s+(?:clear\s+)?(?:provenance|source|origin))?)\Z|"
+    r"(?:论文|正文)中(?:有明确出处|可追溯至原文)的(?:关键词|关键字)\Z",
+    re.IGNORECASE,
+)
+
 
 def typed_source_verification_inventory_is_bound(
     source_text: Any, obligations: Any, *, expected_status: str = "unresolved",
@@ -2662,6 +2677,10 @@ def typed_source_verification_inventory_is_bound(
         labels = {key: atom.get(key, "").strip().rstrip(".。")
                   if isinstance(atom, dict) and isinstance(atom.get(key), str) else ""
                   for key in ("actor", "action", "target")}
+        split_origin_selection = bool(
+            _KEYWORD_SPLIT_ORIGIN_ACTION.fullmatch(labels["action"])
+            and _KEYWORD_SPLIT_ORIGIN_TARGET.fullmatch(labels["target"])
+        )
         if (not isinstance(atom, dict) or not set(atom) <= allowed
                 or not all(isinstance(atom.get(k), str) and atom[k].strip()
                            and atom[k] != "unknown"
@@ -2670,8 +2689,10 @@ def typed_source_verification_inventory_is_bound(
                 or atom.get("condition") is not None
                 or _KEYWORD_VERIFICATION_ACTOR.fullmatch(labels["actor"]) is None
                 or not (_KEYWORD_VERIFICATION_ACTION.fullmatch(labels["action"])
-                        or _KEYWORD_ORIGIN_SELECTION_ACTION.fullmatch(labels["action"]))
-                or _KEYWORD_VERIFICATION_TARGET.fullmatch(labels["target"]) is None
+                        or _KEYWORD_ORIGIN_SELECTION_ACTION.fullmatch(labels["action"])
+                        or split_origin_selection)
+                or (not split_origin_selection
+                    and _KEYWORD_VERIFICATION_TARGET.fullmatch(labels["target"]) is None)
                 or re.search(r"关键词|关键字|\bkeywords?\b", atom["target"], re.IGNORECASE) is None
                 or not isinstance(atom.get("force"), str)
                 or atom.get("force") != "required"
@@ -2680,7 +2701,10 @@ def typed_source_verification_inventory_is_bound(
                 or atom["source_quote"] not in source_text
                 or compile_source_content_verification_codes(atom["source_quote"])
                     != compile_source_content_verification_codes(source_text)
-                or atom.get("route") not in (None, "input" if expected_status == "requires_source_content" else "human")):
+                or atom.get("route") not in (
+                    (None, "human", "input") if split_origin_selection
+                    else (None, "input" if expected_status == "requires_source_content" else "human")
+                )):
             return False
         ids.append(atom["id"])
     return len(ids) == len(set(ids))

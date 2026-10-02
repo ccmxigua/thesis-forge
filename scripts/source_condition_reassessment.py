@@ -1,4 +1,4 @@
-"""Bounded primary scope proposals after a source-first review disagrees.
+"""Bounded primary action/scope proposals after a source-first review disagrees.
 
 The rejected review authorizes a new proposal, not an interpretation. No
 scope value is copied from the reviewer, and no old candidate is accepted.
@@ -22,7 +22,9 @@ TARGET_CODE = "primary_target_reassessment_required"
 TARGET_RULE_ID = "v3_source_bound_target_reassessment"
 APPLICABILITY_CODE = "primary_applicability_reassessment_required"
 APPLICABILITY_RULE_ID = "v3_source_bound_applicability_reassessment"
-REASSESSMENT_CODES = frozenset({CODE, TARGET_CODE, APPLICABILITY_CODE})
+ACTION_CODE = "primary_action_reassessment_required"
+ACTION_RULE_ID = "v3_source_bound_action_reassessment"
+REASSESSMENT_CODES = frozenset({CODE, TARGET_CODE, APPLICABILITY_CODE, ACTION_CODE})
 RETRY_BUDGET_POLICY = "v3_regular_attempts_plus_one_verified_scope_proposal"
 MAX_PRIMARY_CONDITION_PROPOSALS = 1
 
@@ -33,12 +35,14 @@ def condition_feedback(candidate, chunk, request, rejected_review):
 
 
 def source_atom_feedback(candidate, chunk, request, rejected_review):
-    """Rejected scope fields authorize a proposal opportunity, never equivalence.
+    """Rejected action/scope fields authorize a proposal opportunity, never equivalence.
 
     Validate the complete rejected review before authorizing any named field.
     Conditions-only feedback retains its existing contract. Target feedback
     freezes every other dimension and may include separately disputed conditions.
     Applicability feedback never supplies a default or a replacement value.
+    Action feedback freezes actor, quote, force, status and route; a replacement
+    action is a primary semantic proposal and must receive a fresh review.
     """
     return _scope_feedback(candidate, chunk, request, rejected_review, allow_target=True)
 
@@ -78,7 +82,7 @@ def _scope_feedback(candidate, chunk, request, rejected_review, *, allow_target)
             except TypedSourceAtomAlignmentError as error:
                 for disagreement in error.disagreements:
                     fields = disagreement["fields"]
-                    allowed = {"target", "condition", "applicability"} if allow_target else {"condition"}
+                    allowed = {"action", "target", "condition", "applicability"} if allow_target else {"condition"}
                     if not fields or any(field not in allowed for field in fields):
                         return None
                     oid = disagreement["primary_obligation_id"]
@@ -95,12 +99,13 @@ def _scope_feedback(candidate, chunk, request, rejected_review, *, allow_target)
             return None
         target_dispute = any("target" in change["fields"] for change in changes)
         applicability_dispute = any("applicability" in change["fields"] for change in changes)
-        if not target_dispute and not applicability_dispute:
+        action_dispute = any("action" in change["fields"] for change in changes)
+        if not target_dispute and not applicability_dispute and not action_dispute:
             # Preserve the existing conditions-only record representation.
             for change in changes:
                 change.pop("fields")
-        atoms_key = "source_atoms" if target_dispute or applicability_dispute else "condition_atoms"
-        return {"code": APPLICABILITY_CODE if applicability_dispute else TARGET_CODE if target_dispute else CODE,
+        atoms_key = "source_atoms" if target_dispute or applicability_dispute or action_dispute else "condition_atoms"
+        return {"code": ACTION_CODE if action_dispute else APPLICABILITY_CODE if applicability_dispute else TARGET_CODE if target_dispute else CODE,
             "candidate_response_sha256": sha256_json(candidate),
             "source_chunk_sha256": sha256_json(chunk), "run_id": provenance["run_id"],
             "provenance": copy.deepcopy(provenance), atoms_key: changes,
@@ -193,7 +198,7 @@ The code never chooses a replacement target, condition, applicability or metadat
             fields = entry.get("fields", ["condition"])
             for field in fields:
                 value = after.get(field)
-                if (field == "target" and (not isinstance(value, str) or not value.strip()
+                if (field in {"action", "target"} and (not isinstance(value, str) or not value.strip()
                         or value.strip().lower() == "unknown")):
                     return None
                 if field == "condition" and value is not None and not isinstance(value, str):
@@ -245,7 +250,7 @@ The code never chooses a replacement target, condition, applicability or metadat
         if validate(proposed, chunk):
             return None
         rule_id = {CODE: RULE_ID, TARGET_CODE: TARGET_RULE_ID,
-                   APPLICABILITY_CODE: APPLICABILITY_RULE_ID}[rebuilt["code"]]
+                   APPLICABILITY_CODE: APPLICABILITY_RULE_ID, ACTION_CODE: ACTION_RULE_ID}[rebuilt["code"]]
         return [{"rule_id": rule_id,
             "json_pointer": path,
             "source_binding": permitted[path]["source_binding"],
@@ -266,7 +271,7 @@ The code never chooses a replacement target, condition, applicability or metadat
 def project_scope_proposal(parent, proposal, records, chunk, *, prepare, validate, changed_paths):
     """Extract named scope fields without widening the one-shot authorization.
 
-    Only surplus target/condition/applicability edits can be discarded here.
+    Only surplus action/target/condition/applicability edits can be discarded here.
     Changes to quotations, identities, requirements, routes or any other parent
     field remain failures. Authentication and semantic authorization are still
     performed by the complete existing source-first feedback verifier.
@@ -315,7 +320,7 @@ def project_scope_proposal(parent, proposal, records, chunk, *, prepare, validat
                 if key in seen or before["id"] != after["id"]:
                     return None, audit
                 seen.add(key)
-                for field in ("target", "condition", "applicability"):
+                for field in ("action", "target", "condition", "applicability"):
                     path = f"$.clause_reviews[{i}].obligations[{j}].{field}"
                     changed = (field in before) != (field in after) or before.get(field) != after.get(field)
                     if changed:

@@ -1358,3 +1358,10 @@ named target/condition/applicability proposals. Surplus scope edits are audited,
 not accepted. Other payload/quotation/identity edits still fail closed. The
 existing shared one-proposal budget, full validators and fresh independent
 source-first review remain mandatory; no reviewer value is auto-copied.
+
+An independently rejected action/target decomposition may use a separate
+source-bound primary action proposal. It shares the same single semantic
+proposal budget and authorizes only each named atom's explicitly listed fields.
+Actor, exact quotation, force, pending status, route, identity and requirements
+stay frozen. Different wording is not automatically equivalent: the full
+validators and a fresh independent review must accept the new primary proposal.

@@ -271,6 +271,7 @@ from source_condition_reassessment import (
     TARGET_CODE as TARGET_REASSESSMENT_CODE, TARGET_RULE_ID as TARGET_REASSESSMENT_RULE,
     APPLICABILITY_CODE as APPLICABILITY_REASSESSMENT_CODE,
     APPLICABILITY_RULE_ID as APPLICABILITY_REASSESSMENT_RULE,
+    ACTION_CODE as ACTION_REASSESSMENT_CODE, ACTION_RULE_ID as ACTION_REASSESSMENT_RULE,
     REASSESSMENT_CODES,
     condition_proposal_budget_receipt, MAX_PRIMARY_CONDITION_PROPOSALS,
     RETRY_BUDGET_POLICY as CONDITION_RETRY_BUDGET_POLICY,
@@ -6677,14 +6678,15 @@ def _retry_authorization_ledger(
                 "semantic_review_required": True, "independent_review_required": True,
                 "mechanical_equivalence_claimed": False}
                if special_rule == INFORMATION_REASSESSMENT_RULE else {}),
-            **({("applicability_reassessment" if special_rule == APPLICABILITY_REASSESSMENT_RULE
+            **({("action_reassessment" if special_rule == ACTION_REASSESSMENT_RULE
+                 else "applicability_reassessment" if special_rule == APPLICABILITY_REASSESSMENT_RULE
                  else "target_reassessment" if special_rule == TARGET_REASSESSMENT_RULE
                  else "condition_reassessment"): next(
                 proof for proof in condition_proofs if proof["json_pointer"] == path),
                 "semantic_review_required": True, "independent_review_required": True,
                 "mechanical_equivalence_claimed": False}
                if special_rule in {CONDITION_REASSESSMENT_RULE, TARGET_REASSESSMENT_RULE,
-                                   APPLICABILITY_REASSESSMENT_RULE} else {}),
+                                   APPLICABILITY_REASSESSMENT_RULE, ACTION_REASSESSMENT_RULE} else {}),
         })
     return ledger
 
@@ -10836,6 +10838,11 @@ def _host_prompt(*, request_path: Path, chunk_path: Path,
         and len(retry_error_records) == 1
         and retry_error_records[0].get("code") == APPLICABILITY_REASSESSMENT_CODE
     )
+    action_retry = (
+        contract_version == HOST_REVIEW_CONTRACT_V3 and bool(retry_error_records)
+        and len(retry_error_records) == 1
+        and retry_error_records[0].get("code") == ACTION_REASSESSMENT_CODE
+    )
     if retry_parent_response_path is not None:
         if retry_parent_response_sha256 is not None:
             observed_parent_sha256 = sha256_file(retry_parent_response_path)
@@ -10890,6 +10897,7 @@ def _host_prompt(*, request_path: Path, chunk_path: Path,
         edit_kind = (
             "bounded primary semantic proposal"
             if information_reassessment_dispatch_record(retry_error_records) is not None
+            or action_retry or target_retry or condition_retry or applicability_retry
             else "minimum mechanical edits"
         )
         parent_text = f"""The rejected parent response is available only as a repair baseline at:
@@ -10952,6 +10960,18 @@ conditions, properties, source links and provenance. Never fabricate approval
 or move an external duty across clause boundaries. This is a primary proposal,
 not mechanical equivalence; complete validation and fresh source-first
 independent review remain mandatory."""
+    elif action_retry:
+        retry_invariant = """\nFINAL RETRY INVARIANT: source-bound PRIMARY ACTION REASSESSMENT.
+Re-read the current source/context for ONLY the source_atoms named in the record.
+Change ONLY action, target, condition and/or applicability fields explicitly
+listed for EACH atom. An action grant on one atom grants nothing on another.
+Freeze actor, source_quote, force, status, route, IDs/order/count, reasons,
+classifications, all requirements/properties and every source edge. Do not copy
+the rejected reviewer, invent approval, change a pending duty to fulfilled or
+assume paraphrases are equivalent. These are proposed semantic values, not code
+repairs. The single shared proposal budget is unchanged. Full contract validation
+AND a fresh independent source-first review must accept the new candidate.
+If the source supports no bounded correction, return unchanged and fail closed."""
     elif applicability_retry:
         retry_invariant = """\nFINAL RETRY INVARIANT: source-bound PRIMARY APPLICABILITY REASSESSMENT.
 This is not an instruction to copy the reviewer or fill missing values as applicable.
@@ -11044,6 +11064,8 @@ bridge fail closed."""
         parent_text += "\nThe target-reassessment exception below permits only named source-bound scope fields, never a reviewer-driven pass projection.\n"
     if applicability_retry:
         parent_text += "\nThe applicability exception is a bounded semantic proposal, never an automatic default or pass.\n"
+    if action_retry:
+        parent_text += "\nThe action exception permits only per-atom named proposals; it is not equivalence or a reviewer-driven pass projection.\n"
     return f"""You are the current Host Agent for one fresh thesis-format semantic-review run.
 
 Return exactly ONE JSON object and nothing else. Do not use Markdown fences,
@@ -13898,7 +13920,8 @@ def run_bridge(
                 "scope_proposal_limit": MAX_PRIMARY_CONDITION_PROPOSALS,
                 "scope_reassessment_code": (proposal_reservation or {}).get("reassessment_code"),
                 "current_attempt_kind": (
-                    ("applicability_proposal" if proposal_reservation.get("reassessment_code")
+                    ("action_proposal" if proposal_reservation.get("reassessment_code")
+                     == ACTION_REASSESSMENT_CODE else "applicability_proposal" if proposal_reservation.get("reassessment_code")
                      == APPLICABILITY_REASSESSMENT_CODE else "target_proposal" if proposal_reservation.get("reassessment_code")
                      == TARGET_REASSESSMENT_CODE else "condition_proposal")
                     if proposal_reservation is not None else "ordinary"
@@ -14645,6 +14668,9 @@ def run_bridge(
                             elif any(item.get("rule_id") == QUOTE_REASSESSMENT_RULE
                                    for item in pending_retry_authorizations):
                                 audit["semantic_retry_change_policy"] = QUOTE_REASSESSMENT_RULE
+                            elif any(item.get("rule_id") == ACTION_REASSESSMENT_RULE
+                                     for item in pending_retry_authorizations):
+                                audit["semantic_retry_change_policy"] = ACTION_REASSESSMENT_RULE
                             elif any(item.get("rule_id") == APPLICABILITY_REASSESSMENT_RULE
                                      for item in pending_retry_authorizations):
                                 audit["semantic_retry_change_policy"] = APPLICABILITY_REASSESSMENT_RULE

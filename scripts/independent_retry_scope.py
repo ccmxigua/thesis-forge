@@ -44,16 +44,21 @@ def prepare_retry_scope(
     from native_semantic_review import (
         MissingSourceObligationInventoryError, NativeSemanticReviewError,
         EmptyInventoryVerdictError, empty_inventory_retry_feedback_is_bound,
+        UnsafeUncertaintyVerdictError, unsafe_uncertainty_retry_feedback_is_bound,
         validate_obligation_coverage_response,
     )
     feedback = request.get("retry_feedback")
     if (request.get("provider_attempt") != 2 or not isinstance(feedback, dict)
             or feedback.get("code") not in {MissingSourceObligationInventoryError.code,
-                                            EmptyInventoryVerdictError.code}):
+                                            EmptyInventoryVerdictError.code,
+                                            UnsafeUncertaintyVerdictError.code}):
         return {}, None
     empty_verdict = feedback["code"] == EmptyInventoryVerdictError.code
+    unsafe_uncertainty = feedback["code"] == UnsafeUncertaintyVerdictError.code
     if empty_verdict and not empty_inventory_retry_feedback_is_bound(request):
         raise NativeSemanticReviewError("empty-inventory feedback is not current-source bound")
+    if unsafe_uncertainty and not unsafe_uncertainty_retry_feedback_is_bound(request):
+        raise NativeSemanticReviewError("unsafe-uncertainty feedback is not current-source bound")
     suffix = "-provider-attempt-02"
     if not output_dir.name.endswith(suffix):
         raise NativeSemanticReviewError("missing-inventory retry directory is not invocation-scoped")
@@ -66,7 +71,7 @@ def prepare_retry_scope(
     # Test/fault-injection callers without captured invocation artifacts cannot
     # claim sibling retention. They still use the unchanged full review path.
     if not any(path.exists() for path in paths):
-        if empty_verdict:
+        if empty_verdict or unsafe_uncertainty:
             raise NativeSemanticReviewError("empty-inventory retry lacks captured parent evidence")
         return {}, None
     if any(not path.is_file() or path.is_symlink() for path in paths):
@@ -89,11 +94,11 @@ def prepare_retry_scope(
             copy.deepcopy(compiled), prior["checks"],
             allow_draft_disputes=prior.get("output_policy") == "review_draft",
         )
-    except (MissingSourceObligationInventoryError, EmptyInventoryVerdictError) as exc:
+    except (MissingSourceObligationInventoryError, EmptyInventoryVerdictError, UnsafeUncertaintyVerdictError) as exc:
         targets = list(exc.clause_ids)
         if exc.code != feedback["code"] or targets != feedback.get("clause_ids"):
             raise NativeSemanticReviewError("missing-inventory retry scope disagrees with actual rejection")
-        if empty_verdict and exc.rejected_results != feedback.get("rejected_results"):
+        if (empty_verdict or unsafe_uncertainty) and exc.rejected_results != feedback.get("rejected_results"):
             raise NativeSemanticReviewError("empty-inventory rejection differs from captured invocation")
     else:
         raise NativeSemanticReviewError("missing-inventory parent did not reproduce the claimed rejection")
@@ -143,7 +148,8 @@ def prepare_retry_scope(
             atom["source_ref"] = current_ref(atom["source_ref"])
         locks[cid] = value
     proof = {
-        "policy": "validated_empty_inventory_verdict_retry_scope_v1" if empty_verdict else POLICY,
+        "policy": ("validated_unsafe_uncertainty_retry_scope_v1" if unsafe_uncertainty else
+                   "validated_empty_inventory_verdict_retry_scope_v1" if empty_verdict else POLICY),
         "run_id": request.get("run_id"),
         "provenance": copy.deepcopy(request.get("provenance")),
         "request_sha256": sha256_json(request), "parent_request_sha256": sha256_json(prior),
@@ -185,9 +191,10 @@ def validate_retry_scope(response: dict[str, Any], schema: dict[str, Any],
 def validate_persisted_empty_inventory_scope(request: dict[str, Any], output_dir: Path,
                                            raw: dict[str, Any], audit: dict[str, Any]) -> None:
     """Consumers replay the same scope proof; resealed success tags are insufficient."""
-    from native_semantic_review import EmptyInventoryVerdictError, OBLIGATION_COVERAGE_SCHEMA
+    from native_semantic_review import EmptyInventoryVerdictError, UnsafeUncertaintyVerdictError, OBLIGATION_COVERAGE_SCHEMA
     feedback = request.get("retry_feedback")
-    if not isinstance(feedback, dict) or feedback.get("code") != EmptyInventoryVerdictError.code:
+    if not isinstance(feedback, dict) or feedback.get("code") not in {
+            EmptyInventoryVerdictError.code, UnsafeUncertaintyVerdictError.code}:
         return
     native = audit.get("adapter_id") == "codex"
     locks, proof = prepare_retry_scope(request, output_dir, OBLIGATION_COVERAGE_SCHEMA,

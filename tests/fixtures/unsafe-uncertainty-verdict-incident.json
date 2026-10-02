@@ -1,0 +1,361 @@
+{
+  "request": {
+    "protocol": "native_source_obligation_coverage_review_v8",
+    "run_id": "496ae41d-71e9-4a50-bbce-9fcbda762884",
+    "chunk_index": 2,
+    "case_id": "bsu",
+    "provenance": {
+      "version": "1.0",
+      "origin": "fresh_host_agent",
+      "source_sha256": "1e9d38b307dbef8c3bf97b85ba5def70eaf7e2dba50cf25da978e007fc907059",
+      "evidence_sha256": "e60d45793749f14512c9ead27e10a081eedf86176e69b1f7c23c8c1ab4e114b8",
+      "clause_sha256": "17b222fd6154e4461ea15215466d5ca86b96fb97156ae1696c5a8fbc2a2a8a9e",
+      "request_sha256": "11fb7ae6130588f2513510f4ccbe7e98059bc193728c9d6cdb91b936efdb9cd7",
+      "run_id": "496ae41d-71e9-4a50-bbce-9fcbda762884"
+    },
+    "source_sha256": "1e9d38b307dbef8c3bf97b85ba5def70eaf7e2dba50cf25da978e007fc907059",
+    "clause_sha256": "17b222fd6154e4461ea15215466d5ca86b96fb97156ae1696c5a8fbc2a2a8a9e",
+    "evidence_sha256": "e60d45793749f14512c9ead27e10a081eedf86176e69b1f7c23c8c1ab4e114b8",
+    "request_sha256": "11fb7ae6130588f2513510f4ccbe7e98059bc193728c9d6cdb91b936efdb9cd7",
+    "content_context": {
+      "artifact": "thesis_manuscript",
+      "availability": "not_included_in_obligation_review_request",
+      "meaning": "This request omits manuscript body text; it does not assert whether the user supplied a manuscript to the pipeline."
+    },
+    "checks": [
+      {
+        "check_id": "C00009",
+        "document_text": "培养单位",
+        "review_context": {
+          "semantic_clause_text": "培养单位",
+          "classification": "executable",
+          "requires_requirement": true,
+          "reason": "The source shows 培养单位： as a fixed cover label, supporting an automatically generated metadata field.",
+          "primary_obligations": [
+            {
+              "id": "C00009-label",
+              "status": "covered",
+              "reason": "Preserve the source label and bind its value to the corresponding cover metadata field.",
+              "actor": "document generator",
+              "action": "include",
+              "target": "college_name cover field labeled 培养单位：",
+              "source_quote": "培养单位",
+              "force": "required",
+              "applicability": "applicable",
+              "route": "automatic"
+            }
+          ],
+          "primary_obligation_quote_bindings": [
+            {
+              "primary_obligation_id": "C00009-label",
+              "original_source_quote": "培养单位：",
+              "review_source_quote": "培养单位",
+              "source_binding": {
+                "policy": "current_source_occurrence_quote_v1",
+                "clause_binding": {
+                  "text": "培养单位",
+                  "source_fragments": [
+                    {
+                      "clause_id": "C00009",
+                      "evidence_id": "E00009",
+                      "start_offset": 0,
+                      "end_offset": 4,
+                      "source_sha256": "25ea0a3f2ab3cd40d33dd875959fbee7caf4d77ff15bc70a5bace19990b222d0",
+                      "text": "培养单位",
+                      "source_kind": "paragraph",
+                      "separator_before": "",
+                      "location": {
+                        "part": "document",
+                        "child_index": 10,
+                        "order": 8
+                      }
+                    }
+                  ]
+                },
+                "quote_start_offset": 0,
+                "quote_end_offset": 5,
+                "quote_sha256": "d53281aec984b768d062596420e145f8a6b98d06859917de1d83fcb4aaa75980",
+                "context_is_not_execution_scope": true
+              },
+              "original_quote_sha256": "d53281aec984b768d062596420e145f8a6b98d06859917de1d83fcb4aaa75980",
+              "review_quote_sha256": "863403f015195238564787a236c9d619ac3b6d994859f6df972ca4cba58c0af2",
+              "semantic_dimensions_unchanged": true
+            }
+          ],
+          "linked_requirements": [
+            {
+              "requirement_ref": "RRfaaea321cb888dd3f1bc",
+              "source_requirement_id": null,
+              "role": "cover",
+              "properties": {
+                "institution": "——",
+                "fields": [
+                  {
+                    "id": "college_name",
+                    "label": "培养单位：",
+                    "value_from": "thesis_profile.cover_metadata.college_name",
+                    "display_policy": "required",
+                    "label_display_policy": "always",
+                    "order": 1
+                  },
+                  {
+                    "id": "first_discipline",
+                    "label": "一级学科：",
+                    "value_from": "thesis_profile.cover_metadata.first_discipline",
+                    "display_policy": "required",
+                    "label_display_policy": "always",
+                    "order": 2
+                  },
+                  {
+                    "id": "second_discipline",
+                    "label": "二级学科：",
+                    "value_from": "thesis_profile.cover_metadata.second_discipline",
+                    "display_policy": "required",
+                    "label_display_policy": "always",
+                    "order": 3
+                  },
+                  {
+                    "id": "author_name",
+                    "label": "论文作者：",
+                    "value_from": "thesis_profile.cover_metadata.author_name",
+                    "display_policy": "required",
+                    "label_display_policy": "always",
+                    "order": 4
+                  },
+                  {
+                    "id": "supervisor_name",
+                    "label": "指导教师：",
+                    "value_from": "thesis_profile.cover_metadata.supervisor_name",
+                    "display_policy": "required",
+                    "label_display_policy": "always",
+                    "order": 5
+                  },
+                  {
+                    "id": "completion_date",
+                    "label": "年   月",
+                    "value_from": "thesis_profile.cover_metadata.completion_date",
+                    "display_policy": "required",
+                    "label_display_policy": "always",
+                    "order": 6
+                  },
+                  {
+                    "id": "classification_number",
+                    "label": "中图分类号：",
+                    "value_from": "thesis_profile.cover_metadata.classification_number",
+                    "display_policy": "required",
+                    "label_display_policy": "always",
+                    "order": 7
+                  },
+                  {
+                    "id": "unit_code",
+                    "label": "学校代码：",
+                    "value_from": "thesis_profile.cover_metadata.unit_code",
+                    "display_policy": "required",
+                    "label_display_policy": "always",
+                    "order": 8
+                  }
+                ],
+                "before_role": "document_start",
+                "missing_value_policy": "placeholder",
+                "missing_value_placeholder": "——"
+              },
+              "evidence_ids": [
+                "E00009",
+                "E00010",
+                "E00011",
+                "E00012",
+                "E00013",
+                "E00014",
+                "E00015",
+                "E00016"
+              ],
+              "verification": {
+                "mode": "static_docx",
+                "checks": [
+                  "Verify all source-bound labels are present in the generated cover structure.",
+                  "Verify each label maps to its corresponding cover metadata field and missing values use the configured neutral placeholder."
+                ]
+              }
+            }
+          ],
+          "source_clause_support": [
+            {
+              "requirement_ref": "RRfaaea321cb888dd3f1bc",
+              "clause_id": "C00010",
+              "document_text": "一级学科",
+              "semantic_clause_text": "一级学科",
+              "evidence_ids": [
+                "E00010"
+              ]
+            },
+            {
+              "requirement_ref": "RRfaaea321cb888dd3f1bc",
+              "clause_id": "C00011",
+              "document_text": "二级学科",
+              "semantic_clause_text": "二级学科",
+              "evidence_ids": [
+                "E00011"
+              ]
+            },
+            {
+              "requirement_ref": "RRfaaea321cb888dd3f1bc",
+              "clause_id": "C00012",
+              "document_text": "论文作者",
+              "semantic_clause_text": "论文作者",
+              "evidence_ids": [
+                "E00012"
+              ]
+            },
+            {
+              "requirement_ref": "RRfaaea321cb888dd3f1bc",
+              "clause_id": "C00013",
+              "document_text": "指导教师",
+              "semantic_clause_text": "指导教师",
+              "evidence_ids": [
+                "E00013"
+              ]
+            },
+            {
+              "requirement_ref": "RRfaaea321cb888dd3f1bc",
+              "clause_id": "C00014",
+              "document_text": "年   月",
+              "semantic_clause_text": "年 月",
+              "evidence_ids": [
+                "E00014"
+              ]
+            },
+            {
+              "requirement_ref": "RRfaaea321cb888dd3f1bc",
+              "clause_id": "C00015",
+              "document_text": "中图分类号",
+              "semantic_clause_text": "中图分类号",
+              "evidence_ids": [
+                "E00015"
+              ]
+            },
+            {
+              "requirement_ref": "RRfaaea321cb888dd3f1bc",
+              "clause_id": "C00016",
+              "document_text": "学校代码",
+              "semantic_clause_text": "学校代码",
+              "evidence_ids": [
+                "E00016"
+              ]
+            }
+          ],
+          "cited_evidence": {
+            "E00009": {
+              "id": "E00009",
+              "kind": "paragraph",
+              "text": "培养单位：",
+              "style_id": null,
+              "runs": [
+                {
+                  "text": "培养单位：",
+                  "format": {
+                    "fonts": {
+                      "eastAsia": "黑体",
+                      "ascii": "黑体",
+                      "hAnsi": "黑体"
+                    },
+                    "size_pt": 14.0
+                  }
+                }
+              ],
+              "location": {
+                "part": "document",
+                "child_index": 10,
+                "order": 8
+              },
+              "context_before": [
+                "硕  士  学  位  论  文",
+                "MASTER'S THESIS"
+              ],
+              "context_after": [
+                "一级学科：",
+                "二级学科："
+              ],
+              "style_name": null,
+              "xml_locator": {
+                "part": "document",
+                "child_index": 10,
+                "order": 8
+              }
+            }
+          },
+          "machine_obligation_ids": [],
+          "manual_review_codes": [],
+          "source_content_verification_codes": [],
+          "pending_source_work": [],
+          "section_description": null
+        }
+      }
+    ],
+    "attempt": 1,
+    "provider_attempt": 1,
+    "output_policy": "review_draft"
+  },
+  "first_raw": {
+    "results": [
+      {
+        "check_id": "C00009",
+        "verdict": "uncertain",
+        "rationale": "The source is only a standalone cover label; it does not independently establish a required inclusion or metadata mapping. The linked requirement and neighboring labels cannot resolve that source uncertainty.",
+        "identified_obligations": {
+          "first": {
+            "force": "unknown",
+            "applicability": "unknown",
+            "actor": null,
+            "action": null,
+            "target": null,
+            "condition": null,
+            "obligation_summary": "Standalone cover label; source does not establish an executable inclusion or mapping duty.",
+            "primary_obligation_id": "C00009-label",
+            "requirement_refs": [],
+            "pending_work_code": null,
+            "disposition": "ambiguous",
+            "source_ref": "Q156eb52e9da56260"
+          },
+          "remaining": []
+        },
+        "evidence_refs": [
+          "Q156eb52e9da56260"
+        ]
+      }
+    ]
+  },
+  "first_compiled": {
+    "results": [
+      {
+        "check_id": "C00009",
+        "verdict": "uncertain",
+        "rationale": "The source is only a standalone cover label; it does not independently establish a required inclusion or metadata mapping. The linked requirement and neighboring labels cannot resolve that source uncertainty.",
+        "identified_obligations": [
+          {
+            "force": "unknown",
+            "applicability": "unknown",
+            "obligation_summary": "Standalone cover label; source does not establish an executable inclusion or mapping duty.",
+            "primary_obligation_id": "C00009-label",
+            "requirement_refs": [],
+            "disposition": "ambiguous",
+            "source_quote": "培养单位"
+          }
+        ],
+        "evidence_quotes": [
+          "培养单位"
+        ],
+        "machine_obligation_ids": []
+      }
+    ]
+  },
+  "capture": {
+    "commit": "6e1aca29b8621bb7d004b9ea4ff19e4902e7cf48",
+    "run_id": "496ae41d-71e9-4a50-bbce-9fcbda762884",
+    "selection": "C00009 only, not the full eight-check invocation",
+    "original_artifact_sha256": {
+      "request": "3a93fe03159e411584766be20bfc1d936330166f16c1624d434466f9cf424d92",
+      "first_raw": "5f1c6b55659bbc82e5286d218f2150415c88d1ccfe4616c79a42e466c2589b4c",
+      "first_compiled": "3217b7729d784a365ccd410d6b2b6741ac24b485f07ab92e11aba0b879afb39f"
+    }
+  }
+}

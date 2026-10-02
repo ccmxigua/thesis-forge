@@ -225,6 +225,8 @@ from native_semantic_review import (  # noqa: E402
     InconsistentObligationVerdictError,
     EmptyInventoryVerdictError,
     empty_inventory_retry_feedback_is_bound,
+    UnsafeUncertaintyVerdictError,
+    unsafe_uncertainty_retry_feedback_is_bound,
     MissingExecutableObligationInventoryError,
     MissingSourceObligationInventoryError,
     NativeSemanticReviewError,
@@ -12143,6 +12145,7 @@ def _validate_completed_obligation_ledger_chain(
         "independent_obligation_review_incomplete",
         InconsistentObligationVerdictError.code,
         EmptyInventoryVerdictError.code,
+        UnsafeUncertaintyVerdictError.code,
         SourceVerificationMislabelledAsAuthoringError.code,
         PendingVerificationVerdictError.code,
         TableContextUncertaintyError.code,
@@ -12167,6 +12170,9 @@ def _validate_completed_obligation_ledger_chain(
         or review_request.get("retry_feedback") != retry_feedback
         or (isinstance(retry_feedback, dict) and retry_feedback.get("code") == EmptyInventoryVerdictError.code
             and (not empty_inventory_retry_feedback_is_bound(review_request)
+                 or retry_feedback.get("candidate_response_sha256") != _response_sha256(accepted_response)))
+        or (isinstance(retry_feedback, dict) and retry_feedback.get("code") == UnsafeUncertaintyVerdictError.code
+            and (not unsafe_uncertainty_retry_feedback_is_bound(review_request)
                  or retry_feedback.get("candidate_response_sha256") != _response_sha256(accepted_response)))
         or (isinstance(retry_feedback, dict) and retry_feedback.get("code") == TableContextUncertaintyError.code
             and not table_retry_feedback_is_source_bound(review_request))
@@ -12856,6 +12862,10 @@ def _run_independent_obligation_coverage_review(
             and (not empty_inventory_retry_feedback_is_bound(coverage_request)
                  or _retry_feedback.get("candidate_response_sha256") != response_sha)):
         raise IndependentObligationReviewError("empty-inventory retry is not bound to the immutable candidate")
+    if (_retry_feedback is not None and _retry_feedback.get("code") == UnsafeUncertaintyVerdictError.code
+            and (not unsafe_uncertainty_retry_feedback_is_bound(coverage_request)
+                 or _retry_feedback.get("candidate_response_sha256") != response_sha)):
+        raise IndependentObligationReviewError("unsafe-uncertainty retry is not bound to the immutable candidate")
     if (_retry_feedback is not None and _retry_feedback.get("code") == TypedSourceAtomAlignmentError.code
             and (not typed_alignment_retry_feedback_is_bound(coverage_request)
                  or _retry_feedback.get("candidate_response_sha256") != response_sha)):
@@ -13432,6 +13442,7 @@ def _run_independent_obligation_coverage_review(
         MissingSourceObligationInventoryError,
         InconsistentObligationVerdictError,
         EmptyInventoryVerdictError,
+        UnsafeUncertaintyVerdictError,
         SourceVerificationMislabelledAsAuthoringError,
         PendingVerificationVerdictError,
         TableContextUncertaintyError,
@@ -13517,6 +13528,20 @@ def _run_independent_obligation_coverage_review(
                 "provenance": copy.deepcopy(coverage_request.get("provenance")),
             })
             retryable = retryable and empty_inventory_retry_feedback_is_bound({
+                **coverage_request, "provider_attempt": _provider_attempt + 1,
+                "retry_feedback": retry_feedback,
+            })
+        if isinstance(review_error, UnsafeUncertaintyVerdictError):
+            retry_feedback.update({
+                "rejected_results": copy.deepcopy(review_error.rejected_results),
+                "rejected_results_sha256": sha256_json(review_error.rejected_results),
+                "rejected_request_sha256": sha256_json(coverage_request),
+                "checks_sha256": sha256_json(coverage_request["checks"]),
+                "candidate_response_sha256": response_sha,
+                "run_id": run_id,
+                "provenance": copy.deepcopy(coverage_request.get("provenance")),
+            })
+            retryable = retryable and unsafe_uncertainty_retry_feedback_is_bound({
                 **coverage_request, "provider_attempt": _provider_attempt + 1,
                 "retry_feedback": retry_feedback,
             })

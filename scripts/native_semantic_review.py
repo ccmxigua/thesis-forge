@@ -165,6 +165,55 @@ class UnlinkedRepresentedObligationError(NativeSemanticReviewError):
         )
 
 
+class UnsafeUncertaintyVerdictError(NativeSemanticReviewError):
+    """An all-ambiguous reread contradicts current executable work; never a pass."""
+
+    code = "uncertainty_not_preserved_by_executable_candidate"
+
+    def __init__(self, rejected_results: list[dict[str, Any]]) -> None:
+        self.rejected_results = copy.deepcopy(sorted(rejected_results, key=lambda r: r["check_id"]))
+        self.clause_ids = tuple(r["check_id"] for r in self.rejected_results)
+        super().__init__("independent obligation review uncertainty is not preserved safely for "
+                         + ", ".join(self.clause_ids))
+
+
+def unsafe_uncertainty_retry_feedback_is_bound(request: dict[str, Any]) -> bool:
+    """Reproduce the actual rejection; no semantic correction or pass is granted."""
+    feedback = request.get("retry_feedback")
+    if (not isinstance(feedback, dict) or feedback.get("code") != UnsafeUncertaintyVerdictError.code
+            or type(request.get("provider_attempt")) is not int or request["provider_attempt"] != 2
+            or set(feedback) != {"code", "clause_ids", "rejected_results", "rejected_results_sha256",
+                "rejected_request_sha256", "checks_sha256", "candidate_response_sha256", "run_id", "provenance"}
+            or not isinstance(feedback.get("candidate_response_sha256"), str)
+            or re.fullmatch(r"[0-9a-f]{64}", feedback["candidate_response_sha256"]) is None
+            or feedback.get("checks_sha256") != sha256_json(request.get("checks"))
+            or feedback.get("run_id") != request.get("run_id")
+            or feedback.get("provenance") != request.get("provenance")):
+        return False
+    prior = copy.deepcopy(request)
+    prior.pop("retry_feedback", None)
+    prior["provider_attempt"] = 1
+    if feedback.get("rejected_request_sha256") != sha256_json(prior):
+        return False
+    try:
+        rejected, ids = feedback.get("rejected_results"), feedback.get("clause_ids")
+        if (not isinstance(rejected, list) or not rejected or not isinstance(ids, list)
+                or ids != sorted(set(ids)) or len(ids) != len(rejected)
+                or [r.get("check_id") for r in rejected] != ids
+                or feedback.get("rejected_results_sha256") != sha256_json(rejected)):
+            return False
+        checks = {c["check_id"]: c for c in prior["checks"]}
+        if len(checks) != len(prior["checks"]):
+            return False
+        validate_obligation_coverage_response({"results": copy.deepcopy(rejected)}, [checks[cid] for cid in ids],
+            allow_draft_disputes=prior.get("output_policy") == "review_draft")
+    except UnsafeUncertaintyVerdictError as exc:
+        return list(exc.clause_ids) == ids and exc.rejected_results == rejected
+    except (NativeSemanticReviewError, ValueError, TypeError, KeyError, AttributeError):
+        return False
+    return False
+
+
 class TypedSourceAtomAlignmentError(NativeSemanticReviewError):
     """Typed interpretations disagree; no rejected interpretation is a pass.
 
@@ -711,6 +760,7 @@ def build_obligation_coverage_request(
                     clause.get("text") if isinstance(clause.get("text"), str) else ""
                 ),
                 "classification": review.get("classification"),
+                "primary_normative_basis": review.get("normative_basis"),
                 "requires_requirement": classification_requires_requirement(
                     str(review.get("classification"))
                 ),
@@ -864,6 +914,7 @@ def validate_obligation_coverage_response(
     source_verification_classification_corrections: list[dict[str, Any]] = []
     typed_alignment_errors: list[tuple[str, list[dict[str, Any]]]] = []
     empty_inventory_verdicts: list[dict[str, Any]] = []
+    unsafe_uncertainty_verdicts: list[dict[str, Any]] = []
     for result in results:
         check_id = result.get("check_id") if isinstance(result, dict) else None
         if not isinstance(check_id, str) or check_id not in expected:
@@ -1403,6 +1454,16 @@ def validate_obligation_coverage_response(
             if (ambiguous and not scope_unresolved and not unrepresented and not represented
                     and table_context_retry_is_source_bound(check)):
                 raise TableContextUncertaintyError([check_id])
+            if (classification in {"covered", "executable", "verify_existing"}
+                    and context.get("requires_requirement") is True and linked
+                    and ambiguous == len(identified) and ambiguous > 0
+                    and not expected_machine_ids and not live_manual_codes
+                    and not live_source_verification_codes and not pending_facts):
+                # Keep every rejected observation. Only a fresh, source-first
+                # independent reread of the identical candidate may reconsider.
+                # Missing/unrepresented, known or pending duties cannot hide here.
+                unsafe_uncertainty_verdicts.append(copy.deepcopy(result))
+                continue
             raise NativeSemanticReviewError(
                 f"independent obligation review uncertainty is not preserved safely for {check_id}"
             )
@@ -1432,6 +1493,8 @@ def validate_obligation_coverage_response(
         )
     if empty_inventory_verdicts:
         raise EmptyInventoryVerdictError(empty_inventory_verdicts)
+    if unsafe_uncertainty_verdicts:
+        raise UnsafeUncertaintyVerdictError(unsafe_uncertainty_verdicts)
     if missing_source_inventory:
         raise MissingSourceObligationInventoryError(missing_source_inventory)
     if external_compliance_corrections:
@@ -1639,7 +1702,26 @@ def _prompt(request: dict[str, Any], *, retained_results: dict[str, Any] | None 
             else []
         )
         retry_instruction = ""
-        if isinstance(retry_feedback, dict) and retry_feedback.get("code") == SourceReferenceContractError.code:
+        if isinstance(retry_feedback, dict) and retry_feedback.get("code") == UnsafeUncertaintyVerdictError.code:
+            if not unsafe_uncertainty_retry_feedback_is_bound(request):
+                raise NativeSemanticReviewError("unsafe-uncertainty feedback is not current-source bound")
+            retry_instruction = (
+                "\nThe prior source-first review identified genuine-looking ambiguity for checks "
+                + strict_json_dumps(retry_feedback["clause_ids"])
+                + ", but the unchanged candidate still asserts executable work. That contradiction "
+                "was REJECTED, not accepted as uncertainty or compliance. Re-read the exact source, "
+                "its proven structure, and the actual linked properties independently. "
+                "primary_normative_basis is a primary claim to scrutinize, NOT proof of a mandate "
+                "or metadata meaning. A template may establish structural work without normative prose, "
+                "but a bare label does not prove a particular value_from mapping or fill missing facts. "
+                "Decide independently whether the candidate is faithful, materially unsupported, or "
+                "genuinely ambiguous. Do NOT copy typed primary fields to force consistent, invent a "
+                "duty, erase a source duty, or treat absence of a source duty as coverage of an unsupported "
+                "requirement. Preserve any real ambiguity; it will still block this executable candidate. "
+                "This is one bounded reread, not authority to change the candidate, primary classification, "
+                "source, requirements or provenance, and never submission approval.\n"
+            )
+        elif isinstance(retry_feedback, dict) and retry_feedback.get("code") == SourceReferenceContractError.code:
             if not source_reference_retry_feedback_is_bound(request):
                 raise NativeSemanticReviewError("source-reference correction feedback is not current-source bound")
             retry_instruction = (
@@ -1873,6 +1955,10 @@ def _prompt(request: dict[str, Any], *, retained_results: dict[str, Any] | None 
             "Missing or non-unique geometry is not authority to guess. Neighbor text is context only; "
             "source_refs still select only this check's document_text. "
             "Do not assume primary_obligations is complete or correct. "
+            "primary_normative_basis is the primary's interpretation to scrutinize, not code-owned "
+            "proof of a mandate, field meaning, or fulfilled real-world facts. Template structure can "
+            "establish placement or literal preservation without mandatory prose, but does not by itself "
+            "prove any proposed metadata mapping; assess those separately from the actual source. "
             "If a primary obligation proposes typed actor/action/target/source_quote and a known force, "
             "independently assess those dimensions and applicability from the source, return them with "
             "its primary_obligation_id, and report any disagreement rather than copying to pass validation. "

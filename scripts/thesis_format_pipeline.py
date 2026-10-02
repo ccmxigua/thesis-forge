@@ -47,6 +47,8 @@ from native_semantic_review import (
     OBLIGATION_COVERAGE_SCHEMA,
     EmptyInventoryVerdictError,
     empty_inventory_retry_feedback_is_bound,
+    UnsafeUncertaintyVerdictError,
+    unsafe_uncertainty_retry_feedback_is_bound,
     OBLIGATION_COVERAGE_PROTOCOL,
     build_obligation_coverage_request,
     validate_obligation_coverage_response,
@@ -456,6 +458,7 @@ def _validate_independent_obligation_receipts(
             "external_compliance_unrepresented_obligation",
             "missing_source_obligation_inventory",
             EmptyInventoryVerdictError.code,
+            UnsafeUncertaintyVerdictError.code,
             "independent_obligation_review_incomplete",
             TABLE_CONTEXT_RETRY_CODE,
         }
@@ -482,6 +485,9 @@ def _validate_independent_obligation_receipts(
             or independent.get("retry_feedback") != retry_feedback
             or (isinstance(retry_feedback, dict) and retry_feedback.get("code") == EmptyInventoryVerdictError.code
                 and (not empty_inventory_retry_feedback_is_bound(review_request)
+                     or retry_feedback.get("candidate_response_sha256") != candidate_sha))
+            or (isinstance(retry_feedback, dict) and retry_feedback.get("code") == UnsafeUncertaintyVerdictError.code
+                and (not unsafe_uncertainty_retry_feedback_is_bound(review_request)
                      or retry_feedback.get("candidate_response_sha256") != candidate_sha))
             or (isinstance(retry_feedback, dict) and retry_feedback.get("code") == TABLE_CONTEXT_RETRY_CODE
                 and not table_retry_feedback_is_source_bound(review_request))

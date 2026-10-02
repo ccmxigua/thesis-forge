@@ -673,6 +673,9 @@ def _remove_generated_cover_block(doc: Document, style_names_to_remove: set[str]
 
 def _metadata_value(metadata: dict[str, Any], field_id: str) -> str:
     value = metadata.get(field_id)
+    if (field_id in {"first_discipline", "second_discipline"}
+            and value is not None and not isinstance(value, str)):
+        raise ValueError(f"cover metadata {field_id} must be a string")
     if field_id == "co_supervisors" and isinstance(value, list):
         return "、".join(str(item.get("name", "")) for item in value if isinstance(item, dict))
     return "" if value is None else str(value)

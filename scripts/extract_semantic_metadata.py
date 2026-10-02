@@ -280,6 +280,10 @@ def normalize_semantic_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
         "college_name": _metadata_value(metadata, "school", "college"),
         "program_name": _metadata_value(metadata, "major", "discipline"),
         "field_name": _metadata_value(metadata, "second_discipline"),
+        # Preserve the explicit source fields independently. Do not infer
+        # either level from a major, generic discipline, or the other level.
+        "first_discipline": _metadata_value(metadata, "first_discipline"),
+        "second_discipline": _metadata_value(metadata, "second_discipline"),
         "research_direction": _metadata_value(metadata, "research_direction"),
     }
     if discipline:

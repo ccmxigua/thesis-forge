@@ -65,6 +65,10 @@ class MetadataDataflowTest(unittest.TestCase):
         self.assertEqual(profile["completion_date"], "2026-06")
         self.assertTrue(profile["cover_metadata"])
         self.assertEqual(profile["cover_metadata"]["author_name"], "测试学生甲")
+        self.assertEqual(profile["cover_metadata"]["first_discipline"], "交通运输工程")
+        self.assertEqual(profile["cover_metadata"]["second_discipline"], "交通信息工程及控制")
+        for field in ("first_discipline", "second_discipline"):
+            self.assertEqual(profile["provenance"]["field_sources"][f"cover_metadata.{field}"], field)
         self.assertEqual(profile["cover_metadata"]["trust"]["source"], "source_document")
         self.assertEqual(profile["provenance"]["trust"]["confirmed"], True)
         self.assertEqual(len(profile["provenance"]["source_sha256"]), 64)

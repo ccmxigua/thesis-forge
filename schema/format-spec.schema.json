@@ -1737,6 +1737,14 @@
         "degree_discipline": {
           "type": "string"
         },
+        "first_discipline": {
+          "type": "string",
+          "minLength": 1
+        },
+        "second_discipline": {
+          "type": "string",
+          "minLength": 1
+        },
         "professional_degree_type": {
           "type": "string"
         },
@@ -1906,6 +1914,8 @@
             "student_id",
             "college_name",
             "degree_discipline",
+            "first_discipline",
+            "second_discipline",
             "professional_degree_type",
             "program_name",
             "field_name",
@@ -1936,6 +1946,8 @@
             "thesis_profile.cover_metadata.student_id",
             "thesis_profile.cover_metadata.college_name",
             "thesis_profile.cover_metadata.degree_discipline",
+            "thesis_profile.cover_metadata.first_discipline",
+            "thesis_profile.cover_metadata.second_discipline",
             "thesis_profile.cover_metadata.professional_degree_type",
             "thesis_profile.cover_metadata.program_name",
             "thesis_profile.cover_metadata.field_name",

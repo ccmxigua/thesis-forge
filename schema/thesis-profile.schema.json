@@ -56,6 +56,8 @@
         "student_id": {"type": "string", "minLength": 1},
         "college_name": {"type": "string"},
         "degree_discipline": {"type": "string"},
+        "first_discipline": {"type": "string", "minLength": 1},
+        "second_discipline": {"type": "string", "minLength": 1},
         "professional_degree_type": {"type": "string"},
         "program_name": {"type": "string"},
         "field_name": {"type": "string"},

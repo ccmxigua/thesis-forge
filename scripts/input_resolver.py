@@ -15,6 +15,7 @@ EXPECTED_SCALAR_METADATA_KEYS = frozenset({
     "metadata_status", "student_id", "completion_date", "title_zh", "title_en",
     "author_name", "supervisor_name", "college_name", "degree_discipline",
     "professional_degree_type", "program_name", "field_name", "research_direction",
+    "first_discipline", "second_discipline",
     "classification_number", "unit_code", "security_marking", "embargo_until",
     "approval_number", "approval_date", "embargo_start", "author", "author_name", "advisor",
     "school", "college", "major", "discipline", "degree_type",

@@ -24,8 +24,44 @@ from source_condition_reassessment import (
 )
 
 
-def incident():
+def current_schema_condition_fixture():
+    """Synthetic current-schema case; the historical JSON stays untouched.
+
+    The captured incident predates distinct discipline fields. Correct those
+    unrelated bindings in this test copy, not in production or the raw file,
+    then recompute payload fingerprints. Condition retry authority is still
+    tested against the complete current payload, never ordinal-only refs.
+    """
     data = json.loads((ROOT / "tests/fixtures/cover-condition-reassessment-incident.json").read_text())
+    fingerprint_changes = {}
+    for requirement in data["primary_candidate"]["requirements"]:
+        payload = {"source_requirement_id": requirement.get("existing_requirement_id") or requirement.get("id"),
+                   "role": requirement.get("role"), "properties": copy.deepcopy(requirement.get("properties")),
+                   "evidence_ids": copy.deepcopy(requirement.get("evidence_ids") or []),
+                   "verification": copy.deepcopy(requirement.get("verification"))}
+        original = sha256_json(payload)
+        for field in payload["properties"].get("fields", []):
+            label = "".join(str(field.get("label", "")).split()).rstrip("：:")
+            key = {"一级学科": "first_discipline", "二级学科": "second_discipline"}.get(label)
+            if key:
+                field.update(id=key, value_from=f"thesis_profile.cover_metadata.{key}")
+        fingerprint_changes[original] = sha256_json(payload)
+        requirement["properties"] = payload["properties"]
+    for requirement in data["primary_raw"]["requirements"]:
+        for field in requirement["properties"].get("fields", []):
+            label = "".join(str(field.get("label", "")).split()).rstrip("：:")
+            key = {"一级学科": "first_discipline", "二级学科": "second_discipline"}.get(label)
+            if key:
+                field.update(id=key, value_from=f"thesis_profile.cover_metadata.{key}")
+    for refs in data["linked_requirement_fingerprints"].values():
+        for reference, fingerprint in refs.items():
+            assert fingerprint in fingerprint_changes
+            refs[reference] = fingerprint_changes[fingerprint]
+    return data
+
+
+def incident():
+    data = current_schema_condition_fixture()
     source = data["source"]
     evidence = {"evidence": list(source["evidence_context"].values())}
     chunk = engine.build_llm_request([], source["clauses"], evidence, {}, "full", contract_version="3.0")
@@ -125,7 +161,7 @@ class ConditionReassessmentTests(unittest.TestCase):
     def _late_condition_budget_case(self, *, outcome="accepted", ordinary_limit=2, early_rejection=True):
         """Offline bridge orchestration, not a real provider/Word acceptance."""
         data, raw, _, _, _ = incident()
-        original_data = json.loads((ROOT / "tests/fixtures/cover-condition-reassessment-incident.json").read_text())
+        original_data = current_schema_condition_fixture()
         source = data["source"]
         evidence = {"evidence": list(source["evidence_context"].values())}
         with tempfile.TemporaryDirectory() as td:
@@ -405,7 +441,7 @@ class ConditionReassessmentTests(unittest.TestCase):
         data, raw, _, _, _ = incident()
         source = data["source"]
         evidence = {"evidence": list(source["evidence_context"].values())}
-        original_data = json.loads((ROOT / "tests/fixtures/cover-condition-reassessment-incident.json").read_text())
+        original_data = current_schema_condition_fixture()
         with tempfile.TemporaryDirectory() as td:
             directory = Path(td) / "packet"; directory.mkdir()
             request = engine.build_llm_request([], source["clauses"], evidence, {}, "full", contract_version="3.0")

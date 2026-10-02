@@ -177,6 +177,15 @@ Administrative labels with this policy are printed blank while approval/value
 verification remains unchanged. Serialized cover audits check the labels and
 do not count them as trusted metadata. Real Word/visual acceptance is separate.
 
+Printed 一级学科 and 二级学科 labels bind independently to
+`thesis_profile.cover_metadata.first_discipline` and `.second_discipline`.
+The normalizer copies only their explicit source metadata; neither is inferred
+from a major, `degree_discipline`, `field_name`, or the other level. These are
+optional profile fields until a current source requirement needs them. A
+missing required value remains a placeholder/pending input, not a verified
+discipline value. Do not attach an unresolved discipline duty to an executable
+cover requirement; the mixed-relation contract remains fail-closed.
+
 Native structured-output schemas are provider projections, not the local
 contract. Unsupported composition constraints (`allOf`, `not`, `if`/`then`/
 `else`, and non-portable `oneOf`) remain in the local schema and are described

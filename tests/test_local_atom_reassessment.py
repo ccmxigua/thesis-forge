@@ -13,7 +13,7 @@ sys.path[:0] = [str(Path(__file__).resolve().parent),
                str(Path(__file__).resolve().parents[1] / "scripts")]
 import host_agent_bridge as bridge
 import requirements_engine as engine
-from host_review_contract import contract_error_records
+from host_review_contract import contract_error_records, MIXED_INVENTORY_CODE
 from local_atom_reassessment import POLICY
 from semantic_contract import sha256_json
 from test_source_inventory_composition import fixture, completion
@@ -69,6 +69,23 @@ def test_compound_projection_is_exact_current_source_bound_and_preserves_parent(
     assert ledger == audit["authorized_proposals"]
     assert bridge.validate_host_agent_response(candidate, chunk) == []
     assert (parent, proposal, records, chunk) == frozen
+
+
+@pytest.mark.parametrize("wrong_code", ["contract_validation_error", "unknown", "primary_all_covered_classification_reassessment_required"])
+def test_typed_inventory_diagnostic_is_not_a_generic_or_other_proposal_grant(wrong_code):
+    parent, proposal, records, chunk = case()
+    inventory = next(r for r in records if r["code"] == MIXED_INVENTORY_CODE)
+    inventory["code"] = wrong_code
+    assert project(parent, proposal, records, chunk)[0] is None
+
+
+@pytest.mark.parametrize("field", ["applicability", "source_quote"])
+@pytest.mark.parametrize("wrong_code", [MIXED_INVENTORY_CODE, "primary_all_covered_classification_reassessment_required"])
+def test_inventory_or_classification_code_cannot_authorize_a_field_path(field, wrong_code):
+    parent, proposal, records, chunk = case()
+    record = next(r for r in records if r["json_pointer"].endswith("." + field))
+    record["code"] = wrong_code
+    assert project(parent, proposal, records, chunk)[0] is None
 
 
 @pytest.mark.parametrize("damage", ["stale_parent", "missing_error", "duplicate_error", "invented_error", "wrong_clause",

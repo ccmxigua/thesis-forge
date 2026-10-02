@@ -9,7 +9,7 @@ from __future__ import annotations
 import copy
 import re
 
-from host_review_contract import contract_error_records
+from host_review_contract import contract_error_records, MIXED_INVENTORY_CODE
 from semantic_contract import sha256_json
 from source_atom_metadata import bind_atom_quote
 from source_literal_binding import compose_source_fragments
@@ -58,7 +58,11 @@ def project(previous, proposed, records, chunk, *, validate, changed_paths, veri
             path = record.get("json_pointer", "")
             inventory = re.fullmatch(r"\$\.clause_reviews\[(\d+)\]\.obligations", path)
             field = re.fullmatch(r"\$\.clause_reviews\[(\d+)\]\.obligations\[(\d+)\]\.(applicability|source_quote)", path)
-            if record.get("code") != "contract_validation_error" or not (inventory or field):
+            # A typed inventory diagnostic does not widen the old proposal
+            # scope. Field diagnostics still require their original generic
+            # code and exact raw message; every record is replayed above.
+            expected_code = MIXED_INVENTORY_CODE if inventory else "contract_validation_error"
+            if record.get("code") != expected_code or not (inventory or field):
                 return None, audit
             i = int((inventory or field).group(1))
             old_review, new_review = old_reviews[i], new_reviews[i]
@@ -67,7 +71,7 @@ def project(previous, proposed, records, chunk, *, validate, changed_paths, veri
                 return None, audit
             binding = compose_source_fragments([cid], by_clause, chunk["evidence_context"])
             if inventory:
-                if (record.get("raw_error") != path + ": mixed_execution_requires_covered_and_unverifiable_actions"
+                if (record.get("raw_error") != path + ": " + MIXED_INVENTORY_CODE
                         or old_review.get("classification") != "executable_with_external_check"):
                     return None, audit
                 old, new = old_review.get("obligations"), new_review.get("obligations")

@@ -44,6 +44,9 @@ from source_literal_binding import (
 )
 
 
+MIXED_INVENTORY_CODE = "mixed_execution_requires_covered_and_unverifiable_actions"
+
+
 _GENERIC_SIGNATURE_LINE_PATTERNS = (
     re.compile(r"^(?:作者|研究生)(?:姓名|签名|签字)$"),
     re.compile(r"^日期$"),
@@ -384,7 +387,8 @@ def contract_error_records(
             "raw_error": text,
             "response_sha256": _response_sha256(response) if response is not None else None,
             **({"source_chunk_sha256": _response_sha256(chunk)}
-               if code == POLICY_INVENTORY_CODE else {}),
+               if code in {POLICY_INVENTORY_CODE,
+                           MIXED_INVENTORY_CODE} else {}),
             "allowed_values": (
                 [
                     "explicit_normative_text", "template_structure", "fixed_statement",
@@ -402,6 +406,7 @@ def contract_error_records(
                 "unused_executable_requirement",
                 "executable_review_obligations_missing",
                 "executable_review_obligations_uncovered",
+                MIXED_INVENTORY_CODE,
                 "non_public_administration_fields_missing",
             },
         })
@@ -534,6 +539,8 @@ def contract_error_records(
             code = "executable_review_obligations_missing"
         elif "executable_review_requires_all_obligations_covered" in lowered:
             code = "executable_review_obligations_uncovered"
+        elif MIXED_INVENTORY_CODE in lowered:
+            code = MIXED_INVENTORY_CODE
         elif "mixed_execution_classification_relation" in lowered:
             code = "mixed_execution_classification_relation"
         elif "missing_clause_review" in lowered:

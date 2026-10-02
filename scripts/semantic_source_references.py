@@ -21,6 +21,113 @@ from source_obligation_compiler import (
 
 
 REFERENCE_PROTOCOL = "semantic_source_references_v2"
+INVENTORY_ENVELOPE_PROTOCOL = "source_inventory_first_remaining_v1"
+
+
+def source_inventory_generation_schema(
+    schema: dict[str, Any], *, retained_results: dict[str, dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    """Express nonempty inventories using portable object shape, not minItems.
+
+    This changes only new generation. Canonical review arrays and semantic
+    validators are unchanged. Consistent may have duties or no duty; every
+    other verdict must enumerate an actual source finding, never a filler.
+    Shared atom definitions avoid multiplying the large per-source unions.
+    """
+    generated = copy.deepcopy(schema)
+    definitions = generated.setdefault("$defs", {})
+
+    def inventory(array: dict[str, Any], *, empty_allowed: bool,
+                  locked_atoms: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+        atom = array["items"]
+        name = "sourceInventoryAtoms_" + sha256_json(atom)
+        if name in definitions and definitions[name] != atom:
+            raise ValueError("source inventory generation definition collision")
+        definitions[name] = copy.deepcopy(atom)
+        reference = {"$ref": "#/$defs/" + name}
+        empty_allowed = empty_allowed and array.get("minItems", 0) == 0
+        if array.get("maxItems") == 0:
+            first = {"type": "null"}
+        else:
+            first = {"anyOf": [reference, {"type": "null"}]} if empty_allowed else reference
+        if locked_atoms:
+            # The retained head is already independently validated, not a
+            # model proposal. Keep its positional payload fixed as well.
+            from independent_retry_scope import _exact_shape
+            first = _exact_shape(locked_atoms[0])
+        remaining = {"type": "array", "items": reference}
+        if not empty_allowed and "minItems" in array:
+            remaining["minItems"] = max(0, array["minItems"] - 1)
+        if "maxItems" in array:
+            remaining["maxItems"] = max(0, array["maxItems"] - 1)
+        return {"type": "object", "additionalProperties": False,
+                "required": ["first", "remaining"], "properties": {
+                    "first": first,
+                    "remaining": remaining,
+                }, "description": (
+                    "Source inventory envelope: canonical order is first followed by remaining. "
+                    "No duty: first=null and remaining=[], only with consistent. "
+                    "Otherwise first is a genuine exact-source atom. Never invent one to satisfy the schema."
+                )}
+
+    for branch in generated["properties"]["results"]["items"]["anyOf"]:
+        cid = branch["properties"]["check_id"]["enum"][0]
+        locked_atoms = (retained_results or {}).get(cid, {}).get("identified_obligations")
+        alternatives = branch.pop("anyOf", None) or [copy.deepcopy(branch)]
+        # The outer object supplies common keys; the whole-result union binds
+        # verdict to first's nullability even after native minItems is dropped.
+        branch["properties"]["identified_obligations"] = inventory(
+            branch["properties"]["identified_obligations"], empty_allowed=True, locked_atoms=locked_atoms)
+        coupled = []
+        for alternative in alternatives:
+            verdicts = alternative["properties"]["verdict"]["enum"]
+            for values, empty_allowed in (([v for v in verdicts if v == "consistent"], True),
+                                          ([v for v in verdicts if v != "consistent"], False)):
+                if not values:
+                    continue
+                option = copy.deepcopy(alternative)
+                option["properties"]["verdict"] = {"enum": values}
+                option["properties"]["identified_obligations"] = inventory(
+                    alternative["properties"]["identified_obligations"], empty_allowed=empty_allowed,
+                    locked_atoms=locked_atoms)
+                coupled.append(option)
+        branch["anyOf"] = coupled
+    return generated
+
+
+def decode_source_inventory_envelopes(response: Any) -> tuple[Any, list[str]]:
+    """Lossless ordered shape conversion; never changes verdicts or atoms.
+
+    Historical array payloads remain readable. Closed envelope keys prevent
+    silently dropping producer data; a null head with a nonempty tail fails.
+    Semantic contradictions still reach the existing typed validator/retry.
+    """
+    decoded = copy.deepcopy(response)
+    converted = []
+    if not isinstance(decoded, dict) or not isinstance(decoded.get("results"), list):
+        return decoded, converted
+    for result in decoded["results"]:
+        if not isinstance(result, dict):
+            continue
+        envelope = result.get("identified_obligations")
+        if not isinstance(envelope, dict):
+            continue
+        if (set(envelope) != {"first", "remaining"}
+                or not isinstance(envelope["remaining"], list)
+                or any(not isinstance(atom, dict) for atom in envelope["remaining"])):
+            raise ValueError("source inventory envelope has invalid keys or remaining atoms")
+        first, remaining = envelope["first"], envelope["remaining"]
+        if first is None:
+            if remaining:
+                raise ValueError("source inventory null first cannot hide remaining obligations")
+            atoms = []
+        elif isinstance(first, dict):
+            atoms = [first, *remaining]
+        else:
+            raise ValueError("source inventory first must be an obligation object or null")
+        result["identified_obligations"] = atoms
+        converted.append(result.get("check_id"))
+    return decoded, converted
 
 
 class SourceReferenceResponseError(ValueError):
@@ -480,9 +587,10 @@ def compile_source_reference_response(
     packet = build_source_reference_packet(request)
     validation_schema = source_reference_schema(canonical_schema, packet, coverage=coverage)
     provider_response_sha256 = sha256_json(response)
+    wire_input, envelope_checks = decode_source_inventory_envelopes(response) if coverage else (copy.deepcopy(response), [])
     canonical_input = (
-        normalize_native_response(response, validation_schema)
-        if provider_nullable_optionals else copy.deepcopy(response)
+        normalize_native_response(wire_input, validation_schema)
+        if provider_nullable_optionals else wire_input
     )
     errors = validate_instance(canonical_input, validation_schema)
     if errors:
@@ -537,6 +645,14 @@ def compile_source_reference_response(
             "policy": "strict_native_optional_nulls_to_omitted_v1",
             "provider_response_sha256": provider_response_sha256,
             "canonical_input_response_sha256": sha256_json(canonical_input),
+        }
+    if envelope_checks:
+        compilation["inventory_shape_projection"] = {
+            "policy": INVENTORY_ENVELOPE_PROTOCOL,
+            "check_ids": envelope_checks,
+            "raw_response_sha256": provider_response_sha256,
+            "decoded_wire_response_sha256": sha256_json(wire_input),
+            "verdicts_and_ordered_atoms_unchanged": True,
         }
     return compiled, compilation
 

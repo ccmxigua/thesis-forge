@@ -2134,10 +2134,10 @@ class NativeSemanticReviewTests(unittest.TestCase):
             provider_schema_path = output_dir / "provider-response-schema.json"
             provider_schema = json.loads(provider_schema_path.read_text(encoding="utf-8"))
             expected_packet = native_review.build_source_reference_packet(request)
-            self.assertEqual(local_schema, native_review.source_reference_schema(
+            self.assertEqual(local_schema, native_review.source_inventory_generation_schema(native_review.source_reference_schema(
                 OBLIGATION_COVERAGE_SCHEMA, expected_packet, coverage=True,
                 constrain_requirement_links=True,
-            ))
+            )))
             canonical_schema = json.loads(
                 (output_dir / "canonical-response-schema.json").read_text(encoding="utf-8")
             )

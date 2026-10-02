@@ -20,6 +20,7 @@ from native_semantic_review import (
 )
 from semantic_source_references import (
     build_source_reference_packet, source_reference_schema, compile_source_reference_response,
+    source_inventory_generation_schema,
 )
 from host_review_schema import native_output_schema, native_schema_support_errors
 import native_semantic_review as native_review
@@ -208,7 +209,7 @@ class RetryScopeTests(unittest.TestCase):
         replay, _ = compile_source_reference_response(original, self.retry, OBLIGATION_COVERAGE_SCHEMA,
             coverage=True, provider_nullable_optionals=True)
         self.assertEqual(json.loads((self.output / "compiled-response.json").read_text()), replay)
-        self.assertEqual(json.loads((self.output / "response-schema.json").read_text()), schema)
+        self.assertEqual(json.loads((self.output / "response-schema.json").read_text()), source_inventory_generation_schema(schema, retained_results=locks))
         self.assertEqual(observed["output_schema_path"], self.output / "provider-response-schema.json")
         self.assertEqual(replay["results"][1]["verdict"], "external_compliance_pending")
 

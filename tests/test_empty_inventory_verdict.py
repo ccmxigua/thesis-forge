@@ -24,6 +24,14 @@ from tests import test_independent_retry_scope as scope_fixtures
 from tests import test_host_agent_bridge as bridge_fixtures
 
 
+def enveloped(raw):
+    result = copy.deepcopy(raw)
+    for item in result["results"]:
+        atoms = item["identified_obligations"]
+        item["identified_obligations"] = {"first": atoms[0] if atoms else None, "remaining": atoms[1:]}
+    return result
+
+
 class EmptyInventoryVerdictTests(unittest.TestCase):
     def setUp(self):
         self.case = json.loads((ROOT / "tests/fixtures/empty-inventory-verdict-incident.json").read_text())
@@ -137,7 +145,7 @@ class EmptyInventoryVerdictTests(unittest.TestCase):
         stack.enter_context(patch.object(native.codex_adapter,"parse_result",side_effect=[(r,{"event_types":["task_complete"]}) for r in raws]))
 
     def test_native_runner_and_resealed_consumer_proof(self):
-        raw = self.helper.wire(self.corrected, self.retry)
+        raw = enveloped(self.helper.wire(self.corrected, self.retry))
         with ExitStack() as stack:
             self.mock_transport(stack, [raw])
             audit = native.run_native_semantic_review(self.retry,output_dir=self.output,host_runtime="codex",model="gpt-6-luna",timeout=5)
@@ -165,7 +173,7 @@ class EmptyInventoryVerdictTests(unittest.TestCase):
                 retry=self.feedback_request(request,first,sha256_json(candidate))
                 second=copy.deepcopy(first)
                 if success: second["results"][0]["verdict"]="consistent"
-                raws=[self.helper.wire(first,request), self.helper.wire(second,retry)]
+                raws=[enveloped(self.helper.wire(first,request)), enveloped(self.helper.wire(second,retry))]
                 directory=Path(tmp)/"packet"
                 with ExitStack() as stack:
                     self.mock_transport(stack,raws); stack.enter_context(patch.object(bridge.time,"sleep"))

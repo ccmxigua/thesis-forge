@@ -1,0 +1,1558 @@
+{
+  "baseline": "ea54c09e154f6f86291d6f36a1c9493b62ea2d88",
+  "artifacts": {
+    "independent-review-chunk-0004-attempt-01/request.json": {
+      "sha256": "ea493d708eb43ad5afe544df25a17c1d58ae02f884fe629afbc35961a5d64f71",
+      "content": {
+        "protocol": "native_source_obligation_coverage_review_v8",
+        "run_id": "50763fcc-50d0-4a18-841b-e56e7b979490",
+        "chunk_index": 4,
+        "case_id": "bsu",
+        "provenance": {
+          "version": "1.0",
+          "origin": "fresh_host_agent",
+          "source_sha256": "1e9d38b307dbef8c3bf97b85ba5def70eaf7e2dba50cf25da978e007fc907059",
+          "evidence_sha256": "acd3b45f639bec830c8fc9afe1e4555e1a6fd3a8531f8233a84164eac45f5ef5",
+          "clause_sha256": "bf4d3b0323ac0c3892724b1aa9dbb937037bfd005f4a792897291adee64811fa",
+          "request_sha256": "b3549917718a94eb8cce3db8c6b5c648ed5e0bc59441abc849d644ec633438bf",
+          "run_id": "50763fcc-50d0-4a18-841b-e56e7b979490"
+        },
+        "source_sha256": "1e9d38b307dbef8c3bf97b85ba5def70eaf7e2dba50cf25da978e007fc907059",
+        "clause_sha256": "bf4d3b0323ac0c3892724b1aa9dbb937037bfd005f4a792897291adee64811fa",
+        "evidence_sha256": "acd3b45f639bec830c8fc9afe1e4555e1a6fd3a8531f8233a84164eac45f5ef5",
+        "request_sha256": "b3549917718a94eb8cce3db8c6b5c648ed5e0bc59441abc849d644ec633438bf",
+        "content_context": {
+          "artifact": "thesis_manuscript",
+          "availability": "not_included_in_obligation_review_request",
+          "meaning": "This request omits manuscript body text; it does not assert whether the user supplied a manuscript to the pipeline."
+        },
+        "checks": [
+          {
+            "check_id": "C00025",
+            "document_text": "申请学位                          培养单位",
+            "review_context": {
+              "semantic_clause_text": "申请学位 培养单位",
+              "classification": "informational",
+              "requires_requirement": false,
+              "reason": "The evidence is a field-label line in a sample thesis and contains no instruction to reproduce or format it.",
+              "primary_obligations": [],
+              "primary_obligation_quote_bindings": [],
+              "linked_requirements": [],
+              "source_clause_support": [],
+              "cited_evidence": {
+                "E00025": {
+                  "id": "E00025",
+                  "kind": "paragraph",
+                  "text": "申请学位                          培养单位",
+                  "style_id": "af",
+                  "runs": [
+                    {
+                      "text": "申请学位",
+                      "format": {
+                        "fonts": {},
+                        "size_pt": 12.0
+                      }
+                    },
+                    {
+                      "text": "培养单位",
+                      "format": {
+                        "fonts": {},
+                        "size_pt": 12.0
+                      }
+                    }
+                  ],
+                  "location": {
+                    "part": "document",
+                    "child_index": 29,
+                    "order": 24
+                  },
+                  "context_before": [
+                    "English title（英文）",
+                    "论文作者                          指导教师"
+                  ],
+                  "context_after": [
+                    "一级学科                          二级学科",
+                    "答辩委员会："
+                  ],
+                  "style_name": "段",
+                  "xml_locator": {
+                    "part": "document",
+                    "child_index": 29,
+                    "order": 24
+                  }
+                }
+              },
+              "machine_obligation_ids": [],
+              "manual_review_codes": [],
+              "source_content_verification_codes": [],
+              "pending_source_work": [],
+              "section_description": null
+            }
+          },
+          {
+            "check_id": "C00026",
+            "document_text": "一级学科                          二级学科",
+            "review_context": {
+              "semantic_clause_text": "一级学科 二级学科",
+              "classification": "informational",
+              "requires_requirement": false,
+              "reason": "The evidence is a field-label line in a sample thesis and contains no instruction to reproduce or format it.",
+              "primary_obligations": [],
+              "primary_obligation_quote_bindings": [],
+              "linked_requirements": [],
+              "source_clause_support": [],
+              "cited_evidence": {
+                "E00026": {
+                  "id": "E00026",
+                  "kind": "paragraph",
+                  "text": "一级学科                          二级学科",
+                  "style_id": "af",
+                  "runs": [
+                    {
+                      "text": "一级学科",
+                      "format": {
+                        "fonts": {},
+                        "size_pt": 12.0
+                      }
+                    },
+                    {
+                      "text": "二级学科",
+                      "format": {
+                        "fonts": {},
+                        "size_pt": 12.0
+                      }
+                    }
+                  ],
+                  "location": {
+                    "part": "document",
+                    "child_index": 30,
+                    "order": 25
+                  },
+                  "context_before": [
+                    "论文作者                          指导教师",
+                    "申请学位                          培养单位"
+                  ],
+                  "context_after": [
+                    "答辩委员会：",
+                    "主席            技术职称          所在单位"
+                  ],
+                  "style_name": "段",
+                  "xml_locator": {
+                    "part": "document",
+                    "child_index": 30,
+                    "order": 25
+                  }
+                }
+              },
+              "machine_obligation_ids": [],
+              "manual_review_codes": [],
+              "source_content_verification_codes": [],
+              "pending_source_work": [],
+              "section_description": null
+            }
+          },
+          {
+            "check_id": "C00027",
+            "document_text": "答辩委员会",
+            "review_context": {
+              "semantic_clause_text": "答辩委员会",
+              "classification": "informational",
+              "requires_requirement": false,
+              "reason": "The evidence is a committee heading in a sample thesis; it does not establish a requirement to reproduce the heading or committee structure.",
+              "primary_obligations": [],
+              "primary_obligation_quote_bindings": [],
+              "linked_requirements": [],
+              "source_clause_support": [],
+              "cited_evidence": {
+                "E00027": {
+                  "id": "E00027",
+                  "kind": "paragraph",
+                  "text": "答辩委员会：",
+                  "style_id": "af",
+                  "runs": [
+                    {
+                      "text": "答辩委员会",
+                      "format": {
+                        "fonts": {},
+                        "size_pt": 12.0
+                      }
+                    },
+                    {
+                      "text": "：",
+                      "format": {
+                        "fonts": {},
+                        "size_pt": 12.0
+                      }
+                    }
+                  ],
+                  "location": {
+                    "part": "document",
+                    "child_index": 31,
+                    "order": 26
+                  },
+                  "context_before": [
+                    "申请学位                          培养单位",
+                    "一级学科                          二级学科"
+                  ],
+                  "context_after": [
+                    "主席            技术职称          所在单位",
+                    "评阅人          技术职称          所在单位"
+                  ],
+                  "style_name": "段",
+                  "xml_locator": {
+                    "part": "document",
+                    "child_index": 31,
+                    "order": 26
+                  }
+                }
+              },
+              "machine_obligation_ids": [],
+              "manual_review_codes": [],
+              "source_content_verification_codes": [],
+              "pending_source_work": [],
+              "section_description": null
+            }
+          },
+          {
+            "check_id": "C00028",
+            "document_text": "主席            技术职称          所在单位",
+            "review_context": {
+              "semantic_clause_text": "主席 技术职称 所在单位",
+              "classification": "informational",
+              "requires_requirement": false,
+              "reason": "The evidence is a committee-role and information label line in a sample thesis, without a source instruction to reproduce it.",
+              "primary_obligations": [],
+              "primary_obligation_quote_bindings": [],
+              "linked_requirements": [],
+              "source_clause_support": [],
+              "cited_evidence": {
+                "E00028": {
+                  "id": "E00028",
+                  "kind": "paragraph",
+                  "text": "主席            技术职称          所在单位",
+                  "style_id": "af",
+                  "runs": [
+                    {
+                      "text": "主席",
+                      "format": {
+                        "fonts": {},
+                        "size_pt": 12.0
+                      }
+                    },
+                    {
+                      "text": "技术职称",
+                      "format": {
+                        "fonts": {},
+                        "size_pt": 12.0
+                      }
+                    },
+                    {
+                      "text": "所在单位",
+                      "format": {
+                        "fonts": {},
+                        "size_pt": 12.0
+                      }
+                    }
+                  ],
+                  "location": {
+                    "part": "document",
+                    "child_index": 32,
+                    "order": 27
+                  },
+                  "context_before": [
+                    "一级学科                          二级学科",
+                    "答辩委员会："
+                  ],
+                  "context_after": [
+                    "评阅人          技术职称          所在单位",
+                    "委员            技术职称          所在单位"
+                  ],
+                  "style_name": "段",
+                  "xml_locator": {
+                    "part": "document",
+                    "child_index": 32,
+                    "order": 27
+                  }
+                }
+              },
+              "machine_obligation_ids": [],
+              "manual_review_codes": [],
+              "source_content_verification_codes": [],
+              "pending_source_work": [],
+              "section_description": null
+            }
+          },
+          {
+            "check_id": "C00029",
+            "document_text": "评阅人          技术职称          所在单位",
+            "review_context": {
+              "semantic_clause_text": "评阅人 技术职称 所在单位",
+              "classification": "informational",
+              "requires_requirement": false,
+              "reason": "The evidence is a reviewer information label line in a sample thesis, without a source instruction to reproduce it.",
+              "primary_obligations": [],
+              "primary_obligation_quote_bindings": [],
+              "linked_requirements": [],
+              "source_clause_support": [],
+              "cited_evidence": {
+                "E00029": {
+                  "id": "E00029",
+                  "kind": "paragraph",
+                  "text": "评阅人          技术职称          所在单位",
+                  "style_id": "af",
+                  "runs": [
+                    {
+                      "text": "评阅人",
+                      "format": {
+                        "fonts": {},
+                        "size_pt": 12.0
+                      }
+                    },
+                    {
+                      "text": "技术职称",
+                      "format": {
+                        "fonts": {},
+                        "size_pt": 12.0
+                      }
+                    },
+                    {
+                      "text": "所在单位",
+                      "format": {
+                        "fonts": {},
+                        "size_pt": 12.0
+                      }
+                    }
+                  ],
+                  "location": {
+                    "part": "document",
+                    "child_index": 33,
+                    "order": 28
+                  },
+                  "context_before": [
+                    "答辩委员会：",
+                    "主席            技术职称          所在单位"
+                  ],
+                  "context_after": [
+                    "委员            技术职称          所在单位",
+                    "秘书            技术职称          所在单位"
+                  ],
+                  "style_name": "段",
+                  "xml_locator": {
+                    "part": "document",
+                    "child_index": 33,
+                    "order": 28
+                  }
+                }
+              },
+              "machine_obligation_ids": [],
+              "manual_review_codes": [],
+              "source_content_verification_codes": [],
+              "pending_source_work": [],
+              "section_description": null
+            }
+          },
+          {
+            "check_id": "C00030",
+            "document_text": "委员            技术职称          所在单位",
+            "review_context": {
+              "semantic_clause_text": "委员 技术职称 所在单位",
+              "classification": "informational",
+              "requires_requirement": false,
+              "reason": "The evidence is a committee-member information label line in a sample thesis, without a source instruction to reproduce it.",
+              "primary_obligations": [],
+              "primary_obligation_quote_bindings": [],
+              "linked_requirements": [],
+              "source_clause_support": [],
+              "cited_evidence": {
+                "E00030": {
+                  "id": "E00030",
+                  "kind": "paragraph",
+                  "text": "委员            技术职称          所在单位",
+                  "style_id": "af",
+                  "runs": [
+                    {
+                      "text": "委员",
+                      "format": {
+                        "fonts": {},
+                        "size_pt": 12.0
+                      }
+                    },
+                    {
+                      "text": "技术职称",
+                      "format": {
+                        "fonts": {},
+                        "size_pt": 12.0
+                      }
+                    },
+                    {
+                      "text": "所在单位",
+                      "format": {
+                        "fonts": {},
+                        "size_pt": 12.0
+                      }
+                    }
+                  ],
+                  "location": {
+                    "part": "document",
+                    "child_index": 34,
+                    "order": 29
+                  },
+                  "context_before": [
+                    "主席            技术职称          所在单位",
+                    "评阅人          技术职称          所在单位"
+                  ],
+                  "context_after": [
+                    "秘书            技术职称          所在单位",
+                    "年  月"
+                  ],
+                  "style_name": "段",
+                  "xml_locator": {
+                    "part": "document",
+                    "child_index": 34,
+                    "order": 29
+                  }
+                }
+              },
+              "machine_obligation_ids": [],
+              "manual_review_codes": [],
+              "source_content_verification_codes": [],
+              "pending_source_work": [],
+              "section_description": null
+            }
+          },
+          {
+            "check_id": "C00031",
+            "document_text": "秘书            技术职称          所在单位",
+            "review_context": {
+              "semantic_clause_text": "秘书 技术职称 所在单位",
+              "classification": "informational",
+              "requires_requirement": false,
+              "reason": "The evidence is a secretary information label line in a sample thesis, without a source instruction to reproduce it.",
+              "primary_obligations": [],
+              "primary_obligation_quote_bindings": [],
+              "linked_requirements": [],
+              "source_clause_support": [],
+              "cited_evidence": {
+                "E00031": {
+                  "id": "E00031",
+                  "kind": "paragraph",
+                  "text": "秘书            技术职称          所在单位",
+                  "style_id": "af",
+                  "runs": [
+                    {
+                      "text": "秘书",
+                      "format": {
+                        "fonts": {},
+                        "size_pt": 12.0
+                      }
+                    },
+                    {
+                      "text": "技术职称",
+                      "format": {
+                        "fonts": {},
+                        "size_pt": 12.0
+                      }
+                    },
+                    {
+                      "text": "所在单位",
+                      "format": {
+                        "fonts": {},
+                        "size_pt": 12.0
+                      }
+                    }
+                  ],
+                  "location": {
+                    "part": "document",
+                    "child_index": 35,
+                    "order": 30
+                  },
+                  "context_before": [
+                    "评阅人          技术职称          所在单位",
+                    "委员            技术职称          所在单位"
+                  ],
+                  "context_after": [
+                    "年  月",
+                    "北京体育大学学位论文原创性声明"
+                  ],
+                  "style_name": "段",
+                  "xml_locator": {
+                    "part": "document",
+                    "child_index": 35,
+                    "order": 30
+                  }
+                }
+              },
+              "machine_obligation_ids": [],
+              "manual_review_codes": [],
+              "source_content_verification_codes": [],
+              "pending_source_work": [],
+              "section_description": null
+            }
+          },
+          {
+            "check_id": "C00032",
+            "document_text": "年  月",
+            "review_context": {
+              "semantic_clause_text": "年 月",
+              "classification": "informational",
+              "requires_requirement": false,
+              "reason": "The evidence is a month/year line in a sample thesis and does not prescribe a date-formatting requirement.",
+              "primary_obligations": [],
+              "primary_obligation_quote_bindings": [],
+              "linked_requirements": [],
+              "source_clause_support": [],
+              "cited_evidence": {
+                "E00032": {
+                  "id": "E00032",
+                  "kind": "paragraph",
+                  "text": "年  月",
+                  "style_id": null,
+                  "runs": [
+                    {
+                      "text": "年",
+                      "format": {
+                        "fonts": {},
+                        "size_pt": 14.0
+                      }
+                    },
+                    {
+                      "text": "月",
+                      "format": {
+                        "fonts": {},
+                        "size_pt": 14.0
+                      }
+                    }
+                  ],
+                  "location": {
+                    "part": "document",
+                    "child_index": 38,
+                    "order": 31
+                  },
+                  "context_before": [
+                    "委员            技术职称          所在单位",
+                    "秘书            技术职称          所在单位"
+                  ],
+                  "context_after": [
+                    "北京体育大学学位论文原创性声明",
+                    "本人郑重声明：所呈交的学位论文，是本人在导师指导下进行研究工作所取得的研究成果。除文中已经注明引用的内容外，本学位论文的研究成果不包含任何他人创作的、已公开发表或者没有公开发表的作品的内容。对本论文所涉及的研究工作做出贡献的其他个人和集体，均已在文中以明确方式标明。本学位论文原创性声明的法律责任由本人承担。"
+                  ],
+                  "style_name": null,
+                  "xml_locator": {
+                    "part": "document",
+                    "child_index": 38,
+                    "order": 31
+                  }
+                }
+              },
+              "machine_obligation_ids": [],
+              "manual_review_codes": [],
+              "source_content_verification_codes": [],
+              "pending_source_work": [],
+              "section_description": null
+            }
+          }
+        ],
+        "attempt": 1,
+        "provider_attempt": 1,
+        "output_policy": "review_draft"
+      }
+    },
+    "independent-review-chunk-0004-attempt-01/raw-response.json": {
+      "sha256": "f055cc4ae565d00fdc5d71f15bb13d135d532de0100fd89bcdb769073ba8a953",
+      "content": {
+        "results": [
+          {
+            "check_id": "C00025",
+            "verdict": "uncertain",
+            "rationale": "The source is the standalone form-label line “申请学位                          培养单位”. It names fields but does not establish what must be entered or whether this line is an execution target; the label alone does not resolve that uncertainty.",
+            "identified_obligations": [],
+            "evidence_refs": [
+              "Q5c1f8647f867b10c"
+            ]
+          },
+          {
+            "check_id": "C00026",
+            "verdict": "uncertain",
+            "rationale": "The source is the standalone form-label line “一级学科                          二级学科”. It names fields but does not establish what must be entered or whether this line is an execution target; the label alone does not resolve that uncertainty.",
+            "identified_obligations": [],
+            "evidence_refs": [
+              "Q91a6416138f535b5"
+            ]
+          },
+          {
+            "check_id": "C00027",
+            "verdict": "uncertain",
+            "rationale": "The source is the standalone label “答辩委员会”. It identifies a committee heading but does not establish whether reproducing the heading or providing committee information is required; the label alone does not resolve that uncertainty.",
+            "identified_obligations": [],
+            "evidence_refs": [
+              "Q92d86ef39bc464a5"
+            ]
+          },
+          {
+            "check_id": "C00028",
+            "verdict": "uncertain",
+            "rationale": "The source is the standalone form-label line “主席            技术职称          所在单位”. It identifies fields but does not establish what must be entered or whether this line is an execution target; the label alone does not resolve that uncertainty.",
+            "identified_obligations": [],
+            "evidence_refs": [
+              "Qd945a6d1a286ab06"
+            ]
+          },
+          {
+            "check_id": "C00029",
+            "verdict": "uncertain",
+            "rationale": "The source is the standalone form-label line “评阅人          技术职称          所在单位”. It identifies fields but does not establish what must be entered or whether this line is an execution target; the label alone does not resolve that uncertainty.",
+            "identified_obligations": [],
+            "evidence_refs": [
+              "Qbadc2afdaa89321a"
+            ]
+          },
+          {
+            "check_id": "C00030",
+            "verdict": "uncertain",
+            "rationale": "The source is the standalone form-label line “委员            技术职称          所在单位”. It identifies fields but does not establish what must be entered or whether this line is an execution target; the label alone does not resolve that uncertainty.",
+            "identified_obligations": [],
+            "evidence_refs": [
+              "Qeafac50b588d67b5"
+            ]
+          },
+          {
+            "check_id": "C00031",
+            "verdict": "uncertain",
+            "rationale": "The source is the standalone form-label line “秘书            技术职称          所在单位”. It identifies fields but does not establish what must be entered or whether this line is an execution target; the label alone does not resolve that uncertainty.",
+            "identified_obligations": [],
+            "evidence_refs": [
+              "Q93c8a4e832ad7d9a"
+            ]
+          },
+          {
+            "check_id": "C00032",
+            "verdict": "uncertain",
+            "rationale": "The source is the standalone date-field label “年  月”. It identifies year and month fields but does not prescribe a date format or establish whether a date must be entered; the label alone does not resolve that uncertainty.",
+            "identified_obligations": [],
+            "evidence_refs": [
+              "Q844aa25f88586060"
+            ]
+          }
+        ]
+      }
+    },
+    "independent-review-chunk-0004-attempt-01/compiled-response.json": {
+      "sha256": "50235c9c58789f2d371ddb96f6f49541ea0b6e096d8d7a14865f8c9225607ba5",
+      "content": {
+        "results": [
+          {
+            "check_id": "C00025",
+            "verdict": "uncertain",
+            "rationale": "The source is the standalone form-label line “申请学位                          培养单位”. It names fields but does not establish what must be entered or whether this line is an execution target; the label alone does not resolve that uncertainty.",
+            "identified_obligations": [],
+            "evidence_quotes": [
+              "申请学位                          培养单位"
+            ],
+            "machine_obligation_ids": []
+          },
+          {
+            "check_id": "C00026",
+            "verdict": "uncertain",
+            "rationale": "The source is the standalone form-label line “一级学科                          二级学科”. It names fields but does not establish what must be entered or whether this line is an execution target; the label alone does not resolve that uncertainty.",
+            "identified_obligations": [],
+            "evidence_quotes": [
+              "一级学科                          二级学科"
+            ],
+            "machine_obligation_ids": []
+          },
+          {
+            "check_id": "C00027",
+            "verdict": "uncertain",
+            "rationale": "The source is the standalone label “答辩委员会”. It identifies a committee heading but does not establish whether reproducing the heading or providing committee information is required; the label alone does not resolve that uncertainty.",
+            "identified_obligations": [],
+            "evidence_quotes": [
+              "答辩委员会"
+            ],
+            "machine_obligation_ids": []
+          },
+          {
+            "check_id": "C00028",
+            "verdict": "uncertain",
+            "rationale": "The source is the standalone form-label line “主席            技术职称          所在单位”. It identifies fields but does not establish what must be entered or whether this line is an execution target; the label alone does not resolve that uncertainty.",
+            "identified_obligations": [],
+            "evidence_quotes": [
+              "主席            技术职称          所在单位"
+            ],
+            "machine_obligation_ids": []
+          },
+          {
+            "check_id": "C00029",
+            "verdict": "uncertain",
+            "rationale": "The source is the standalone form-label line “评阅人          技术职称          所在单位”. It identifies fields but does not establish what must be entered or whether this line is an execution target; the label alone does not resolve that uncertainty.",
+            "identified_obligations": [],
+            "evidence_quotes": [
+              "评阅人          技术职称          所在单位"
+            ],
+            "machine_obligation_ids": []
+          },
+          {
+            "check_id": "C00030",
+            "verdict": "uncertain",
+            "rationale": "The source is the standalone form-label line “委员            技术职称          所在单位”. It identifies fields but does not establish what must be entered or whether this line is an execution target; the label alone does not resolve that uncertainty.",
+            "identified_obligations": [],
+            "evidence_quotes": [
+              "委员            技术职称          所在单位"
+            ],
+            "machine_obligation_ids": []
+          },
+          {
+            "check_id": "C00031",
+            "verdict": "uncertain",
+            "rationale": "The source is the standalone form-label line “秘书            技术职称          所在单位”. It identifies fields but does not establish what must be entered or whether this line is an execution target; the label alone does not resolve that uncertainty.",
+            "identified_obligations": [],
+            "evidence_quotes": [
+              "秘书            技术职称          所在单位"
+            ],
+            "machine_obligation_ids": []
+          },
+          {
+            "check_id": "C00032",
+            "verdict": "uncertain",
+            "rationale": "The source is the standalone date-field label “年  月”. It identifies year and month fields but does not prescribe a date format or establish whether a date must be entered; the label alone does not resolve that uncertainty.",
+            "identified_obligations": [],
+            "evidence_quotes": [
+              "年  月"
+            ],
+            "machine_obligation_ids": []
+          }
+        ]
+      }
+    },
+    "independent-review-chunk-0004-attempt-01-provider-attempt-02/request.json": {
+      "sha256": "dabda520799c75a983eb271b95d6cd1e0dfe1b6191b23cbc4d421cb5a714eae9",
+      "content": {
+        "protocol": "native_source_obligation_coverage_review_v8",
+        "run_id": "50763fcc-50d0-4a18-841b-e56e7b979490",
+        "chunk_index": 4,
+        "case_id": "bsu",
+        "provenance": {
+          "version": "1.0",
+          "origin": "fresh_host_agent",
+          "source_sha256": "1e9d38b307dbef8c3bf97b85ba5def70eaf7e2dba50cf25da978e007fc907059",
+          "evidence_sha256": "acd3b45f639bec830c8fc9afe1e4555e1a6fd3a8531f8233a84164eac45f5ef5",
+          "clause_sha256": "bf4d3b0323ac0c3892724b1aa9dbb937037bfd005f4a792897291adee64811fa",
+          "request_sha256": "b3549917718a94eb8cce3db8c6b5c648ed5e0bc59441abc849d644ec633438bf",
+          "run_id": "50763fcc-50d0-4a18-841b-e56e7b979490"
+        },
+        "source_sha256": "1e9d38b307dbef8c3bf97b85ba5def70eaf7e2dba50cf25da978e007fc907059",
+        "clause_sha256": "bf4d3b0323ac0c3892724b1aa9dbb937037bfd005f4a792897291adee64811fa",
+        "evidence_sha256": "acd3b45f639bec830c8fc9afe1e4555e1a6fd3a8531f8233a84164eac45f5ef5",
+        "request_sha256": "b3549917718a94eb8cce3db8c6b5c648ed5e0bc59441abc849d644ec633438bf",
+        "content_context": {
+          "artifact": "thesis_manuscript",
+          "availability": "not_included_in_obligation_review_request",
+          "meaning": "This request omits manuscript body text; it does not assert whether the user supplied a manuscript to the pipeline."
+        },
+        "checks": [
+          {
+            "check_id": "C00025",
+            "document_text": "申请学位                          培养单位",
+            "review_context": {
+              "semantic_clause_text": "申请学位 培养单位",
+              "classification": "informational",
+              "requires_requirement": false,
+              "reason": "The evidence is a field-label line in a sample thesis and contains no instruction to reproduce or format it.",
+              "primary_obligations": [],
+              "primary_obligation_quote_bindings": [],
+              "linked_requirements": [],
+              "source_clause_support": [],
+              "cited_evidence": {
+                "E00025": {
+                  "id": "E00025",
+                  "kind": "paragraph",
+                  "text": "申请学位                          培养单位",
+                  "style_id": "af",
+                  "runs": [
+                    {
+                      "text": "申请学位",
+                      "format": {
+                        "fonts": {},
+                        "size_pt": 12.0
+                      }
+                    },
+                    {
+                      "text": "培养单位",
+                      "format": {
+                        "fonts": {},
+                        "size_pt": 12.0
+                      }
+                    }
+                  ],
+                  "location": {
+                    "part": "document",
+                    "child_index": 29,
+                    "order": 24
+                  },
+                  "context_before": [
+                    "English title（英文）",
+                    "论文作者                          指导教师"
+                  ],
+                  "context_after": [
+                    "一级学科                          二级学科",
+                    "答辩委员会："
+                  ],
+                  "style_name": "段",
+                  "xml_locator": {
+                    "part": "document",
+                    "child_index": 29,
+                    "order": 24
+                  }
+                }
+              },
+              "machine_obligation_ids": [],
+              "manual_review_codes": [],
+              "source_content_verification_codes": [],
+              "pending_source_work": [],
+              "section_description": null
+            }
+          },
+          {
+            "check_id": "C00026",
+            "document_text": "一级学科                          二级学科",
+            "review_context": {
+              "semantic_clause_text": "一级学科 二级学科",
+              "classification": "informational",
+              "requires_requirement": false,
+              "reason": "The evidence is a field-label line in a sample thesis and contains no instruction to reproduce or format it.",
+              "primary_obligations": [],
+              "primary_obligation_quote_bindings": [],
+              "linked_requirements": [],
+              "source_clause_support": [],
+              "cited_evidence": {
+                "E00026": {
+                  "id": "E00026",
+                  "kind": "paragraph",
+                  "text": "一级学科                          二级学科",
+                  "style_id": "af",
+                  "runs": [
+                    {
+                      "text": "一级学科",
+                      "format": {
+                        "fonts": {},
+                        "size_pt": 12.0
+                      }
+                    },
+                    {
+                      "text": "二级学科",
+                      "format": {
+                        "fonts": {},
+                        "size_pt": 12.0
+                      }
+                    }
+                  ],
+                  "location": {
+                    "part": "document",
+                    "child_index": 30,
+                    "order": 25
+                  },
+                  "context_before": [
+                    "论文作者                          指导教师",
+                    "申请学位                          培养单位"
+                  ],
+                  "context_after": [
+                    "答辩委员会：",
+                    "主席            技术职称          所在单位"
+                  ],
+                  "style_name": "段",
+                  "xml_locator": {
+                    "part": "document",
+                    "child_index": 30,
+                    "order": 25
+                  }
+                }
+              },
+              "machine_obligation_ids": [],
+              "manual_review_codes": [],
+              "source_content_verification_codes": [],
+              "pending_source_work": [],
+              "section_description": null
+            }
+          },
+          {
+            "check_id": "C00027",
+            "document_text": "答辩委员会",
+            "review_context": {
+              "semantic_clause_text": "答辩委员会",
+              "classification": "informational",
+              "requires_requirement": false,
+              "reason": "The evidence is a committee heading in a sample thesis; it does not establish a requirement to reproduce the heading or committee structure.",
+              "primary_obligations": [],
+              "primary_obligation_quote_bindings": [],
+              "linked_requirements": [],
+              "source_clause_support": [],
+              "cited_evidence": {
+                "E00027": {
+                  "id": "E00027",
+                  "kind": "paragraph",
+                  "text": "答辩委员会：",
+                  "style_id": "af",
+                  "runs": [
+                    {
+                      "text": "答辩委员会",
+                      "format": {
+                        "fonts": {},
+                        "size_pt": 12.0
+                      }
+                    },
+                    {
+                      "text": "：",
+                      "format": {
+                        "fonts": {},
+                        "size_pt": 12.0
+                      }
+                    }
+                  ],
+                  "location": {
+                    "part": "document",
+                    "child_index": 31,
+                    "order": 26
+                  },
+                  "context_before": [
+                    "申请学位                          培养单位",
+                    "一级学科                          二级学科"
+                  ],
+                  "context_after": [
+                    "主席            技术职称          所在单位",
+                    "评阅人          技术职称          所在单位"
+                  ],
+                  "style_name": "段",
+                  "xml_locator": {
+                    "part": "document",
+                    "child_index": 31,
+                    "order": 26
+                  }
+                }
+              },
+              "machine_obligation_ids": [],
+              "manual_review_codes": [],
+              "source_content_verification_codes": [],
+              "pending_source_work": [],
+              "section_description": null
+            }
+          },
+          {
+            "check_id": "C00028",
+            "document_text": "主席            技术职称          所在单位",
+            "review_context": {
+              "semantic_clause_text": "主席 技术职称 所在单位",
+              "classification": "informational",
+              "requires_requirement": false,
+              "reason": "The evidence is a committee-role and information label line in a sample thesis, without a source instruction to reproduce it.",
+              "primary_obligations": [],
+              "primary_obligation_quote_bindings": [],
+              "linked_requirements": [],
+              "source_clause_support": [],
+              "cited_evidence": {
+                "E00028": {
+                  "id": "E00028",
+                  "kind": "paragraph",
+                  "text": "主席            技术职称          所在单位",
+                  "style_id": "af",
+                  "runs": [
+                    {
+                      "text": "主席",
+                      "format": {
+                        "fonts": {},
+                        "size_pt": 12.0
+                      }
+                    },
+                    {
+                      "text": "技术职称",
+                      "format": {
+                        "fonts": {},
+                        "size_pt": 12.0
+                      }
+                    },
+                    {
+                      "text": "所在单位",
+                      "format": {
+                        "fonts": {},
+                        "size_pt": 12.0
+                      }
+                    }
+                  ],
+                  "location": {
+                    "part": "document",
+                    "child_index": 32,
+                    "order": 27
+                  },
+                  "context_before": [
+                    "一级学科                          二级学科",
+                    "答辩委员会："
+                  ],
+                  "context_after": [
+                    "评阅人          技术职称          所在单位",
+                    "委员            技术职称          所在单位"
+                  ],
+                  "style_name": "段",
+                  "xml_locator": {
+                    "part": "document",
+                    "child_index": 32,
+                    "order": 27
+                  }
+                }
+              },
+              "machine_obligation_ids": [],
+              "manual_review_codes": [],
+              "source_content_verification_codes": [],
+              "pending_source_work": [],
+              "section_description": null
+            }
+          },
+          {
+            "check_id": "C00029",
+            "document_text": "评阅人          技术职称          所在单位",
+            "review_context": {
+              "semantic_clause_text": "评阅人 技术职称 所在单位",
+              "classification": "informational",
+              "requires_requirement": false,
+              "reason": "The evidence is a reviewer information label line in a sample thesis, without a source instruction to reproduce it.",
+              "primary_obligations": [],
+              "primary_obligation_quote_bindings": [],
+              "linked_requirements": [],
+              "source_clause_support": [],
+              "cited_evidence": {
+                "E00029": {
+                  "id": "E00029",
+                  "kind": "paragraph",
+                  "text": "评阅人          技术职称          所在单位",
+                  "style_id": "af",
+                  "runs": [
+                    {
+                      "text": "评阅人",
+                      "format": {
+                        "fonts": {},
+                        "size_pt": 12.0
+                      }
+                    },
+                    {
+                      "text": "技术职称",
+                      "format": {
+                        "fonts": {},
+                        "size_pt": 12.0
+                      }
+                    },
+                    {
+                      "text": "所在单位",
+                      "format": {
+                        "fonts": {},
+                        "size_pt": 12.0
+                      }
+                    }
+                  ],
+                  "location": {
+                    "part": "document",
+                    "child_index": 33,
+                    "order": 28
+                  },
+                  "context_before": [
+                    "答辩委员会：",
+                    "主席            技术职称          所在单位"
+                  ],
+                  "context_after": [
+                    "委员            技术职称          所在单位",
+                    "秘书            技术职称          所在单位"
+                  ],
+                  "style_name": "段",
+                  "xml_locator": {
+                    "part": "document",
+                    "child_index": 33,
+                    "order": 28
+                  }
+                }
+              },
+              "machine_obligation_ids": [],
+              "manual_review_codes": [],
+              "source_content_verification_codes": [],
+              "pending_source_work": [],
+              "section_description": null
+            }
+          },
+          {
+            "check_id": "C00030",
+            "document_text": "委员            技术职称          所在单位",
+            "review_context": {
+              "semantic_clause_text": "委员 技术职称 所在单位",
+              "classification": "informational",
+              "requires_requirement": false,
+              "reason": "The evidence is a committee-member information label line in a sample thesis, without a source instruction to reproduce it.",
+              "primary_obligations": [],
+              "primary_obligation_quote_bindings": [],
+              "linked_requirements": [],
+              "source_clause_support": [],
+              "cited_evidence": {
+                "E00030": {
+                  "id": "E00030",
+                  "kind": "paragraph",
+                  "text": "委员            技术职称          所在单位",
+                  "style_id": "af",
+                  "runs": [
+                    {
+                      "text": "委员",
+                      "format": {
+                        "fonts": {},
+                        "size_pt": 12.0
+                      }
+                    },
+                    {
+                      "text": "技术职称",
+                      "format": {
+                        "fonts": {},
+                        "size_pt": 12.0
+                      }
+                    },
+                    {
+                      "text": "所在单位",
+                      "format": {
+                        "fonts": {},
+                        "size_pt": 12.0
+                      }
+                    }
+                  ],
+                  "location": {
+                    "part": "document",
+                    "child_index": 34,
+                    "order": 29
+                  },
+                  "context_before": [
+                    "主席            技术职称          所在单位",
+                    "评阅人          技术职称          所在单位"
+                  ],
+                  "context_after": [
+                    "秘书            技术职称          所在单位",
+                    "年  月"
+                  ],
+                  "style_name": "段",
+                  "xml_locator": {
+                    "part": "document",
+                    "child_index": 34,
+                    "order": 29
+                  }
+                }
+              },
+              "machine_obligation_ids": [],
+              "manual_review_codes": [],
+              "source_content_verification_codes": [],
+              "pending_source_work": [],
+              "section_description": null
+            }
+          },
+          {
+            "check_id": "C00031",
+            "document_text": "秘书            技术职称          所在单位",
+            "review_context": {
+              "semantic_clause_text": "秘书 技术职称 所在单位",
+              "classification": "informational",
+              "requires_requirement": false,
+              "reason": "The evidence is a secretary information label line in a sample thesis, without a source instruction to reproduce it.",
+              "primary_obligations": [],
+              "primary_obligation_quote_bindings": [],
+              "linked_requirements": [],
+              "source_clause_support": [],
+              "cited_evidence": {
+                "E00031": {
+                  "id": "E00031",
+                  "kind": "paragraph",
+                  "text": "秘书            技术职称          所在单位",
+                  "style_id": "af",
+                  "runs": [
+                    {
+                      "text": "秘书",
+                      "format": {
+                        "fonts": {},
+                        "size_pt": 12.0
+                      }
+                    },
+                    {
+                      "text": "技术职称",
+                      "format": {
+                        "fonts": {},
+                        "size_pt": 12.0
+                      }
+                    },
+                    {
+                      "text": "所在单位",
+                      "format": {
+                        "fonts": {},
+                        "size_pt": 12.0
+                      }
+                    }
+                  ],
+                  "location": {
+                    "part": "document",
+                    "child_index": 35,
+                    "order": 30
+                  },
+                  "context_before": [
+                    "评阅人          技术职称          所在单位",
+                    "委员            技术职称          所在单位"
+                  ],
+                  "context_after": [
+                    "年  月",
+                    "北京体育大学学位论文原创性声明"
+                  ],
+                  "style_name": "段",
+                  "xml_locator": {
+                    "part": "document",
+                    "child_index": 35,
+                    "order": 30
+                  }
+                }
+              },
+              "machine_obligation_ids": [],
+              "manual_review_codes": [],
+              "source_content_verification_codes": [],
+              "pending_source_work": [],
+              "section_description": null
+            }
+          },
+          {
+            "check_id": "C00032",
+            "document_text": "年  月",
+            "review_context": {
+              "semantic_clause_text": "年 月",
+              "classification": "informational",
+              "requires_requirement": false,
+              "reason": "The evidence is a month/year line in a sample thesis and does not prescribe a date-formatting requirement.",
+              "primary_obligations": [],
+              "primary_obligation_quote_bindings": [],
+              "linked_requirements": [],
+              "source_clause_support": [],
+              "cited_evidence": {
+                "E00032": {
+                  "id": "E00032",
+                  "kind": "paragraph",
+                  "text": "年  月",
+                  "style_id": null,
+                  "runs": [
+                    {
+                      "text": "年",
+                      "format": {
+                        "fonts": {},
+                        "size_pt": 14.0
+                      }
+                    },
+                    {
+                      "text": "月",
+                      "format": {
+                        "fonts": {},
+                        "size_pt": 14.0
+                      }
+                    }
+                  ],
+                  "location": {
+                    "part": "document",
+                    "child_index": 38,
+                    "order": 31
+                  },
+                  "context_before": [
+                    "委员            技术职称          所在单位",
+                    "秘书            技术职称          所在单位"
+                  ],
+                  "context_after": [
+                    "北京体育大学学位论文原创性声明",
+                    "本人郑重声明：所呈交的学位论文，是本人在导师指导下进行研究工作所取得的研究成果。除文中已经注明引用的内容外，本学位论文的研究成果不包含任何他人创作的、已公开发表或者没有公开发表的作品的内容。对本论文所涉及的研究工作做出贡献的其他个人和集体，均已在文中以明确方式标明。本学位论文原创性声明的法律责任由本人承担。"
+                  ],
+                  "style_name": null,
+                  "xml_locator": {
+                    "part": "document",
+                    "child_index": 38,
+                    "order": 31
+                  }
+                }
+              },
+              "machine_obligation_ids": [],
+              "manual_review_codes": [],
+              "source_content_verification_codes": [],
+              "pending_source_work": [],
+              "section_description": null
+            }
+          }
+        ],
+        "attempt": 1,
+        "provider_attempt": 2,
+        "output_policy": "review_draft",
+        "retry_feedback": {
+          "code": "empty_inventory_verdict_conflict",
+          "clause_ids": [
+            "C00025",
+            "C00026",
+            "C00027",
+            "C00028",
+            "C00029",
+            "C00030",
+            "C00031",
+            "C00032"
+          ],
+          "rejected_results": [
+            {
+              "check_id": "C00025",
+              "verdict": "uncertain",
+              "rationale": "The source is the standalone form-label line “申请学位                          培养单位”. It names fields but does not establish what must be entered or whether this line is an execution target; the label alone does not resolve that uncertainty.",
+              "identified_obligations": [],
+              "evidence_quotes": [
+                "申请学位                          培养单位"
+              ],
+              "machine_obligation_ids": []
+            },
+            {
+              "check_id": "C00026",
+              "verdict": "uncertain",
+              "rationale": "The source is the standalone form-label line “一级学科                          二级学科”. It names fields but does not establish what must be entered or whether this line is an execution target; the label alone does not resolve that uncertainty.",
+              "identified_obligations": [],
+              "evidence_quotes": [
+                "一级学科                          二级学科"
+              ],
+              "machine_obligation_ids": []
+            },
+            {
+              "check_id": "C00027",
+              "verdict": "uncertain",
+              "rationale": "The source is the standalone label “答辩委员会”. It identifies a committee heading but does not establish whether reproducing the heading or providing committee information is required; the label alone does not resolve that uncertainty.",
+              "identified_obligations": [],
+              "evidence_quotes": [
+                "答辩委员会"
+              ],
+              "machine_obligation_ids": []
+            },
+            {
+              "check_id": "C00028",
+              "verdict": "uncertain",
+              "rationale": "The source is the standalone form-label line “主席            技术职称          所在单位”. It identifies fields but does not establish what must be entered or whether this line is an execution target; the label alone does not resolve that uncertainty.",
+              "identified_obligations": [],
+              "evidence_quotes": [
+                "主席            技术职称          所在单位"
+              ],
+              "machine_obligation_ids": []
+            },
+            {
+              "check_id": "C00029",
+              "verdict": "uncertain",
+              "rationale": "The source is the standalone form-label line “评阅人          技术职称          所在单位”. It identifies fields but does not establish what must be entered or whether this line is an execution target; the label alone does not resolve that uncertainty.",
+              "identified_obligations": [],
+              "evidence_quotes": [
+                "评阅人          技术职称          所在单位"
+              ],
+              "machine_obligation_ids": []
+            },
+            {
+              "check_id": "C00030",
+              "verdict": "uncertain",
+              "rationale": "The source is the standalone form-label line “委员            技术职称          所在单位”. It identifies fields but does not establish what must be entered or whether this line is an execution target; the label alone does not resolve that uncertainty.",
+              "identified_obligations": [],
+              "evidence_quotes": [
+                "委员            技术职称          所在单位"
+              ],
+              "machine_obligation_ids": []
+            },
+            {
+              "check_id": "C00031",
+              "verdict": "uncertain",
+              "rationale": "The source is the standalone form-label line “秘书            技术职称          所在单位”. It identifies fields but does not establish what must be entered or whether this line is an execution target; the label alone does not resolve that uncertainty.",
+              "identified_obligations": [],
+              "evidence_quotes": [
+                "秘书            技术职称          所在单位"
+              ],
+              "machine_obligation_ids": []
+            },
+            {
+              "check_id": "C00032",
+              "verdict": "uncertain",
+              "rationale": "The source is the standalone date-field label “年  月”. It identifies year and month fields but does not prescribe a date format or establish whether a date must be entered; the label alone does not resolve that uncertainty.",
+              "identified_obligations": [],
+              "evidence_quotes": [
+                "年  月"
+              ],
+              "machine_obligation_ids": []
+            }
+          ],
+          "rejected_results_sha256": "71d8a1608e8ecf58ef35d1c8311a91e7395df518b93f22a5f9a8cd71a12c4824",
+          "rejected_request_sha256": "2ce6704055bc77e0795f02dfe90980d5e8a7043ae876bdbdf304818baa852456",
+          "checks_sha256": "54ff679fd41a2d901a267cbce43b744045bb952c243e29da6d176dd6141f866b",
+          "candidate_response_sha256": "20f0fe27723f264ca92058953b49efda18db50eb6cf1d1b9bfb56ed1a1ddb7ba",
+          "run_id": "50763fcc-50d0-4a18-841b-e56e7b979490",
+          "provenance": {
+            "version": "1.0",
+            "origin": "fresh_host_agent",
+            "source_sha256": "1e9d38b307dbef8c3bf97b85ba5def70eaf7e2dba50cf25da978e007fc907059",
+            "evidence_sha256": "acd3b45f639bec830c8fc9afe1e4555e1a6fd3a8531f8233a84164eac45f5ef5",
+            "clause_sha256": "bf4d3b0323ac0c3892724b1aa9dbb937037bfd005f4a792897291adee64811fa",
+            "request_sha256": "b3549917718a94eb8cce3db8c6b5c648ed5e0bc59441abc849d644ec633438bf",
+            "run_id": "50763fcc-50d0-4a18-841b-e56e7b979490"
+          }
+        }
+      }
+    },
+    "independent-review-chunk-0004-attempt-01-provider-attempt-02/raw-response.json": {
+      "sha256": "5901f782686e1826e1f294de7a22ae3cfa8c752d9c4e213254eb94ab2975b612",
+      "content": {
+        "results": [
+          {
+            "check_id": "C00025",
+            "verdict": "uncertain",
+            "rationale": "The exact source is a standalone field-label line. It does not say what must be entered or establish that the line is an execution target, so the uncertainty remains unresolved.",
+            "identified_obligations": [],
+            "evidence_refs": [
+              "Q0e035b98e8b730e5"
+            ]
+          },
+          {
+            "check_id": "C00026",
+            "verdict": "uncertain",
+            "rationale": "The exact source is a standalone field-label line. It does not say what must be entered or establish that the line is an execution target, so the uncertainty remains unresolved.",
+            "identified_obligations": [],
+            "evidence_refs": [
+              "Q1513046596544230"
+            ]
+          },
+          {
+            "check_id": "C00027",
+            "verdict": "uncertain",
+            "rationale": "The exact source is a standalone committee heading. It does not establish whether the heading or committee information must be reproduced, so the uncertainty remains unresolved.",
+            "identified_obligations": [],
+            "evidence_refs": [
+              "Q32565b9d194c0197"
+            ]
+          },
+          {
+            "check_id": "C00028",
+            "verdict": "uncertain",
+            "rationale": "The exact source is a standalone role and information-label line. It does not say what must be entered or establish that the line is an execution target, so the uncertainty remains unresolved.",
+            "identified_obligations": [],
+            "evidence_refs": [
+              "Qedfe6a8f52c7184d"
+            ]
+          },
+          {
+            "check_id": "C00029",
+            "verdict": "uncertain",
+            "rationale": "The exact source is a standalone role and information-label line. It does not say what must be entered or establish that the line is an execution target, so the uncertainty remains unresolved.",
+            "identified_obligations": [],
+            "evidence_refs": [
+              "Qa45d6fe7ea9cfe63"
+            ]
+          },
+          {
+            "check_id": "C00030",
+            "verdict": "uncertain",
+            "rationale": "The exact source is a standalone role and information-label line. It does not say what must be entered or establish that the line is an execution target, so the uncertainty remains unresolved.",
+            "identified_obligations": [],
+            "evidence_refs": [
+              "Q185349405251c0cc"
+            ]
+          },
+          {
+            "check_id": "C00031",
+            "verdict": "uncertain",
+            "rationale": "The exact source is a standalone role and information-label line. It does not say what must be entered or establish that the line is an execution target, so the uncertainty remains unresolved.",
+            "identified_obligations": [],
+            "evidence_refs": [
+              "Q8012079ebb197589"
+            ]
+          },
+          {
+            "check_id": "C00032",
+            "verdict": "uncertain",
+            "rationale": "The exact source is a standalone date-field label. It does not prescribe a date format or establish whether a date must be entered, so the uncertainty remains unresolved.",
+            "identified_obligations": [],
+            "evidence_refs": [
+              "Qa47ecda1c3d56143"
+            ]
+          }
+        ]
+      }
+    },
+    "independent-review-chunk-0004-attempt-01-provider-attempt-02/compiled-response.json": {
+      "sha256": "e5ef65816d2fed6e0983b15a078a694b89f9a2c7b9148b6b2ca409aef46b4280",
+      "content": {
+        "results": [
+          {
+            "check_id": "C00025",
+            "verdict": "uncertain",
+            "rationale": "The exact source is a standalone field-label line. It does not say what must be entered or establish that the line is an execution target, so the uncertainty remains unresolved.",
+            "identified_obligations": [],
+            "evidence_quotes": [
+              "申请学位                          培养单位"
+            ],
+            "machine_obligation_ids": []
+          },
+          {
+            "check_id": "C00026",
+            "verdict": "uncertain",
+            "rationale": "The exact source is a standalone field-label line. It does not say what must be entered or establish that the line is an execution target, so the uncertainty remains unresolved.",
+            "identified_obligations": [],
+            "evidence_quotes": [
+              "一级学科                          二级学科"
+            ],
+            "machine_obligation_ids": []
+          },
+          {
+            "check_id": "C00027",
+            "verdict": "uncertain",
+            "rationale": "The exact source is a standalone committee heading. It does not establish whether the heading or committee information must be reproduced, so the uncertainty remains unresolved.",
+            "identified_obligations": [],
+            "evidence_quotes": [
+              "答辩委员会"
+            ],
+            "machine_obligation_ids": []
+          },
+          {
+            "check_id": "C00028",
+            "verdict": "uncertain",
+            "rationale": "The exact source is a standalone role and information-label line. It does not say what must be entered or establish that the line is an execution target, so the uncertainty remains unresolved.",
+            "identified_obligations": [],
+            "evidence_quotes": [
+              "主席            技术职称          所在单位"
+            ],
+            "machine_obligation_ids": []
+          },
+          {
+            "check_id": "C00029",
+            "verdict": "uncertain",
+            "rationale": "The exact source is a standalone role and information-label line. It does not say what must be entered or establish that the line is an execution target, so the uncertainty remains unresolved.",
+            "identified_obligations": [],
+            "evidence_quotes": [
+              "评阅人          技术职称          所在单位"
+            ],
+            "machine_obligation_ids": []
+          },
+          {
+            "check_id": "C00030",
+            "verdict": "uncertain",
+            "rationale": "The exact source is a standalone role and information-label line. It does not say what must be entered or establish that the line is an execution target, so the uncertainty remains unresolved.",
+            "identified_obligations": [],
+            "evidence_quotes": [
+              "委员            技术职称          所在单位"
+            ],
+            "machine_obligation_ids": []
+          },
+          {
+            "check_id": "C00031",
+            "verdict": "uncertain",
+            "rationale": "The exact source is a standalone role and information-label line. It does not say what must be entered or establish that the line is an execution target, so the uncertainty remains unresolved.",
+            "identified_obligations": [],
+            "evidence_quotes": [
+              "秘书            技术职称          所在单位"
+            ],
+            "machine_obligation_ids": []
+          },
+          {
+            "check_id": "C00032",
+            "verdict": "uncertain",
+            "rationale": "The exact source is a standalone date-field label. It does not prescribe a date format or establish whether a date must be entered, so the uncertainty remains unresolved.",
+            "identified_obligations": [],
+            "evidence_quotes": [
+              "年  月"
+            ],
+            "machine_obligation_ids": []
+          }
+        ]
+      }
+    }
+  }
+}

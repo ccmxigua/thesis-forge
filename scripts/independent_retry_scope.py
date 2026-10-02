@@ -17,6 +17,7 @@ from semantic_contract import sha256_json, strict_json_loads
 from semantic_source_references import (
     build_source_reference_packet, compile_source_reference_response,
     source_reference_schema,
+    decode_source_inventory_envelopes,
 )
 
 POLICY = "validated_missing_inventory_retry_scope_v1"
@@ -117,8 +118,9 @@ def prepare_retry_scope(
     new_packet = build_source_reference_packet(request)
     new_checks = {check["check_id"]: check for check in new_packet["checks"]}
     old_wire_schema = source_reference_schema(canonical_schema, packet, coverage=True)
-    wire = (normalize_native_response(raw, old_wire_schema)
-            if provider_nullable_optionals else copy.deepcopy(raw))
+    decoded, _ = decode_source_inventory_envelopes(raw)
+    wire = (normalize_native_response(decoded, old_wire_schema)
+            if provider_nullable_optionals else decoded)
     locks = {}
     for result in wire["results"]:
         cid = result["check_id"]
@@ -170,7 +172,8 @@ def constrain_retry_schema(schema: dict[str, Any], locks: dict[str, dict[str, An
 def validate_retry_scope(response: dict[str, Any], schema: dict[str, Any],
                          locks: dict[str, dict[str, Any]], *, native: bool) -> None:
     from native_semantic_review import NativeSemanticReviewError
-    canonical = normalize_native_response(response, schema) if native else copy.deepcopy(response)
+    decoded, _ = decode_source_inventory_envelopes(response)
+    canonical = normalize_native_response(decoded, schema) if native else decoded
     if validate_instance(canonical, schema):
         raise NativeSemanticReviewError("corrective review changed its validated sibling scope")
     for cid, locked in locks.items():

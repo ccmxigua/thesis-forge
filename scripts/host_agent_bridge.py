@@ -252,6 +252,7 @@ from obligation_workflow import OBLIGATION_ANALYSIS_LEDGER_PROTOCOL, work_type_f
 from table_source_context import table_context_retry_is_source_bound, table_retry_feedback_is_source_bound
 from document_text_font import materialize_document_font_references
 from section_description import project_section_description_claims
+from unresolved_label_assessment import build_unresolved_label_assessments
 from administrative_relation_projection import (
     project_administrative_copies, project_copied_administrative_qualifiers,
 )
@@ -12305,6 +12306,9 @@ def _validate_completed_obligation_ledger_chain(
         "submission_ready": False,
         "obligations": expected_obligations,
     }
+    label_assessments = build_unresolved_label_assessments(review_request["checks"], results)
+    if label_assessments:
+        expected_ledger_metadata["unresolved_label_assessments"] = label_assessments
     if ledger != expected_ledger_metadata:
         raise ValueError(
             f"Host Agent chunk {chunk_index} AO ledger does not match the canonical current-run reconstruction"
@@ -12643,6 +12647,9 @@ def _write_obligation_analysis_ledger(
         "submission_ready": False,
         "obligations": obligations,
     }
+    label_assessments = build_unresolved_label_assessments(coverage_request["checks"], result_items)
+    if label_assessments:
+        ledger["unresolved_label_assessments"] = label_assessments
     ledger_path = output_dir / "obligation-analysis-ledger.json"
     if ledger_path.exists():
         raise ValueError(f"refusing to overwrite obligation analysis ledger: {ledger_path}")

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Run the auditable LaTeX/DOCX requirement-to-format pipeline as one safe command."""
 from __future__ import annotations
+from unresolved_label_assessment import validate_unresolved_label_assessments
 
 import argparse
 import copy
@@ -735,6 +736,7 @@ def _validate_independent_obligation_receipts(
                 )
         if ledger_items != expected_ledger_items:
             raise ValueError(f"obligation analysis ledger {index} does not match the reviewed source obligations")
+        validate_unresolved_label_assessments(ledger, checks, normalized_results)
         checks_by_id = {
             str(item.get("check_id")): item for item in checks
             if isinstance(item, dict) and isinstance(item.get("check_id"), str)

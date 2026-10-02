@@ -21,6 +21,7 @@ from artifact_io import atomic_write_text
 from semantic_contract import sha256_json, strict_json_dumps
 from source_atom_metadata import bind_atom_quote
 from section_description import compile_section_description
+from unresolved_label_assessment import unresolved_label_assessment
 from obligation_workflow import (
     OBLIGATION_COVERAGE_PROTOCOL,
     SCOPE_DEPENDENCY_DIMENSIONS,
@@ -844,6 +845,7 @@ def validate_obligation_coverage_response(
         if (
             classification not in {"informational", "not_applicable"}
             and not result.get("identified_obligations")
+            and unresolved_label_assessment(check, result) is None
         ):
             missing_source_inventory.append(check_id)
         rationale = result.get("rationale")
@@ -1801,6 +1803,9 @@ def _prompt(request: dict[str, Any], *, retained_results: dict[str, Any] | None 
             "linked_requirements; recognizing a label, heading or row is not represented coverage. "
             "If the exact source and proven context establish no duty, leave identified_obligations empty "
             "and use verdict=consistent with exact evidence_refs and a source-first rationale. "
+            "For an unresolved standalone form label, an empty source inventory never resolves the primary "
+            "uncertainty or proves an execution target: preserve that uncertainty, quote the whole selected label, "
+            "and do not invent a duty. Readable quantitative, normative or mixed duties still need an inventory. "
             "Informational is a valid primary classification, not itself an error or a correction trigger. "
             "Never return incomplete with an empty inventory or cite a classification correction for a "
             "mere heading, label or description that establishes no duty. Do not invent an obligation merely to fill the array, "

@@ -1390,6 +1390,15 @@ validators and a fresh independent review must accept the new primary proposal.
 
 ## Unresolved empty proposals
 
+An independently assessed standalone form label can have no identified source
+duty while its primary interpretation remains unresolved. The source-bound
+form-label policy checks the whole label, colon, exact current evidence and
+unmerged blank-cell geometry, rejects known/mixed/pending duties and preserves
+every unknown primary atom. Its separate analysis record is replayed by the
+pipeline; unresolved questions, manual review and full/submission blockers remain.
+Do not invent an obligation to fill an array or infer a cover role from geometry.
+See `docs/unresolved-form-label-assessments.md`.
+
 An unresolved source clause is not an executable formatting requirement. The
 bridge may separate a newly proposed, entirely empty object only under
 `unresolved_empty_proposal_separation_v1`: validated current invocation and exact

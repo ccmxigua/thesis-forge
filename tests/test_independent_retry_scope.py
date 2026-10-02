@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 from contextlib import ExitStack
 import json
 from pathlib import Path
@@ -236,6 +237,78 @@ class RetryScopeTests(unittest.TestCase):
     def test_other_retries_and_first_attempt_remain_unrestricted(self):
         for request in (self.request, {**copy.deepcopy(self.retry), "retry_feedback": {"code": "other"}}):
             self.assertEqual(prepare_retry_scope(request, self.output, OBLIGATION_COVERAGE_SCHEMA), ({}, None))
+
+    def typed_parent(self):
+        compiled = copy.deepcopy(self.case["second_compiled"])
+        compiled["results"][1] = copy.deepcopy(self.case["first_compiled"]["results"][1])
+        compiled["results"][1]["identified_obligations"][0]["target"] = "disputed responsibility target"
+        self.write_parent(compiled)
+        with self.assertRaises(native_review.TypedSourceAtomAlignmentError) as caught:
+            validate_obligation_coverage_response(compiled, self.request["checks"])
+        self.retry = {**copy.deepcopy(self.request), "provider_attempt": 2, "retry_feedback": {
+            "code": caught.exception.code, "clause_ids": list(caught.exception.clause_ids),
+            "disagreements": caught.exception.disagreements,
+            "checks_sha256": native_review.sha256_json(self.request["checks"]),
+            "run_id": self.request["run_id"], "provenance": copy.deepcopy(self.request["provenance"])}}
+        return compiled
+
+    def test_typed_retry_locks_only_individually_validated_siblings(self):
+        self.typed_parent()
+        locks, proof, schema = self.scope()
+        self.assertEqual(proof["policy"], "validated_typed_alignment_retry_scope_v1")
+        self.assertEqual(proof["fresh_review_check_ids"], ["C00037"])
+        self.assertEqual(proof["retained_check_ids"], ["C00033"])
+        corrected = copy.deepcopy(self.case["second_compiled"])
+        corrected["results"][1] = self.case["first_compiled"]["results"][1]
+        raw = self.wire(corrected, self.retry)
+        raw["results"][0] = copy.deepcopy(locks["C00033"])
+        validate_retry_scope(raw, schema, locks, native=True)
+        damaged = copy.deepcopy(raw); damaged["results"][0]["identified_obligations"] = []
+        with self.assertRaises(NativeSemanticReviewError):
+            validate_retry_scope(damaged, schema, locks, native=True)
+        compiled, _ = compile_source_reference_response(raw, self.retry, OBLIGATION_COVERAGE_SCHEMA, coverage=True)
+        self.assertEqual(len(validate_obligation_coverage_response(compiled, self.retry["checks"])), 2)
+
+    def test_typed_scope_refuses_changed_dispute_or_missing_parent(self):
+        self.typed_parent()
+        original = copy.deepcopy(self.retry)
+        for damage in ("field", "primary_hash", "run", "check_hash"):
+            self.retry = copy.deepcopy(original)
+            feedback = self.retry["retry_feedback"]
+            if damage == "field": feedback["disagreements"][0]["fields"] = ["condition"]
+            elif damage == "primary_hash": feedback["disagreements"][0]["primary_sha256"] = "0" * 64
+            elif damage == "run": feedback["run_id"] = "old"
+            else: feedback["checks_sha256"] = "0" * 64
+            with self.subTest(damage=damage), self.assertRaises(NativeSemanticReviewError):
+                self.scope()
+        self.retry = original
+        with self.assertRaisesRegex(NativeSemanticReviewError, "parent evidence"):
+            prepare_retry_scope(self.retry, Path(self.temp.name) / "missing-provider-attempt-02", OBLIGATION_COVERAGE_SCHEMA)
+
+    def test_typed_persisted_scope_is_replayed_not_a_self_reported_pass(self):
+        from independent_retry_scope import validate_persisted_empty_inventory_scope
+        self.typed_parent()
+        locks, proof, _ = self.scope()
+        corrected = copy.deepcopy(self.case["second_compiled"])
+        corrected["results"][1] = self.case["first_compiled"]["results"][1]
+        raw = self.wire(corrected, self.retry); raw["results"][0] = copy.deepcopy(locks["C00033"])
+        self.output.mkdir()
+        path = self.output / "validated-retry-scope.json"
+        path.write_text(json.dumps(proof), encoding="utf-8")
+        audit = {"adapter_id": "codex", "corrective_review_scope": {
+            "policy": proof["policy"], "proof_path": str(path.resolve()),
+            "proof_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "fresh_review_check_ids": proof["fresh_review_check_ids"],
+            "retained_check_ids": proof["retained_check_ids"]}}
+        validate_persisted_empty_inventory_scope(self.retry, self.output, raw, audit)
+        damaged = copy.deepcopy(raw); damaged["results"][0]["identified_obligations"] = []
+        with self.assertRaises(NativeSemanticReviewError):
+            validate_persisted_empty_inventory_scope(self.retry, self.output, damaged, audit)
+        changed = copy.deepcopy(proof); changed["retained_check_ids"] = []
+        path.write_text(json.dumps(changed), encoding="utf-8")
+        audit["corrective_review_scope"]["proof_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+        with self.assertRaises(ValueError):
+            validate_persisted_empty_inventory_scope(self.retry, self.output, raw, audit)
 
     def test_linked_parent_directory_is_not_current_invocation_evidence(self):
         link = Path(self.temp.name) / "linked"

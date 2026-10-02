@@ -37,6 +37,15 @@ receipt. Tests cover the production runner with mocked transport, full replay,
 hidden errors, identity changes, tampering and renamed IDs. Offline passes do
 not establish real BSU merge, DOCX/Word acceptance or submission readiness.
 
+Typed action/target/condition/applicability disagreement retries now use the
+same sibling replay and locking, under `validated_typed_alignment_retry_scope_v1`.
+The captured full parent must reproduce the exact reported disagreement, not
+only its check ID; stale field grants or changed primary hashes are rejected.
+Both receipt consumers replay the scope proof. All newly disputed checks remain
+fresh, never frozen or changed to covered, and the original two-invocation
+budget is unchanged. This prevents a corrective target read from emptying
+unrelated inventories which were already individually validated.
+
 ## Multiple errors in one captured response
 
 The full validator reports one error class first. During sibling replay, a

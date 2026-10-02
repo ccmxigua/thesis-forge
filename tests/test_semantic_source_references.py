@@ -22,10 +22,58 @@ from semantic_source_references import (
     build_source_reference_packet,
     compile_source_reference_response,
     source_reference_schema,
+    SourceReferenceResponseError,
 )
 
 
 class SemanticSourceReferenceTests(unittest.TestCase):
+    def test_all_dispositions_bind_requirement_selectors_to_the_current_check(self):
+        request = {"checks": [
+            {"check_id": "dynamic-a", "document_text": "年   月", "review_context": {
+                "linked_requirements": [{"requirement_ref": "RR-current-a"}]}},
+            {"check_id": "dynamic-b", "document_text": "作者签字", "review_context": {
+                "linked_requirements": [{"requirement_ref": "RR-current-b"}]}},
+            {"check_id": "no-document-link", "document_text": "批准后公开", "review_context": {}},
+        ]}
+        packet = build_source_reference_packet(request)
+        dispositions = ["represented", "unrepresented", "ambiguous", "external_action_pending",
+                        "authoring_content_pending", "backend_unsupported", "source_content_verification_pending"]
+        for constrained in (False, True):
+            schema = source_reference_schema(OBLIGATION_COVERAGE_SCHEMA, packet, coverage=True,
+                                            constrain_requirement_links=constrained)
+            self.assertEqual(native_schema_support_errors(native_output_schema(schema)), [])
+            for check, branch in zip(packet["checks"], schema["properties"]["results"]["items"]["anyOf"]):
+                ref = check["source_spans"][0]["ref_id"]
+                for disposition in dispositions:
+                    for foreign in ("RR-current-b" if check["check_id"] == "dynamic-a" else "RR-current-a",
+                                    "RR-current-", "made-up"):
+                        result = {"check_id": check["check_id"], "verdict": "incomplete", "rationale": "Rejected source observation.",
+                            "evidence_refs": [ref], "identified_obligations": [{"source_ref": ref,
+                                "disposition": disposition, "requirement_refs": [foreign]}]}
+                        with self.subTest(constrained=constrained, check=check["check_id"], disposition=disposition, foreign=foreign):
+                            self.assertTrue(validate_instance(result, branch))
+
+    def test_foreign_diagnostic_ref_enters_wire_error_router_not_semantic_repair(self):
+        request = {"checks": [{"check_id": "dynamic-label", "document_text": "年   月", "review_context": {
+            "classification": "covered", "requires_requirement": True,
+            "linked_requirements": [{"requirement_ref": "RR-live-label"}]}}]}
+        packet = build_source_reference_packet(request)
+        ref = packet["checks"][0]["source_spans"][0]["ref_id"]
+        raw = {"results": [{"check_id": "dynamic-label", "verdict": "consistent", "rationale": "Source label is preserved.",
+            "evidence_refs": [ref], "identified_obligations": [{"source_ref": ref,
+                "disposition": "unrepresented", "requirement_refs": ["RR-live-labe"]}]}]}
+        original = copy.deepcopy(raw)
+        with self.assertRaises(SourceReferenceResponseError) as caught:
+            compile_source_reference_response(raw, request, OBLIGATION_COVERAGE_SCHEMA, coverage=True)
+        self.assertEqual(caught.exception.issues[0]["check_id"], "dynamic-label")
+        self.assertEqual(raw, original)
+        # A valid selector alone cannot turn an unrepresented duty into coverage.
+        raw["results"][0]["identified_obligations"][0]["requirement_refs"] = ["RR-live-label"]
+        compiled, _ = compile_source_reference_response(raw, request, OBLIGATION_COVERAGE_SCHEMA, coverage=True)
+        from native_semantic_review import NativeSemanticReviewError
+        with self.assertRaisesRegex(NativeSemanticReviewError, "verdict conflicts"):
+            validate_obligation_coverage_response(compiled, request["checks"])
+
     def test_external_generation_couples_pending_verdict_and_current_atom_mapping(self) -> None:
         request = {"run_id": "fresh", "checks": [{"check_id": "external-any-id",
             "document_text": "导师同意后学院批准。", "review_context": {

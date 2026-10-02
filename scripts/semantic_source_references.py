@@ -449,16 +449,30 @@ def source_reference_schema(
                         registered["properties"]["requirement_refs"]["maxItems"] = 0
                         pending_scoped.append(registered)
             compiled_obligation_branches = pending_scoped
+            # RR selectors are identity, not a semantic coverage decision.
+            # Bind them for EVERY disposition in generation and compilation,
+            # not just represented atoms. Otherwise an unrepresented or
+            # ambiguous atom can retype a foreign/shortened RR and bypass the
+            # wire-error router until a generic semantic failure terminates.
+            live_refs = sorted({
+                item["requirement_ref"]
+                for item in review_context.get("linked_requirements", [])
+                if isinstance(item, dict) and isinstance(item.get("requirement_ref"), str)
+                and item["requirement_ref"]
+            })
+            for obligation in compiled_obligation_branches:
+                refs_schema = obligation["properties"]["requirement_refs"]
+                if live_refs:
+                    refs_schema["items"] = {"type": "string", "enum": live_refs}
+                else:
+                    # Portable native schemas omit maxItems; null item shape
+                    # offers no invented string selector. Locally only [] is
+                    # legal and nonempty/null lists receive a wire rejection.
+                    refs_schema.update({"items": {"type": "null"}, "maxItems": 0})
             if constrain_requirement_links:
                 # Generation-time constraint mirrors the canonical coverage
                 # validator. Parsing still preserves invalid raw output for a
                 # typed, bounded corrective review, never silently repairs it.
-                live_refs = sorted({
-                    item["requirement_ref"]
-                    for item in review_context.get("linked_requirements", [])
-                    if isinstance(item, dict) and isinstance(item.get("requirement_ref"), str)
-                    and item["requirement_ref"]
-                })
                 constrained = []
                 for obligation in compiled_obligation_branches:
                     dispositions = obligation["properties"]["disposition"].get("enum", [])

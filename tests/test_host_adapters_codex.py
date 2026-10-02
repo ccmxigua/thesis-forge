@@ -53,6 +53,31 @@ class CodexAdapterTests(unittest.TestCase):
                 cwd=root,
             )
         self.assertEqual(command[command.index("--model") + 1], "gpt-6-luna")
+        self.assertNotIn("--config", command)
+
+    def test_explicit_effort_is_one_quoted_native_config_value(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            prompt = root / "prompt.txt"
+            prompt.write_text("审查来源。", encoding="utf-8")
+            for effort in ("max", 'advertised"value'):
+                with self.subTest(effort=effort):
+                    command = codex.build_command(
+                        binary="codex", prompt_path=prompt,
+                        last_message_path=root / "last-message.txt", cwd=root,
+                        reasoning_effort=effort,
+                    )
+                    config = command[command.index("--config") + 1]
+                    self.assertEqual(json.loads(config.split("=", 1)[1]), effort)
+                    self.assertEqual(command[command.index("--model") + 1], "gpt-6-luna")
+                    self.assertEqual(command[-1], "-")
+
+    def test_effort_resolution_rejects_invalid_values_without_fallback(self) -> None:
+        self.assertIsNone(codex.resolve_reasoning_effort(None))
+        self.assertEqual(codex.resolve_reasoning_effort(" max "), "max")
+        for invalid in ("", " ", False, 6):
+            with self.subTest(effort=invalid), self.assertRaises(ValueError):
+                codex.resolve_reasoning_effort(invalid)
 
     def test_model_resolution_rejects_invalid_overrides_without_fallback(self) -> None:
         self.assertEqual(codex.resolve_model(None), "gpt-6-luna")

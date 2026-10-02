@@ -45,9 +45,12 @@ def pipeline_command(args: argparse.Namespace, *, prepare_host_review: bool = Fa
                      merge_receipt: Path | None = None,
                      offline_merge_receipt: Path | None = None,
                      semantic_review_runtime: str | None = None,
-                     semantic_review_model: str | None = None) -> list[str]:
+                     semantic_review_model: str | None = None,
+                     semantic_review_reasoning_effort: str | None = None) -> list[str]:
     if bool(semantic_review_runtime) != bool(semantic_review_model):
         raise ValueError("semantic review runtime and model must be supplied together")
+    if semantic_review_reasoning_effort is not None and semantic_review_runtime != "codex":
+        raise ValueError("semantic review reasoning effort requires Codex")
     output_policy = getattr(
         args,
         "output_policy",
@@ -84,6 +87,8 @@ def pipeline_command(args: argparse.Namespace, *, prepare_host_review: bool = Fa
     if semantic_review_runtime:
         command += ["--semantic-review-runtime", semantic_review_runtime,
                     "--semantic-review-model", str(semantic_review_model)]
+    if semantic_review_reasoning_effort is not None:
+        command += ["--semantic-review-reasoning-effort", semantic_review_reasoning_effort]
     for option, value in (("--style-template", args.style_template),
                           ("--thesis-profile", args.thesis_profile),
                           ("--template-profile", args.template_profile),
@@ -155,6 +160,8 @@ def main(argv: list[str]) -> int:
                    help="optional native codex executable used by --auto-host-agent")
     p.add_argument("--codex-model",
                    help=f"native Codex model override (project default: {codex_adapter.DEFAULT_MODEL})")
+    p.add_argument("--codex-reasoning-effort", type=codex_adapter.resolve_reasoning_effort,
+                   help="explicit Codex effort for primary, independent and post-format review")
     p.add_argument("--allow-prompt-only", action="store_true",
                    help="explicit non-release override when native Codex lacks --output-schema")
     p.add_argument("--render-report", type=Path)
@@ -178,6 +185,7 @@ def main(argv: list[str]) -> int:
             "--host-runtime": args.host_runtime,
             "--codex-bin": args.codex_bin,
             "--codex-model": args.codex_model,
+            "--codex-reasoning-effort": args.codex_reasoning_effort,
             "--openclaw-bin": args.openclaw_bin,
             "--host-agent-model": args.host_agent_model,
             "--host-agent-parent-session-key": args.host_agent_parent_session_key,
@@ -244,6 +252,7 @@ def main(argv: list[str]) -> int:
         if adapter_id == "codex":
             try:
                 args.codex_model = codex_adapter.resolve_model(args.codex_model)
+                args.codex_reasoning_effort = codex_adapter.resolve_reasoning_effort(args.codex_reasoning_effort)
             except ValueError as exc:
                 p.error(str(exc))
             forbidden = []
@@ -262,6 +271,8 @@ def main(argv: list[str]) -> int:
                     "Codex native adapter does not accept OpenClaw-only options: "
                     + ", ".join(forbidden)
                 )
+        elif args.codex_reasoning_effort is not None:
+            p.error("--codex-reasoning-effort requires the Codex adapter")
         work = args.work_dir.resolve()
         output = args.output.resolve() if args.output else None
         if work.exists() and any(work.iterdir()):
@@ -309,6 +320,8 @@ def main(argv: list[str]) -> int:
                 bridge += ["--codex-bin", args.codex_bin]
             if args.codex_model:
                 bridge += ["--codex-model", args.codex_model]
+            if args.codex_reasoning_effort is not None:
+                bridge += ["--codex-reasoning-effort", args.codex_reasoning_effort]
             if args.allow_prompt_only:
                 bridge.append("--allow-prompt-only")
             label = "explicit Codex native adapter review + provenance merge"
@@ -335,6 +348,7 @@ def main(argv: list[str]) -> int:
             merge_receipt=review_requirements / "merge-receipt.json",
             semantic_review_runtime=runtime.runtime if adapter_id == "codex" else None,
             semantic_review_model=args.codex_model if adapter_id == "codex" else None,
+            semantic_review_reasoning_effort=args.codex_reasoning_effort if adapter_id == "codex" else None,
         )
         return run_stage(
             final,

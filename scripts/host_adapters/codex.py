@@ -31,6 +31,19 @@ def resolve_model(model: str | None) -> str:
     return model.strip()
 
 
+def resolve_reasoning_effort(value: str | None) -> str | None:
+    """Keep an explicit model-advertised effort without guessing a fallback.
+
+    Native Codex defines effort as a non-empty string advertised by the model,
+    rather than a fixed enum. Passing a value does not prove model support.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("Codex reasoning effort must be a non-empty string when supplied")
+    return value.strip()
+
+
 def resolve_binary(binary: str | None) -> str:
     """Resolve an explicitly supplied or installed native Codex executable."""
     candidate = binary or shutil.which("codex")
@@ -51,6 +64,7 @@ def build_command(
     last_message_path: Path,
     cwd: Path,
     model: str | None = None,
+    reasoning_effort: str | None = None,
     output_schema_path: Path | None = None,
 ) -> list[str]:
     """Build an isolated, read-only native Codex invocation.
@@ -90,6 +104,9 @@ def build_command(
             "--output-schema", str(schema_path),
         ]
     command[4:4] = ["--model", resolve_model(model)]
+    effort = resolve_reasoning_effort(reasoning_effort)
+    if effort is not None:
+        command[4:4] = ["--config", "model_reasoning_effort=" + json.dumps(effort)]
     return command
 
 

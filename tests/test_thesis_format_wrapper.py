@@ -107,6 +107,31 @@ class ThesisFormatWrapperTests(unittest.TestCase):
         self.assertEqual(command[2], str(Path("requirements.docx").resolve()))
         self.assertEqual(command[3], str(Path("thesis.docx").resolve()))
 
+    def test_explicit_codex_effort_survives_primary_and_post_format_handoff(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            with patch.dict("os.environ", {"THESIS_FORGE_HOST_RUNTIME": "codex"}), \
+                 patch.object(wrapper, "strict_json_read", return_value={"run_id": "fresh-run"}), \
+                 patch.object(wrapper, "run_stage", return_value=0) as run:
+                code = wrapper.main([
+                    "requirements.docx", "thesis.tex", str(Path(td) / "out.docx"),
+                    "--work-dir", str(Path(td) / "work"), "--auto-host-agent",
+                    "--host-runtime", "codex", "--codex-reasoning-effort", "max",
+                ])
+            self.assertEqual(code, 0)
+            primary = run.call_args_list[1].args[0]
+            final = run.call_args_list[2].args[0]
+            self.assertEqual(primary[primary.index("--codex-reasoning-effort") + 1], "max")
+            self.assertEqual(final[final.index("--semantic-review-reasoning-effort") + 1], "max")
+            self.assertEqual(primary[primary.index("--max-attempts") + 1], "2")
+            self.assertEqual(primary[primary.index("--timeout") + 1], "900")
+
+    def test_effort_requires_explicit_native_codex_execution(self) -> None:
+        for extra in ([], ["--auto-host-agent", "--host-runtime", "openclaw"]):
+            with self.subTest(extra=extra), patch.dict("os.environ", {"THESIS_FORGE_HOST_RUNTIME": "openclaw"}), \
+                 patch.object(wrapper, "run_stage") as stage, self.assertRaises(SystemExit):
+                wrapper.main(["requirements.docx", "thesis.tex", "--codex-reasoning-effort", "max", *extra])
+            stage.assert_not_called()
+
     def test_explicit_native_executable_path_is_caller_relative(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             with patch.dict("os.environ", {"THESIS_FORGE_HOST_RUNTIME": "codex"}), \

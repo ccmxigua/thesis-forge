@@ -568,6 +568,17 @@ routes. An unavailable model fails closed; it is not replaced with an older
 model. Requested model identity is recorded separately from actual route
 visibility, which may remain `unobservable`.
 
+For an explicitly requested native reasoning effort, pass
+`--codex-reasoning-effort max` (or the exact model-advertised value). The wrapper
+and batch runner forward it to primary extraction, every bounded independent
+review retry, and the post-format semantic review. Direct post-format callers
+use `--semantic-review-reasoning-effort` with runtime `codex`. Omission preserves
+the native default; it never changes timeouts, retry budgets, provider, or
+authentication. Audits record the requested effort separately from the observed
+effort, which remains unavailable when the native stream does not expose it.
+A locally accepted configuration string is not proof that the model supports
+or actually executed that effort. No effort fallback is permitted.
+
 For compound native-review failures, repair authorization is bound to the
 complete validator bundle and its exact parent candidate. Empty obligation
 inventories may be completed only at named current-source targets; typed atoms

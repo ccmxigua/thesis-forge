@@ -50,6 +50,32 @@ class BatchAcceptanceTests(unittest.TestCase):
             self.assertEqual(primary[primary.index("--codex-model") + 1], "gpt-6-luna")
             self.assertEqual(pipeline.call_args.kwargs["semantic_review_model"], "gpt-6-luna")
 
+    def test_explicit_codex_effort_survives_batch_stage_handoff(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            base = Path(td)
+            extraction = base / "case" / "work" / "review" / "requirements" / "extraction-manifest.json"
+            extraction.parent.mkdir(parents=True)
+            extraction.write_text(json.dumps({"run_id": "fresh-test-run"}), encoding="utf-8")
+            commands = []
+
+            def run_command(command, **kwargs):
+                commands.append(command)
+                return {"returncode": 2 if len(commands) == 3 else 0}
+
+            with patch.object(batch, "pipeline_command", return_value=["pipeline"]) as pipeline, \
+                 patch.object(batch, "run_command", side_effect=run_command), \
+                 patch.object(batch, "extraction_report", return_value={}), \
+                 patch.object(batch, "canonical_profile_report", return_value={}):
+                batch.run_case(
+                    base, base / "source.tex", {"id": "case", "analysis_mode": "llm_primary"},
+                    prepare_host_review=False, auto_host_agent=True,
+                    host_runtime="codex", host_adapter_id="codex", codex_reasoning_effort="max",
+                )
+            primary = commands[1]
+            self.assertEqual(primary[primary.index("--codex-reasoning-effort") + 1], "max")
+            self.assertEqual(primary[primary.index("--max-attempts") + 1], "2")
+            self.assertEqual(pipeline.call_args.kwargs["semantic_review_reasoning_effort"], "max")
+
     def test_native_semantic_review_requires_case_run_and_exact_check_coverage(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             case_root = Path(td) / "case"

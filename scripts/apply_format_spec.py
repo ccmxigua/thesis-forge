@@ -13,6 +13,8 @@ import zipfile
 from pathlib import Path
 from typing import Any
 
+from host_adapters.codex import resolve_reasoning_effort
+
 from docx import Document
 from docx.table import Table, _Cell
 from docx.enum.section import WD_ORIENT
@@ -3990,6 +3992,8 @@ def main(argv: list[str]) -> int:
                    help="explicit current host runtime for read-only abstract semantic review")
     p.add_argument("--semantic-review-model",
                    help="explicit model route for the current host's semantic review")
+    p.add_argument("--semantic-review-reasoning-effort", type=resolve_reasoning_effort,
+                   help="explicit native Codex reasoning effort; no model-support claim")
     p.add_argument("--semantic-review-timeout", type=int, default=900)
     p.add_argument("--semantic-review-agent-id", default="main")
     p.add_argument("--semantic-review-runner", choices=["exec", "gateway"], default="exec")
@@ -4001,6 +4005,8 @@ def main(argv: list[str]) -> int:
         p.error("--manual-review-items requires --pipeline-manifest")
     if bool(args.semantic_review_runtime) != bool(args.semantic_review_model):
         p.error("--semantic-review-runtime and --semantic-review-model must be supplied together")
+    if args.semantic_review_reasoning_effort is not None and args.semantic_review_runtime != "codex":
+        p.error("--semantic-review-reasoning-effort requires --semantic-review-runtime codex")
     if args.semantic_review_timeout <= 0:
         p.error("--semantic-review-timeout must be positive")
     spec = load_json(args.format_spec)
@@ -4751,6 +4757,8 @@ def main(argv: list[str]) -> int:
                         runner=args.semantic_review_runner,
                         binary=args.semantic_review_bin,
                         config_path=args.semantic_review_config,
+                        **({"reasoning_effort": args.semantic_review_reasoning_effort}
+                           if args.semantic_review_reasoning_effort is not None else {}),
                     )
                     semantic_review_complete = semantic_review.get("status") == "completed"
                     semantic_uncertainty_items = semantic_content_review_items(

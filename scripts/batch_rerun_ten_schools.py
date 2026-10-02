@@ -401,7 +401,10 @@ def pipeline_command(case: dict[str, Any], source: Path, work_dir: Path, output_
                      merge_receipt: Path | None = None,
                      host_review_chunk_size: int = 20,
                      semantic_review_runtime: str | None = None,
-                     semantic_review_model: str | None = None) -> list[str]:
+                     semantic_review_model: str | None = None,
+                     semantic_review_reasoning_effort: str | None = None) -> list[str]:
+    if semantic_review_reasoning_effort is not None and semantic_review_runtime != "codex":
+        raise ValueError("semantic review reasoning effort requires Codex")
     command = [
         sys.executable, "scripts/thesis_format_pipeline.py",
         str(case["requirements"]), str(source), str(output_docx),
@@ -444,6 +447,8 @@ def pipeline_command(case: dict[str, Any], source: Path, work_dir: Path, output_
             "--semantic-review-runtime", semantic_review_runtime,
             "--semantic-review-model", semantic_review_model,
         ])
+    if semantic_review_reasoning_effort is not None:
+        command.extend(["--semantic-review-reasoning-effort", semantic_review_reasoning_effort])
     return command
 
 
@@ -1579,6 +1584,7 @@ def run_case(base: Path, source: Path, case: dict[str, Any], *, prepare_host_rev
              openclaw_config: Path | None = None,
              codex_bin: str | None = None,
              codex_model: str | None = None,
+             codex_reasoning_effort: str | None = None,
              semantic_review_model: str | None = None,
              allow_prompt_only: bool = False,
              neutral_reference_docx: Path | None = None,
@@ -1587,6 +1593,9 @@ def run_case(base: Path, source: Path, case: dict[str, Any], *, prepare_host_rev
              stage_timeout: int = 1800) -> dict[str, Any]:
     if host_adapter_id == "codex":
         codex_model = codex_adapter.resolve_model(codex_model)
+        codex_reasoning_effort = codex_adapter.resolve_reasoning_effort(codex_reasoning_effort)
+    elif codex_reasoning_effort is not None:
+        raise ValueError("--codex-reasoning-effort requires the Codex adapter")
     case_dir = base / str(case["id"])
     work = case_dir / "work"
     review_requirements = work / "review" / "requirements"
@@ -1655,6 +1664,8 @@ def run_case(base: Path, source: Path, case: dict[str, Any], *, prepare_host_rev
                     bridge_command.extend(["--codex-bin", codex_bin])
                 if codex_model:
                     bridge_command.extend(["--codex-model", codex_model])
+                if codex_reasoning_effort is not None:
+                    bridge_command.extend(["--codex-reasoning-effort", codex_reasoning_effort])
                 if allow_prompt_only:
                     bridge_command.append("--allow-prompt-only")
             else:
@@ -1696,6 +1707,7 @@ def run_case(base: Path, source: Path, case: dict[str, Any], *, prepare_host_rev
                     merge_receipt=review_requirements / "merge-receipt.json",
                     host_review_chunk_size=host_review_chunk_size,
                     semantic_review_runtime=host_runtime,
+                    semantic_review_reasoning_effort=codex_reasoning_effort,
                     semantic_review_model=(semantic_review_model or (
                         codex_model if host_adapter_id == "codex" else host_agent_model
                     )),
@@ -1906,6 +1918,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="optional native codex executable used by --auto-host-agent")
     parser.add_argument("--codex-model",
                         help=f"native Codex model override (project default: {codex_adapter.DEFAULT_MODEL})")
+    parser.add_argument("--codex-reasoning-effort",
+                        help="explicit Codex effort for primary, independent and post-format review")
     parser.add_argument("--semantic-review-model",
                         help="explicit model route for the post-format semantic review; defaults to the selected host model")
     parser.add_argument(
@@ -1919,6 +1933,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--stage-timeout", type=int, default=1800,
                         help="hard timeout for each pipeline/bridge/render subprocess")
     args = parser.parse_args(argv)
+    if args.codex_reasoning_effort is not None:
+        if not args.auto_host_agent:
+            parser.error("--codex-reasoning-effort requires explicit --auto-host-agent")
+        try:
+            args.codex_reasoning_effort = codex_adapter.resolve_reasoning_effort(args.codex_reasoning_effort)
+        except ValueError as exc:
+            parser.error(str(exc))
     try:
         source, cases, manifest_path = load_manifest(args.template_manifest)
     except ValueError as exc:
@@ -1967,6 +1988,8 @@ def main(argv: list[str] | None = None) -> int:
             adapter_id = automatic_adapter_id(runtime)
         except HostRuntimeError as exc:
             parser.error(str(exc))
+        if args.codex_reasoning_effort is not None and adapter_id != "codex":
+            parser.error("--codex-reasoning-effort requires the Codex adapter")
         if adapter_id == "codex":
             forbidden = []
             if args.host_agent_model:
@@ -2050,7 +2073,7 @@ def main(argv: list[str] | None = None) -> int:
                 host_agent_parent_session_key=args.host_agent_parent_session_key,
                 host_agent_auth_env_only=args.host_agent_auth_env_only,
                 host_agent_runner=args.host_agent_runner,
-                host_runtime=args.host_runtime,
+                host_runtime=runtime.runtime if args.auto_host_agent else args.host_runtime,
                 host_adapter_id=adapter_id,
                 inherit_parent_model=not args.no_host_agent_model_inheritance,
                 host_review_chunk_size=args.host_review_chunk_size,
@@ -2059,6 +2082,7 @@ def main(argv: list[str] | None = None) -> int:
                 openclaw_config=args.openclaw_config,
                 codex_bin=args.codex_bin,
                 codex_model=args.codex_model,
+                codex_reasoning_effort=args.codex_reasoning_effort,
                 semantic_review_model=args.semantic_review_model,
                 allow_prompt_only=args.allow_prompt_only,
                 neutral_reference_docx=neutral_reference,

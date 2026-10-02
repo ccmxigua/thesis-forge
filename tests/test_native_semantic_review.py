@@ -2098,7 +2098,7 @@ class NativeSemanticReviewTests(unittest.TestCase):
                 audit = native_review.run_native_semantic_review(
                     request,
                     output_dir=output_dir, host_runtime="codex", model=None,
-                    timeout=5,
+                    timeout=5, reasoning_effort="max",
                 )
 
             self.assertEqual(process.call_args.kwargs["input_text"],
@@ -2119,6 +2119,9 @@ class NativeSemanticReviewTests(unittest.TestCase):
             self.assertEqual(observed["output_schema_path"], provider_schema_path)
             self.assertEqual(observed["model"], "gpt-6-luna")
             self.assertEqual(audit["model_requested"], "gpt-6-luna")
+            self.assertEqual(observed["reasoning_effort"], "max")
+            self.assertEqual(audit["reasoning_effort_requested"], "max")
+            self.assertIsNone(audit["reasoning_effort_observed"])
             self.assertEqual(native_schema_support_errors(provider_schema), [])
 
             def contains_unique_items(node):

@@ -201,7 +201,7 @@ review-draft markers under the separate policy below.
 ### Document-wide English font scope
 
 An explicitly document-wide English-font rule must not be narrowed to
-`body_text` alone. For the narrowly recognized unconditional wording, code may
+`body_text` alone. For the narrowly recognized document-wide wording, code may
 complete the current source-bound catalog's text-role references only when all
 catalog roles, exact properties, source spans and evidence match. It never
 changes a manual classification, fabricates missing catalog values, or guesses
@@ -209,13 +209,26 @@ which clause/occurrence a model meant. Preserve the immutable native response
 and separate `document_font_projections` hashes; the completed candidate still
 requires the ordinary contract and a fresh independent obligation review.
 
+The recognized “论文中出现英文时” wording retains the exact conditional
+`source_inventory.english_text` / `present` / `null` declaration in every
+catalog, candidate and merged role requirement. Missing or changed conditions,
+exceptions, stale source spans or incomplete catalogs cannot be completed.
+This structural contract does not resolve the source fact: capability preflight
+still blocks a missing fact as `unknown`. The run executor and verifier select
+only actual Latin text, preserving the occurrence condition and document scope.
+
 The formatter applies the bound Latin font directly to editable WordprocessingML
 English runs, including tables, headers, footers, hyperlinks, text boxes and
 note parts. It leaves the East Asian font slots and text unchanged. The
 serialized `document-font-audit.json` and final post-Word format comparison
 check the actual run properties, not just the paragraph style. This wording
 does not itself authorize changing standalone numbers, symbols, or mathematical
-fonts. Latin text in OMML/DrawingML that this executor cannot validate remains
+fonts. Compiler and merge keep this source's font out of general role styles;
+formatter and comparison use the same filtered role view for legacy specs.
+All source-bound role requirements remain intact for the dedicated executor.
+A separate unconditional general-font requirement may retain that role's font;
+the English-only source cannot supply unrelated font or paragraph properties.
+Latin text in OMML/DrawingML that this executor cannot validate remains
 an explicit technical verification blocker, not a successful font check or a
 red author TODO. OOXML font values also do not prove that the required font is
 installed or that Word rendered the expected glyphs: real renderer acceptance

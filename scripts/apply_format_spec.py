@@ -25,7 +25,7 @@ from docx.text.paragraph import Paragraph
 from docx.text.run import Run
 
 from artifact_io import atomic_write_text, commit_files, sibling_temp
-from document_text_font import apply_document_font, audit_document_font
+from document_text_font import apply_document_font, audit_document_font, document_font_safe_roles
 from docx_semantics import (
     all_body_paragraphs,
     all_story_paragraphs,
@@ -4084,6 +4084,7 @@ def main(argv: list[str]) -> int:
         role: merge_role_style_defaults(defaults.get(role, {}), role_spec)
         for role, role_spec in spec.get("roles", {}).items()
     }
+    effective_roles = document_font_safe_roles(spec, effective_roles)
     requested_compliance_mode = args.compliance_mode or spec.get("compliance_mode", "supported_subset")
     compliance_mode = (
         "supported_subset" if args.output_policy == "review_draft"

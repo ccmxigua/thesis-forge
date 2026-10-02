@@ -40,6 +40,26 @@ def compile_document_latin_font(source: Any) -> str | None:
     return _FONT_NAMES.get(value.casefold())
 
 
+def compile_document_font_applicability(source: Any) -> dict | None:
+    """Preserve the exact recognized occurrence condition, without resolving it."""
+    if compile_document_latin_font(source) and source.strip().startswith("论文中出现英文时"):
+        return {"status": "conditional", "conditions": [
+            {"fact": "source_inventory.english_text", "operator": "present", "value": None}],
+            "exceptions": []}
+    return None
+
+
+def _source_applicability_matches(source: str, declaration: Any) -> bool:
+    expected = compile_document_font_applicability(source)
+    if expected is None:
+        return declaration is None or declaration == {}
+    return (isinstance(declaration, dict)
+            and not set(declaration) - {"status", "conditions", "exceptions"}
+            and declaration.get("status") == expected["status"]
+            and declaration.get("conditions") == expected["conditions"]
+            and declaration.get("exceptions", []) == [])
+
+
 def _digest(value: Any) -> str:
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True,
                                     separators=(",", ":")).encode()).hexdigest()
@@ -55,11 +75,50 @@ def _items(value: Any) -> list:
     return value if isinstance(value, list) else []
 
 
+def document_font_safe_roles(spec: dict, roles: dict | None = None) -> dict:
+    """Keep English-only source fonts out of general run/style operations.
+
+    Requirements remain intact. A separate unconditional source requirement
+    may authorize the same Latin font as a general role default; the global
+    English-only sentence by itself cannot authorize numbers or symbols.
+    """
+    result = copy.deepcopy(spec.get("roles", {}) if roles is None else roles)
+    requirements = [r for r in _items(spec.get("requirements")) if isinstance(r, dict)]
+    def unconditional(declaration: Any) -> bool:
+        return declaration is None or declaration == {} or (
+            isinstance(declaration, dict)
+            and not set(declaration) - {"status", "conditions", "exceptions"}
+            and declaration.get("status") == "always"
+            and declaration.get("conditions", []) == []
+            and declaration.get("exceptions", []) == [])
+    for role, props in list(result.items()):
+        if not isinstance(props, dict) or not isinstance(props.get("font"), dict):
+            continue
+        latin = props["font"].get("latin")
+        global_sources = [r for r in requirements if r.get("role") == role
+                          and compile_document_latin_font(r.get("source_text")) == latin
+                          and latin is not None]
+        if not global_sources:
+            continue
+        independent = [r for r in requirements if r.get("role") == role
+                       and not compile_document_latin_font(r.get("source_text"))
+                       and _latin_font(r) == latin
+                       and unconditional(r.get("applicability"))]
+        if independent:
+            continue
+        props["font"].pop("latin", None)
+        if not props["font"]:
+            props.pop("font")
+        if not props:
+            result.pop(role)
+    return result
+
+
 def materialize_document_font_references(response: Any, chunk: dict) -> tuple[Any, list[dict]]:
     """Complete only exact, current-source catalog edges, never synthesize values.
 
-    A missing/inconsistent catalog, a conflicting model value, conditional
-    payload, or non-executable classification is not permission to guess.
+    Conditions must match the exact source-owned catalog. A missing/inconsistent
+    catalog, conflicting value/condition or manual classification cannot be repaired.
     """
     from source_obligation_compiler import verified_current_source_span
 
@@ -84,20 +143,22 @@ def materialize_document_font_references(response: Any, chunk: dict) -> tuple[An
             continue
         eligible = [r for r in catalog if isinstance(r, dict)
                     and r.get("clause_ids") == [cid] and eid in _items(r.get("evidence_ids"))
-                    and compile_document_latin_font(r.get("source_text")) == font]
+                    and r.get("source_text") == binding[1]]
         if (len(eligible) != len(TEXT_FONT_ROLES)
                 or {r.get("role") for r in eligible} != set(TEXT_FONT_ROLES)
                 or len({r.get("id") for r in eligible}) != len(eligible)
                 or any(not isinstance(r.get("id"), str)
                        or r.get("properties") != {"font": {"latin": font}}
-                       or any(r.get(key) for key in ("applicability", "input_prerequisites"))
+                       or not _source_applicability_matches(binding[1], r.get("applicability"))
+                       or r.get("input_prerequisites")
                        for r in eligible)):
             continue
         by_id = {r["id"]: r for r in eligible}
         existing = [r for r in requirements if isinstance(r, dict) and cid in _items(r.get("clause_ids"))]
         if any(r.get("existing_requirement_id") not in by_id
                or r.get("clause_ids") != [cid] or r.get("evidence_ids") != clause.get("evidence_ids")
-               or any(r.get(key) for key in ("applicability", "input_prerequisites"))
+               or not _source_applicability_matches(binding[1], r.get("applicability"))
+               or r.get("input_prerequisites")
                or (r.get("properties") is not None
                    and r["properties"] != by_id[r["existing_requirement_id"]]["properties"])
                or (r.get("role") is not None and r["role"] != by_id[r["existing_requirement_id"]]["role"])
@@ -111,12 +172,16 @@ def materialize_document_font_references(response: Any, chunk: dict) -> tuple[An
             continue
         before = _digest(projected)
         for rule in missing:
-            requirements.append({"existing_requirement_id": rule["id"], "role": rule["role"],
+            reference = {"existing_requirement_id": rule["id"], "role": rule["role"],
                                  "properties": copy.deepcopy(rule["properties"]),
                                  "clause_ids": [cid], "evidence_ids": copy.deepcopy(clause["evidence_ids"]),
-                                 "confidence": 1.0, "reason": "Code-bound complete document Latin-font scope."})
-        audits.append({"policy": "current_source_document_font_catalog_completion_v1",
+                                 "confidence": 1.0, "reason": "Code-bound complete document Latin-font scope."}
+            if rule.get("applicability") is not None:
+                reference["applicability"] = copy.deepcopy(rule["applicability"])
+            requirements.append(reference)
+        audits.append({"policy": "current_source_document_font_catalog_completion_v2",
                        "clause_id": cid, "evidence_id": eid, "font": font,
+                       "applicability": compile_document_font_applicability(binding[1]),
                        "source_span": copy.deepcopy(clause["source_span"]),
                        "catalog_sha256": _digest(eligible), "added_existing_requirement_ids": [r["id"] for r in missing],
                        "response_before_sha256": before, "response_after_sha256": _digest(projected),
@@ -140,8 +205,9 @@ def document_font_policy(spec: dict) -> str | None:
     if (not set(TEXT_FONT_ROLES) <= {r.get("role") for r in rules}
             or any(not key[0] or not key[1] or not set(TEXT_FONT_ROLES) <= {r.get("role") for r in group}
                    for key, group in source_groups.items())
-            or any(_latin_font(r) != font
-                   or any(r.get(key) for key in ("applicability", "input_prerequisites")) for r in rules)):
+            or any(r.get("properties") != {"font": {"latin": font}}
+                   or not _source_applicability_matches(r["source_text"], r.get("applicability"))
+                   or r.get("input_prerequisites") for r in rules)):
         raise ValueError("incomplete document-wide Latin-font scope")
     # Role-specific exceptions must be adjudicated, not silently overwritten.
     for requirement in _items(spec.get("requirements")):
@@ -165,12 +231,17 @@ def document_font_scope_errors(response: dict, chunk: dict) -> list[str]:
             continue
         rules = [r for r in _items(response.get("requirements")) if isinstance(r, dict)
                  and review["clause_id"] in _items(r.get("clause_ids"))]
-        roles = {r.get("role") for r in rules if _latin_font(r) == font
-                 and not any(r.get(key) for key in ("applicability", "input_prerequisites"))}
+        roles = {r.get("role") for r in rules if r.get("properties") == {"font": {"latin": font}}
+                 and _source_applicability_matches(binding[1], r.get("applicability"))
+                 and not r.get("input_prerequisites")}
         if not set(TEXT_FONT_ROLES) <= roles:
             errors.append(f"$.clause_reviews[{index}]: document_latin_font_scope_incomplete")
         if any(_latin_font(r) not in (None, font) for r in rules):
             errors.append(f"$.clause_reviews[{index}]: document_latin_font_conflict")
+        if any(not _source_applicability_matches(binding[1], r.get("applicability")) for r in rules):
+            errors.append(f"$.clause_reviews[{index}]: document_latin_font_condition_mismatch")
+        if any(r.get("properties") != {"font": {"latin": font}} for r in rules):
+            errors.append(f"$.clause_reviews[{index}]: document_latin_font_payload_mismatch")
     return errors
 
 

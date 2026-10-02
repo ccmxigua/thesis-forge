@@ -265,6 +265,7 @@ from publication_policy_inventory import (
     RULE_ID as POLICY_INVENTORY_RULE,
 )
 from source_quote_reassessment import quote_context_reassessment, RULE_ID as QUOTE_REASSESSMENT_RULE
+from local_atom_reassessment import project as project_local_atoms, ledger as local_atom_retry_ledger, POLICY as LOCAL_ATOM_PROPOSAL_POLICY
 from source_condition_reassessment import (
     source_atom_feedback, condition_reassessment, project_scope_proposal, CODE as CONDITION_REASSESSMENT_CODE,
     RULE_ID as CONDITION_REASSESSMENT_RULE,
@@ -1996,6 +1997,47 @@ def _prove_retry_repair_base_replay(
         "authorizing_error_records_sha256": _response_sha256(reproduced_records),
         "accepted": False,
     }
+
+
+def _verified_local_atom_parent_binding(
+    receipt: Any, attempt_record: Any, previous: Any, chunk: dict[str, Any],
+    records: list[dict[str, Any]], *, source_projection_validation_sha256: str | None = None,
+) -> dict[str, Any] | None:
+    """Authenticate a code-produced parent that intentionally has no model provenance.
+
+    Do not stamp missing provenance onto the parent. Its persisted bytes,
+    complete invocation receipt and deterministic replay are a separate proof.
+    This proof is code-owned and is never read from the model response.
+    """
+    if (not isinstance(receipt, dict) or receipt.get("kind") != "unaccepted_repair_base"
+            or not isinstance(attempt_record, dict) or not isinstance(previous, dict)
+            or not _retry_fingerprints_complete(_retry_input_fingerprints(chunk))
+            or attempt_record.get("retry_input_fingerprints") != _retry_input_fingerprints(chunk)
+            or receipt.get("canonical_json_sha256") != _response_sha256(previous)):
+        return None
+    raw_receipt = receipt.get("decoded_raw_receipt")
+    try:
+        if (not isinstance(raw_receipt, dict)
+                or sha256_file(Path(receipt["path"])) != receipt.get("sha256")
+                or sha256_file(Path(raw_receipt["path"])) != raw_receipt.get("sha256")
+                or _response_sha256(_read_json(Path(receipt["path"]), label="local proposal parent"))
+                != _response_sha256(previous)):
+            return None
+        replay = _prove_retry_repair_base_replay(
+            receipt, chunk, records,
+            source_projection_validation_sha256=source_projection_validation_sha256,
+        )
+        if replay is None:
+            return None
+        return {"policy": "verified_current_retry_repair_base_v1",
+                "parent_response_sha256": _response_sha256(previous),
+                "source_chunk_sha256": _response_sha256(chunk),
+                "input_fingerprints": _retry_input_fingerprints(chunk),
+                "parent_file_sha256": receipt["sha256"],
+                "raw_file_sha256": raw_receipt["sha256"],
+                "replay_proof": replay, "accepted": False}
+    except (OSError, KeyError, TypeError, ValueError):
+        return None
 
 
 def _load_normalized_retry_raw_pair(
@@ -5854,6 +5896,7 @@ def _retry_semantic_change_error(
     comparison_previous_response: Any | None = None,
     comparison_current_response: Any | None = None,
     model_retry_response: Any | None = None,
+    verified_local_parent_binding: dict[str, Any] | None = None,
 ) -> tuple[ValueError | None, list[str]]:
     """Reject semantic drift even when the retry response is still invalid.
 
@@ -5873,6 +5916,17 @@ def _retry_semantic_change_error(
         if comparison_current_response is not None else current_response
     )
     changed_paths = _retry_change_paths(comparison_previous, comparison_current)
+    if (contract_version == HOST_REVIEW_CONTRACT_V3 and isinstance(chunk, dict)
+            and _retry_fingerprints_complete(_retry_input_fingerprints(chunk))):
+        local_ledger = local_atom_retry_ledger(
+            comparison_previous, comparison_current, records, changed_paths, chunk,
+            validate=validate_host_agent_response, changed_paths=_retry_change_paths,
+            verified_parent_binding=verified_local_parent_binding,
+        )
+        if local_ledger is not None:
+            if authorization_out is not None:
+                authorization_out.extend(copy.deepcopy(local_ledger))
+            return None, changed_paths
     if contract_version == HOST_REVIEW_CONTRACT_V3 and isinstance(chunk, dict):
         declaration_previous, _ = _materialize_fixed_declaration_source_text(previous_response, chunk)
         declaration_current, _ = _materialize_fixed_declaration_source_text(current_response, chunk)
@@ -6004,6 +6058,7 @@ def _project_validator_targeted_obligation_fields(
     model_retry_response: Any,
     records: list[dict[str, Any]],
     *, chunk: dict[str, Any] | None = None,
+    verified_local_parent_binding: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any] | None, dict[str, Any]]:
     """Project only source-inventory fields explicitly targeted by the validator.
 
@@ -6043,6 +6098,13 @@ def _project_validator_targeted_obligation_fields(
     ]
     if not target_records:
         if isinstance(chunk, dict) and _retry_fingerprints_complete(_retry_input_fingerprints(chunk)):
+            local_candidate, local_audit = project_local_atoms(
+                parent_response, model_retry_response, records, chunk,
+                validate=validate_host_agent_response, changed_paths=_retry_change_paths,
+                verified_parent_binding=verified_local_parent_binding,
+            )
+            if local_candidate is not None:
+                return local_candidate, local_audit
             scope_candidate, scope_audit = project_scope_proposal(
                 parent_response, model_retry_response, records, chunk,
                 prepare=prepare_native_response_candidate, validate=validate_host_agent_response,
@@ -14361,6 +14423,11 @@ def run_bridge(
                         current_retry_comparison, current_declaration_projection = (
                             _materialize_fixed_declaration_source_text(current_for_authorization, chunk)
                         )
+                        local_parent_binding = _verified_local_atom_parent_binding(
+                            semantic_parent_receipt, semantic_parent_attempt_record,
+                            previous_retry_comparison, chunk, semantic_parent_error_records,
+                            source_projection_validation_sha256=source_projection_validation_sha256,
+                        )
                         change_error, semantic_changes = _retry_semantic_change_error(
                             previous_raw,
                             current_for_authorization,
@@ -14371,6 +14438,7 @@ def run_bridge(
                             comparison_previous_response=previous_retry_comparison,
                             comparison_current_response=current_retry_comparison,
                             model_retry_response=normalized_model_retry,
+                            verified_local_parent_binding=local_parent_binding,
                         )
                         model_semantic_changes = raw_model_semantic_changes
                         retry_field_projection: dict[str, Any] | None = None
@@ -14389,12 +14457,14 @@ def run_bridge(
                                     current_for_authorization,
                                     semantic_parent_error_records,
                                     chunk=chunk,
+                                    verified_local_parent_binding=local_parent_binding,
                                 )
                             )
                             if projection_audit.get("policy") in {
                                 "source_bound_scope_field_patch_v1",
                                 "validator_targeted_administrative_qualifiers_v1",
                                 "validator_targeted_missing_requirements_v1",
+                                LOCAL_ATOM_PROPOSAL_POLICY,
                             }:
                                 obligation_projection_records = semantic_parent_error_records
                             if projected_raw is not None and obligation_projection_records:
@@ -14411,6 +14481,7 @@ def run_bridge(
                                     authorization_out=projected_authorizations,
                                     comparison_previous_response=previous_retry_comparison,
                                     comparison_current_response=projected_retry_comparison,
+                                    verified_local_parent_binding=local_parent_binding,
                                 )
                                 if projected_error is None:
                                     change_error = None

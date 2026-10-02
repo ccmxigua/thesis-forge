@@ -1393,3 +1393,15 @@ array against the unique current source candidate; audit the original scalar.
 Otherwise competing `body`/`body_parts` are rejected by the contract, merger
 and resource registry. Legacy single-form inputs preserve original bytes.
 See `docs/source-routing-declaration-representation.md`.
+
+## Compound local source-atom proposals
+
+Local diagnostics can authorize a bounded primary proposal under
+`validator_bound_compound_atom_proposal_v1`, not certify semantic equivalence.
+Authenticate the complete current parent/error/source/invocation binding; copy
+only named applicability/quote fields or append the missing side of a mixed
+inventory without editing existing atoms. Preserve unrequested raw changes in
+audit, reject reported conflicts, and require complete revalidation and fresh
+independent source-first review. Do not guess applicability, invent human acts,
+stamp provenance onto an unaccepted parent or extend the ordinary retry budget.
+See `docs/compound-local-atom-proposals.md`.

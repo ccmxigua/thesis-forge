@@ -1322,6 +1322,15 @@ contract response and immutable host receipts.
   print relations in source order; classifications and human atoms stay frozen.
   Legacy 2.1 continuation fragments are unchanged.
   See `docs/redundant-signature-print-proposals.md`.
+- A missing-inventory corrective independent read may lock individually
+  validated siblings only after replaying the immediately preceding invocation
+  against the identical current request/source/candidate. Retained selections
+  bind the same source occurrence; hidden errors or incomplete sibling results
+  cannot be retained. Only failed checks receive fresh semantic assessment.
+  Preserve raw output, enforce scope equality and all full-response validators,
+  record parent hashes and fresh/retained IDs, and keep human actions pending.
+  This is not a new full independent assessment or submission approval.
+  See `docs/independent-corrective-review-scope.md`.
 - Missing chunk response: stop and report the exact filename.
 - Input prerequisites use the code-owned `requirement_contract.input_catalog`
   for their exact kind. Generation schema couples kind and key by registered

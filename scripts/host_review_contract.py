@@ -1837,6 +1837,25 @@ def validate_response(response: Any, chunk: dict[str, Any]) -> list[str]:
                             for body_index, body in enumerate(body_parts)
                             if isinstance(body, str) and body.strip()
                         )
+                    # Reject a standalone, unmaterialized heading entity at
+                    # the same boundary as the merger. Do not add a competing
+                    # generic error to an existing source-selector repair, or
+                    # reinterpret legacy body-only compatibility payloads.
+                    heading_only_selection = any(
+                        source_ids == group.get("heading_evidence_ids")
+                        and item.get("clause_ids") == [group.get("heading_clause_id")]
+                        for group in derive_fixed_declaration_candidates(
+                            clauses, evidence_context,
+                            anchor=chunk.get("declaration_anchor_preference"),
+                        )
+                    )
+                    if (contract_version == HOST_REVIEW_CONTRACT_V3 and heading_only_selection
+                            and not any(path == "body" or path.startswith("body_parts[")
+                                        for path, _ in fixed_text_atoms)):
+                        errors.append(
+                            f"$.requirements[{index}].properties.items[{item_index}]: "
+                            "declaration_source_text_not_materialized"
+                        )
                     for field_path, value in fixed_text_atoms:
                         if value not in source_texts:
                             errors.append(

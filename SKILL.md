@@ -1309,6 +1309,19 @@ contract response and immutable host receipts.
   so canonical coverage, one-to-one identity, source and mixed-duty checks still
   apply. Parsing preserves rejected raw states for bounded correction; it must
   not relabel an unrepresented duty as pending merely to pass schema validation.
+- A redundant adjacent blank signature proposal may use copied source body
+  paragraphs or source-bound placeholders with external/static-DOCX presence
+  checks. Policy v2 removes it only when one retained complete declaration
+  already prints every exact current-source line; registered checkers and
+  independent operations cannot be discarded. Human signing/dating remains
+  pending, with full revalidation and fresh independent review required.
+  Contract 3.0 also rejects standalone unmaterialized heading-only declaration
+  items before review, without replacing existing source-selector diagnostics.
+  A source-bound heading-only object may join the sole complete declaration
+  already printing that exact heading/body by unioning only the two supplied
+  print relations in source order; classifications and human atoms stay frozen.
+  Legacy 2.1 continuation fragments are unchanged.
+  See `docs/redundant-signature-print-proposals.md`.
 - Missing chunk response: stop and report the exact filename.
 - Input prerequisites use the code-owned `requirement_contract.input_catalog`
   for their exact kind. Generation schema couples kind and key by registered

@@ -38,7 +38,7 @@ class SignatureSourceLinesTests(unittest.TestCase):
         self.assertEqual([l['text'] for l in lines], raw['requirements'][1]['properties']['items'][0]['body_parts'])
         self.assertEqual(lines[0]['attestation_scope'], 'placeholder_presence_only')
         self.assertEqual(bridge.validate_host_agent_response(candidate, chunk), [])
-        self.assertIn('source_bound_signature_block_projection_v1', json.dumps(audit))
+        self.assertIn('source_bound_signature_block_projection_v2', json.dumps(audit))
 
     def test_current_resource_and_serialized_docx_have_exact_spaces_once(self):
         raw, chunk = incident()

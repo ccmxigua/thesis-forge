@@ -78,6 +78,17 @@ def prepare_retry_scope(
         raise NativeSemanticReviewError("missing-inventory parent evidence is incomplete")
     data = [strict_json_loads(path.read_text(encoding="utf-8")) for path in paths]
     prior, raw, compiled, packet, compilation = data
+    if provider_nullable_optionals and prior.get("native_review_partition_policy") is not None:
+        from independent_review_partition import PROTOCOL, validate_partition_receipt
+        partition_path = parent_dir / "native-partition-projection.json"
+        if not partition_path.is_file():
+            raise NativeSemanticReviewError("partitioned retry parent lacks native projection proof")
+        validate_partition_receipt(prior, parent_dir, raw, {
+            "adapter_id": "codex", "native_partition_projection": {
+                "protocol": PROTOCOL, "path": str(partition_path.resolve()),
+                "sha256": hashlib.sha256(partition_path.read_bytes()).hexdigest(),
+            },
+        })
     expected = copy.deepcopy(request)
     expected.pop("retry_feedback", None)
     expected["provider_attempt"] = 1

@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -792,6 +793,8 @@ def build_obligation_coverage_request(
     provenance = chunk.get("provenance") if isinstance(chunk.get("provenance"), dict) else {}
     return {
         "protocol": OBLIGATION_COVERAGE_PROTOCOL,
+        **({"native_review_partition_policy": "whole_candidate_checks_4_v1"}
+           if len(checks) > 8 else {}),
         "run_id": run_id,
         "chunk_index": chunk_index,
         "case_id": chunk.get("case_id"),
@@ -1639,9 +1642,10 @@ def validate_response(
     return [results[key] for key in sorted(results)]
 
 
-def _prompt(request: dict[str, Any], *, retained_results: dict[str, Any] | None = None) -> str:
+def _prompt(request: dict[str, Any], *, retained_results: dict[str, Any] | None = None,
+            source_packet: dict[str, Any] | None = None) -> str:
     checks = request.get("checks")
-    packet = (
+    packet = copy.deepcopy(source_packet) if source_packet is not None else (
         build_source_reference_packet(request)
         if isinstance(checks, list) and checks else copy.deepcopy(request)
     )
@@ -2102,6 +2106,11 @@ def _prompt(request: dict[str, Any], *, retained_results: dict[str, Any] | None 
             "from the current request; do not emit or alter them. Return "
             "exactly one result per check_id and only the JSON object required by the schema."
             + retry_instruction + "\n"
+            + ("This is an output partition of one immutable whole-candidate audit. "
+               "Return ONLY checks listed in checks/native_review_partition.check_ids. "
+               "orientation_only_checks preserves the whole source group and graph for context; "
+               "it is not an additional output set. Never drop duties within a selected check.\n"
+               if source_packet is not None else "")
             + "Current run-bound audit request:\n"
             + strict_json_dumps(packet, ensure_ascii=False, sort_keys=True, indent=2)
         )
@@ -2130,6 +2139,82 @@ def _write_fresh(path: Path, text: str) -> None:
         raise NativeSemanticReviewError(f"refusing to reuse native semantic review artifact: {path}")
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
+
+
+def _run_codex_review_partitions(request, source_packet, generation_schema, retry_locks,
+                                 *, output_dir, binary, model, reasoning_effort, timeout,
+                                 env, controller):
+    """One bounded invocation per focus set, with explicit native replay proof."""
+    from independent_review_partition import (
+        POLICY, PROTOCOL, partition_packets, partition_schema, join_partition_responses,
+    )
+    packets = partition_packets(request, source_packet)
+    responses, records = [], []
+    started = time.monotonic()
+    for index, packet in enumerate(packets, 1):
+        if controller is not None:
+            controller.check()
+        remaining = timeout - (time.monotonic() - started)
+        if remaining <= 0:
+            raise NativeSemanticReviewError("native partition review exceeded the whole-invocation timeout")
+        directory = output_dir / f"native-batch-{index:04d}"
+        directory.mkdir(parents=True, exist_ok=False)
+        ids = packet["native_review_partition"]["check_ids"]
+        focus_locks = {cid: value for cid, value in retry_locks.items() if cid in ids}
+        _write_fresh(directory / "source-reference-packet.json", strict_json_dumps(packet, ensure_ascii=False, indent=2) + "\n")
+        _write_fresh(directory / "prompt.txt", _prompt(request, retained_results=focus_locks, source_packet=packet))
+        schema = native_output_schema(partition_schema(generation_schema, ids))
+        require_native_schema(schema)
+        _write_fresh(directory / "provider-response-schema.json", strict_json_dumps(schema, ensure_ascii=False, indent=2) + "\n")
+        command = codex_adapter.build_command(
+            binary=binary, prompt_path=directory / "prompt.txt",
+            last_message_path=directory / "last-message.txt",
+            cwd=Path(__file__).resolve().parents[1], model=model,
+            reasoning_effort=reasoning_effort,
+            output_schema_path=directory / "provider-response-schema.json",
+        )
+        try:
+            completed = run_process(command, cwd=Path(__file__).resolve().parents[1], env=env,
+                                    timeout=remaining, controller=controller,
+                                    input_text=(directory / "prompt.txt").read_text(encoding="utf-8"))
+        except BaseException:
+            # The process runner reaps owned children before propagating. It
+            # does not expose drained bytes on cancellation: record unknown,
+            # never manufacture a native terminal or claim a successful tail.
+            _write_fresh(directory / "stdout.jsonl", "")
+            _write_fresh(directory / "stderr.txt", "[process-interrupted] no terminal output captured; remote state unknown")
+            raise
+        _write_fresh(directory / "stdout.jsonl", completed.stdout or "")
+        _write_fresh(directory / "stderr.txt", completed.stderr or "")
+        failure = None
+        if codex_adapter.output_limit_failure_code(completed.stdout or "") is not None:
+            failure = NativeOutputLimitError(f"native independent partition {index} terminated at max_output_tokens; no partial aggregate accepted")
+        elif (retry_code := codex_adapter.retryable_failure_code(completed.stdout or "")) is not None:
+            failure = RetryableNativeSemanticReviewError(f"native independent partition {index} provider failure: {retry_code}", retry_code=retry_code)
+        elif completed.returncode != 0:
+            failure = NativeSemanticReviewError(f"native independent partition {index} process failed ({completed.returncode})")
+        if failure is not None:
+            # Top-level failure capture remains usable by the existing bounded
+            # error router, but is explicitly one child's terminal, not success.
+            _write_fresh(output_dir / "stdout.jsonl", completed.stdout or "")
+            _write_fresh(output_dir / "stderr.txt", f"[native-partition-{index}-failed]\n" + (completed.stderr or ""))
+            raise failure
+        response, _ = codex_adapter.parse_result(completed.stdout or "", last_message=(directory / "last-message.txt").read_text(encoding="utf-8"))
+        _write_fresh(directory / "raw-response.json", strict_json_dumps(response, ensure_ascii=False, indent=2) + "\n")
+        responses.append(response)
+        names = ("source-reference-packet.json", "prompt.txt", "provider-response-schema.json", "stdout.jsonl", "stderr.txt", "last-message.txt", "raw-response.json")
+        records.append({"batch_index": index, "check_ids": ids,
+                        "artifacts": {name: sha256_file(directory / name) for name in names}})
+    response = join_partition_responses(packets, responses)
+    proof = {"protocol": PROTOCOL, "policy": POLICY, "whole_request_sha256": sha256_json(request),
+             "children": records, "aggregate_sha256": sha256_json(response)}
+    path = output_dir / "native-partition-projection.json"
+    _write_fresh(path, strict_json_dumps(proof, ensure_ascii=False, indent=2) + "\n")
+    # This is a code-generated trace index, deliberately not a turn.completed.
+    _write_fresh(output_dir / "stdout.jsonl", strict_json_dumps({"protocol": PROTOCOL, "projection_path": str(path.resolve())}) + "\n")
+    _write_fresh(output_dir / "stderr.txt", "")
+    pointer = {"protocol": PROTOCOL, "path": str(path.resolve()), "sha256": sha256_file(path)}
+    return response, pointer
 
 
 def run_native_semantic_review(
@@ -2216,12 +2301,17 @@ def run_native_semantic_review(
     raw_response_path = output_dir / "raw-response.json"
     compilation_path = output_dir / "source-reference-compilation.json"
     retry_scope_path = output_dir / "validated-retry-scope.json"
-    reserved_paths = [
+    reserved_paths = [output_dir / "native-partition-projection.json",
         request_path, prompt_path, response_path, compiled_response_path, stdout_path, stderr_path,
         schema_path, canonical_schema_path, provider_schema_path, output_dir / "last-message.txt",
         source_packet_path, raw_response_path, compilation_path, retry_scope_path,
     ]
     existing_paths = [str(path) for path in reserved_paths if path.exists()]
+    if request.get("native_review_partition_policy") == "whole_candidate_checks_4_v1":
+        from independent_review_partition import partition_packets
+        existing_paths.extend(str(output_dir / f"native-batch-{index:04d}")
+                              for index, _ in enumerate(partition_packets(request, source_packet), 1)
+                              if (output_dir / f"native-batch-{index:04d}").exists())
     if existing_paths:
         raise NativeSemanticReviewError(
             "refusing to reuse semantic review artifacts: " + ", ".join(existing_paths)
@@ -2292,23 +2382,34 @@ def run_native_semantic_review(
     env = os.environ.copy()
     env["THESIS_FORGE_HOST_RUNTIME"] = str(context.runtime)
     started_at = datetime.now(timezone.utc).isoformat()
+    partition_projection = None
+    partitioned = (adapter_id == "codex" and obligation_coverage_mode
+                   and request.get("native_review_partition_policy") == "whole_candidate_checks_4_v1")
     try:
-        completed = run_process(
-            command, cwd=Path(__file__).resolve().parents[1], env=env,
-            timeout=timeout, controller=controller,
-            **({"input_text": prompt_path.read_text(encoding="utf-8")} if adapter_id == "codex" else {}),
-        )
+        if partitioned:
+            response, partition_projection = _run_codex_review_partitions(
+                request, source_packet, generation_schema, retry_locks,
+                output_dir=output_dir, binary=codex_binary, model=model,
+                reasoning_effort=reasoning_effort, timeout=timeout, env=env, controller=controller,
+            )
+        else:
+            completed = run_process(
+                command, cwd=Path(__file__).resolve().parents[1], env=env,
+                timeout=timeout, controller=controller,
+                **({"input_text": prompt_path.read_text(encoding="utf-8")} if adapter_id == "codex" else {}),
+            )
     except KeyboardInterrupt:
         _write_fresh(stdout_path, "")
         _write_fresh(stderr_path, "[process-interrupted] native semantic review was interrupted")
         raise
-    _write_fresh(stdout_path, completed.stdout or "")
-    _write_fresh(stderr_path, completed.stderr or "")
-    if completed.returncode == 124 and "[process-timeout]" in (completed.stderr or ""):
+    if not partitioned:
+        _write_fresh(stdout_path, completed.stdout or "")
+        _write_fresh(stderr_path, completed.stderr or "")
+    if not partitioned and completed.returncode == 124 and "[process-timeout]" in (completed.stderr or ""):
         raise NativeSemanticReviewError(
             f"native semantic review exceeded {timeout} seconds"
         )
-    if adapter_id == "codex":
+    if adapter_id == "codex" and not partitioned:
         if codex_adapter.output_limit_failure_code(completed.stdout or "") is not None:
             raise NativeOutputLimitError(
                 "native Codex semantic review terminated at max_output_tokens; "
@@ -2321,12 +2422,18 @@ def run_native_semantic_review(
                 f"native Codex semantic review reported retryable provider failure: {retry_code}",
                 retry_code=retry_code,
             )
-    if completed.returncode != 0:
+    if not partitioned and completed.returncode != 0:
         raise NativeSemanticReviewError(
             f"native semantic review process failed ({completed.returncode}); see {stderr_path}"
         )
     try:
-        if adapter_id == "codex":
+        if partitioned:
+            from independent_review_partition import validate_partition_receipt
+            validate_partition_receipt(request, output_dir, response, {
+                "adapter_id": adapter_id, "native_partition_projection": partition_projection,
+            })
+            envelope = {}  # No fabricated native aggregate event stream.
+        elif adapter_id == "codex":
             last_message = (output_dir / "last-message.txt").read_text(encoding="utf-8")
             response, envelope = codex_adapter.parse_result(
                 completed.stdout or "", last_message=last_message,
@@ -2413,6 +2520,7 @@ def run_native_semantic_review(
         "raw_response_file_sha256": sha256_file(raw_response_path),
         "source_reference_compilation_path": str(compilation_path.resolve()),
         "source_reference_compilation_sha256": sha256_file(compilation_path),
+        **({"native_partition_projection": partition_projection} if partition_projection is not None else {}),
         **({"corrective_review_scope": {
             "policy": retry_scope["policy"],
             "proof_path": str(retry_scope_path.resolve()),

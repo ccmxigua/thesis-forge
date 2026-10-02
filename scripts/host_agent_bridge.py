@@ -12221,6 +12221,8 @@ def _validate_completed_obligation_ledger_chain(
         )
     from independent_retry_scope import validate_persisted_empty_inventory_scope
     validate_persisted_empty_inventory_scope(review_request, request_path.parent, raw_response, review_audit)
+    from independent_review_partition import validate_partition_receipt
+    validate_partition_receipt(review_request, request_path.parent, raw_response, review_audit)
     validate_draft_dispute_envelope(independent_envelope, review_request, output_policy=output_policy)
 
     reconstructed_response, reconstructed_compilation = compile_source_reference_response(

@@ -36,6 +36,8 @@ class CodexAdapterTests(unittest.TestCase):
         self.assertIn("read-only", command)
         self.assertIn("--json", command)
         self.assertIn("--output-last-message", command)
+        self.assertEqual(command[-1], "-")
+        self.assertNotIn("Return one JSON object.", command)
         self.assertNotIn("openclaw", " ".join(command).lower())
 
     def test_build_command_without_model_uses_project_default(self) -> None:

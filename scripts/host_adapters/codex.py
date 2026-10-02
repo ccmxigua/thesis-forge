@@ -62,6 +62,8 @@ def build_command(
     ``codex exec --json`` emits the auditable JSONL event stream while
     ``--output-last-message`` gives the bridge the exact semantic response
     text without attempting to scrape human-facing logs.
+    The caller must pass the exact UTF-8 prompt text on stdin; keeping it out
+    of argv avoids the operating system's per-argument size limit.
     """
     prompt = prompt_path.read_text(encoding="utf-8")
     if not prompt.strip():
@@ -76,7 +78,7 @@ def build_command(
         "--color", "never",
         "--output-last-message", str(last_message_path),
         "-C", str(cwd),
-        prompt,
+        "-",
     ]
     if output_schema_path is not None:
         schema_path = output_schema_path.expanduser().resolve()

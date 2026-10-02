@@ -10,6 +10,7 @@ from __future__ import annotations
 import os
 import signal
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 from typing import Any, Mapping
@@ -76,23 +77,35 @@ def run_process(
     """
     if isinstance(timeout, bool) or timeout <= 0:
         raise ValueError("process timeout must be a positive integer")
-    process = subprocess.Popen(
-        command,
-        cwd=cwd,
-        text=True,
-        stdin=subprocess.PIPE if input_text is not None else None,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        start_new_session=(os.name == "posix"),
-        env=dict(env) if env is not None else None,
-    )
+    # A seekable stdin avoids abandoning a partially written PIPE when a
+    # controller poll times out inside communicate(). The child owns its
+    # duplicated descriptor; close our temporary handle immediately after spawn.
+    stdin_file = None
+    try:
+        if input_text is not None:
+            stdin_file = tempfile.TemporaryFile(mode="w+b")
+            stdin_file.write(input_text.encode("utf-8"))
+            stdin_file.seek(0)
+        process = subprocess.Popen(
+            command,
+            cwd=cwd,
+            text=True,
+            stdin=stdin_file,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=(os.name == "posix"),
+            env=dict(env) if env is not None else None,
+        )
+    finally:
+        if stdin_file is not None:
+            stdin_file.close()
     registered = False
     try:
         if controller is not None:
             controller.register(process)
             registered = True
         deadline = time.monotonic() + timeout
-        pending_input = input_text
+        pending_input = None
         while True:
             if controller is not None:
                 controller.check()

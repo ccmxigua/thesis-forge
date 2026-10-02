@@ -1983,6 +1983,7 @@ def run_native_semantic_review(
         completed = run_process(
             command, cwd=Path(__file__).resolve().parents[1], env=env,
             timeout=timeout, controller=controller,
+            **({"input_text": prompt_path.read_text(encoding="utf-8")} if adapter_id == "codex" else {}),
         )
     except KeyboardInterrupt:
         _write_fresh(stdout_path, "")

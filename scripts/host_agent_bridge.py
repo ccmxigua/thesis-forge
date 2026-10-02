@@ -158,10 +158,12 @@ def _run_command(
     *,
     timeout: int,
     controller: RunController | None = None,
+    input_text: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a host CLI through the shared bounded process supervisor."""
     result = run_process(
         command, cwd=ROOT, timeout=timeout, controller=controller,
+        **({"input_text": input_text} if input_text is not None else {}),
     )
     if result.returncode == 124 and "[process-timeout]" in (result.stderr or ""):
         raise subprocess.TimeoutExpired(
@@ -11012,6 +11014,7 @@ def run_host_agent_chunk(
     try:
         result = _run_command(
             command, timeout=timeout, controller=controller,
+            **({"input_text": prompt_path.read_text(encoding="utf-8")} if adapter_id == "codex" else {}),
         )
     except subprocess.TimeoutExpired as exc:
         raw_envelope_path = response_path.with_name(

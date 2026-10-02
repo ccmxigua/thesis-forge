@@ -654,7 +654,8 @@ def _inspect_docx_artifact(path: Path) -> dict[str, Any]:
         }
 
 
-def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, Any]:
+def case_acceptance(result: dict[str, Any], *, root: Path = ROOT,
+                    run_root: Path | None = None) -> dict[str, Any]:
     """Apply one strict, artifact-bound acceptance gate to a batch case.
 
     A subprocess return code is only a stage signal.  The case is accepted only
@@ -703,7 +704,12 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT) -> dict[str, A
         blockers.append("case_root_missing")
         return {"status": "blocked", "accepted": False, "blockers": sorted(set(blockers)), "checks": checks}
     checks["case_root"] = str(case_root.resolve())
-    if not _path_within(case_root, root):
+    # Artifact strings retain their repository-relative interpretation, while
+    # the launcher supplies the separate, trusted boundary of this fresh run.
+    # Never derive that boundary from an artifact's own manifest or payload.
+    boundary = run_root if run_root is not None else root
+    checks["run_root"] = str(boundary.resolve())
+    if not _path_within(case_root, boundary):
         blockers.append("case_root_outside_run_root")
     if manifest_path != (case_root / "work" / "pipeline-manifest.json").resolve():
         blockers.append("pipeline_manifest_path_not_canonical")
@@ -2101,7 +2107,7 @@ def main(argv: list[str] | None = None) -> int:
             break
         except Exception as exc:  # keep each school independently auditable
             result = failed_case_result(case, exc)
-        result["acceptance"] = case_acceptance(result)
+        result["acceptance"] = case_acceptance(result, run_root=base)
         results[str(case["id"])] = result
         write_batch_results()
         fatal_reason = global_fatal_reason(result)

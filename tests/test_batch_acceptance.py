@@ -557,6 +557,11 @@ class BatchAcceptanceTests(unittest.TestCase):
             accepted = batch.case_acceptance(result, root=root)
             self.assertTrue(accepted["accepted"], accepted)
             self.assertEqual(accepted["status"], "accepted_review_draft")
+            external_run = batch.case_acceptance(result, run_root=root)
+            self.assertTrue(external_run["accepted"], external_run)
+            other_run = batch.case_acceptance(result, root=root, run_root=root / "different-run")
+            self.assertFalse(other_run["accepted"])
+            self.assertIn("case_root_outside_run_root", other_run["blockers"])
             # The new draft-only policy accepts honestly failed checks only
             # with an exact, current-run-bound, visibly serialized scorecard.
             original_output = output.read_bytes()

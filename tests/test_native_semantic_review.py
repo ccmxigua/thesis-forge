@@ -2094,12 +2094,15 @@ class NativeSemanticReviewTests(unittest.TestCase):
         ))
         with tempfile.TemporaryDirectory() as td:
             output_dir = Path(td) / "native"
-            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6]:
+            with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5] as process, patches[6]:
                 audit = native_review.run_native_semantic_review(
                     request,
                     output_dir=output_dir, host_runtime="codex", model=None,
-                    timeout=5,
+                    timeout=5, reasoning_effort="max",
                 )
+
+            self.assertEqual(process.call_args.kwargs["input_text"],
+                             observed["prompt_path"].read_text(encoding="utf-8"))
 
             local_schema = json.loads((output_dir / "response-schema.json").read_text(encoding="utf-8"))
             provider_schema_path = output_dir / "provider-response-schema.json"
@@ -2116,6 +2119,9 @@ class NativeSemanticReviewTests(unittest.TestCase):
             self.assertEqual(observed["output_schema_path"], provider_schema_path)
             self.assertEqual(observed["model"], "gpt-6-luna")
             self.assertEqual(audit["model_requested"], "gpt-6-luna")
+            self.assertEqual(observed["reasoning_effort"], "max")
+            self.assertEqual(audit["reasoning_effort_requested"], "max")
+            self.assertIsNone(audit["reasoning_effort_observed"])
             self.assertEqual(native_schema_support_errors(provider_schema), [])
 
             def contains_unique_items(node):

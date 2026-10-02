@@ -99,6 +99,19 @@ def _patch_styles(unzip_dir: Path) -> None:
         sid = style_elem.get(qn('w', 'styleId'))
         style_name = style_elem.find(qn('w', 'name'))
         style_label = style_name.get(qn('w', 'val'), '') if style_name is not None else ''
+        # Some Pandoc versions serialize built-in heading names in UI case.
+        # python-docx maps UI "Heading 1" to XML "heading 1" for lookup;
+        # preserve the style ID/references while restoring that canonical name.
+        if (re.fullmatch(r'Heading[1-9]', sid or '')
+                and style_label == f'Heading {sid[-1]}'
+                and style_elem.get(qn('w', 'customStyle')) not in {'1', 'true', 'on'}):
+            canonical_name = style_label.lower()
+            if any(other is not style_elem
+                   and (name := other.find(qn('w', 'name'))) is not None
+                   and name.get(qn('w', 'val')) == canonical_name
+                   for other in styles_root.findall(qn('w', 'style'))):
+                raise ValueError(f'ambiguous built-in heading style: {canonical_name}')
+            style_name.set(qn('w', 'val'), canonical_name)
         if sid == 'TOCHeading' or style_label.lower() == 'toc heading':
             ppr = style_elem.find(qn('w', 'pPr'))
             if ppr is not None:

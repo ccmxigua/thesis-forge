@@ -31,6 +31,19 @@ def resolve_model(model: str | None) -> str:
     return model.strip()
 
 
+def resolve_reasoning_effort(value: str | None) -> str | None:
+    """Keep an explicit model-advertised effort without guessing a fallback.
+
+    Native Codex defines effort as a non-empty string advertised by the model,
+    rather than a fixed enum. Passing a value does not prove model support.
+    """
+    if value is None:
+        return None
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("Codex reasoning effort must be a non-empty string when supplied")
+    return value.strip()
+
+
 def resolve_binary(binary: str | None) -> str:
     """Resolve an explicitly supplied or installed native Codex executable."""
     candidate = binary or shutil.which("codex")
@@ -51,6 +64,7 @@ def build_command(
     last_message_path: Path,
     cwd: Path,
     model: str | None = None,
+    reasoning_effort: str | None = None,
     output_schema_path: Path | None = None,
 ) -> list[str]:
     """Build an isolated, read-only native Codex invocation.
@@ -62,6 +76,8 @@ def build_command(
     ``codex exec --json`` emits the auditable JSONL event stream while
     ``--output-last-message`` gives the bridge the exact semantic response
     text without attempting to scrape human-facing logs.
+    The caller must pass the exact UTF-8 prompt text on stdin; keeping it out
+    of argv avoids the operating system's per-argument size limit.
     """
     prompt = prompt_path.read_text(encoding="utf-8")
     if not prompt.strip():
@@ -76,7 +92,7 @@ def build_command(
         "--color", "never",
         "--output-last-message", str(last_message_path),
         "-C", str(cwd),
-        prompt,
+        "-",
     ]
     if output_schema_path is not None:
         schema_path = output_schema_path.expanduser().resolve()
@@ -88,6 +104,9 @@ def build_command(
             "--output-schema", str(schema_path),
         ]
     command[4:4] = ["--model", resolve_model(model)]
+    effort = resolve_reasoning_effort(reasoning_effort)
+    if effort is not None:
+        command[4:4] = ["--config", "model_reasoning_effort=" + json.dumps(effort)]
     return command
 
 

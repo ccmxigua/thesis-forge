@@ -224,7 +224,12 @@ note parts. It leaves the East Asian font slots and text unchanged. The
 serialized `document-font-audit.json` and final post-Word format comparison
 check the actual run properties, not just the paragraph style. This wording
 does not itself authorize changing standalone numbers, symbols, or mathematical
-fonts. Latin text in OMML/DrawingML that this executor cannot validate remains
+fonts. Compiler and merge keep this source's font out of general role styles;
+formatter and comparison use the same filtered role view for legacy specs.
+All source-bound role requirements remain intact for the dedicated executor.
+A separate unconditional general-font requirement may retain that role's font;
+the English-only source cannot supply unrelated font or paragraph properties.
+Latin text in OMML/DrawingML that this executor cannot validate remains
 an explicit technical verification blocker, not a successful font check or a
 red author TODO. OOXML font values also do not prove that the required font is
 installed or that Word rendered the expected glyphs: real renderer acceptance
@@ -563,6 +568,17 @@ override. This does not modify global Codex settings or other native hosts'
 routes. An unavailable model fails closed; it is not replaced with an older
 model. Requested model identity is recorded separately from actual route
 visibility, which may remain `unobservable`.
+
+For an explicitly requested native reasoning effort, pass
+`--codex-reasoning-effort max` (or the exact model-advertised value). The wrapper
+and batch runner forward it to primary extraction, every bounded independent
+review retry, and the post-format semantic review. Direct post-format callers
+use `--semantic-review-reasoning-effort` with runtime `codex`. Omission preserves
+the native default; it never changes timeouts, retry budgets, provider, or
+authentication. Audits record the requested effort separately from the observed
+effort, which remains unavailable when the native stream does not expose it.
+A locally accepted configuration string is not proof that the model supports
+or actually executed that effort. No effort fallback is permitted.
 
 For compound native-review failures, repair authorization is bound to the
 complete validator bundle and its exact parent candidate. Empty obligation

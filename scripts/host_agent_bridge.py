@@ -158,10 +158,12 @@ def _run_command(
     *,
     timeout: int,
     controller: RunController | None = None,
+    input_text: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
     """Run a host CLI through the shared bounded process supervisor."""
     result = run_process(
         command, cwd=ROOT, timeout=timeout, controller=controller,
+        **({"input_text": input_text} if input_text is not None else {}),
     )
     if result.returncode == 124 and "[process-timeout]" in (result.stderr or ""):
         raise subprocess.TimeoutExpired(
@@ -10917,6 +10919,7 @@ def run_host_agent_chunk(
     codex_bin: str | None = None,
     codex_model: str | None = None,
     structured_output_mode: str = "prompt_only",
+    codex_reasoning_effort: str | None = None,
     retry_parent_response_sha256: str | None = None,
     retry_parent_response_path: Path | None = None,
     retry_error_records: list[dict[str, Any]] | None = None,
@@ -10926,6 +10929,9 @@ def run_host_agent_chunk(
         controller.check()
     if adapter_id == "codex":
         codex_model = codex_adapter.resolve_model(codex_model)
+        codex_reasoning_effort = codex_adapter.resolve_reasoning_effort(codex_reasoning_effort)
+    elif codex_reasoning_effort is not None:
+        raise ValueError("Codex reasoning effort requires the Codex adapter")
     prompt_path.parent.mkdir(parents=True, exist_ok=True)
     model_packet_path = prompt_path.with_name(prompt_path.stem.replace("prompt", "input") + ".json")
     model_packet = compact_model_packet(chunk, fresh_primary=retry_parent_response_path is None)
@@ -11004,6 +11010,7 @@ def run_host_agent_chunk(
             last_message_path=last_message_path,
             cwd=ROOT,
             model=codex_model,
+            reasoning_effort=codex_reasoning_effort,
             output_schema_path=output_schema_path if structured_output_mode == "native_schema" else None,
         )
     else:
@@ -11012,6 +11019,7 @@ def run_host_agent_chunk(
     try:
         result = _run_command(
             command, timeout=timeout, controller=controller,
+            **({"input_text": prompt_path.read_text(encoding="utf-8")} if adapter_id == "codex" else {}),
         )
     except subprocess.TimeoutExpired as exc:
         raw_envelope_path = response_path.with_name(
@@ -11271,6 +11279,8 @@ def run_host_agent_chunk(
         ),
         "expected_route": model if adapter_id == "openclaw" else "unobservable",
         "requested_model": codex_model if adapter_id == "codex" else model,
+        "reasoning_effort_requested": codex_reasoning_effort,
+        "reasoning_effort_observed": None,
         "actual_provider": route.get("provider"),
         "actual_model": route.get("model"),
         "actual_route": route.get("route"),
@@ -12118,6 +12128,7 @@ def _run_independent_obligation_coverage_review(
     controller: RunController,
     output_policy: str = "submission",
     _provider_attempt: int = 1,
+    codex_reasoning_effort: str | None = None,
     _provider_attempt_history: list[dict[str, Any]] | None = None,
     _retry_feedback: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -12163,6 +12174,8 @@ def _run_independent_obligation_coverage_review(
             binary=binary,
             config_path=config_path,
             controller=controller,
+            **({"reasoning_effort": codex_reasoning_effort}
+               if codex_reasoning_effort is not None else {}),
         )
         ledger_pointer = _write_obligation_analysis_ledger(
             review_result, response, chunk,
@@ -12396,6 +12409,7 @@ def _run_independent_obligation_coverage_review(
                     attempt=attempt,
                     host_runtime=host_runtime,
                     model=model,
+                    codex_reasoning_effort=codex_reasoning_effort,
                     timeout=timeout,
                     agent_id=agent_id,
                     runner=runner,
@@ -12663,6 +12677,7 @@ def _run_independent_obligation_coverage_review(
                 attempt=attempt,
                 host_runtime=host_runtime,
                 model=model,
+                codex_reasoning_effort=codex_reasoning_effort,
                 timeout=timeout,
                 agent_id=agent_id,
                 runner=runner,
@@ -12842,6 +12857,7 @@ def _run_independent_obligation_coverage_review(
                 attempt=attempt,
                 host_runtime=host_runtime,
                 model=model,
+                codex_reasoning_effort=codex_reasoning_effort,
                 timeout=timeout,
                 agent_id=agent_id,
                 runner=runner,
@@ -12936,6 +12952,7 @@ def _run_independent_obligation_coverage_review(
                 attempt=attempt,
                 host_runtime=host_runtime,
                 model=model,
+                codex_reasoning_effort=codex_reasoning_effort,
                 timeout=timeout,
                 agent_id=agent_id,
                 runner=runner,
@@ -13034,6 +13051,7 @@ def run_bridge(
     host_runtime: str | None = None,
     codex_model: str | None = None,
     allow_prompt_only: bool = False,
+    codex_reasoning_effort: str | None = None,
     output_policy: str = "submission",
 ) -> dict[str, Any]:
     if output_policy not in {"submission", "review_draft"}:
@@ -13047,8 +13065,11 @@ def run_bridge(
     if adapter_id == "codex":
         try:
             codex_model = codex_adapter.resolve_model(codex_model)
+            codex_reasoning_effort = codex_adapter.resolve_reasoning_effort(codex_reasoning_effort)
         except ValueError as exc:
             raise HostRuntimeError(str(exc)) from exc
+    elif codex_reasoning_effort is not None:
+        raise HostRuntimeError("--codex-reasoning-effort requires the Codex adapter")
     if adapter_id == "openclaw" and model is None and not inherit_parent_model and not host_context.parent_session_id:
         raise HostRuntimeError(
             "automatic OpenClaw execution requires an explicit model route or a bound parent session; refusing the gateway default"
@@ -13339,6 +13360,8 @@ def run_bridge(
                 chunk_runs,
             ),
             "route_visibility": "provider-model" if adapter_id == "openclaw" else "unobservable",
+            "reasoning_effort_requested": codex_reasoning_effort,
+            "reasoning_effort_observed": None,
             "auth_env_only": bool(auth_env_only),
             "runner": runner,
             "model_source": resolution.get("source"),
@@ -13613,6 +13636,7 @@ def run_bridge(
                     controller=controller,
                     adapter_id=adapter_id,
                     codex_model=codex_model,
+                    codex_reasoning_effort=codex_reasoning_effort,
                     structured_output_mode=structured_output_mode,
                     retry_parent_response_sha256=(
                         chunk_lifecycle[index].get("retry_parent_response_sha256")
@@ -14287,6 +14311,7 @@ def run_bridge(
                         attempt=attempt,
                         host_runtime=host_context.runtime,
                         model=effective_model,
+                        codex_reasoning_effort=codex_reasoning_effort,
                         timeout=timeout,
                         agent_id=agent_id,
                         runner=runner,
@@ -14961,6 +14986,8 @@ def run_bridge(
             chunk_audits,
         ),
         "route_visibility": "provider-model" if adapter_id == "openclaw" else "unobservable",
+        "reasoning_effort_requested": codex_reasoning_effort,
+        "reasoning_effort_observed": None,
         "local_process_state": "completed",
         "remote_operation_state": "remote_operation_completed",
         "chunk_lifecycle": [chunk_lifecycle[index] for index in sorted(chunk_lifecycle)],
@@ -15040,6 +15067,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="optional path to the native codex executable")
     parser.add_argument("--codex-model",
                         help=f"native Codex model override (project default: {codex_adapter.DEFAULT_MODEL})")
+    parser.add_argument("--codex-reasoning-effort", type=codex_adapter.resolve_reasoning_effort,
+                        help="explicit native Codex effort (for example max); no fallback or support claim")
     parser.add_argument(
         "--allow-prompt-only", action="store_true",
         help="explicit non-release override when native Codex lacks --output-schema",
@@ -15068,6 +15097,7 @@ def main(argv: list[str] | None = None) -> int:
             openclaw_config=args.openclaw_config,
             codex_bin=args.codex_bin,
             codex_model=args.codex_model,
+            codex_reasoning_effort=args.codex_reasoning_effort,
             inherit_parent_model=args.inherit_parent_model,
             parent_session_key=args.parent_session_key,
             auth_env_only=args.auth_env_only,

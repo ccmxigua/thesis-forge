@@ -1850,6 +1850,7 @@ def run_native_semantic_review(
     binary: str | None = None,
     config_path: Path | None = None,
     controller: Any = None,
+    reasoning_effort: str | None = None,
 ) -> dict[str, Any]:
     """Run one fresh native-host review; never fall back to another host.
 
@@ -1861,12 +1862,15 @@ def run_native_semantic_review(
         raise NativeSemanticReviewError("native semantic review timeout must be positive")
     context = require_host_runtime(host_runtime)
     adapter_id = automatic_adapter_id(context)
+    if reasoning_effort is not None and adapter_id != "codex":
+        raise NativeSemanticReviewError("reasoning effort is supported only by the Codex adapter")
     obligation_coverage_mode = request.get("protocol") == OBLIGATION_COVERAGE_PROTOCOL
     if adapter_id == "openclaw" and (not isinstance(model, str) or not model.strip()):
         raise NativeSemanticReviewError("OpenClaw semantic review requires an explicit model route")
     if adapter_id == "codex":
         try:
             model = codex_adapter.resolve_model(model)
+            reasoning_effort = codex_adapter.resolve_reasoning_effort(reasoning_effort)
         except ValueError as exc:
             raise NativeSemanticReviewError(str(exc)) from exc
     canonical_schema = OBLIGATION_COVERAGE_SCHEMA if obligation_coverage_mode else RESPONSE_SCHEMA
@@ -1943,12 +1947,15 @@ def run_native_semantic_review(
             binary=codex_binary, prompt_path=prompt_path,
             last_message_path=output_dir / "last-message.txt",
             cwd=Path(__file__).resolve().parents[1], model=model,
+            reasoning_effort=reasoning_effort,
             output_schema_path=provider_schema_path,
         )
         route_audit: dict[str, Any] = {
             "binary": codex_binary,
             "capabilities": capabilities,
             "route_visibility": "native_codex_model_unobservable",
+            "reasoning_effort_requested": reasoning_effort,
+            "reasoning_effort_observed": None,
         }
     elif adapter_id == "openclaw":
         if "/" not in model.strip():
@@ -1983,6 +1990,7 @@ def run_native_semantic_review(
         completed = run_process(
             command, cwd=Path(__file__).resolve().parents[1], env=env,
             timeout=timeout, controller=controller,
+            **({"input_text": prompt_path.read_text(encoding="utf-8")} if adapter_id == "codex" else {}),
         )
     except KeyboardInterrupt:
         _write_fresh(stdout_path, "")

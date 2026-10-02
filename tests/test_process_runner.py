@@ -16,6 +16,18 @@ from process_runner import _terminate_and_reap, run_process  # noqa: E402
 
 
 class ProcessRunnerTests(unittest.TestCase):
+    def test_large_unicode_stdin_survives_controller_polling(self) -> None:
+        payload = "中文 review\n" * 50000
+        controller = Mock()
+        with tempfile.TemporaryDirectory() as td:
+            result = run_process(
+                [sys.executable, "-c", "import sys,time; time.sleep(.7); print(sys.stdin.read(), end='')"],
+                cwd=Path(td), timeout=5, input_text=payload, controller=controller,
+            )
+        self.assertEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, payload)
+        controller.register.assert_called_once()
+
     def test_timeout_returns_terminal_record_and_reaps_child(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             result = run_process(

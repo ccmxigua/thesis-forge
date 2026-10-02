@@ -15,7 +15,7 @@ from collections import Counter
 from pathlib import Path
 
 from artifact_io import atomic_write_text
-from document_text_font import audit_document_font
+from document_text_font import audit_document_font, document_font_safe_roles
 from typing import Any
 
 from docx import Document
@@ -300,9 +300,10 @@ def build_report(generated_docx: Path, official_docx: Path, format_spec: Path,
     # The written requirements define the executable comparison scope.  The
     # style analyzer may identify additional incidental built-in styles in the
     # official file; those are not school requirements by themselves.
-    all_roles = sorted(spec.get("roles", {}))
+    safe_roles = document_font_safe_roles(spec)
+    all_roles = sorted(safe_roles)
     for role in all_roles:
-        rows.extend(compare_role(role, spec.get("roles", {}).get(role, {}),
+        rows.extend(compare_role(role, safe_roles.get(role, {}),
                                  official_roles.get(role), generated_roles.get(role)))
     if requirements_only:
         # Use an empty disposable official baseline logically; compare_page is

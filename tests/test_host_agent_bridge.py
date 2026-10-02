@@ -508,9 +508,10 @@ class HostAgentBridgeTests(unittest.TestCase):
                     response, chunk, review_dir=review_dir, run_id="run-capacity-retry",
                     chunk_index=3, attempt=1, host_runtime="codex", model="gpt-5.6-luna",
                     timeout=10, agent_id="main", runner="exec", binary="codex",
-                    config_path=None, controller=bridge.RunController(),
+                    config_path=None, controller=bridge.RunController(), codex_reasoning_effort="max",
                 )
 
+            self.assertEqual([kwargs["reasoning_effort"] for _, kwargs in calls], ["max"] * 2)
             self.assertEqual(len(calls), 2)
             self.assertEqual([kwargs["model"] for _, kwargs in calls], ["gpt-5.6-luna"] * 2)
             self.assertNotEqual(calls[0][1]["output_dir"], calls[1][1]["output_dir"])
@@ -9688,6 +9689,10 @@ class HostAgentBridgeTests(unittest.TestCase):
             self.assertIn("--json", command)
             self.assertIn("--sandbox", command)
             self.assertEqual(command[command.index("--model") + 1], "gpt-6-luna")
+            self.assertEqual(command[-1], "-")
+            prompt_files = list(review_dir.rglob("prompt-0001-attempt-01.txt"))
+            self.assertEqual(len(prompt_files), 1)
+            self.assertEqual(run.call_args.kwargs["input_text"], prompt_files[0].read_text(encoding="utf-8"))
             self.assertNotIn("openclaw", " ".join(command).lower())
             self.assertNotIn("--session-key", command)
             self.assertEqual(audit["adapter_id"], "codex")

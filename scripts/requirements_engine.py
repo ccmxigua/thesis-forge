@@ -24,7 +24,7 @@ from artifact_io import atomic_write_text
 from table_source_context import TABLE_CONTEXT_PROTOCOL, text_sha256
 from document_text_font import (TEXT_FONT_ROLES, compile_document_latin_font,
                                 compile_document_font_applicability, document_font_policy,
-                                materialize_document_font_references)
+                                document_font_safe_roles, materialize_document_font_references)
 from existing_requirement_contract import (
     existing_reference_errors,
     normalized_source_text,
@@ -1762,13 +1762,10 @@ def build_rule_result(source: Path, clauses: list[dict[str, Any]]) -> tuple[dict
     for clause in clauses:
         page_props = parse_page_properties(clause["text"])
         role_text = _non_page_text(clause["text"]) if page_props else clause["text"]
-        props = parse_properties(role_text)
-        document_font = compile_document_latin_font(role_text)
-        if document_font is not None:
-            # The exact whole-source compiler owns this narrow rule, including
-            # all fonts it recognizes. Do not rely on the broader style parser
-            # knowing the same spelling (or silently miss e.g. Helvetica).
-            props = {"font": {"latin": document_font}}
+        # The exact whole-source compiler owns its complete recognized font
+        # vocabulary; the broader style parser need not know every spelling.
+        global_font = compile_document_latin_font(role_text)
+        props = {"font": {"latin": global_font}} if global_font else parse_properties(role_text)
         if page_props:
             req = {"id": f"R{len(requirements)+1:05d}", "role": "page", "properties": page_props,
                    "evidence_ids": clause["evidence_ids"], "clause_ids": [str(clause["id"])],
@@ -1781,7 +1778,7 @@ def build_rule_result(source: Path, clauses: list[dict[str, Any]]) -> tuple[dict
             requirements.append(req)
         if not props:
             continue
-        role, candidates = identify_role(role_text)
+        role, candidates = ("all_text", ["all_text"]) if global_font else identify_role(role_text)
         if role is None and not candidates:
             role = infer_role_from_context(clause, role_text)
             if role is not None:
@@ -1819,7 +1816,7 @@ def build_rule_result(source: Path, clauses: list[dict[str, Any]]) -> tuple[dict
             if instance_id:
                 field_instance_ids = [instance_id]
         normalized_props = _style_properties_for_role(role, props)
-        merge_conflicts = _merge_role_group(roles, target_roles, normalized_props)
+        merge_conflicts = [] if global_font else _merge_role_group(roles, target_roles, normalized_props)
         if role in CONTENT_INSTANCE_ROLES:
             # A text-bearing requirement may carry an instance-specific style
             # override.  The shared role remains a useful default, but a
@@ -1836,12 +1833,10 @@ def build_rule_result(source: Path, clauses: list[dict[str, Any]]) -> tuple[dict
                    "properties": copy.deepcopy(normalized_props), "evidence_ids": clause["evidence_ids"],
                    "clause_ids": [str(clause["id"])], "resolved_by": "rule",
                    "confidence": .98, "source_text": clause["text"]}
+            if global_font and (applicability := compile_document_font_applicability(role_text)):
+                req["applicability"] = copy.deepcopy(applicability)
             if field_instance_ids:
                 req["field_instance_ids"] = list(field_instance_ids)
-            if role == "all_text" and compile_document_latin_font(clause["text"]):
-                applicability = compile_document_font_applicability(clause["text"])
-                if applicability is not None:
-                    req["applicability"] = applicability
             requirements.append(req)
     status = "needs_clarification" if questions or conflicts else "rule_resolved"
     spec = {"schema_version": "1.0", "source_document": str(source),
@@ -3048,7 +3043,7 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
     # consumed by the application must contain only executable shared style
     # defaults.  A later LLM requirement may have reintroduced a declarative
     # depth while merging, so sanitize once more at the boundary.
-    spec["roles"] = _sanitize_role_specs_for_backend(spec.get("roles", {}))
+    spec["roles"] = document_font_safe_roles(spec, _sanitize_role_specs_for_backend(spec.get("roles", {})))
     # Preserve model-reported conflicts as typed semantic artifacts.  The
     # response contract requires an unresolved status; neither chunk order nor
     # merge order may choose a winner.  Each such record therefore gets an

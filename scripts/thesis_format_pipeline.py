@@ -13,6 +13,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from host_adapters.codex import resolve_reasoning_effort
+
 from compliance import report as compliance_report
 from docx import Document
 from format_spec_validation import load_and_validate
@@ -2414,6 +2416,8 @@ def _main(argv: list[str]) -> int:
                    help="explicit native runtime for post-format abstract semantic review")
     p.add_argument("--semantic-review-model",
                    help="explicit native model route for post-format abstract semantic review")
+    p.add_argument("--semantic-review-reasoning-effort", type=resolve_reasoning_effort,
+                   help="explicit native Codex reasoning effort; requires --semantic-review-runtime codex")
     p.add_argument("--thesis-profile", type=Path, help="JSON metadata for conditional requirements such as master/doctor limits")
     p.add_argument("--analysis-mode", choices=["llm_primary", "rule_only", "known_template"], default="llm_primary",
                    help="unseen templates default to full LLM semantic extraction and completeness review")
@@ -2459,6 +2463,8 @@ def _main(argv: list[str]) -> int:
     args = p.parse_args(argv)
     if bool(args.semantic_review_runtime) != bool(args.semantic_review_model):
         p.error("--semantic-review-runtime and --semantic-review-model must be supplied together")
+    if args.semantic_review_reasoning_effort is not None and args.semantic_review_runtime != "codex":
+        p.error("--semantic-review-reasoning-effort requires --semantic-review-runtime codex")
     if args.case_id is not None:
         args.case_id = args.case_id.strip()
         if not args.case_id or not all(
@@ -3378,6 +3384,8 @@ def _main(argv: list[str]) -> int:
             "--semantic-review-runtime", args.semantic_review_runtime,
             "--semantic-review-model", args.semantic_review_model,
         ]
+    if args.semantic_review_reasoning_effort is not None:
+        apply_cmd += ["--semantic-review-reasoning-effort", args.semantic_review_reasoning_effort]
     if args.template_profile and not args.neutral_reference_docx:
         # apply_format_spec retains its legacy interface; the profile gate is
         # run independently below so generation cannot self-certify it.

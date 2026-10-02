@@ -6839,6 +6839,125 @@ def _is_null_payload_external_requirement(
     )
 
 
+def _project_unresolved_empty_requirements(
+    response: dict[str, Any], records: list[dict[str, Any]],
+    chunk: dict[str, Any] | None, *,
+    source_projection_validation_sha256: str | None,
+) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+    """Separate invalid empty proposals, never resolve their source semantics.
+
+    The whole validator bundle, exact source occurrence and current validated
+    invocation must agree. No substantive property, identity, check, condition
+    or authored obligation may be discarded. Every unresolved review and the
+    complete rejected proposal remain available to source-first review/audit.
+    This is not authority for model retry deletion or publication.
+    """
+    if (
+        not isinstance(chunk, dict) or response.get("contract_version") != "3.0"
+        or source_projection_validation_sha256 != _response_sha256(chunk)
+        or not _retry_fingerprints_complete(_retry_input_fingerprints(chunk))
+        or (response.get("provenance") is not None
+            and response["provenance"] != chunk.get("provenance"))
+        or response.get("reported_conflicts") or not records
+    ):
+        return None, []
+    actual = contract_error_records(
+        validate_host_agent_response(response, chunk), response=response, chunk=chunk,
+    )
+    allowed_codes = {"empty_requirement_properties", "non_requirement_classification_relation"}
+    if (
+        any(not isinstance(r, dict) or r.get("code") not in allowed_codes for r in records)
+        or sorted(_response_sha256(r) for r in actual)
+        != sorted(_response_sha256(r) for r in records)
+    ):
+        return None, []
+    requirements, reviews = response.get("requirements"), response.get("clause_reviews")
+    clauses, evidence = chunk.get("clauses"), chunk.get("evidence_context")
+    contract = chunk.get("requirement_contract")
+    if (
+        not all(isinstance(v, list) for v in (requirements, reviews, clauses))
+        or not isinstance(evidence, dict) or not isinstance(contract, dict)
+        or not isinstance(contract.get("role_properties_schema"), dict)
+    ):
+        return None, []
+    clause_map = {c.get("id"): c for c in clauses if isinstance(c, dict)}
+    review_map = {r.get("clause_id"): r for r in reviews if isinstance(r, dict)}
+    if len(clause_map) != len(clauses) or len(review_map) != len(reviews):
+        return None, []
+    targets, bindings = set(), []
+    for relation in actual:
+        if relation.get("code") != "non_requirement_classification_relation":
+            continue
+        index = relation.get("requirement_index")
+        if type(index) is not int or not 0 <= index < len(requirements) or index in targets:
+            return None, []
+        pointer = f"$.requirements[{index}]"
+        paired = [r for r in actual if r.get("code") == "empty_requirement_properties"
+                  and r.get("json_pointer") == pointer + ".properties"]
+        requirement = requirements[index]
+        if (
+            len(paired) != 1 or relation.get("json_pointer") != pointer
+            or not isinstance(requirement, dict)
+            or requirement.get("existing_requirement_id") is not None
+            or requirement.get("field_key") is not None
+            or requirement.get("source_fragment_clause_ids") not in (None, [])
+            or requirement.get("input_prerequisites") not in (None, [])
+            or requirement.get("verification") is not None
+            or requirement.get("applicability") is not None
+        ):
+            return None, []
+        role_schema = contract["role_properties_schema"].get(requirement.get("role"))
+        if role_schema is None or classify_semantic_payload(
+            requirement.get("properties"), role_schema=role_schema, contract_root=contract,
+        ) != "empty":
+            return None, []
+        ids, eids = requirement.get("clause_ids"), requirement.get("evidence_ids")
+        if (not isinstance(ids, list) or len(ids) != 1 or not isinstance(ids[0], str)
+            or not isinstance(eids, list) or not eids
+            or any(not isinstance(eid, str) for eid in eids) or len(eids) != len(set(eids))):
+            return None, []
+        clause, review = clause_map.get(ids[0]), review_map.get(ids[0])
+        if (
+            not isinstance(clause, dict) or not isinstance(review, dict)
+            or review.get("classification") != "unresolved"
+            or review.get("obligations") not in (None, [])
+            or not isinstance(clause.get("evidence_ids"), list)
+            or set(eids) != set(clause["evidence_ids"])
+            or any(not isinstance(evidence.get(eid), dict)
+                   or evidence[eid].get("id") != eid for eid in eids)
+        ):
+            return None, []
+        try:
+            source = _exact_clause_source_text(clause, evidence)
+        except NativeSemanticReviewError:
+            return None, []
+        # A registered executable fact needs its existing compiler/repair
+        # path, not deferral via an empty placeholder.
+        if compile_known_source_obligation_ids(source):
+            return None, []
+        targets.add(index)
+        bindings.append({"requirement_index": index, "clause_id": ids[0],
+                         "source_span": copy.deepcopy(clause.get("source_span")),
+                         "evidence_ids": list(eids), "source_text_sha256": _response_sha256(source)})
+    if not targets or len(actual) != 2 * len(targets):
+        return None, []
+    projected = copy.deepcopy(response)
+    projected["requirements"] = [copy.deepcopy(r) for i, r in enumerate(requirements) if i not in targets]
+    return projected, [{
+        "code": "non_requirement_classification_relation",
+        "rule_id": "unresolved_empty_proposal_separation_v1",
+        "json_pointer": "$.requirements", "removed_indexes": sorted(targets),
+        "removed_requirements": [copy.deepcopy(requirements[i]) for i in sorted(targets)],
+        "source_bindings": bindings, "input_fingerprints": _retry_input_fingerprints(chunk),
+        "source_projection_validation_sha256": source_projection_validation_sha256,
+        "source_response_sha256": _response_sha256(response),
+        "repaired_response_sha256": _response_sha256(projected),
+        "error_bundle_sha256": _response_sha256(actual),
+        "clause_reviews_unchanged": True, "unresolved_semantics_preserved": True,
+        "independent_review_required": True, "submission_ready": False,
+    }]
+
+
 def _project_external_action_requirements(
     response: dict[str, Any], records: list[dict[str, Any]], chunk: dict[str, Any] | None,
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
@@ -9511,6 +9630,13 @@ def _apply_safe_mechanical_repairs(
     """
     if not isinstance(response, dict) or not error_records:
         return None, []
+
+    unresolved_candidate, unresolved_audit = _project_unresolved_empty_requirements(
+        response, error_records, chunk,
+        source_projection_validation_sha256=source_projection_validation_sha256,
+    )
+    if unresolved_candidate is not None:
+        return unresolved_candidate, unresolved_audit
 
     # A source-bound table may already preserve every local operation while
     # the model copied those properties onto pending approvals or onto the

@@ -1365,3 +1365,16 @@ proposal budget and authorizes only each named atom's explicitly listed fields.
 Actor, exact quotation, force, pending status, route, identity and requirements
 stay frozen. Different wording is not automatically equivalent: the full
 validators and a fresh independent review must accept the new primary proposal.
+
+## Unresolved empty proposals
+
+An unresolved source clause is not an executable formatting requirement. The
+bridge may separate a newly proposed, entirely empty object only under
+`unresolved_empty_proposal_separation_v1`: validated current invocation and exact
+source/evidence binding, complete paired validator diagnostics, no existing
+identity, substantive property, condition, prerequisite, check or authored
+obligation, and no registered executable source fact. Preserve the complete
+rejected proposal in audit and leave source text/review/uncertainty unchanged.
+Require full revalidation and fresh independent source-obligation review. This
+does not resolve the clause, authorize model deletion, guess heading levels or
+release a submission-ready document. See `docs/unresolved-empty-proposals.md`.

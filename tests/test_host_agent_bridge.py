@@ -3730,8 +3730,10 @@ class HostAgentBridgeTests(unittest.TestCase):
                 parent_candidate, retry_candidate, [record], chunk=chunk,
             )
             self.assertIsNotNone(direct_candidate, direct_audit)
-            rejected_without_projection, _ = bridge._retry_semantic_change_error(
+            reproduced_authorizations = []
+            accepted_by_reproduction, _ = bridge._retry_semantic_change_error(
                 parent_raw, retry_raw, [record], contract_version="3.0", chunk=chunk,
+                authorization_out=reproduced_authorizations,
             )
             accepted, changed = bridge._retry_semantic_change_error(
                 parent_raw, retry_raw, [record], contract_version="3.0", chunk=chunk,
@@ -3751,7 +3753,11 @@ class HostAgentBridgeTests(unittest.TestCase):
                 comparison_previous_response=parent_candidate,
                 comparison_current_response=retry_candidate,
             )
-        self.assertIsNotNone(rejected_without_projection)
+        # The bridge now reproduces the full candidate itself. This is not
+        # permission to compare the feedback hash directly against raw JSON.
+        self.assertIsNone(accepted_by_reproduction)
+        self.assertEqual(reproduced_authorizations[0]["parent_candidate_sha256"],
+                         record["candidate_response_sha256"])
         self.assertIsNone(accepted)
         self.assertEqual(changed, ["$.clause_reviews[3].classification"])
         self.assertIsNotNone(rejected_tampered)

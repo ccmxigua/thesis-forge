@@ -335,12 +335,17 @@ empty/default cover shell is never an additional requirement.
 
 For a source-first review that explicitly authorizes a single existing-content
 verification reclassification, the authorization hashes identify the
-source-materialized candidate, not the raw provider JSON. On retry, recompute
-the fixed-declaration literal projection from both immutable raw responses
-and the current chunk before comparing candidate hashes. Only the named
-classification path may change; changed source links, declaration text not
-derived from current evidence, stale hashes, or incomplete path/source
-authorization still fail closed.
+source-materialized candidate, not the raw provider JSON. On retry, reproduce
+both complete native candidates from the immutable raw responses and the current
+chunk before comparing candidate hashes. Only the named classification paths
+may change in the model proposal; all other raw fields stay frozen. If that
+classification requires a different responsibility route, only the existing
+metadata projector may derive it for validator-named route errors on the same
+reviews, with a separate source-bound projection proof. It cannot change atom
+content or attest that human verification occurred. Changed source links,
+unrelated payload changes, stale hashes, or incomplete path/source authorization
+still fail closed. The complete validator and a fresh independent source-first
+review must pass before acceptance; submission readiness remains false.
 
 Fixed-declaration candidates are source-text groupings, not executable-clause
 lists. A requirement may link only clauses independently classified as

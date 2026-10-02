@@ -5061,6 +5061,7 @@ def _v3_source_verification_reclassification_response(
     records: list[dict[str, Any]],
     *,
     chunk: dict[str, Any] | None = None,
+    code_owned_route_projection: bool = False,
 ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
     """Authorize only an exact, source-bound non-verification -> verification change."""
     authorization = "source_bound_existing_content_verification_reclassification_v1"
@@ -5192,7 +5193,7 @@ def _v3_source_verification_reclassification_response(
             return None, None
         expected_review = copy.deepcopy(previous_review)
         expected_review["classification"] = "requires_source_verification"
-        if current_review != expected_review:
+        if not code_owned_route_projection and current_review != expected_review:
             return None, None
         repaired_reviews[review_index] = expected_review
         affected.append(clause_id)
@@ -5200,6 +5201,28 @@ def _v3_source_verification_reclassification_response(
 
     repaired = copy.deepcopy(previous_response)
     repaired["clause_reviews"] = repaired_reviews
+    route_proofs: list[dict[str, Any]] = []
+    if code_owned_route_projection:
+        route_errors = contract_error_records(
+            validate_host_agent_response(repaired, chunk), response=repaired, chunk=chunk,
+        )
+        if route_errors:
+            target_indexes = {int(re.fullmatch(
+                r"\$\.clause_reviews\[(\d+)\]\.classification", r["json_pointer"]
+            ).group(1)) for r in records}
+            for error in route_errors:
+                match = re.fullmatch(
+                    r"\$\.clause_reviews\[(\d+)\]\.obligations\[\d+\]\.route",
+                    str(error.get("json_pointer") or ""),
+                )
+                if (error.get("code") != "contract_validation_error" or match is None
+                        or int(match.group(1)) not in target_indexes
+                        or error.get("raw_error") != f"{error['json_pointer']}: responsibility_route_conflict"):
+                    return None, None
+            projected, route_proofs = project_atom_metadata(repaired, route_errors, chunk)
+            if projected is None or len(route_proofs) != len(route_errors):
+                return None, None
+            repaired = projected
     if _semantic_retry_view(repaired) != _semantic_retry_view(current_response):
         return None, None
     if validate_host_agent_response(repaired, chunk):
@@ -5217,8 +5240,69 @@ def _v3_source_verification_reclassification_response(
         "requirement_graph_unchanged": True,
         "exact_current_source_quotes": True,
         "parent_semantic_response_sha256": expected_parent_sha,
+        "code_owned_route_projection": copy.deepcopy(route_proofs),
         "submission_ready": False,
     }
+
+
+def _source_verification_projection_retry_ledger(previous, current, records, chunk, changed_paths):
+    """Prove a model classification-only proposal at the full candidate stage.
+
+    The independently rejected candidate owns the feedback hashes. Reproduce it
+    from the immutable raw parent, rather than comparing those hashes to raw
+    JSON or weakening them. Code-owned route changes are separately proven.
+    """
+    if (not isinstance(chunk, dict) or not records or not changed_paths
+            or not _retry_fingerprints_complete(_retry_input_fingerprints(chunk))
+            or not isinstance(previous, dict) or not isinstance(current, dict)
+            or any(not isinstance(r, dict) or r.get("primary_retry_authorization") !=
+                   "source_bound_existing_content_verification_reclassification_v1" for r in records)):
+        return None
+    try:
+        for value in (previous, current):
+            if value.get("provenance") is not None and value["provenance"] != chunk.get("provenance"):
+                return None
+        expected = copy.deepcopy(previous)
+        target_paths = set()
+        for record in records:
+            match = re.fullmatch(r"\$\.clause_reviews\[(\d+)\]\.classification", str(record.get("json_pointer")))
+            if match is None or record["json_pointer"] in target_paths:
+                return None
+            index = int(match.group(1))
+            old = expected["clause_reviews"][index]
+            if old["clause_id"] != record.get("clause_id") or old.get("classification") != record.get("baseline_classification"):
+                return None
+            old["classification"] = "requires_source_verification"
+            target_paths.add(record["json_pointer"])
+        # The provider may not edit route, atom content, requirements or reasons.
+        for value in (expected,):
+            value.pop("provenance", None)
+        model = copy.deepcopy(current); model.pop("provenance", None)
+        if expected != model or set(changed_paths) != target_paths:
+            return None
+        parent, parent_audit = prepare_native_response_candidate(
+            previous, chunk, source_projection_validation_sha256=_response_sha256(chunk))
+        candidate, candidate_audit = prepare_native_response_candidate(
+            current, chunk, source_projection_validation_sha256=_response_sha256(chunk))
+        parent = _bind_current_invocation_provenance(parent, chunk["provenance"])
+        candidate = _bind_current_invocation_provenance(candidate, chunk["provenance"])
+        result, proof = _v3_source_verification_reclassification_response(
+            parent, candidate, records, chunk=chunk, code_owned_route_projection=True)
+        if result is None:
+            return None
+        return [{"rule_id": "v3_source_bound_existing_content_verification_reclassification",
+                 "json_pointer": path, "authorized_changed_paths": list(changed_paths),
+                 "source_binding_complete": True, "input_fingerprints": _retry_input_fingerprints(chunk),
+                 "parent_candidate_sha256": _response_sha256(parent),
+                 "candidate_sha256": _response_sha256(candidate),
+                 "parent_projection_audit_sha256": _response_sha256(parent_audit),
+                 "candidate_projection_audit_sha256": _response_sha256(candidate_audit),
+                 "source_verification_projection_proof": proof,
+                 "feedback_sha256": _response_sha256(records),
+                 "independent_review_required": True, "submission_ready": False}
+                for path in changed_paths]
+    except (ValueError, TypeError, KeyError, IndexError, AttributeError):
+        return None
 
 
 def _bind_current_invocation_provenance(
@@ -5767,6 +5851,19 @@ def _retry_semantic_change_error(
         if comparison_current_response is not None else current_response
     )
     changed_paths = _retry_change_paths(comparison_previous, comparison_current)
+    if contract_version == HOST_REVIEW_CONTRACT_V3 and isinstance(chunk, dict):
+        declaration_previous, _ = _materialize_fixed_declaration_source_text(previous_response, chunk)
+        declaration_current, _ = _materialize_fixed_declaration_source_text(current_response, chunk)
+        if ((comparison_previous_response is None and comparison_current_response is None)
+                or (declaration_previous == comparison_previous and declaration_current == comparison_current)):
+            source_verification_ledger = _source_verification_projection_retry_ledger(
+                previous_response, model_retry_response if model_retry_response is not None else current_response,
+                records, chunk, changed_paths,
+            )
+            if source_verification_ledger is not None:
+                if authorization_out is not None:
+                    authorization_out.extend(copy.deepcopy(source_verification_ledger))
+                return None, changed_paths
     policy_ledger = policy_inventory_retry_ledger(
         comparison_previous, comparison_current, records, changed_paths, chunk,
         validate=validate_host_agent_response, make_records=contract_error_records,
@@ -14352,6 +14449,7 @@ def run_bridge(
                                 _v3_source_verification_reclassification_response(
                                     previous_candidate, current_candidate,
                                     semantic_parent_error_records, chunk=chunk,
+                                    code_owned_route_projection=True,
                                 )
                             )
                             if source_verification_repair is not None:

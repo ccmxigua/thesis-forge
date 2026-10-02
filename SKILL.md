@@ -1350,3 +1350,11 @@ coverage, role schemas and the full contract must validate. Mixed or unrelated
 parent errors cannot use this path. The additions still require a fresh
 independent source-first review; neither projection nor a score proves compliance
 or permits submission.
+
+Scope-reassessment grants are per clause, obligation and field, not per top-level
+feedback code. An otherwise unchanged retry may contain surplus scope-field
+edits; a source-bound patch retains the authenticated parent and copies only the
+named target/condition/applicability proposals. Surplus scope edits are audited,
+not accepted. Other payload/quotation/identity edits still fail closed. The
+existing shared one-proposal budget, full validators and fresh independent
+source-first review remain mandatory; no reviewer value is auto-copied.

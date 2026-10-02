@@ -261,3 +261,89 @@ The code never chooses a replacement target, condition, applicability or metadat
             for path in paths]
     except (ValueError, KeyError, TypeError, IndexError, AttributeError):
         return None
+
+
+def project_scope_proposal(parent, proposal, records, chunk, *, prepare, validate, changed_paths):
+    """Extract named scope fields without widening the one-shot authorization.
+
+    Only surplus target/condition/applicability edits can be discarded here.
+    Changes to quotations, identities, requirements, routes or any other parent
+    field remain failures. Authentication and semantic authorization are still
+    performed by the complete existing source-first feedback verifier.
+    """
+    audit = {"policy": "source_bound_scope_field_patch_v1", "status": "not_applicable",
+             "parent_response_sha256": sha256_json(parent),
+             "model_retry_response_sha256": sha256_json(proposal),
+             "applied_paths": [], "discarded_unrequested_paths": [],
+             "independent_review_required": True, "submission_ready": False}
+    if (not all(isinstance(v, dict) for v in (parent, proposal, chunk))
+            or not isinstance(records, list) or len(records) != 1
+            or not isinstance(records[0], dict) or records[0].get("code") not in REASSESSMENT_CODES):
+        return None, audit
+    try:
+        record = records[0]
+        digest = sha256_json(parent)
+        if digest == record.get("candidate_response_sha256"):
+            candidate = copy.deepcopy(parent)
+        elif digest == record.get("response_sha256"):
+            candidate = prepare(copy.deepcopy(parent), chunk)[0]
+            candidate["provenance"] = copy.deepcopy(chunk["provenance"])
+        else:
+            return None, audit
+        rebuilt = source_atom_feedback(candidate, chunk, record["review_request"], record["rejected_review"])
+        if rebuilt is None or any(record.get(k) != v for k, v in rebuilt.items()):
+            return None, audit
+        if "provenance" in proposal and proposal["provenance"] != chunk["provenance"]:
+            return None, audit
+        atoms_key = "condition_atoms" if rebuilt["code"] == CODE else "source_atoms"
+        authority = {(e["clause_id"], e["obligation_id"]): e.get("fields", ["condition"])
+                     for e in rebuilt[atoms_key]}
+        if len(authority) != len(rebuilt[atoms_key]):
+            return None, audit
+        projected, non_scope = copy.deepcopy(parent), copy.deepcopy(proposal)
+        seen = set()
+        if len(parent["clause_reviews"]) != len(proposal["clause_reviews"]):
+            return None, audit
+        for i, before_review in enumerate(parent["clause_reviews"]):
+            after_review = proposal["clause_reviews"][i]
+            if (before_review["clause_id"] != after_review["clause_id"]
+                    or len(before_review.get("obligations", [])) != len(after_review.get("obligations", []))):
+                return None, audit
+            for j, before in enumerate(before_review.get("obligations", [])):
+                after = after_review["obligations"][j]
+                key = (before_review["clause_id"], before["id"])
+                if key in seen or before["id"] != after["id"]:
+                    return None, audit
+                seen.add(key)
+                for field in ("target", "condition", "applicability"):
+                    path = f"$.clause_reviews[{i}].obligations[{j}].{field}"
+                    changed = (field in before) != (field in after) or before.get(field) != after.get(field)
+                    if changed:
+                        if field in authority.get(key, []):
+                            dest = projected["clause_reviews"][i]["obligations"][j]
+                            if field in after:
+                                dest[field] = copy.deepcopy(after[field])
+                            else:
+                                dest.pop(field, None)
+                            audit["applied_paths"].append(path)
+                        else:
+                            audit["discarded_unrequested_paths"].append(path)
+                    dest = non_scope["clause_reviews"][i]["obligations"][j]
+                    if field in before:
+                        dest[field] = copy.deepcopy(before[field])
+                    else:
+                        dest.pop(field, None)
+        if (not set(authority).issubset(seen) or _semantic(non_scope) != _semantic(parent)
+                or not audit["applied_paths"] or not audit["discarded_unrequested_paths"]):
+            return None, audit
+        paths = changed_paths(parent, projected)
+        proofs = condition_reassessment(parent, projected, records, paths, chunk,
+                                       prepare=prepare, validate=validate)
+        if proofs is None:
+            return None, audit
+        audit.update(status="projected", projected_response_sha256=sha256_json(projected),
+                     feedback_sha256=sha256_json(record), source_chunk_sha256=sha256_json(chunk),
+                     authorized_scope_proposals=proofs, mechanical_equivalence_claimed=False)
+        return projected, audit
+    except (NativeSemanticReviewError, ValueError, KeyError, TypeError, IndexError, AttributeError):
+        return None, audit

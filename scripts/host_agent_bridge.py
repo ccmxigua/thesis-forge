@@ -266,7 +266,7 @@ from publication_policy_inventory import (
 )
 from source_quote_reassessment import quote_context_reassessment, RULE_ID as QUOTE_REASSESSMENT_RULE
 from source_condition_reassessment import (
-    source_atom_feedback, condition_reassessment, CODE as CONDITION_REASSESSMENT_CODE,
+    source_atom_feedback, condition_reassessment, project_scope_proposal, CODE as CONDITION_REASSESSMENT_CODE,
     RULE_ID as CONDITION_REASSESSMENT_RULE,
     TARGET_CODE as TARGET_REASSESSMENT_CODE, TARGET_RULE_ID as TARGET_REASSESSMENT_RULE,
     APPLICABILITY_CODE as APPLICABILITY_REASSESSMENT_CODE,
@@ -6020,6 +6020,14 @@ def _project_validator_targeted_obligation_fields(
         }
     ]
     if not target_records:
+        if isinstance(chunk, dict) and _retry_fingerprints_complete(_retry_input_fingerprints(chunk)):
+            scope_candidate, scope_audit = project_scope_proposal(
+                parent_response, model_retry_response, records, chunk,
+                prepare=prepare_native_response_candidate, validate=validate_host_agent_response,
+                changed_paths=_retry_change_paths,
+            )
+            if scope_candidate is not None:
+                return scope_candidate, scope_audit
         relation_candidate, relation_audit = _project_validator_targeted_missing_requirements(
             parent_response, model_retry_response, records, chunk=chunk,
         )
@@ -14214,6 +14222,7 @@ def run_bridge(
                                 )
                             )
                             if projection_audit.get("policy") in {
+                                "source_bound_scope_field_patch_v1",
                                 "validator_targeted_administrative_qualifiers_v1",
                                 "validator_targeted_missing_requirements_v1",
                             }:

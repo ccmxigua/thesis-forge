@@ -269,6 +269,49 @@ class RetryScopeTests(unittest.TestCase):
         compiled, _ = compile_source_reference_response(raw, self.retry, OBLIGATION_COVERAGE_SCHEMA, coverage=True)
         self.assertEqual(len(validate_obligation_coverage_response(compiled, self.retry["checks"])), 2)
 
+    def test_mixed_missing_atom_retry_replays_parent_without_fabricating_coverage(self):
+        from tests.test_native_semantic_review import NativeSemanticReviewTests
+        check, good = NativeSemanticReviewTests._typed_mixed_inventory_case()
+        self.request["checks"].append(check)
+        compiled = copy.deepcopy(self.case["second_compiled"])
+        compiled["results"][1] = copy.deepcopy(self.case["first_compiled"]["results"][1])
+        complete = copy.deepcopy(compiled)
+        complete["results"].extend(copy.deepcopy(good["results"]))
+        partial = copy.deepcopy(good["results"][0])
+        partial["identified_obligations"].pop(0)
+        partial["identified_obligations"][0]["target"] += " disputed"
+        compiled["results"].append(partial)
+        self.write_parent(compiled)
+        with self.assertRaises(native_review.TypedSourceAtomAlignmentError) as caught:
+            validate_obligation_coverage_response(compiled, self.request["checks"])
+        self.retry = {**copy.deepcopy(self.request), "provider_attempt": 2, "retry_feedback": {
+            "code": caught.exception.code, "clause_ids": list(caught.exception.clause_ids),
+            "disagreements": caught.exception.disagreements,
+            "checks_sha256": native_review.sha256_json(self.request["checks"]),
+            "run_id": self.request["run_id"], "provenance": copy.deepcopy(self.request["provenance"])}}
+        before = copy.deepcopy(self.request)
+        locks, proof, schema = self.scope()
+        self.assertEqual(proof["fresh_review_check_ids"], [check["check_id"]])
+        self.assertEqual(set(locks), {"C00033", "C00037"})
+        # Retry authorization does not accept the old partial inventory.
+        with self.assertRaises(native_review.TypedSourceAtomAlignmentError):
+            validate_obligation_coverage_response(compiled, self.retry["checks"])
+        corrected = self.wire(complete, self.retry)
+        for index, result in enumerate(corrected["results"]):
+            if result["check_id"] in locks:
+                corrected["results"][index] = copy.deepcopy(locks[result["check_id"]])
+        validate_retry_scope(corrected, schema, locks, native=True)
+        replay, _ = compile_source_reference_response(corrected, self.retry, OBLIGATION_COVERAGE_SCHEMA,
+            coverage=True, provider_nullable_optionals=True)
+        self.assertEqual(len(validate_obligation_coverage_response(replay, self.retry["checks"])), 3)
+        self.assertEqual(self.request, before)
+        self.assertIn("rationale mentioning a rendered declaration", _prompt(self.retry, retained_results=locks))
+        stale = copy.deepcopy(self.retry)
+        stale["checks"][-1]["document_text"] += " changed"
+        with self.assertRaises(NativeSemanticReviewError):
+            prepare_retry_scope(stale, self.output, OBLIGATION_COVERAGE_SCHEMA,
+                                provider_nullable_optionals=True)
+
     def test_typed_scope_refuses_changed_dispute_or_missing_parent(self):
         self.typed_parent()
         original = copy.deepcopy(self.retry)

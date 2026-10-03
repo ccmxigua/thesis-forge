@@ -1351,6 +1351,41 @@ def validate_obligation_coverage_response(
                 for item in identified if isinstance(item, dict)
             ]
             if (
+                typed_disagreements
+                and verdict == "mixed_execution_external_pending"
+                and context.get("requires_requirement") is True
+                and linked and identified
+                and represented + external_pending == len(identified)
+                and len(primary_by_id) == len(primary_obligations)
+                and all(
+                    isinstance(item, dict)
+                    and isinstance(item.get("id"), str) and item["id"]
+                    and item.get("status") in {"covered", "unverifiable"}
+                    and item.get("force", "unknown") != "unknown"
+                    and all(item.get(key) not in {None, "", "unknown"}
+                            for key in ("actor", "action", "target", "source_quote"))
+                    for item in primary_obligations
+                )
+                and {item.get("status") for item in primary_obligations}
+                    == {"covered", "unverifiable"}
+                and len(mapped_ids) == len(identified)
+                and len(set(mapped_ids)) == len(mapped_ids)
+                and set(mapped_ids).issubset(primary_by_id)
+                and all(
+                    primary_by_id.get(item.get("primary_obligation_id")) == (
+                        "covered" if item.get("disposition") == "represented" else "unverifiable"
+                    )
+                    and not (item.get("disposition") == "external_action_pending"
+                             and item.get("requirement_refs"))
+                    for item in identified
+                )
+            ):
+                # A valid partial inventory is still rejected. Reread the
+                # unchanged source/candidate through the existing bounded typed
+                # route, including missing atoms and changed semantic fields.
+                # Never synthesize the omitted atom or accept partial coverage.
+                raise TypedSourceAtomAlignmentError(check_id, typed_disagreements)
+            if (
                 verdict != "mixed_execution_external_pending"
                 or context.get("requires_requirement") is not True
                 or not linked
@@ -1836,6 +1871,10 @@ def _prompt(request: dict[str, Any], *, retained_results: dict[str, Any] | None 
                 "larger contextual span when it states the same duty. Where the primary typed dimensions "
                 "and condition are genuinely faithful to the source, preserve their exact representation "
                 "instead of paraphrasing them; cite each matching primary_obligation_id exactly once. "
+                "For mixed document/external work, list the represented document duty and each "
+                "pending external duty separately: a rationale mentioning a rendered declaration "
+                "does not replace its inventory entry. Inspect missing mappings as well as changed "
+                "fields; do not fabricate a missing duty if the source does not support it. "
                 "If meaning, target, strength, condition or applicability actually differs, preserve the "
                 "disagreement and explain it. Never invent approval facts, normalize a semantic conflict, "
                 "delete an obligation, or change source, candidate, provenance or requirement links. "

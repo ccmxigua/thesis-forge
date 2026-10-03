@@ -1523,6 +1523,85 @@ class NativeSemanticReviewTests(unittest.TestCase):
             with self.subTest(broken=broken), self.assertRaises(NativeSemanticReviewError):
                 validate_obligation_coverage_response(broken, [check])
 
+    @staticmethod
+    def _typed_mixed_inventory_case():
+        source = "本声明须原样保留，作者须确认声明中的成果真实。"
+        primaries = [
+            {"id": "render", "status": "covered", "reason": "Preserve source text.",
+             "actor": "document generator", "action": "render", "target": "declaration text"},
+            {"id": "truth", "status": "unverifiable", "reason": "Human verification remains pending.",
+             "actor": "author", "action": "confirm", "target": "truthfulness of claims"},
+        ]
+        for item in primaries:
+            item.update(source_quote=source, force="required", applicability="applicable")
+        check = {"check_id": "C-generic-mixed", "document_text": source, "review_context": {
+            "classification": "executable_with_external_check", "requires_requirement": True,
+            "linked_requirements": [{"requirement_ref": "RR-declaration"}],
+            "primary_obligations": primaries, "machine_obligation_ids": [],
+        }}
+        atoms = []
+        for item in primaries:
+            atom = {key: value for key, value in item.items() if key not in {"id", "status", "reason"}}
+            atom.update(primary_obligation_id=item["id"],
+                        disposition="represented" if item["status"] == "covered" else "external_action_pending",
+                        requirement_refs=["RR-declaration"] if item["status"] == "covered" else [])
+            atoms.append(atom)
+        response = {"results": [{"check_id": check["check_id"],
+            "verdict": "mixed_execution_external_pending", "rationale": "Render and verify separately.",
+            "evidence_quotes": [source], "machine_obligation_ids": [], "identified_obligations": atoms}]}
+        return check, response
+
+    def test_typed_mixed_partial_inventory_is_rejected_via_bounded_rereview(self) -> None:
+        check, response = self._typed_mixed_inventory_case()
+        self.assertEqual(validate_obligation_coverage_response(response, [check])[0]["verdict"],
+                         "mixed_execution_external_pending")
+        for missing in (0, 1):
+            for changed_target in (False, True):
+                broken = copy.deepcopy(response)
+                atoms = broken["results"][0]["identified_obligations"]
+                atoms.pop(missing)
+                if changed_target:
+                    atoms[0]["target"] += " disputed"
+                before = copy.deepcopy((check, broken))
+                with self.subTest(missing=missing, changed_target=changed_target):
+                    with self.assertRaises(native_review.TypedSourceAtomAlignmentError) as rejected:
+                        validate_obligation_coverage_response(broken, [check])
+                    self.assertEqual(rejected.exception.clause_ids, (check["check_id"],))
+                    self.assertEqual((check, broken), before)
+
+    def test_typed_mixed_inventory_structural_errors_cannot_gain_typed_retry(self) -> None:
+        check, response = self._typed_mixed_inventory_case()
+        mutations = (
+            ("primary_obligation_id", "foreign"), ("primary_obligation_id", "render"),
+            ("requirement_refs", ["RR-declaration"]), ("requirement_refs", ["RR-foreign"]),
+            ("source_quote", "not in source"), ("disposition", "unrepresented"),
+        )
+        for field, value in mutations:
+            broken = copy.deepcopy(response)
+            broken["results"][0]["identified_obligations"][1][field] = value
+            broken["results"][0]["identified_obligations"][1]["target"] += " disputed"
+            with self.subTest(field=field, value=value):
+                with self.assertRaises(NativeSemanticReviewError) as rejected:
+                    validate_obligation_coverage_response(broken, [check])
+                self.assertNotIsInstance(rejected.exception, native_review.TypedSourceAtomAlignmentError)
+        for bad_context in ("legacy", "duplicate", "no_link", "wrong_status"):
+            altered = copy.deepcopy(check)
+            broken = copy.deepcopy(response)
+            broken["results"][0]["identified_obligations"].pop(0)
+            context = altered["review_context"]
+            if bad_context == "legacy":
+                context["primary_obligations"][0].pop("actor")
+            elif bad_context == "duplicate":
+                context["primary_obligations"][0]["id"] = "truth"
+            elif bad_context == "no_link":
+                context["linked_requirements"] = []
+            else:
+                context["primary_obligations"][0]["status"] = "unverifiable"
+            with self.subTest(context=bad_context):
+                with self.assertRaises(NativeSemanticReviewError) as rejected:
+                    validate_obligation_coverage_response(broken, [altered])
+                self.assertNotIsInstance(rejected.exception, native_review.TypedSourceAtomAlignmentError)
+
     def test_three_distinct_external_actions_remain_three_pending_items(self) -> None:
         source = "须经导师同意、作者申请和学院批准。"
         check = {

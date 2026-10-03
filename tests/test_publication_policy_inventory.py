@@ -27,18 +27,22 @@ POLICY = "未经批准的均为公开学位论文（公开的学位论文本项�
 APPROVAL = "非公开学位论文须经指导教师同意、作者本人申请和相关部门批准方能标注"
 
 
-def fixture(policy=POLICY):
+def fixture(policy=POLICY, *, include_information=False):
     source = APPROVAL + "。" + policy
     evidence = {"evidence": [
         {"id": "current-prose", "text": source},
         {"id": "current-field", "text": "申请密级"},
     ]}
     clauses = []
-    for cid, eid, text, start in (
+    rows = [
         ("neighbor-approval", "current-prose", APPROVAL, 0),
         ("selected-policy", "current-prose", policy, len(APPROVAL) + 1),
         ("security-label", "current-field", "申请密级", 0),
-    ):
+    ]
+    if include_information:
+        evidence["evidence"].append({"id": "current-information", "text": "本页说明"})
+        rows.append(("information-only", "current-information", "本页说明", 0))
+    for cid, eid, text, start in rows:
         full = next(e["text"] for e in evidence["evidence"] if e["id"] == eid)
         clauses.append({"id": cid, "text": text, "evidence_ids": [eid],
             "source_span": {"evidence_id": eid, "text": text,
@@ -86,6 +90,9 @@ def fixture(policy=POLICY):
         {"clause_id": "security-label", "classification": "executable",
          "normative_basis": "explicit_normative_text", "reason": "Printed administrative field.",
          "obligations": [atom("label", "covered", "申请密级", "preserve", "field label")]}]
+    if include_information:
+        reviews.append({"clause_id": "information-only", "classification": "informational",
+                        "normative_basis": "insufficient", "reason": "Descriptive heading only."})
     response = {"contract_version": "3.0", "provenance": chunk["provenance"],
         "requirements": [requirement], "clause_reviews": reviews,
         "reported_conflicts": [], "unsupported_items": []}
@@ -175,8 +182,10 @@ class PublicationPolicyInventoryTests(unittest.TestCase):
             self.assertFalse(any(r["code"] == CODE for r in records))
             self.assertIsNone(self.proof(old, proposed(old), chunk, [{"code": CODE}]))
 
-    def _orchestration(self, reject_review=False, bad_proposal=False, repair_base=False):
-        old, source, evidence = fixture(); calls = []; reviews = []
+    def _orchestration(self, reject_review=False, bad_proposal=False, repair_base=False,
+                       empty_information_variant=False):
+        old, source, evidence = fixture(include_information=empty_information_variant)
+        calls = []; reviews = []
         with tempfile.TemporaryDirectory() as td:
             directory = Path(td) / "packet"; directory.mkdir()
             engine.prepare_host_agent_review_packets(source, source["clauses"], evidence,
@@ -192,6 +201,8 @@ class PublicationPolicyInventoryTests(unittest.TestCase):
                     body["requirements"][0]["properties"]["non_public_administration"].pop("publication_default_policy")
                     body["requirements"][0]["source_fragment_clause_ids"] = None
                 if bad_proposal and len(calls) > 1: body["clause_reviews"][0]["obligations"].pop()
+                if empty_information_variant and len(calls) > 1:
+                    body["clause_reviews"][-1]["obligations"] = []
                 return subprocess.CompletedProcess(["mock-host"], 0, json.dumps({"runId": "offline-policy",
                     "status": "ok", "provider": "offline-test", "model": "policy-test",
                     "result": {"payloads": [{"text": json.dumps(body)}]}}), "")
@@ -199,6 +210,8 @@ class PublicationPolicyInventoryTests(unittest.TestCase):
                 reviews.append(kwargs["attempt"])
                 self.assertEqual(candidate["clause_reviews"][0], old["clause_reviews"][0])
                 self.assertEqual(candidate["clause_reviews"][1]["obligations"], old["clause_reviews"][1]["obligations"][:2])
+                if empty_information_variant:
+                    self.assertEqual(candidate["clause_reviews"][-1]["obligations"], [])
                 if reject_review:
                     error = bridge.IndependentObligationReviewError("fresh reviewer rejects the proposal")
                     error.retryable = False
@@ -216,6 +229,9 @@ class PublicationPolicyInventoryTests(unittest.TestCase):
                     bridge.run_bridge(directory, response_out=output, agent_id="main", timeout=1,
                         max_attempts=2, openclaw_bin="mock-host", model="offline-test/policy-test")
             audit = json.loads((directory / "host-agent-run.json").read_text())
+            if empty_information_variant:
+                raw = json.loads((directory / "llm-response-chunk-0001.attempt-02.raw.json").read_text())
+                self.assertEqual(raw["clause_reviews"][-1]["obligations"], [])
             self.assertEqual(output.exists(), not (reject_review or bad_proposal))
             return audit, calls, reviews
 
@@ -228,6 +244,23 @@ class PublicationPolicyInventoryTests(unittest.TestCase):
     def test_fresh_review_rejection_cannot_publish_or_merge(self):
         audit, calls, reviews = self._orchestration(reject_review=True)
         self.assertEqual(len(calls), 2); self.assertEqual(reviews, [2])
+        self.assertEqual(audit["status"], "failed")
+        self.assertFalse(audit["merged_response_written"])
+
+    def test_empty_information_representation_does_not_cancel_scoped_policy_proposal(self):
+        audit, calls, reviews = self._orchestration(empty_information_variant=True)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(reviews, [2])
+        self.assertEqual(audit["status"], "merged")
+        accepted = audit["chunk_runs"][0]
+        self.assertEqual(accepted["semantic_retry_change_policy"], RULE_ID)
+        self.assertEqual(len(accepted["semantic_retry_changes"]), 3)
+
+    def test_empty_information_equivalence_cannot_bypass_fresh_review(self):
+        audit, calls, reviews = self._orchestration(
+            empty_information_variant=True, reject_review=True)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(reviews, [2])
         self.assertEqual(audit["status"], "failed")
         self.assertFalse(audit["merged_response_written"])
 

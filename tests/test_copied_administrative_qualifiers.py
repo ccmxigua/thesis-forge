@@ -88,7 +88,10 @@ class CopiedAdministrativeQualifierTests(unittest.TestCase):
         self.assertIsNone(error)
         self.assertEqual(len(authorizations), 4)
         prepared, preparation_audit = bridge.prepare_native_response_candidate(repaired, chunk)
-        self.assertEqual(prepared, repaired)
+        # Candidate preparation may canonicalize an unreferenced informational
+        # zero-inventory representation; it must make no other payload change.
+        self.assertEqual(prepared, bridge.normalize_native_response(repaired, chunk['response_schema']))
+        self.assertEqual(raw, original)
         self.assertEqual(project(repaired, chunk), (None, []))
 
     def test_distinct_extracted_sources_preserve_different_terms_and_identity(self):

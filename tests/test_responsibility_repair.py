@@ -47,19 +47,11 @@ class ResponsibilityRepairTests(unittest.TestCase):
             candidate, audit = bridge.prepare_native_response_candidate(raw, chunk)
             self.assertEqual(raw, before)
             self.assertEqual(len(candidate["requirements"]), expected_count)
-            # Native strict-schema responses encode omitted optional values as
-            # null. Canonicalization removes those null sentinels (here,
-            # obligations=None); compare the semantic review inventory while
-            # still requiring every non-null obligation payload to be exact.
-            def semantic_reviews(reviews):
-                return [
-                    {key: value for key, value in review.items()
-                     if not (key == "obligations" and value is None)}
-                    for review in reviews
-                ]
-
-            self.assertEqual(semantic_reviews(candidate["clause_reviews"]),
-                             semantic_reviews(raw["clause_reviews"]))
+            # Compare the same normalization stage: native optional nulls and
+            # unreferenced informational zero inventories have canonical forms.
+            # Every real obligation and all other review fields remain exact.
+            expected = bridge.normalize_native_response(raw, chunk["response_schema"])
+            self.assertEqual(candidate["clause_reviews"], expected["clause_reviews"])
             self.assertEqual(bridge.validate_host_agent_response(candidate, chunk), [])
             transaction = audit["repair_transaction"]
             self.assertIsNotNone(transaction)

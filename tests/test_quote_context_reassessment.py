@@ -29,7 +29,9 @@ def incident():
     chunk = attach_request_provenance(chunk, source_sha256=sha256_json(evidence), evidence_doc=evidence,
                                      clauses=source["clauses"], run_id="offline-quote-context")
     current = bridge.normalize_native_response(data["model_retry"], chunk["response_schema"])
-    return data["baseline"], current, chunk
+    # Compare like stages, matching the production bridge's raw-pair loader.
+    baseline = bridge.normalize_native_response(data["baseline"], chunk["response_schema"])
+    return baseline, current, chunk
 
 
 class QuoteContextReassessmentTests(unittest.TestCase):

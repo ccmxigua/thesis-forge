@@ -3385,7 +3385,9 @@ class HostAgentBridgeTests(unittest.TestCase):
                     "clause_id": "C1", "classification": "informational", "reason": "Primary interpretation.",
                 }], "unsupported_items": [], "reported_conflicts": [],
             }
-            corrected = copy.deepcopy(parent)
+            # The retry prompt carries the normalized candidate parent. Keep
+            # its explicit zero-inventory form while changing classification.
+            corrected = bridge.normalize_native_response(parent, chunk["response_schema"])
             corrected["clause_reviews"][0]["classification"] = "requires_source_content"
 
             def primary_envelope(payload):

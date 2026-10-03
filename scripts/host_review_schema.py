@@ -293,7 +293,11 @@ def normalize_native_response(
     Native strict schemas encode local optional properties as required nullable
     properties.  A ``null`` at a property that is optional in the local
     contract means exactly "omitted"; removing it restores the local contract
-    without changing any non-null semantic value.  Required nulls and values
+    without changing a semantic value. For v3 informational/not-applicable
+    reviews not referenced by any requirement or diagnostic, omitted/null/empty
+    optional inventories share the explicit empty-array normal form. Linked
+    reviews retain their inventory-presence signal for context-edge repair.
+    Nonempty inventories and required arrays are never erased. Required nulls and values
     in unconstrained branches are preserved for the normal fail-closed
     validator.  Requirement ``properties`` is represented by the union of the
     registered role schemas, so nullable provider fields can be normalized
@@ -332,7 +336,45 @@ def normalize_native_response(
                 return [normalize(item, item_schema) for item in value]
         return copy.deepcopy(value)
 
-    return normalize(response, response_schema)
+    normalized = normalize(response, response_schema)
+    if (isinstance(normalized, dict)
+            and normalized.get("contract_version") == "3.0"
+            and root.get("properties", {}).get("contract_version", {}).get("const") == "3.0"):
+        review_schema = root.get("properties", {}).get("clause_reviews", {}).get("items", {})
+        reviews = normalized.get("clause_reviews")
+
+        def references(value: Any, clause_id: str) -> bool:
+            if isinstance(value, str):
+                return clause_id in value
+            if isinstance(value, list):
+                return any(references(item, clause_id) for item in value)
+            if isinstance(value, dict):
+                return any(references(key, clause_id) or references(child, clause_id)
+                           for key, child in value.items())
+            return False
+
+        consumers = {key: normalized.get(key) for key in
+                     ("requirements", "reported_conflicts", "unsupported_items")}
+        if isinstance(reviews, list):
+            for review in reviews:
+                if (not isinstance(review, dict)
+                        or not isinstance(review.get("classification"), str)
+                        or review.get("classification") not in {"informational", "not_applicable"}
+                        or ("obligations" in review and review["obligations"] != [])
+                        or not isinstance(review.get("clause_id"), str)
+                        or not review["clause_id"]
+                        or references(consumers, review["clause_id"])):
+                    continue
+                branch = _schema_for_value(review_schema, review, root)
+                inventory = branch.get("properties", {}).get("obligations", {})
+                if (inventory.get("type") == "array"
+                        and inventory.get("minItems", 0) == 0
+                        and "obligations" not in branch.get("required", [])):
+                    # Never invent atoms. Leave linked reviews untouched:
+                    # context-edge projection requires explicit empty input.
+                    # Raw output remains unchanged in its decoded artifact.
+                    review["obligations"] = []
+    return normalized
 
 
 def native_schema_support_errors(schema: Any, path: str = "$") -> list[str]:

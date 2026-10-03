@@ -60,7 +60,8 @@ class DeclarationSelectorRetryTests(unittest.TestCase):
                             and not a["submission_ready"] for a in ledger))
         projected = bridge.prepare_native_response_candidate(raw, chunk)[0]
         self.assertEqual(bridge.validate_host_agent_response(projected, chunk), [])
-        self.assertEqual(projected["clause_reviews"], parent["clause_reviews"])
+        self.assertEqual(projected["clause_reviews"],
+                         bridge.normalize_native_response(parent, chunk["response_schema"])["clause_reviews"])
         self.assertEqual((parent, raw, chunk, records), frozen)
 
     def test_model_literal_atom_graph_and_diagnostic_edits_are_rejected(self):

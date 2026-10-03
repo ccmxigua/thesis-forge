@@ -183,6 +183,211 @@ class RetryScopeTests(unittest.TestCase):
         self.assertEqual(proof["fresh_review_check_ids"], ["C00033", "C00037"])
         self.assertEqual(proof["retained_check_ids"], [])
 
+    def correction_sibling_parent(self, *, external=False):
+        source = ("须经导师同意。" if external else "论文中的实验数据须可追溯至原始实验记录。")
+        cid = "X-external" if external else "X-verification"
+        check = {"check_id": cid, "document_text": source, "review_context": {
+            "classification": "external_compliance" if external else "informational",
+            "requires_requirement": False, "linked_requirements": [], "primary_obligations": [],
+            "machine_obligation_ids": [], "cited_evidence": {"E-current": {"id": "E-current", "text": source}},
+        }}
+        result = {"check_id": cid, "verdict": "external_compliance_pending" if external else "source_content_verification_pending",
+            "rationale": "The real-world action or source traceability remains unverified.",
+            "evidence_quotes": [source], "machine_obligation_ids": [], "identified_obligations": [{
+                "source_quote": source, "disposition": "unrepresented" if external else "source_content_verification_pending",
+                "requirement_refs": [],
+            }]}
+        if external:
+            # Faithful typed actions with a contradictory pending verdict /
+            # unrepresented disposition use the existing correction signal.
+            atom = result["identified_obligations"][0]
+            atom.update(actor="advisor", action="consent",
+                        target="thesis", force="required", applicability="applicable")
+            check["review_context"]["primary_obligations"] = [{
+                **{key: value for key, value in atom.items()
+                   if key not in {"primary_obligation_id", "disposition", "requirement_refs"}},
+                "id": "advisor-consent", "status": "unverifiable", "route": "human",
+                "reason": "Actual consent remains unverified.",
+            }]
+        self.request["checks"].append(check)
+        first = copy.deepcopy(self.case["first_compiled"])
+        first["results"].append(result)
+        self.retry = {**copy.deepcopy(self.request), "provider_attempt": 2,
+            "retry_feedback": {"code": "missing_source_obligation_inventory", "clause_ids": ["C00033"]}}
+        self.write_parent(first)
+        return check, result, first
+
+    def test_hidden_classification_and_external_corrections_remain_fresh_not_authorized(self):
+        for external in (False, True):
+            with self.subTest(external=external):
+                # Rebuild an independent parent rather than combining test cases.
+                self.request = copy.deepcopy(self.case["request"])
+                check, result, first = self.correction_sibling_parent(external=external)
+                before = copy.deepcopy((self.request, first))
+                locks, proof, _ = self.scope()
+                self.assertEqual(proof["fresh_review_check_ids"], ["C00033", check["check_id"]])
+                self.assertEqual(proof["retained_check_ids"], ["C00037"])
+                record = proof["additional_reproduced_rejections"][0]
+                error_type = (native_review.ExternalComplianceCorrectionRequiredError if external
+                              else native_review.SourceVerificationClassificationCorrectionRequiredError)
+                with self.assertRaises(error_type) as rejected:
+                    validate_obligation_coverage_response({"results": [result]}, [check])
+                self.assertEqual(record["corrections"], list(rejected.exception.corrections))
+                self.assertEqual(record["corrections_sha256"], native_review.sha256_json(record["corrections"]))
+                self.assertEqual(record["rejected_result_sha256"], native_review.sha256_json(result))
+                self.assertNotIn(check["check_id"], locks)
+                self.assertNotIn("primary_retry_authorization", record)
+                self.assertEqual((self.request, first), before)
+
+    def test_hidden_classification_correction_reaches_transport_with_new_bound_artifacts(self):
+        check, result, _ = self.correction_sibling_parent()
+        corrected = copy.deepcopy(self.case["second_compiled"])
+        corrected["results"][1] = copy.deepcopy(self.case["first_compiled"]["results"][1])
+        corrected["results"].append(result)
+        raw = self.wire(corrected, self.retry)
+        context = SimpleNamespace(runtime="codex", as_audit=lambda: {"host_runtime": "codex"})
+        def command(**kwargs):
+            kwargs["last_message_path"].write_text("{}", encoding="utf-8")
+            return ["codex"]
+        with ExitStack() as stack:
+            for obj, name, value in (
+                (native_review, "require_host_runtime", context),
+                (native_review, "automatic_adapter_id", "codex"),
+                (native_review.codex_adapter, "resolve_binary", "codex"),
+                (native_review.codex_adapter, "probe_capabilities", {"output_schema_supported": True}),
+                (native_review.codex_adapter, "parse_result", (raw, {"event_types": ["task_complete"]})),
+            ):
+                stack.enter_context(patch.object(obj, name, return_value=value))
+            transport = stack.enter_context(patch.object(native_review, "run_process",
+                return_value=CompletedProcess(["codex"], 0, "{}", "")))
+            stack.enter_context(patch.object(native_review.codex_adapter, "build_command", side_effect=command))
+            with self.assertRaises(native_review.SourceVerificationClassificationCorrectionRequiredError) as rejected:
+                native_review.run_native_semantic_review(self.retry, output_dir=self.output,
+                    host_runtime="codex", model="gpt-6-luna", timeout=5)
+        transport.assert_called_once()
+        self.assertEqual(rejected.exception.check_ids, (check["check_id"],))
+        self.assertEqual(json.loads((self.output / "request.json").read_text()), self.retry)
+        self.assertEqual(json.loads((self.output / "raw-response.json").read_text()), raw)
+        compiled = json.loads((self.output / "compiled-response.json").read_text())
+        self.assertEqual(compiled["results"][-1], result)
+        self.assertTrue((self.output / "source-reference-compilation.json").is_file())
+        self.assertFalse((self.output / "response.json").exists())
+        proof = json.loads((self.output / "validated-retry-scope.json").read_text())
+        self.assertIn(check["check_id"], proof["fresh_review_check_ids"])
+        self.assertNotIn(check["check_id"], proof["retained_check_ids"])
+
+    def test_correction_sibling_invalid_quote_reference_or_schema_still_aborts(self):
+        _, result, first = self.correction_sibling_parent()
+        for field, value in (("source_quote", "foreign source"),
+                             ("requirement_refs", ["RR-foreign"]),
+                             ("disposition", "not_registered")):
+            broken = copy.deepcopy(first)
+            broken["results"][-1]["identified_obligations"][0][field] = value
+            self.write_parent(first)
+            if field == "source_quote":
+                raw = json.loads((self.base / "raw-response.json").read_text())
+                raw["results"][-1]["identified_obligations"][0]["source_ref"] = "foreign-span"
+                self.write("raw-response.json", raw)
+            with self.subTest(field=field), self.assertRaises((NativeSemanticReviewError, ValueError)):
+                if field != "source_quote":
+                    self.write_parent(broken)
+                self.scope()
+        self.write_parent(first)
+        stale = copy.deepcopy(self.retry)
+        stale["provenance"]["source_sha256"] = "0" * 64
+        with self.assertRaises(NativeSemanticReviewError):
+            prepare_retry_scope(stale, self.output, OBLIGATION_COVERAGE_SCHEMA,
+                                provider_nullable_optionals=True)
+
+    def test_correction_sibling_nonlocal_identity_or_mutation_cannot_be_retained(self):
+        check, _, _ = self.correction_sibling_parent()
+        original = native_review.validate_obligation_coverage_response
+        for damage in ("foreign", "duplicate", "mutation"):
+            def validator(response, checks, **kwargs):
+                if len(checks) == 1 and checks[0]["check_id"] == check["check_id"]:
+                    corrections = [{"check_id": check["check_id"], "source_quotes": [check["document_text"]]}]
+                    if damage == "foreign": corrections[0]["check_id"] = "foreign"
+                    elif damage == "duplicate": corrections.append(copy.deepcopy(corrections[0]))
+                    else: response["results"][0]["rationale"] = "mutated"
+                    raise native_review.SourceVerificationClassificationCorrectionRequiredError(corrections)
+                return original(response, checks, **kwargs)
+            with self.subTest(damage=damage), patch.object(native_review, "validate_obligation_coverage_response", side_effect=validator), \
+                    self.assertRaises(NativeSemanticReviewError):
+                self.scope()
+
+    def test_persisted_scope_replays_hidden_correction_payload_not_resealed_hash(self):
+        self.assert_persisted_hidden_correction_scope(empty_verdict=True)
+
+    def test_missing_inventory_persisted_scope_replays_hidden_correction_and_locks(self):
+        self.assert_persisted_hidden_correction_scope(empty_verdict=False)
+
+    def assert_persisted_hidden_correction_scope(self, *, empty_verdict):
+        from independent_retry_scope import validate_persisted_empty_inventory_scope
+        _, result, first = self.correction_sibling_parent()
+        if empty_verdict:
+            first["results"][0]["verdict"] = "uncertain"
+            self.write_parent(first)
+            with self.assertRaises(native_review.EmptyInventoryVerdictError) as rejected:
+                validate_obligation_coverage_response(first, self.request["checks"], allow_draft_disputes=True)
+            feedback = {
+                "code": rejected.exception.code, "clause_ids": list(rejected.exception.clause_ids),
+                "rejected_results": rejected.exception.rejected_results,
+                "rejected_results_sha256": native_review.sha256_json(rejected.exception.rejected_results),
+                "rejected_request_sha256": native_review.sha256_json(self.request),
+                "checks_sha256": native_review.sha256_json(self.request["checks"]),
+                "candidate_response_sha256": native_review.sha256_json(self.case),
+                "run_id": self.request["run_id"], "provenance": copy.deepcopy(self.request["provenance"]),
+            }
+            self.retry = {**copy.deepcopy(self.request), "provider_attempt": 2, "retry_feedback": feedback}
+        locks, proof, _ = self.scope()
+        corrected = copy.deepcopy(self.case["second_compiled"])
+        corrected["results"][1] = copy.deepcopy(self.case["first_compiled"]["results"][1])
+        corrected["results"].append(result)
+        raw = self.wire(corrected, self.retry)
+        for index, item in enumerate(raw["results"]):
+            if item["check_id"] in locks:
+                raw["results"][index] = copy.deepcopy(locks[item["check_id"]])
+        self.output.mkdir()
+        path = self.output / "validated-retry-scope.json"
+        path.write_text(json.dumps(proof), encoding="utf-8")
+        audit = {"adapter_id": "codex", "corrective_review_scope": {
+            "policy": proof["policy"], "proof_path": str(path.resolve()),
+            "proof_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+            "fresh_review_check_ids": proof["fresh_review_check_ids"],
+            "retained_check_ids": proof["retained_check_ids"],
+        }}
+        validate_persisted_empty_inventory_scope(self.retry, self.output, raw, audit)
+        changed = copy.deepcopy(raw)
+        changed["results"][1]["rationale"] = "altered retained result"
+        with self.assertRaises(NativeSemanticReviewError):
+            validate_persisted_empty_inventory_scope(self.retry, self.output, changed, audit)
+        path.unlink()
+        with self.assertRaises(ValueError):
+            validate_persisted_empty_inventory_scope(self.retry, self.output, raw, audit)
+        path.write_text(json.dumps(proof), encoding="utf-8")
+        forged = copy.deepcopy(proof)
+        record = forged["additional_reproduced_rejections"][0]
+        record["corrections"][0]["baseline_classification"] = "external_compliance"
+        record["corrections_sha256"] = native_review.sha256_json(record["corrections"])
+        path.write_text(json.dumps(forged), encoding="utf-8")
+        audit["corrective_review_scope"]["proof_sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+        with self.assertRaises(ValueError):
+            validate_persisted_empty_inventory_scope(self.retry, self.output, raw, audit)
+
+    def test_missing_inventory_full_read_fallback_cannot_claim_retention(self):
+        from independent_retry_scope import validate_persisted_empty_inventory_scope
+        output = Path(self.temp.name) / "absent-parent-provider-attempt-02"
+        # No parent or locks: the existing full-read fallback is not a pass.
+        validate_persisted_empty_inventory_scope(self.retry, output, {}, {"adapter_id": "codex"})
+        with self.assertRaises(ValueError):
+            validate_persisted_empty_inventory_scope(self.retry, output, {}, {
+                "adapter_id": "codex", "corrective_review_scope": {},
+            })
+        output.mkdir()
+        (output / "validated-retry-scope.json").write_text("{}", encoding="utf-8")
+        with self.assertRaises(ValueError):
+            validate_persisted_empty_inventory_scope(self.retry, output, {}, {"adapter_id": "codex"})
+
     def test_unknown_sibling_error_still_aborts_scope(self):
         original_validator = native_review.validate_obligation_coverage_response
         def validator(response, checks, **kwargs):

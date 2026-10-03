@@ -46,6 +46,8 @@ def prepare_retry_scope(
         EmptyInventoryVerdictError, empty_inventory_retry_feedback_is_bound,
         UnsafeUncertaintyVerdictError, unsafe_uncertainty_retry_feedback_is_bound,
         TypedSourceAtomAlignmentError, typed_alignment_retry_feedback_is_bound,
+        SourceVerificationClassificationCorrectionRequiredError,
+        ExternalComplianceCorrectionRequiredError,
         validate_obligation_coverage_response,
     )
     feedback = request.get("retry_feedback")
@@ -138,17 +140,35 @@ def prepare_retry_scope(
                 allow_draft_disputes=prior.get("output_policy") == "review_draft",
             )
         except (MissingSourceObligationInventoryError, EmptyInventoryVerdictError,
-                UnsafeUncertaintyVerdictError, TypedSourceAtomAlignmentError) as exc:
+                UnsafeUncertaintyVerdictError, TypedSourceAtomAlignmentError,
+                SourceVerificationClassificationCorrectionRequiredError,
+                ExternalComplianceCorrectionRequiredError) as exc:
             # The full validator reports one error class first, not an
             # exhaustive failure set. A reproduced, check-local semantic
             # rejection must receive a fresh read, never become a frozen pass.
             # This grants no primary edit or interpretation; the unchanged
             # full validator still rejects any persistent disagreement.
-            if list(exc.clause_ids) != [cid] or validated != original:
+            correction = isinstance(exc, (
+                SourceVerificationClassificationCorrectionRequiredError,
+                ExternalComplianceCorrectionRequiredError,
+            ))
+            ids = exc.check_ids if correction else exc.clause_ids
+            if list(ids) != [cid] or validated != original:
                 raise NativeSemanticReviewError("additional retry rejection is not check-local and unchanged") from exc
-            additional_rejections.append({"check_id": cid, "code": exc.code,
+            record = {"check_id": cid, "code": exc.code,
                 "error_type": type(exc).__name__, "message": str(exc),
-                "rejected_result_sha256": sha256_json(original)})
+                "rejected_result_sha256": sha256_json(original)}
+            if correction:
+                if (len(exc.corrections) != 1
+                        or not isinstance(exc.corrections[0], dict)
+                        or exc.corrections[0].get("check_id") != cid):
+                    raise NativeSemanticReviewError("additional correction is not uniquely check-local") from exc
+                # This is rejected parent evidence, not a primary-edit grant.
+                # The fresh invocation must persist and validate its own result
+                # before any ordinary bridge correction handler can act on it.
+                record["corrections"] = copy.deepcopy(list(exc.corrections))
+                record["corrections_sha256"] = sha256_json(record["corrections"])
+            additional_rejections.append(record)
             continue
         if validated != original or original.get("verdict") == "incomplete":
             raise NativeSemanticReviewError("missing-inventory sibling is not an unchanged validated result")
@@ -229,9 +249,14 @@ def validate_retry_scope(response: dict[str, Any], schema: dict[str, Any],
 def validate_persisted_empty_inventory_scope(request: dict[str, Any], output_dir: Path,
                                            raw: dict[str, Any], audit: dict[str, Any]) -> None:
     """Consumers replay the same scope proof; resealed success tags are insufficient."""
-    from native_semantic_review import EmptyInventoryVerdictError, UnsafeUncertaintyVerdictError, TypedSourceAtomAlignmentError, OBLIGATION_COVERAGE_SCHEMA
+    from native_semantic_review import (
+        MissingSourceObligationInventoryError, EmptyInventoryVerdictError,
+        UnsafeUncertaintyVerdictError, TypedSourceAtomAlignmentError,
+        OBLIGATION_COVERAGE_SCHEMA,
+    )
     feedback = request.get("retry_feedback")
     if not isinstance(feedback, dict) or feedback.get("code") not in {
+            MissingSourceObligationInventoryError.code,
             EmptyInventoryVerdictError.code, UnsafeUncertaintyVerdictError.code,
             TypedSourceAtomAlignmentError.code}:
         return
@@ -239,6 +264,12 @@ def validate_persisted_empty_inventory_scope(request: dict[str, Any], output_dir
     locks, proof = prepare_retry_scope(request, output_dir, OBLIGATION_COVERAGE_SCHEMA,
                                      provider_nullable_optionals=native)
     path = output_dir / "validated-retry-scope.json"
+    # The legacy missing-inventory fallback performs an unchanged full read
+    # when no parent artifacts exist. It may not claim any retained scope.
+    if (proof is None and feedback["code"] == MissingSourceObligationInventoryError.code
+            and "corrective_review_scope" not in audit
+            and not path.exists() and not path.is_symlink()):
+        return
     if proof is None or not path.is_file() or path.is_symlink():
         raise ValueError("empty-inventory correction lacks its replayed scope proof")
     expected = {"policy": proof["policy"], "proof_path": str(path.resolve()),

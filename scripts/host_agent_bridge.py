@@ -5220,7 +5220,7 @@ def _v3_source_verification_reclassification_response(
             or clause_id in seen
             or match is None
             or record.get("baseline_classification") not in {
-                "informational", "requires_source_content",
+                "informational", "requires_source_content", "external_compliance",
             }
             or record.get("candidate_semantic_sha256") != expected_parent_sha
             or record.get("candidate_response_sha256") != expected_parent_response_sha
@@ -5259,6 +5259,19 @@ def _v3_source_verification_reclassification_response(
             source_text = _exact_clause_source_text(clause, evidence_context)
         except NativeSemanticReviewError:
             return None, None
+        if record.get("baseline_classification") == "external_compliance":
+            from native_semantic_review import external_verification_inventory_matches
+            rejected = record.get("rejected_result")
+            primaries = previous_review.get("obligations")
+            if (not isinstance(rejected, dict) or rejected.get("check_id") != clause_id
+                    or record.get("primary_obligations_sha256") != sha256_json(primaries)
+                    or record.get("rejected_result_sha256") != sha256_json(rejected)
+                    or not external_verification_inventory_matches(rejected, {
+                        "classification": "external_compliance", "requires_requirement": False,
+                        "primary_obligations": primaries, "linked_requirements": [],
+                    })
+                    or quotes != [item["source_quote"] for item in rejected["identified_obligations"]]):
+                return None, None
         clause_evidence_ids = {
             str(value) for value in (clause.get("evidence_ids") or []) if value
         }
@@ -13265,7 +13278,7 @@ def _run_independent_obligation_coverage_review(
                 artifacts_valid
                 and isinstance(clause_id, str) and bool(clause_id)
                 and isinstance(review_index, int)
-                and baseline_classification in {"informational", "requires_source_content"}
+                and baseline_classification in {"informational", "requires_source_content", "external_compliance"}
                 and context.get("classification") == baseline_classification
                 and isinstance(primary_review, dict)
                 and primary_review.get("classification") == baseline_classification
@@ -13283,6 +13296,15 @@ def _run_independent_obligation_coverage_review(
                 and isinstance(evidence_ids, list) and bool(evidence_ids)
                 and set(evidence_ids) == set(context.get("cited_evidence", {}))
             )
+            if baseline_classification == "external_compliance":
+                from native_semantic_review import external_verification_inventory_matches
+                rejected = correction.get("rejected_result")
+                valid_correction = bool(valid_correction and isinstance(rejected, dict)
+                    and rejected.get("check_id") == clause_id
+                    and correction.get("primary_obligations_sha256") == sha256_json(
+                        context.get("primary_obligations"))
+                    and correction.get("rejected_result_sha256") == sha256_json(rejected)
+                    and external_verification_inventory_matches(rejected, context))
             error_records.append({
                 "code": "independent_obligation_review_incomplete",
                 "correction_reason_code": SourceVerificationClassificationCorrectionRequiredError.code,
@@ -13304,6 +13326,9 @@ def _run_independent_obligation_coverage_review(
                 "review_request_sha256": review_request_sha,
                 "review_response_sha256": review_response_sha,
                 "source_reference_compilation_sha256": compilation_sha,
+                **({key: copy.deepcopy(correction.get(key)) for key in (
+                    "primary_obligations_sha256", "rejected_result", "rejected_result_sha256",
+                )} if baseline_classification == "external_compliance" else {}),
             })
         retryable = bool(error_records) and all(
             item.get("primary_repairable") is True for item in error_records

@@ -931,6 +931,65 @@ class NativeSemanticReviewTests(unittest.TestCase):
         with self.assertRaisesRegex(NativeSemanticReviewError, "non-source obligation quote"):
             validate_obligation_coverage_response(forged, [check])
 
+    def test_external_verification_proposal_preserves_every_pending_typed_duty(self) -> None:
+        source = "对研究工作作出贡献的个人和集体，均已在文中明确标明。"
+        primary = {"id": "contributor-check", "status": "unverifiable", "route": "human",
+                   "reason": "作者核验贡献归属。", "actor": "作者", "action": "核验贡献者标注",
+                   "target": "研究贡献者", "source_quote": source, "force": "required",
+                   "applicability": "applicable"}
+        context = {"classification": "external_compliance", "requires_requirement": False,
+                   "primary_obligations": [primary], "linked_requirements": [],
+                   "cited_evidence": {"E-current": {"id": "E-current", "text": source}}}
+        check = {"check_id": "not-a-school-specific-id", "document_text": source, "review_context": context}
+        atom = {key: value for key, value in primary.items() if key not in {"id", "status", "route", "reason"}}
+        atom.update(primary_obligation_id=primary["id"], requirement_refs=[],
+                    disposition="source_content_verification_pending")
+        result = {"check_id": check["check_id"], "verdict": "source_content_verification_pending",
+                  "rationale": "核验既有论文内容，不声称已经完成。", "identified_obligations": [atom],
+                  "evidence_quotes": [source], "machine_obligation_ids": []}
+        with self.assertRaises(SourceVerificationClassificationCorrectionRequiredError) as caught:
+            validate_obligation_coverage_response({"results": [result]}, [check])
+        correction = caught.exception.corrections[0]
+        self.assertEqual(correction["rejected_result"], result)
+        self.assertEqual(correction["primary_obligations_sha256"], native_review.sha256_json([primary]))
+        self.assertEqual(correction["baseline_classification"], "external_compliance")
+        changed = copy.deepcopy(check)
+        changed["review_context"]["classification"] = "requires_source_verification"
+        self.assertEqual(validate_obligation_coverage_response({"results": [result]}, [changed]), [result])
+        self.assertEqual(check["review_context"]["primary_obligations"], [primary])
+        disagreement = copy.deepcopy(result)
+        disagreement["identified_obligations"][0]["target"] = "其他研究贡献者"
+        with self.assertRaises(native_review.TypedSourceAtomAlignmentError) as disputed:
+            validate_obligation_coverage_response({"results": [disagreement]}, [check])
+        self.assertEqual(disputed.exception.disagreements[0]["fields"], ["target"])
+        self.assertFalse(native_review.external_verification_inventory_matches(disagreement, context))
+
+        for field in ("actor", "action", "target", "source_quote", "force", "applicability", "condition",
+                      "primary_obligation_id", "disposition", "requirement_refs"):
+            bad = copy.deepcopy(result)
+            bad["identified_obligations"][0][field] = ["RR-invented"] if field == "requirement_refs" else "different"
+            with self.subTest(field=field):
+                self.assertFalse(native_review.external_verification_inventory_matches(bad, context))
+        for extra in ({"id": "extra-approval", "status": "unverifiable"}, primary):
+            bad_context = copy.deepcopy(context)
+            bad_context["primary_obligations"].append(copy.deepcopy(extra))
+            self.assertFalse(native_review.external_verification_inventory_matches(result, bad_context))
+        for status in ("covered", "unresolved", "requires_source_content"):
+            bad_context = copy.deepcopy(context)
+            bad_context["primary_obligations"][0]["status"] = status
+            self.assertFalse(native_review.external_verification_inventory_matches(result, bad_context))
+        for key, value in (("linked_requirements", [{"requirement_ref": "RR-local"}]),
+                           ("machine_obligation_ids", ["local-duty"]), ("requires_requirement", True),
+                           ("pending_source_work", [{"code": "author-input"}])):
+            self.assertFalse(native_review.external_verification_inventory_matches(result, {**context, key: value}))
+        # A correctly identified signing/approval action stays in its external
+        # pending route; no content-verification proposal is inferred by code.
+        external = copy.deepcopy(result)
+        external["verdict"] = "external_compliance_pending"
+        external["identified_obligations"][0]["disposition"] = "external_action_pending"
+        self.assertFalse(native_review.external_verification_inventory_matches(external, context))
+        self.assertEqual(validate_obligation_coverage_response({"results": [external]}, [check]), [external])
+
     def test_authoring_content_pending_rejects_negation_and_conditional_scope(self) -> None:
         source = "以下示例内容是编写的，请作者根据需要自行撰写真实研究内容。"
         check = {

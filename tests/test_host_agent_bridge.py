@@ -1245,7 +1245,7 @@ class HostAgentBridgeTests(unittest.TestCase):
 
     def test_typed_external_disposition_correction_keeps_candidate_and_two_call_limit(self):
         self._independent_review_patch.stop()
-        from test_native_semantic_review import NativeSemanticReviewTests
+        from tests.test_native_semantic_review import NativeSemanticReviewTests
         import native_semantic_review as native
         for outcome in ("accepted", "repeat", "foreign_quote"):
             chunk, response, accepted_review, _ = self._external_compliance_review_case()
@@ -3684,6 +3684,69 @@ class HostAgentBridgeTests(unittest.TestCase):
                         case_parent, case_candidate, case_records, chunk=case_chunk,
                     )
                     self.assertIsNone(result)
+
+    def test_external_content_verification_classification_grant_replays_captured_review(self) -> None:
+        source = "对研究工作作出贡献的个人和集体，均已在文中明确标明。"
+        with tempfile.TemporaryDirectory() as td:
+            review_dir, chunk = self._packet(Path(td) / "requirements", contract_version="3.0", source=source)
+            primary = {"id": "contributor-check", "status": "unverifiable", "route": "human",
+                       "reason": "作者核验贡献归属。", "actor": "作者", "action": "核验贡献者标注",
+                       "target": "研究贡献者", "source_quote": source, "force": "required",
+                       "applicability": "applicable"}
+            parent = {"contract_version": "3.0", "provenance": chunk["provenance"], "requirements": [],
+                      "clause_reviews": [{"clause_id": "C1", "classification": "external_compliance",
+                                          "reason": "贡献标注待核验。", "normative_basis": "explicit_normative_text",
+                                          "obligations": [primary]}], "unsupported_items": [], "reported_conflicts": []}
+            candidate = copy.deepcopy(parent)
+            candidate["clause_reviews"][0]["classification"] = "requires_source_verification"
+            self.assertEqual(bridge.validate_host_agent_response(parent, chunk), [])
+            self.assertEqual(bridge.validate_host_agent_response(candidate, chunk), [])
+
+            def rejected_review(request, *, output_dir, **kwargs):
+                packet = build_source_reference_packet(request)
+                span = next(item for item in packet["checks"][0]["source_spans"] if item["text"] == source)
+                atom = {key: value for key, value in primary.items() if key not in {"id", "status", "route", "reason", "source_quote"}}
+                atom.update(primary_obligation_id=primary["id"], requirement_refs=[], source_ref=span["ref_id"],
+                            disposition="source_content_verification_pending")
+                raw = {"results": [{"check_id": "C1", "verdict": "source_content_verification_pending",
+                                    "rationale": "需要人工检查实际论文。", "identified_obligations": [atom],
+                                    "evidence_refs": [span["ref_id"]]}]}
+                compiled, compilation = compile_source_reference_response(raw, request, bridge.OBLIGATION_COVERAGE_SCHEMA, coverage=True)
+                for name, value in (("request.json", request), ("raw-response.json", raw),
+                                    ("source-reference-packet.json", packet), ("compiled-response.json", compiled),
+                                    ("source-reference-compilation.json", compilation)):
+                    bridge._write_json(output_dir / name, value)
+                bridge.validate_obligation_coverage_response(compiled, request["checks"])
+                raise AssertionError("the mismatched classification must be rejected")
+
+            self._independent_review_patch.stop()
+            with patch.object(bridge, "run_native_semantic_review", side_effect=rejected_review), self.assertRaises(
+                bridge.IndependentObligationReviewError,
+            ) as caught:
+                bridge._run_independent_obligation_coverage_review(parent, chunk, review_dir=review_dir,
+                    run_id=chunk["provenance"]["run_id"], chunk_index=1, attempt=1, host_runtime="openclaw",
+                    model=None, timeout=1, agent_id="main", runner="exec", binary=None, config_path=None,
+                    controller=bridge.RunController(), output_policy="review_draft")
+            self.assertTrue(caught.exception.retryable)
+            records = caught.exception.error_records
+            self.assertTrue(records[0]["primary_repairable"])
+            repaired, proof = bridge._v3_source_verification_reclassification_response(parent, candidate, records, chunk=chunk)
+            self.assertEqual(repaired, candidate)
+            self.assertFalse(proof["submission_ready"])
+            self.assertEqual(repaired["clause_reviews"][0]["obligations"], [primary])
+            self.assertEqual(bridge._retry_change_paths(parent, repaired), ["$.clause_reviews[0].classification"])
+            change_error, paths = bridge._retry_semantic_change_error(
+                parent, candidate, records, contract_version="3.0", chunk=chunk)
+            self.assertIsNone(change_error)
+            self.assertEqual(paths, ["$.clause_reviews[0].classification"])
+            for key in ("primary_obligations_sha256", "rejected_result_sha256", "candidate_semantic_sha256"):
+                tampered = copy.deepcopy(records)
+                tampered[0][key] = "0" * 64
+                self.assertIsNone(bridge._v3_source_verification_reclassification_response(
+                    parent, candidate, tampered, chunk=chunk)[0])
+            modified = copy.deepcopy(candidate)
+            modified["clause_reviews"][0]["obligations"][0]["action"] = "已确认完成"
+            self.assertIsNone(bridge._v3_source_verification_reclassification_response(parent, modified, records, chunk=chunk)[0])
 
     def test_source_verification_retry_uses_source_materialized_candidate_identity(self) -> None:
         keyword_source = "关键词须在论文中有明确出处"

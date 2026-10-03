@@ -394,7 +394,7 @@ class SourceVerificationClassificationCorrectionRequiredError(NativeSemanticRevi
         super().__init__(
             "independent review found existing-content verification work on clause(s) "
             + ", ".join(check_ids)
-            + " classified as non-normative"
+            + " requiring a classification correction"
         )
         self.check_ids = tuple(check_ids)
 
@@ -897,6 +897,52 @@ def _external_pending_disposition_mismatch(result, primary_obligations):
     return len(set(matched)) == len(ids) and set(matched) == set(ids)
 
 
+def external_verification_inventory_matches(
+    result: Any, context: Any, *, require_semantic_match: bool = True,
+) -> bool:
+    """Bind a manual-to-manual classification proposal, never certify its meaning.
+
+    The reviewer makes the existing-content interpretation independently. Code
+    only checks that *all* current pending duties survive it, one-to-one, with
+    every typed semantic dimension unchanged. No prose-only atom, executable
+    duty or incomplete decomposition can use this proposal route.
+    """
+    if not isinstance(result, dict) or not isinstance(context, dict):
+        return False
+    primary = context.get("primary_obligations")
+    identified = result.get("identified_obligations")
+    fields = ("actor", "action", "target", "source_quote", "force", "applicability", "condition")
+    if (context.get("classification") != "external_compliance"
+            or context.get("requires_requirement") is not False
+            or context.get("linked_requirements")
+            or context.get("machine_obligation_ids")
+            or context.get("pending_source_work")
+            or result.get("verdict") != "source_content_verification_pending"
+            or not isinstance(primary, list) or not primary
+            or not isinstance(identified, list) or len(primary) != len(identified)):
+        return False
+    ids = [atom.get("id") for atom in primary if isinstance(atom, dict)]
+    if (len(ids) != len(primary) or any(not isinstance(value, str) or not value for value in ids)
+            or len(set(ids)) != len(ids)):
+        return False
+    mapped = []
+    for atom in primary:
+        matches = [item for item in identified if isinstance(item, dict)
+                   and item.get("primary_obligation_id") == atom["id"]]
+        if (atom.get("status") != "unverifiable"
+                or atom.get("route") not in (None, "human")
+                or atom.get("force") not in {"required", "recommended", "optional", "prohibited"}
+                or not all(isinstance(atom.get(key), str) and atom[key].strip()
+                           and atom[key] != "unknown" for key in ("actor", "action", "target", "source_quote"))
+                or len(matches) != 1
+                or matches[0].get("disposition") != "source_content_verification_pending"
+                or matches[0].get("requirement_refs")
+                or (require_semantic_match and any(matches[0].get(key) != atom.get(key) for key in fields))):
+            return False
+        mapped.append(matches[0]["primary_obligation_id"])
+    return set(mapped) == set(ids)
+
+
 def validate_obligation_coverage_response(
     response: Any, checks: list[dict[str, Any]], *, allow_draft_disputes: bool = False,
 ) -> list[dict[str, Any]]:
@@ -1186,6 +1232,28 @@ def validate_obligation_coverage_response(
                     f"external_compliance source combines a locally expressible document action "
                     f"with a real-world action and must be split before it can remain external: {check_id}"
                 )
+            if (typed_disagreements and external_verification_inventory_matches(
+                    result, context, require_semantic_match=False)):
+                # The same observation can contain both a routing disagreement
+                # and a typed semantic disagreement. Reread the latter first;
+                # classification-only authority requires exact agreement and
+                # must not hide or erase the disputed target/force/condition.
+                raise TypedSourceAtomAlignmentError(check_id, typed_disagreements)
+            if external_verification_inventory_matches(result, context):
+                # Reject, do not accept the mismatched classification. Preserve
+                # the independently observed inventory for an exact primary
+                # classification-only proposal and another independent review.
+                source_verification_classification_corrections.append({
+                    "check_id": check_id,
+                    "baseline_classification": classification,
+                    "source_quotes": [item["source_quote"] for item in identified_obligations],
+                    "evidence_ids": sorted(str(value) for value in (context.get("cited_evidence") or {})),
+                    "primary_obligations_sha256": sha256_json(primary_obligations),
+                    "rejected_result": copy.deepcopy(result),
+                    "rejected_result_sha256": sha256_json(result),
+                })
+                by_id[check_id] = result
+                continue
             # A source-bound decomposition disagreement is not compliant
             # coverage. Preserve the original incomplete/unrepresented result
             # solely for a scored, non-submission draft. Schema, source quotes,
@@ -2094,6 +2162,11 @@ def _prompt(request: dict[str, Any], *, retained_results: dict[str, Any] | None 
             "requires_source_content but the exact source duties identified here are exclusively human verification "
             "of existing content (with no primary authoring obligation), report that same verification finding; "
             "the bridge may authorize only the exact classification correction to requires_source_verification. "
+            "If external_compliance already contains exclusively pending human duties and your independent "
+            "source reading identifies them as existing-content verification, report that finding with each "
+            "current primary_obligation_id. A classification-only proposal is possible only when every typed "
+            "duty survives unchanged and no executable duty is linked. Do not relabel actual signing or approval "
+            "as a content check; do not alter an action, condition or force to obtain this route. "
             "Never use this correction to erase an authoring-content obligation. The request metadata distinguishes content not "
             "included in this review from content the user did not provide. "
             "For a clause classified unsupported_backend, use verdict backend_unsupported only when the source is "

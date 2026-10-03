@@ -110,10 +110,13 @@ class RetryScopeTests(unittest.TestCase):
         locks, _, schema = self.scope()
         good = self.wire(self.case["second_compiled"], self.retry); good["results"][1] = copy.deepcopy(locks["C00037"])
         good["results"][0]["identified_obligations"] = []
-        validate_retry_scope(good, schema, locks, native=True)
+        original = copy.deepcopy(good)
+        with self.assertRaises(NativeSemanticReviewError):
+            validate_retry_scope(good, schema, locks, native=True)
         compiled, _ = compile_source_reference_response(good, self.retry, OBLIGATION_COVERAGE_SCHEMA, coverage=True)
         with self.assertRaisesRegex(NativeSemanticReviewError, "no source-obligation inventory"):
             validate_obligation_coverage_response(compiled, self.retry["checks"])
+        self.assertEqual(good, original)
 
     def test_hidden_second_error_is_not_retained(self):
         bad = copy.deepcopy(self.case["first_compiled"])

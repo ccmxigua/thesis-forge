@@ -4,7 +4,11 @@ from __future__ import annotations
 import copy
 import json
 from pathlib import Path
+import sys
 import unittest
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "scripts"))
 
 import native_semantic_review as native
 from format_spec_validation import validate_instance
@@ -17,9 +21,6 @@ from semantic_source_references import (
 )
 from tests.test_empty_inventory_verdict import enveloped
 
-ROOT = Path(__file__).resolve().parents[1]
-
-
 class SourceInventoryGenerationTests(unittest.TestCase):
     def schemas(self, request):
         packet = build_source_reference_packet(request)
@@ -27,6 +28,83 @@ class SourceInventoryGenerationTests(unittest.TestCase):
             coverage=True, constrain_requirement_links=True)
         generated = source_inventory_generation_schema(wire)
         return packet, wire, generated, native_output_schema(generated)
+
+    def test_confirmed_linked_structural_inventory_is_portably_nonempty(self):
+        for source in ("某大学学位论文原创性声明", "Declaration of originality"):
+            request = {"run_id": "new-template-run", "checks": [{
+                "check_id": "dynamic-declaration-heading", "document_text": source,
+                "review_context": {"classification": "covered", "primary_normative_basis": "template_structure",
+                    "requires_requirement": True, "linked_requirements": [{
+                        "requirement_ref": "RR-current-heading", "role": "declarations",
+                        "properties": {"items": [{"heading": source}]},
+                    }]},
+            }]}
+            original = copy.deepcopy(request)
+            packet, wire, generation, provider = self.schemas(request)
+            self.assertEqual(native_schema_support_errors(provider), [])
+            ref = packet["checks"][0]["source_spans"][0]["ref_id"]
+            raw = {"results": [{"check_id": "dynamic-declaration-heading", "verdict": "consistent",
+                "rationale": "The source heading is preserved by the linked declaration.",
+                "evidence_refs": [ref], "identified_obligations": {"first": None, "remaining": []}}]}
+            with self.subTest(source=source):
+                self.assertTrue(validate_instance(raw, generation))
+                self.assertTrue(validate_instance(raw, provider))
+                # Historical/raw evidence remains readable, not rewritten.
+                compiled, _ = compile_source_reference_response(raw, request,
+                    native.OBLIGATION_COVERAGE_SCHEMA, coverage=True)
+                with self.assertRaises(native.MissingSourceObligationInventoryError):
+                    native.validate_obligation_coverage_response(compiled, request["checks"])
+                atom = {"source_ref": ref, "disposition": "represented", "requirement_refs": ["RR-current-heading"]}
+                raw["results"][0]["identified_obligations"]["first"] = atom
+                self.assertEqual(validate_instance(raw, generation), [])
+                atom_schema = wire["properties"]["results"]["items"]["anyOf"][0]["properties"]["identified_obligations"]["items"]
+                # Strict-provider null sentinels do not add semantic fields.
+                props = atom_schema.get("properties") or atom_schema["anyOf"][0]["properties"]
+                for field in props:
+                    atom.setdefault(field, None)
+                raw["results"][0]["identified_obligations"]["first"] = atom
+                self.assertEqual(validate_instance(raw, provider), [])
+                compiled, _ = compile_source_reference_response(raw, request,
+                    native.OBLIGATION_COVERAGE_SCHEMA, coverage=True, provider_nullable_optionals=True)
+                self.assertEqual(native.validate_obligation_coverage_response(compiled, request["checks"])[0]["verdict"], "consistent")
+                self.assertEqual(compiled["results"][0]["identified_obligations"][0]["source_quote"], source)
+                for field, value in (("source_ref", "foreign-source"), ("requirement_refs", ["RR-old"]),
+                                     ("disposition", "unrepresented")):
+                    bad = copy.deepcopy(raw)
+                    bad["results"][0]["identified_obligations"]["first"][field] = value
+                    if field == "disposition":
+                        bad["results"][0]["identified_obligations"]["first"]["requirement_refs"] = []
+                        candidate, _ = compile_source_reference_response(bad, request,
+                            native.OBLIGATION_COVERAGE_SCHEMA, coverage=True, provider_nullable_optionals=True)
+                        with self.assertRaises(native.NativeSemanticReviewError):
+                            native.validate_obligation_coverage_response(candidate, request["checks"])
+                    else:
+                        self.assertTrue(validate_instance(bad, provider))
+                self.assertEqual(request, original)
+
+    def test_informational_heading_is_not_forced_by_presence_or_primary_links(self):
+        for linked in ([], [{"requirement_ref": "RR-primary-not-proof"}]):
+            request = {"checks": [{"check_id": "description-only", "document_text": "研究概况",
+                "review_context": {"classification": "informational", "requires_requirement": True,
+                    "linked_requirements": linked}}]}
+            packet, _, generation, provider = self.schemas(request)
+            raw = {"results": [{"check_id": "description-only", "verdict": "consistent", "rationale": "Only descriptive context.",
+                "evidence_refs": [packet["checks"][0]["source_spans"][0]["ref_id"]],
+                "identified_obligations": {"first": None, "remaining": []}}]}
+            self.assertEqual(validate_instance(raw, generation), [])
+            self.assertEqual(validate_instance(raw, provider), [])
+            compiled, _ = compile_source_reference_response(raw, request, native.OBLIGATION_COVERAGE_SCHEMA, coverage=True)
+            self.assertEqual(native.validate_obligation_coverage_response(compiled, request["checks"])[0]["identified_obligations"], [])
+
+    def test_structural_inventory_prompt_preserves_independent_interpretation(self):
+        request = {"protocol": native.OBLIGATION_COVERAGE_PROTOCOL, "checks": [],
+            "retry_feedback": {"code": native.MissingSourceObligationInventoryError.code, "clause_ids": ["new-heading-id"]}}
+        prompt = native._prompt(request)
+        self.assertIn("structural or literal-preservation requirement", prompt)
+        self.assertIn("rationale saying the title is already preserved cannot replace the inventory entry", prompt)
+        self.assertIn("reject unsupported structural interpretations", prompt)
+        self.assertIn("Never invent an obligation", prompt)
+        self.assertIn("with no source duty may still have an empty inventory", prompt)
 
     def test_both_captured_eight_check_attempts_cannot_generate_empty_uncertain(self):
         case = json.loads((ROOT / "tests/fixtures/empty-inventory-generation-incident.json").read_text())

@@ -581,6 +581,30 @@ def source_reference_schema(
                     alternative for alternative in alternatives
                     if alternative["properties"]["verdict"].get("enum")
                 ] + nonempty_diagnostics
+                if (review_context.get("classification") not in {"informational", "not_applicable"}
+                        and review_context.get("requires_requirement") is True and live_refs):
+                    # Claiming consistency with linked executable work cannot
+                    # erase its source inventory merely because the duty is a
+                    # structural heading/literal rather than imperative prose.
+                    # This is generation shape only: raw compilation and the
+                    # semantic validator retain their existing rejection paths.
+                    coupled = []
+                    for alternative in branch["anyOf"]:
+                        verdicts = alternative["properties"]["verdict"]["enum"]
+                        if "consistent" not in verdicts:
+                            coupled.append(alternative)
+                            continue
+                        consistent = copy.deepcopy(alternative)
+                        consistent["properties"]["verdict"] = {"enum": ["consistent"]}
+                        consistent["properties"]["identified_obligations"]["minItems"] = max(
+                            1, consistent["properties"]["identified_obligations"].get("minItems", 0))
+                        other = copy.deepcopy(alternative)
+                        other["properties"]["verdict"] = {
+                            "enum": [value for value in verdicts if value != "consistent"]}
+                        if other["properties"]["verdict"]["enum"]:
+                            coupled.append(other)
+                        coupled.append(consistent)
+                    branch["anyOf"] = coupled
         branches.append(branch)
     schema["properties"]["results"]["items"] = {"anyOf": branches}
     return schema

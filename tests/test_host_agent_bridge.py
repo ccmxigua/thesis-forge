@@ -173,7 +173,8 @@ class HostAgentBridgeTests(unittest.TestCase):
     @staticmethod
     def _fake_independent_review(
         response: dict, chunk: dict, *, review_dir: Path, run_id: str,
-        chunk_index: int, attempt: int, result_builder=None, **_kwargs,
+        chunk_index: int, attempt: int, result_builder=None,
+        preserve_external_inventory=False, **_kwargs,
     ) -> dict:
         """Offline, source-bound reviewer double for bridge orchestration tests."""
         response_sha = bridge._response_sha256(response)
@@ -197,6 +198,22 @@ class HostAgentBridgeTests(unittest.TestCase):
                 "evidence_refs": [source_ref],
                 "identified_obligations": [],
             }
+            if (preserve_external_inventory
+                    and check["review_context"].get("classification") == "external_compliance"):
+                # This is an explicitly scripted orchestration double, NOT an
+                # independent semantic judgment. These tests need agreement on
+                # pending atoms, not a fabricated consistent/empty certificate.
+                default_result["verdict"] = "external_compliance_pending"
+                for primary in check["review_context"]["primary_obligations"]:
+                    refs = [s["ref_id"] for s in check["source_spans"] if s["text"] == primary["source_quote"]]
+                    if len(refs) != 1:
+                        raise AssertionError("fixture atom needs an exact unique source reference")
+                    default_result["identified_obligations"].append({
+                        **{key: copy.deepcopy(primary[key]) for key in
+                           ("actor", "action", "target", "force", "applicability", "condition") if key in primary},
+                        "source_ref": refs[0], "primary_obligation_id": primary["id"],
+                        "disposition": "external_action_pending", "requirement_refs": [],
+                    })
             raw_response["results"].append(
                 result_builder(check, source_ref) if result_builder else default_result
             )
@@ -207,6 +224,11 @@ class HostAgentBridgeTests(unittest.TestCase):
             bridge.validate_obligation_coverage_response(
                 copy.deepcopy(compiled_response), request["checks"],
             )
+        elif preserve_external_inventory:
+            for check in request["checks"]:
+                if check["review_context"].get("classification") == "external_compliance":
+                    selected = next(r for r in compiled_response["results"] if r["check_id"] == check["check_id"])
+                    bridge.validate_obligation_coverage_response({"results": [copy.deepcopy(selected)]}, [check])
         request_path = out_dir / "request.json"
         source_packet_path = out_dir / "source-reference-packet.json"
         raw_response_path = out_dir / "raw-response.json"

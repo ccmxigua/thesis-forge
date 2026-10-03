@@ -216,7 +216,8 @@ class PublicationPolicyInventoryTests(unittest.TestCase):
                     error = bridge.IndependentObligationReviewError("fresh reviewer rejects the proposal")
                     error.retryable = False
                     raise error
-                return host_tests.HostAgentBridgeTests._fake_independent_review(candidate, current, **kwargs)
+                return host_tests.HostAgentBridgeTests._fake_independent_review(
+                    candidate, current, preserve_external_inventory=True, **kwargs)
             output = Path(td) / "merged.json"
             with patch.dict(os.environ, {"THESIS_FORGE_HOST_RUNTIME": "openclaw"}), \
                  patch.object(bridge, "_run_command", side_effect=primary), \

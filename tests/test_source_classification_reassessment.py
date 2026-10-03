@@ -188,7 +188,8 @@ def test_native_bridge_requires_new_independent_review_before_merge(tmp_path, fr
             error.retryable = False
             raise error
         from test_host_agent_bridge import HostAgentBridgeTests
-        return HostAgentBridgeTests._fake_independent_review(candidate, current_chunk, **kwargs)
+        return HostAgentBridgeTests._fake_independent_review(
+            candidate, current_chunk, preserve_external_inventory=True, **kwargs)
 
     output = tmp_path / "merged.json"
     with patch.dict(os.environ, {"THESIS_FORGE_HOST_RUNTIME": "codex"}), \

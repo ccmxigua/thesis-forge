@@ -257,6 +257,7 @@ from table_source_context import table_context_retry_is_source_bound, table_retr
 from document_text_font import materialize_document_font_references
 from section_description import project_section_description_claims
 from unresolved_label_assessment import build_unresolved_label_assessments
+from source_inventory_dispute import build_inventory_existence_disputes
 from administrative_relation_projection import (
     project_administrative_copies, project_copied_administrative_qualifiers,
 )
@@ -12417,6 +12418,9 @@ def _validate_completed_obligation_ledger_chain(
     label_assessments = build_unresolved_label_assessments(review_request["checks"], results)
     if label_assessments:
         expected_ledger_metadata["unresolved_label_assessments"] = label_assessments
+    inventory_disputes = build_inventory_existence_disputes(review_request["checks"], results)
+    if inventory_disputes:
+        expected_ledger_metadata["source_inventory_disputes"] = inventory_disputes
     if ledger != expected_ledger_metadata:
         raise ValueError(
             f"Host Agent chunk {chunk_index} AO ledger does not match the canonical current-run reconstruction"
@@ -12758,6 +12762,9 @@ def _write_obligation_analysis_ledger(
     label_assessments = build_unresolved_label_assessments(coverage_request["checks"], result_items)
     if label_assessments:
         ledger["unresolved_label_assessments"] = label_assessments
+    inventory_disputes = build_inventory_existence_disputes(coverage_request["checks"], result_items)
+    if inventory_disputes:
+        ledger["source_inventory_disputes"] = inventory_disputes
     ledger_path = output_dir / "obligation-analysis-ledger.json"
     if ledger_path.exists():
         raise ValueError(f"refusing to overwrite obligation analysis ledger: {ledger_path}")
@@ -12926,11 +12933,16 @@ def _run_independent_obligation_coverage_review(
             item for item in (review_result.get("results") or [])
             if isinstance(item, dict) and item.get("verdict") == "incomplete"
         ]
+        inventory_disputes = build_inventory_existence_disputes(
+            coverage_request["checks"], review_result.get("results") or [],
+        )
+        has_disputes = bool(incomplete_results or inventory_disputes)
         envelope = {
             "schema_version": "1.0",
             "protocol": OBLIGATION_COVERAGE_PROTOCOL,
-            "status": ("completed_with_disputes" if output_policy == "review_draft" else "rejected") if incomplete_results else "completed",
-            "coverage_complete": not bool(incomplete_results),
+            "status": ("completed_with_disputes" if output_policy == "review_draft" else "rejected") if has_disputes else "completed",
+            "coverage_complete": not has_disputes,
+            **({"source_inventory_disputes": inventory_disputes} if inventory_disputes else {}),
             "submission_ready": False,
             "run_id": run_id,
             "chunk_index": chunk_index,

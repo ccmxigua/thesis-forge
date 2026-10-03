@@ -2,6 +2,7 @@
 """Run the auditable LaTeX/DOCX requirement-to-format pipeline as one safe command."""
 from __future__ import annotations
 from unresolved_label_assessment import validate_unresolved_label_assessments
+from source_inventory_dispute import validate_inventory_existence_disputes
 
 import argparse
 import copy
@@ -753,6 +754,7 @@ def _validate_independent_obligation_receipts(
         if ledger_items != expected_ledger_items:
             raise ValueError(f"obligation analysis ledger {index} does not match the reviewed source obligations")
         validate_unresolved_label_assessments(ledger, checks, normalized_results)
+        inventory_disputes = validate_inventory_existence_disputes(ledger, checks, normalized_results)
         checks_by_id = {
             str(item.get("check_id")): item for item in checks
             if isinstance(item, dict) and isinstance(item.get("check_id"), str)
@@ -764,6 +766,7 @@ def _validate_independent_obligation_receipts(
         })
         manual_review_clause_ids = enforce_obligation_review_output_policy(
             normalized_results, output_policy=output_policy,
+            source_inventory_disputes=inventory_disputes,
             code_owned_source_content_verification_clause_ids=(
                 code_owned_source_verification_clause_ids
             ),
@@ -1039,6 +1042,7 @@ def _validate_independent_obligation_receipts(
         validated.append({
             "chunk_index": index,
             "coverage_disputes": [copy.deepcopy(item) for item in normalized_results if item.get("verdict") == "incomplete"],
+            "source_inventory_disputes": copy.deepcopy(inventory_disputes),
             "run_id": expected_run_id,
             "case_id": review_request.get("case_id"),
             "attempt": attempt,
@@ -1189,6 +1193,7 @@ def _code_owned_source_content_verification_release_gates(
 def enforce_obligation_review_output_policy(
     results: list[dict[str, Any]], *, output_policy: str,
     code_owned_source_content_verification_clause_ids: list[str] | set[str] | tuple[str, ...] = (),
+    source_inventory_disputes: list[dict[str, Any]] | tuple[dict[str, Any], ...] = (),
 ) -> list[str]:
     """Permit irreducible ambiguity only in an explicitly non-release draft."""
     if output_policy not in {"review_draft", "submission"}:
@@ -1198,7 +1203,7 @@ def enforce_obligation_review_output_policy(
     incomplete_clause_ids = sorted({
         str(item.get("check_id")) for item in results
         if isinstance(item, dict) and item.get("verdict") == "incomplete"
-    })
+    } | {item["check_id"] for item in source_inventory_disputes})
     if incomplete_clause_ids and output_policy != "review_draft":
         raise ValueError(
             "independent obligation review is incomplete for clause(s) "
@@ -1248,6 +1253,41 @@ def enforce_obligation_review_output_policy(
             + "; submission output is blocked (use an explicit review_draft for a non-release artifact)"
         )
     return sorted(set(manual_review_clause_ids + incomplete_clause_ids))
+
+
+def _inventory_dispute_release_gates(independent_reviews, *, clauses):
+    """Display both interpretations, not an instruction to perform a disputed duty.
+
+Only call with the current receipts returned by the canonical receipt validator.
+The complete assessment stays in producer_records, bound into MO/MR identities.
+"""
+    by_id = {c["id"]: c for c in clauses}
+    gates = []
+    for review in independent_reviews:
+        for dispute in review.get("source_inventory_disputes", []):
+            cid = dispute["check_id"]
+            clause = by_id[cid]
+            primary = dispute["primary_review_context"]
+            independent = dispute["independent_result"]
+            actions = "；".join(a["action"] for a in primary["primary_obligations"])
+            gates.append({
+                "source_code": "source_inventory_dispute:" + cid,
+                "source_inventory_dispute_sha256": sha256_json(dispute),
+                "category": "semantic_content_review",
+                "clause_ids": [cid], "evidence_ids": clause["evidence_ids"],
+                "source_text": dispute["source_text"],
+                "reason": (
+                    f"义务是否存在尚未确认。主审提出待核验义务：{actions}。"
+                    f"独立审查未识别义务：{independent['rationale']}"
+                ),
+                "action": "请核对原始来源及上下文，先确认是否存在这些义务；不要按主审推测直接填写或执行。未确认前不可提交。",
+                "placeholder_text": f"【待人工判断：{cid} 是否包含义务】",
+                "producer_records": [{"producer": "source_inventory_existence_dispute", "record": {
+                    "review": copy.deepcopy(review), "assessment": copy.deepcopy(dispute),
+                    "execution_authorized": False,
+                }}],
+            })
+    return gates
 
 
 def _independent_obligation_producer_record(
@@ -3111,6 +3151,9 @@ def _main(argv: list[str]) -> int:
                         "execution_authorized": False,
                     }}],
                 })
+        manual_review_release_gates.extend(
+            _inventory_dispute_release_gates(independent_reviews, clauses=clauses)
+        )
         manual_review_release_gates.extend(
             _source_content_verification_release_gates(
                 independent_reviews, clauses=clauses, evidence_doc=evidence_doc,

@@ -1,0 +1,180 @@
+{
+  "description": "Reduced observed source inventory disagreement, no model call or semantic correction",
+  "baseline": "c0ba743748beec04a1194a0b94ab83f7d2f42963",
+  "run_id": "d7b2232b-0987-41d9-ac71-7c978277ee9e",
+  "request": {
+    "protocol": "native_source_obligation_coverage_review_v8",
+    "native_review_partition_policy": "whole_candidate_checks_4_v1",
+    "run_id": "d7b2232b-0987-41d9-ac71-7c978277ee9e",
+    "chunk_index": 7,
+    "case_id": "bsu",
+    "provenance": {
+      "version": "1.0",
+      "origin": "fresh_host_agent",
+      "source_sha256": "1e9d38b307dbef8c3bf97b85ba5def70eaf7e2dba50cf25da978e007fc907059",
+      "evidence_sha256": "83c3459e415ccb653ebce6d2a4fdbb675991c7e7c1fcb85cc167e663be483ced",
+      "clause_sha256": "c1a78a362e0fbfb980e9ed0efccfa5e803ad51a865705c004e618363748fac68",
+      "request_sha256": "4bb296bd4af3ac9db890dc7307edd0923ce21af768e62fb2ace5aa91dd018f9d",
+      "run_id": "d7b2232b-0987-41d9-ac71-7c978277ee9e"
+    },
+    "source_sha256": "1e9d38b307dbef8c3bf97b85ba5def70eaf7e2dba50cf25da978e007fc907059",
+    "clause_sha256": "c1a78a362e0fbfb980e9ed0efccfa5e803ad51a865705c004e618363748fac68",
+    "evidence_sha256": "83c3459e415ccb653ebce6d2a4fdbb675991c7e7c1fcb85cc167e663be483ced",
+    "request_sha256": "4bb296bd4af3ac9db890dc7307edd0923ce21af768e62fb2ace5aa91dd018f9d",
+    "content_context": {
+      "artifact": "thesis_manuscript",
+      "availability": "not_included_in_obligation_review_request",
+      "meaning": "This request omits manuscript body text; it does not assert whether the user supplied a manuscript to the pipeline."
+    },
+    "attempt": 1,
+    "provider_attempt": 1,
+    "output_policy": "review_draft"
+  },
+  "checks": [
+    {
+      "check_id": "C00065",
+      "document_text": "年    月    日",
+      "review_context": {
+        "semantic_clause_text": "年 月 日",
+        "classification": "external_compliance",
+        "primary_normative_basis": "external_duty",
+        "requires_requirement": false,
+        "reason": "The source indicates that the declaration must be dated by a person; the date is not supplied and cannot be attested by printing a blank line.",
+        "primary_obligations": [
+          {
+            "id": "C00065-author-date",
+            "status": "unverifiable",
+            "reason": "The actual signing date requires human completion.",
+            "actor": "Author",
+            "action": "Enter the date of signing",
+            "target": "Declaration date line",
+            "source_quote": "年    月    日",
+            "force": "required",
+            "applicability": "applicable",
+            "route": "human"
+          }
+        ],
+        "primary_obligation_quote_bindings": [
+          {
+            "primary_obligation_id": "C00065-author-date",
+            "original_source_quote": "年    月    日",
+            "review_source_quote": "年    月    日",
+            "source_binding": {
+              "policy": "current_source_occurrence_quote_v1",
+              "clause_binding": {
+                "text": "年    月    日",
+                "source_fragments": [
+                  {
+                    "clause_id": "C00065",
+                    "evidence_id": "E00056",
+                    "start_offset": 0,
+                    "end_offset": 11,
+                    "source_sha256": "0da3d421c0f772c4e7b3dda8540d93a3bcef1b278db8b568e6548d7e54c49fad",
+                    "text": "年    月    日",
+                    "source_kind": "paragraph",
+                    "separator_before": "",
+                    "location": {
+                      "part": "document",
+                      "child_index": 59,
+                      "order": 55
+                    }
+                  }
+                ]
+              },
+              "quote_start_offset": 0,
+              "quote_end_offset": 11,
+              "quote_sha256": "d4b52f8a02cdc4f68f757aea3d66723701bcb1fed4a0d4473d8be2b77a115983",
+              "context_is_not_execution_scope": true
+            },
+            "original_quote_sha256": "d4b52f8a02cdc4f68f757aea3d66723701bcb1fed4a0d4473d8be2b77a115983",
+            "review_quote_sha256": "d4b52f8a02cdc4f68f757aea3d66723701bcb1fed4a0d4473d8be2b77a115983",
+            "semantic_dimensions_unchanged": true
+          }
+        ],
+        "linked_requirements": [],
+        "source_clause_support": [],
+        "cited_evidence": {
+          "E00056": {
+            "id": "E00056",
+            "kind": "paragraph",
+            "text": "年    月    日",
+            "style_id": null,
+            "runs": [
+              {
+                "text": "年",
+                "format": {
+                  "fonts": {
+                    "eastAsia": "宋体",
+                    "ascii": "宋体",
+                    "hAnsi": "宋体"
+                  },
+                  "size_pt": 14
+                }
+              },
+              {
+                "text": "月",
+                "format": {
+                  "fonts": {
+                    "eastAsia": "宋体",
+                    "ascii": "宋体",
+                    "hAnsi": "宋体"
+                  },
+                  "size_pt": 14
+                }
+              },
+              {
+                "text": "日",
+                "format": {
+                  "fonts": {
+                    "eastAsia": "宋体",
+                    "ascii": "宋体",
+                    "hAnsi": "宋体"
+                  },
+                  "size_pt": 14
+                }
+              }
+            ],
+            "location": {
+              "part": "document",
+              "child_index": 59,
+              "order": 55
+            },
+            "context_before": [
+              "本人承诺：本人的学位论文是在北京体育大学学习期间创作完成的作品，并已通过论文答辩；提交的学位论文电子版与纸质本论文的内容一致，如因不同造成不良后果由本人自负。",
+              "学位论文作者暨授权人签字："
+            ],
+            "context_after": [
+              "摘  要",
+              "这部分是论文的摘要"
+            ],
+            "style_name": null,
+            "xml_locator": {
+              "part": "document",
+              "child_index": 59,
+              "order": 55
+            }
+          }
+        },
+        "machine_obligation_ids": [],
+        "manual_review_codes": [],
+        "source_content_verification_codes": [],
+        "pending_source_work": [],
+        "section_description": null
+      }
+    }
+  ],
+  "response": {
+    "results": [
+      {
+        "check_id": "C00065",
+        "verdict": "consistent",
+        "rationale": "The selected source is a date-field label only; it does not itself state that a person must enter a signing date. The adjacent signature label does not establish that additional duty for this check.",
+        "identified_obligations": [],
+        "evidence_quotes": [
+          "年    月    日"
+        ],
+        "machine_obligation_ids": []
+      }
+    ]
+  }
+}

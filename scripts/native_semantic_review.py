@@ -23,6 +23,7 @@ from semantic_contract import sha256_json, strict_json_dumps
 from source_atom_metadata import bind_atom_quote
 from section_description import compile_section_description
 from unresolved_label_assessment import unresolved_label_assessment
+from source_inventory_dispute import inventory_existence_dispute, validate_inventory_existence_disputes
 from obligation_workflow import (
     OBLIGATION_COVERAGE_PROTOCOL,
     SCOPE_DEPENDENCY_DIMENSIONS,
@@ -848,7 +849,10 @@ def _project_registered_source_correction_to_manual_review(
 
 def validate_draft_dispute_envelope(envelope: dict[str, Any], request: dict[str, Any], *, output_policy: str) -> None:
     """A completed operation is not a certificate of complete source coverage."""
-    disputed = any(item.get("verdict") == "incomplete" for item in envelope.get("results", []))
+    inventory_disputes = validate_inventory_existence_disputes(
+        envelope, request.get("checks", []), envelope.get("results", []),
+    )
+    disputed = bool(inventory_disputes) or any(item.get("verdict") == "incomplete" for item in envelope.get("results", []))
     if envelope.get("status") == "completed_with_disputes" or disputed:
         if not (
             disputed and output_policy == "review_draft"
@@ -988,6 +992,9 @@ def validate_obligation_coverage_response(
         if context.get("pending_source_work", []) != pending_facts:
             raise NativeSemanticReviewError(f"pending human-work source authorization is stale for {check_id}")
         identified = result.get("identified_obligations", [])
+        inventory_dispute = (
+            inventory_existence_dispute(check, result) if allow_draft_disputes else None
+        )
         has_pending_code = any(item.get("pending_work_code") is not None for item in identified)
         mixed_author_work = pending_work_inventory_is_bound(source_text, identified, authoring=True)
         conditional_work = pending_work_inventory_is_bound(source_text, identified, authoring=False)
@@ -997,6 +1004,7 @@ def validate_obligation_coverage_response(
             classification not in {"informational", "not_applicable"}
             and not result.get("identified_obligations")
             and unresolved_label_assessment(check, result) is None
+            and inventory_dispute is None
         ):
             missing_source_inventory.append(check_id)
         rationale = result.get("rationale")
@@ -1083,7 +1091,7 @@ def validate_obligation_coverage_response(
                     "check_id": check_id, "primary_obligation_id": primary.get("id"),
                     "primary_sha256": sha256_json(primary), "fields": fields,
                 })
-        if typed_disagreements:
+        if typed_disagreements and inventory_dispute is None:
             # Do not let a semantic disagreement hide invalid quotes, refs,
             # inventories or dispositions later in this same review. Retain
             # the rejection, but finish the structural checks before routing.
@@ -1232,6 +1240,12 @@ def validate_obligation_coverage_response(
                     f"external_compliance source combines a locally expressible document action "
                     f"with a real-world action and must be split before it can remain external: {check_id}"
                 )
+            if inventory_dispute is not None:
+                # Neither reviewer wins: keep both original inventories in a
+                # reconstructible assessment, not a fabricated AO/requirement.
+                # Producer and consumers require completed_with_disputes and
+                # preserve an explicit human task in the non-release draft.
+                continue
             if (typed_disagreements and external_verification_inventory_matches(
                     result, context, require_semantic_match=False)):
                 # The same observation can contain both a routing disagreement

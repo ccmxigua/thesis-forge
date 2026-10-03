@@ -15,6 +15,7 @@ from native_semantic_review import (
 from semantic_contract import sha256_json
 from source_atom_metadata import bind_atom_quote
 from source_literal_binding import compose_source_fragments
+from source_inventory_dispute import inventory_existence_dispute
 
 CODE = "primary_condition_reassessment_required"
 RULE_ID = "v3_source_bound_condition_reassessment"
@@ -74,12 +75,24 @@ def _scope_feedback(candidate, chunk, request, rejected_review, *, allow_target)
         by_clause = {c["id"]: c for c in clauses}
         if len(by_clause) != len(clauses):
             return None
-        changes = []
+        changes, retained_disputes = [], []
         for check in checks:
             cid = check["check_id"]
+            original = by_result[cid]
+            validated = copy.deepcopy(original)
+            dispute = (inventory_existence_dispute(check, original)
+                       if request.get("output_policy") == "review_draft" else None)
             try:
-                validate_obligation_coverage_response({"results": [by_result[cid]]}, [check])
+                # Only a reconstructible existence dispute can remain a
+                # non-release sibling here. Do not enable general incomplete
+                # draft verdicts or grant edits to the disputed inventory.
+                validate_obligation_coverage_response(
+                    {"results": [validated]}, [check],
+                    allow_draft_disputes=dispute is not None,
+                )
             except TypedSourceAtomAlignmentError as error:
+                if validated != original:
+                    return None  # A projected opinion is not the captured rejection.
                 for disagreement in error.disagreements:
                     fields = disagreement["fields"]
                     allowed = {"action", "target", "condition", "applicability"} if allow_target else {"condition"}
@@ -95,6 +108,11 @@ def _scope_feedback(candidate, chunk, request, rejected_review, *, allow_target)
                         "source_binding": binding, "quote_binding": quote})
             except NativeSemanticReviewError:
                 return None  # Other missing inventories/fields are not this repair.
+            else:
+                if validated != original:
+                    return None
+                if dispute is not None:
+                    retained_disputes.append(dispute)
         if not changes:
             return None
         target_dispute = any("target" in change["fields"] for change in changes)
@@ -112,6 +130,7 @@ def _scope_feedback(candidate, chunk, request, rejected_review, *, allow_target)
             "review_request": copy.deepcopy(request), "rejected_review": copy.deepcopy(rejected_review),
             "review_request_sha256": sha256_json(request),
             "rejected_review_sha256": sha256_json(rejected_review),
+            **({"retained_source_inventory_disputes": retained_disputes} if retained_disputes else {}),
             "semantic_review_required": True, "submission_ready": False}
     except (NativeSemanticReviewError, ValueError, KeyError, TypeError, IndexError, StopIteration):
         return None

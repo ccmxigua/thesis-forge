@@ -169,6 +169,13 @@ Raw and projected stages are checked separately against the same authorization,
 and the new candidate must pass full validation plus a fresh independent review.
 Rejected artifacts never become a successful ledger or submission evidence.
 
+Independent reviewers may explicitly select a confirmed current target with
+`target: {"primary_target_ref": "<same primary_obligation_id>"}`. This resolves
+only the selected representation and records its binding; it never infers
+equivalence, changes a literal disagreement or supplies another typed field.
+Primary claims remain untrusted and every semantic gate remains mandatory.
+See `docs/primary-target-reference-generation.md` for replay and retry boundaries.
+
 Cover field `label_display_policy` defaults to `with_value` for compatibility;
 `always` is an explicit source-supported rendering duty, not an inference from
 missing metadata. An optional empty value can therefore leave its label visible
@@ -689,6 +696,12 @@ the current contract remain in their technical reports and keep `format_ready` o
 marker layer rejects technical categories even if an old or hand-written ledger
 contains them. A red marker never means that a requirement passed.
 
+Native coverage generation couples `uncertain` to a nonempty inventory of
+`ambiguous` source atoms; omitted duties remain `incomplete`/`unrepresented`.
+This does not resolve the source, rewrite a raw response, or extend retries.
+Canonical semantic/source validators remain authoritative. Pipeline manifests
+start with `submission_ready=false`, including preparation and failure states.
+
 `review_draft` is explicitly non-submission: it sets `submission_ready=false`,
 keeps `format_ready=false` when any technical finding remains, defers the strict
 official-template comparison and Word/PDF release audit, and records
@@ -884,6 +897,21 @@ and must:
 7. report uncertainty as `unresolved`, `requires_metadata`,
    `requires_source_content`, `unsupported_backend`, `unverifiable`, or another
    contract classification rather than inventing a requirement.
+
+For automatic native contract-3.0 **first attempts**, the provider-facing
+schema uses the versioned `response_wire_format` value
+`host_review_v3_clause_reviews_by_id_v1` and requires `clause_reviews` as an
+object keyed by every current clause ID. Each key is one required slot; the
+row's `clause_id` must match its key. The bridge converts this transport shape
+back to the canonical array and runs the unchanged local coverage and source
+validators. Manual packet responses and retries continue to use their supplied
+canonical array schema, and old array receipts remain replayable. Do not reuse
+or wrap an old response in the new transport marker.
+The same first-attempt schema omits
+`non_public_administration.publication_default_policy`: the bridge materializes
+that code-owned value only from an exactly linked source clause recognized by
+the source compiler. Manual canonical responses continue to follow the source
+rule below.
 
 If a source clause explicitly states both that an unapproved thesis is public
 and that the administrative item is blank for a public thesis, retain **both**

@@ -132,6 +132,97 @@ def bind_declaration_fixture_spans(chunk: dict) -> None:
         }
 
 
+def mixed_declaration_relation_retry_case() -> tuple[dict, dict, dict, list[dict]]:
+    heading = "学位论文原创性声明"
+    first_sentence = "本人郑重声明：本研究由作者完成。"
+    target_text = "本学位论文原创性声明的法律责任由本人承担"
+    body = first_sentence + target_text
+    provenance = {
+        "run_id": "run-mixed-declaration-relation",
+        "case_id": "case-mixed-declaration-relation",
+        "source_sha256": "a" * 64,
+        "clause_sha256": "b" * 64,
+        "evidence_sha256": "c" * 64,
+        "request_sha256": "d" * 64,
+    }
+    chunk = {
+        "contract_version": "3.0",
+        "provenance": provenance,
+        "batch": {"index": 5},
+        "runtime_context": {"code_fingerprint_sha256": "e" * 64},
+        "response_schema": {"type": "object"},
+        "declaration_anchor_preference": "abstract_title_zh",
+        "clauses": [
+            {"id": "C1", "text": heading, "evidence_ids": ["E1"],
+             "location": {"part": "document", "child_index": 1, "order": 1}},
+            {"id": "C2", "text": first_sentence, "evidence_ids": ["E2"],
+             "location": {"part": "document", "child_index": 2, "order": 2}},
+            {"id": "C3", "text": target_text, "evidence_ids": ["E2"],
+             "location": {"part": "document", "child_index": 2, "order": 2}},
+            {"id": "C4", "text": "摘要", "evidence_ids": ["E3"],
+             "location": {"part": "document", "child_index": 3, "order": 3}},
+        ],
+        "evidence_context": {
+            "E1": {"id": "E1", "kind": "paragraph", "text": heading,
+                   "location": {"part": "document", "child_index": 1, "order": 1}},
+            "E2": {"id": "E2", "kind": "paragraph", "text": body,
+                   "location": {"part": "document", "child_index": 2, "order": 2}},
+            "E3": {"id": "E3", "kind": "paragraph", "text": "摘要",
+                   "location": {"part": "document", "child_index": 3, "order": 3}},
+        },
+    }
+    bind_declaration_fixture_spans(chunk)
+    parent_requirement = {
+        "role": "declarations",
+        "properties": {"before_role": "abstract_title_zh", "items": [{
+            "id": "originality_declaration",
+            "heading": heading,
+            "body_parts": [body],
+            "source_evidence_ids": ["E1", "E2"],
+            "signature_placeholders": [],
+        }]},
+        "clause_ids": ["C1", "C2"],
+        "evidence_ids": ["E1", "E2"],
+        "confidence": 0.98,
+        "reason": "The exact source declaration is printed as one item.",
+        "verification": {"mode": "static_docx", "checks": ["Verify the complete declaration text."]},
+    }
+    parent = {
+        "contract_version": "3.0",
+        "provenance": copy.deepcopy(provenance),
+        "requirements": [parent_requirement],
+        "clause_reviews": [
+            {"clause_id": "C1", "classification": "covered", "reason": "Declaration heading."},
+            {"clause_id": "C2", "classification": "covered", "reason": "Printable declaration text."},
+            {"clause_id": "C3", "classification": "executable_with_external_check",
+             "reason": "Printed text is automated; accepting responsibility remains human.",
+             "obligations": [
+                 {"id": "C3-text", "status": "covered", "route": "automatic",
+                  "reason": "The exact declaration text is printed.", "source_quote": target_text},
+                 {"id": "C3-responsibility", "status": "unverifiable", "route": "human",
+                  "reason": "Printing cannot establish that the author accepted responsibility.",
+                  "source_quote": target_text},
+             ]},
+        ],
+        "unsupported_items": [],
+        "reported_conflicts": [],
+    }
+    duplicate = copy.deepcopy(parent_requirement)
+    duplicate.update({"clause_ids": ["C3"], "evidence_ids": ["E2"]})
+    duplicate["properties"]["items"][0]["id"] = "originality_declaration_c3"
+    duplicate["reason"] = "The target clause needs a requirement edge."
+    duplicate["verification"] = {"mode": "static_docx", "checks": ["Verify the declaration body."]}
+    retry = copy.deepcopy(parent)
+    retry["requirements"].append(duplicate)
+    records = [{
+        "code": "missing_derived_requirement",
+        "json_pointer": "$.clause_reviews[2]",
+        "clause_id": "C3",
+        "raw_error": "$.clause_reviews[2]: executable_review_requires_derived_requirement",
+    }]
+    return chunk, parent, retry, records
+
+
 class HostAgentBridgeTests(unittest.TestCase):
     def setUp(self) -> None:
         self._host_runtime_env = patch.dict(
@@ -2758,6 +2849,57 @@ class HostAgentBridgeTests(unittest.TestCase):
             self.assertIn("preserve every requirement", prompt)
         self.assertNotIn("remove only this requirement object", prompt)
 
+    def test_unresolved_relation_retry_does_not_use_external_duty_guidance(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            directory = Path(td)
+            chunk_path = directory / "chunk.json"
+            parent_path = directory / "parent.json"
+            bridge._write_json(chunk_path, {"contract_version": "3.0"})
+            bridge._write_json(parent_path, {"requirements": [], "clause_reviews": []})
+
+            for classification, expects_external_guidance in (
+                ("unresolved", False),
+                ("external_compliance", True),
+            ):
+                record = {
+                    "code": "non_requirement_classification_relation",
+                    "json_pointer": "$.requirements[1]",
+                    "mechanically_removable": False,
+                    "relation_category": "non_requirement_classification",
+                    "requirement_index": 1,
+                    "clause_ids": ["C00020"],
+                    "clause_classifications": {"C00020": [classification]},
+                }
+                with self.subTest(classification=classification):
+                    guidance = bridge._structured_contract_repair_guidance(
+                        [record], contract_version="3.0",
+                    )
+                    prompt = bridge._host_prompt(
+                        request_path=directory / "request.json",
+                        chunk_path=chunk_path,
+                        response_path=directory / "response.json",
+                        run_id="run-relation-retry-routing",
+                        chunk_index=3, chunk_count=61, attempt=2,
+                        retry_hint="non_requirement_classification_relation",
+                        retry_parent_response_sha256=bridge.sha256_file(parent_path),
+                        retry_parent_response_path=parent_path,
+                        retry_error_records=[record],
+                    )
+                    external_guidance = (
+                        "do not delete or rewrite this external-duty requirement on a model retry"
+                    )
+                    external_invariant = (
+                        "FINAL RETRY INVARIANT: do not remove or modify an external-duty requirement"
+                    )
+                    self.assertEqual(external_guidance in guidance, expects_external_guidance)
+                    self.assertEqual(external_invariant in prompt, expects_external_guidance)
+                    if not expects_external_guidance:
+                        self.assertIn("Unresolved, external, unsupported", guidance)
+                        self.assertIn(
+                            "External, unresolved, unsupported, and prerequisite-bound objects are not generic deletion candidates.",
+                            prompt,
+                        )
+
     def test_external_action_projection_rejects_non_null_or_conditional_payload(self) -> None:
         source = "北京体育大学学位评定委员会办公室盖章(有效)"
         evidence = {"evidence": [{"id": "E1", "text": source, "kind": "paragraph"}]}
@@ -5321,6 +5463,66 @@ class HostAgentBridgeTests(unittest.TestCase):
                 previous_response=previous, current_response=current, chunk=chunk,
             ))
 
+    def test_v3_mixed_declaration_retry_reuses_existing_source_bound_item(self) -> None:
+        chunk, parent, retry, records = mixed_declaration_relation_retry_case()
+        with patch.object(bridge, "validate_host_agent_response", return_value=[]):
+            repaired, audit = bridge._v3_relation_completion_response(
+                parent, retry, records, chunk=chunk,
+            )
+        self.assertIsNotNone(repaired)
+        self.assertIsNotNone(audit)
+        assert repaired is not None and audit is not None
+        self.assertEqual(len(repaired["requirements"]), 1)
+        self.assertEqual(repaired["requirements"][0]["clause_ids"], ["C1", "C2", "C3"])
+        self.assertEqual(
+            repaired["requirements"][0]["properties"],
+            parent["requirements"][0]["properties"],
+        )
+        self.assertEqual(
+            repaired["clause_reviews"][2]["obligations"],
+            parent["clause_reviews"][2]["obligations"],
+        )
+        self.assertEqual(audit["rule_id"], "source_bound_mixed_declaration_relation_reuse_v1")
+        self.assertEqual(audit["human_obligation_ids_preserved"], ["C3-responsibility"])
+        self.assertTrue(audit["duplicate_declaration_proposal_discarded"])
+
+        wrong_duplicate = copy.deepcopy(retry)
+        wrong_duplicate["requirements"][1]["properties"]["items"][0]["body_parts"] = [
+            "模型改写的声明正文"
+        ]
+        with patch.object(bridge, "validate_host_agent_response", return_value=[]):
+            rejected, rejection_audit = bridge._v3_relation_completion_response(
+                parent, wrong_duplicate, records, chunk=chunk,
+            )
+        self.assertIsNone(rejected)
+        self.assertIsNone(rejection_audit)
+
+        with tempfile.TemporaryDirectory() as td:
+            directory = Path(td)
+            packet_path = directory / "chunk.json"
+            packet_path.write_text(
+                json.dumps(bridge.compact_model_packet(chunk), ensure_ascii=False),
+                encoding="utf-8",
+            )
+            parent_path = directory / "parent.json"
+            parent_path.write_text(json.dumps(parent, ensure_ascii=False), encoding="utf-8")
+            prompt = bridge._host_prompt(
+                request_path=directory / "request.json",
+                chunk_path=packet_path,
+                response_path=directory / "response.json",
+                run_id="run-mixed-declaration-relation",
+                chunk_index=5,
+                chunk_count=1,
+                attempt=2,
+                retry_hint="local contract validation failed",
+                retry_parent_response_path=parent_path,
+                retry_parent_response_sha256=bridge.sha256_file(parent_path),
+                retry_error_records=records,
+            )
+        self.assertIn("Add only clause ID C3", prompt)
+        self.assertIn("never add a second declaration", prompt)
+        self.assertNotIn("the retry must add one evidence-backed requirement for that clause", prompt)
+
     def test_v3_retry_restores_omitted_baseline_requirements_before_accepting_additions(self) -> None:
         previous = {
             "contract_version": "3.0",
@@ -6258,6 +6460,9 @@ class HostAgentBridgeTests(unittest.TestCase):
         records = [{
             "code": "non_requirement_classification_relation",
             "json_pointer": "$.requirements[1]", "requirement_index": 1,
+            "relation_category": "non_requirement_classification",
+            "clause_ids": ["C00039"],
+            "clause_classifications": {"C00039": ["external_compliance"]},
             "mechanically_removable": False,
         }, {
             "code": "empty_requirement_properties",
@@ -9412,6 +9617,12 @@ class HostAgentBridgeTests(unittest.TestCase):
             self.assertFalse(response_out.exists())
             failure = json.loads((review_dir / "host-agent-run.json").read_text(encoding="utf-8"))
             self.assertEqual(failure["terminal_error"]["type"], "RetryRawArtifactIntegrityError")
+            diagnostic = failure["terminal_error"]["failure_diagnostics"]
+            self.assertEqual(diagnostic["protocol"], "exception_locations_v1")
+            self.assertFalse(diagnostic["captures_locals"])
+            self.assertEqual(diagnostic["exceptions"][0]["type"], "RetryRawArtifactIntegrityError")
+            self.assertTrue(diagnostic["exceptions"][0]["frames"])
+            self.assertNotIn("message", diagnostic["exceptions"][0])
             self.assertTrue(failure["primary_error"]["records"])
             self.assertTrue(any(
                 record.get("code") == "retry_raw_artifact_missing"

@@ -13,10 +13,33 @@ from typing import Any
 
 from semantic_contract import sha256_json, strict_json_loads
 
-POLICY = "whole_candidate_checks_4_v1"
+LEGACY_POLICY = "whole_candidate_checks_4_v1"
+ARRAY_TWO_POLICY = "whole_candidate_checks_2_v1"
+KEYED_TWO_POLICY = "whole_candidate_keyed_checks_2_v1"
+LEGACY_SINGLE_CHECK_POLICY = "whole_candidate_keyed_check_1_v1"
+PREVIOUS_SINGLE_CHECK_POLICY = "whole_candidate_keyed_check_1_v2"
+POLICY = "whole_candidate_keyed_check_1_v3"
+SINGLE_CHECK_POLICIES = frozenset({
+    LEGACY_SINGLE_CHECK_POLICY, PREVIOUS_SINGLE_CHECK_POLICY, POLICY,
+})
+COMPACT_ORIENTATION_POLICIES = frozenset({PREVIOUS_SINGLE_CHECK_POLICY, POLICY})
+KEYED_POLICIES = frozenset({KEYED_TWO_POLICY, *SINGLE_CHECK_POLICIES})
 PROTOCOL = "native_independent_partition_projection_v1"
-PACKING_THRESHOLD = 8
-CHECKS_PER_INVOCATION = 4
+PACKING_THRESHOLD = 2
+CHECKS_PER_INVOCATION = 1
+
+
+def partition_limits(policy: str | None) -> tuple[int, int] | None:
+    """Keep historical packet/proof interpretation fixed by its request marker."""
+    if policy is None:
+        return None
+    if policy == LEGACY_POLICY:
+        return 8, 4
+    if policy in {ARRAY_TWO_POLICY, KEYED_TWO_POLICY}:
+        return 3, 2
+    if policy in SINGLE_CHECK_POLICIES:
+        return PACKING_THRESHOLD, CHECKS_PER_INVOCATION
+    raise ValueError("unknown native review partition policy")
 
 
 def partition_schema(schema: dict[str, Any], ids: list[str]) -> dict[str, Any]:
@@ -54,34 +77,61 @@ def partition_schema(schema: dict[str, Any], ids: list[str]) -> dict[str, Any]:
     return result
 
 
+def partition_generation_schema(schema: dict[str, Any], ids: list[str], policy: str) -> dict[str, Any]:
+    """Bind one complete result to each check using portable required keys.
+
+    Array cardinality/uniqueness is not available on the native wire. The new
+    shape removes the repeated choice of a result branch, not any semantic
+    field, source atom, or local validator. Historical policies stay exact.
+    """
+    partition_limits(policy)
+    result = partition_schema(schema, ids)
+    if policy in KEYED_POLICIES:
+        branches = result["properties"]["results"]["items"]["anyOf"]
+        result["properties"]["results"] = {
+            "type": "object", "additionalProperties": False,
+            "required": list(ids), "properties": dict(zip(ids, branches)),
+        }
+    return result
+
+
 def partition_packets(request: dict[str, Any], packet: dict[str, Any]) -> list[dict[str, Any]]:
     """Deterministic focus subsets of one immutable full source catalog.
 
-    All source checks remain available as orientation, including cross-clause
-    links, physical geometry, conditions and exact text. Q/RR selectors retain
-    their whole-request identities. Only the required output set is smaller.
+    The focused checks and orientation context together retain the complete
+    source group, including cross-clause links, physical geometry, conditions
+    and exact text. Q/RR selectors retain their whole-request identities. Only
+    the required output set is smaller.
     """
-    if request.get("native_review_partition_policy") != POLICY:
+    policy = request.get("native_review_partition_policy")
+    limits = partition_limits(policy)
+    if limits is None:
         raise ValueError("partition policy is missing or unknown")
+    threshold, batch_size = limits
     checks = packet.get("checks")
-    if not isinstance(checks, list) or len(checks) <= PACKING_THRESHOLD:
+    if not isinstance(checks, list) or len(checks) < threshold:
         raise ValueError("partition request is not an oversized source group")
     ids = [check.get("check_id") for check in checks if isinstance(check, dict)]
     if (len(ids) != len(checks) or any(not isinstance(cid, str) or not cid for cid in ids)
             or len(set(ids)) != len(ids)):
         raise ValueError("partition request check identity is invalid")
-    count = (len(checks) + CHECKS_PER_INVOCATION - 1) // CHECKS_PER_INVOCATION
+    count = (len(checks) + batch_size - 1) // batch_size
     output = []
-    for index, start in enumerate(range(0, len(checks), CHECKS_PER_INVOCATION), 1):
+    for index, start in enumerate(range(0, len(checks), batch_size), 1):
         child = copy.deepcopy(packet)
-        child["checks"] = copy.deepcopy(checks[start:start + CHECKS_PER_INVOCATION])
-        child["orientation_only_checks"] = copy.deepcopy(checks)
+        child["checks"] = copy.deepcopy(checks[start:start + batch_size])
+        focused_ids = set(ids[start:start + batch_size])
+        orientation = (
+            [check for check in checks if check["check_id"] not in focused_ids]
+            if policy in COMPACT_ORIENTATION_POLICIES else checks
+        )
+        child["orientation_only_checks"] = copy.deepcopy(orientation)
         child["native_review_partition"] = {
-            "protocol": PROTOCOL, "policy": POLICY,
+            "protocol": PROTOCOL, "policy": policy,
             "whole_request_sha256": sha256_json(request),
             "whole_source_packet_sha256": sha256_json(packet),
             "batch_index": index, "batch_count": count,
-            "check_ids": ids[start:start + CHECKS_PER_INVOCATION],
+            "check_ids": ids[start:start + batch_size],
         }
         output.append(child)
     return output
@@ -94,10 +144,20 @@ def join_partition_responses(packets: list[dict[str, Any]], responses: list[dict
     joined, seen = [], set()
     for packet, response in zip(packets, responses):
         expected = packet["native_review_partition"]["check_ids"]
-        if (not isinstance(response, dict) or set(response) != {"results"}
-                or not isinstance(response["results"], list)):
+        if not isinstance(response, dict) or set(response) != {"results"}:
             raise ValueError("native partition response is not a closed results object")
         records = response["results"]
+        policy = packet["native_review_partition"]["policy"]
+        partition_limits(policy)
+        if policy in KEYED_POLICIES:
+            if not isinstance(records, dict) or set(records) != set(expected):
+                raise ValueError("native keyed partition has missing or extra check keys")
+            if any(not isinstance(records[cid], dict) or records[cid].get("check_id") != cid
+                   for cid in expected):
+                raise ValueError("native keyed partition check key and payload identity differ")
+            records = [records[cid] for cid in expected]
+        if not isinstance(records, list):
+            raise ValueError("native partition results have the wrong versioned shape")
         ids = [item.get("check_id") for item in records if isinstance(item, dict)]
         if (len(ids) != len(records) or len(ids) != len(expected)
                 or len(set(ids)) != len(ids) or set(ids) != set(expected)
@@ -118,12 +178,13 @@ def validate_partition_receipt(request: dict[str, Any], root: Path, raw: dict[st
     last-message must independently reproduce each stored raw child output.
     """
     from host_adapters import codex
-    from host_review_schema import native_output_schema
+    from native_wire_schema import review_wire_schema
     from native_semantic_review import OBLIGATION_COVERAGE_SCHEMA, _prompt
     from semantic_source_references import build_source_reference_packet, source_reference_schema, source_inventory_generation_schema
     from independent_retry_scope import prepare_retry_scope, constrain_retry_schema
 
-    expected = request.get("native_review_partition_policy") == POLICY and audit.get("adapter_id") == "codex"
+    policy = request.get("native_review_partition_policy")
+    expected = partition_limits(policy) is not None and audit.get("adapter_id") == "codex"
     pointer = audit.get("native_partition_projection")
     proof_path = root / "native-partition-projection.json"
     if not expected:
@@ -145,7 +206,7 @@ def validate_partition_receipt(request: dict[str, Any], root: Path, raw: dict[st
         schema = constrain_retry_schema(schema, locks)
     schema = source_inventory_generation_schema(schema, retained_results=locks)
     if (not isinstance(proof, dict) or set(proof) != {"protocol", "policy", "whole_request_sha256", "children", "aggregate_sha256"}
-            or proof.get("protocol") != PROTOCOL or proof.get("policy") != POLICY
+            or proof.get("protocol") != PROTOCOL or proof.get("policy") != policy
             or proof.get("whole_request_sha256") != sha256_json(request)
             or not isinstance(proof.get("children"), list) or len(proof["children"]) != len(packets)):
         raise ValueError("native partition projection identity/coverage mismatch")
@@ -165,7 +226,7 @@ def validate_partition_receipt(request: dict[str, Any], root: Path, raw: dict[st
         load = lambda name: strict_json_loads((directory / name).read_text(encoding="utf-8"))
         focus_locks = {cid: value for cid, value in locks.items() if cid in record["check_ids"]}
         if (load("source-reference-packet.json") != child
-                or load("provider-response-schema.json") != native_output_schema(partition_schema(schema, record["check_ids"]))
+                or load("provider-response-schema.json") != review_wire_schema(partition_generation_schema(schema, record["check_ids"], policy), request)
                 or (directory / "prompt.txt").read_text(encoding="utf-8") != _prompt(request, retained_results=focus_locks, source_packet=child)):
             raise ValueError("native partition input is not reconstructed from the immutable whole request")
         stdout = (directory / "stdout.jsonl").read_text(encoding="utf-8")

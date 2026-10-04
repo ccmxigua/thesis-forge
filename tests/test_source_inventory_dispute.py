@@ -8,6 +8,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -15,6 +16,11 @@ import native_semantic_review as native
 import host_agent_bridge as bridge
 import thesis_format_pipeline as pipeline
 from source_inventory_dispute import inventory_existence_dispute, build_inventory_existence_disputes
+from source_classification_dispute import (
+    informational_uncertainty_dispute,
+    template_example_alignment_dispute,
+    build_informational_uncertainty_disputes,
+)
 from semantic_contract import sha256_json, request_body_sha256
 from tests import test_empty_inventory_verdict as transport
 from tests import test_independent_retry_scope as wire
@@ -214,6 +220,349 @@ class InventoryDisputeTests(unittest.TestCase):
         stale=build_manual_review_ledger({},[],binding=binding,release_gates=changed)
         self.assertNotEqual(stale["items"][0]["manual_obligation_id"],ledger["items"][0]["manual_obligation_id"])
         self.assertFalse(audit_manual_review_markers(path,stale)["valid"])
+
+
+class ClassificationDisputeTests(unittest.TestCase):
+    def packet(self, directory):
+        _, chunk = packets.HostAgentBridgeTests()._packet(
+            directory, source="10043", contract_version="3.0",
+        )
+        candidate = {
+            "contract_version": "3.0",
+            "provenance": copy.deepcopy(chunk["provenance"]),
+            "requirements": [],
+            "clause_reviews": [{
+                "clause_id": "C1", "classification": "informational",
+                "normative_basis": "source_content",
+                "reason": "The isolated source value does not state an instruction.",
+                "obligations": [],
+            }],
+            "unsupported_items": [],
+            "reported_conflicts": [],
+        }
+        request = native.build_obligation_coverage_request(
+            candidate, chunk, run_id=chunk["provenance"]["run_id"], chunk_index=1,
+        )
+        request.update(attempt=1, provider_attempt=1, output_policy="review_draft")
+        check = request["checks"][0]
+        result = {
+            "check_id": check["check_id"],
+            "verdict": "uncertain",
+            "rationale": "The isolated value may have a field meaning, but the source does not settle it.",
+            "identified_obligations": [{
+                "force": "unknown", "applicability": "unknown", "target": "10043",
+                "obligation_summary": "The field meaning and any preservation duty are not established.",
+                "requirement_refs": [], "disposition": "ambiguous", "source_quote": "10043",
+            }],
+            "evidence_quotes": ["10043"],
+            "machine_obligation_ids": [],
+        }
+        return chunk, candidate, request, result
+
+    def template_example_packet(self, directory):
+        _, chunk = packets.HostAgentBridgeTests()._packet(
+            directory, source="培养单位", contract_version="3.0",
+        )
+        candidate = {
+            "contract_version": "3.0",
+            "provenance": copy.deepcopy(chunk["provenance"]),
+            "requirements": [],
+            "clause_reviews": [{
+                "clause_id": "C1", "classification": "informational",
+                "normative_basis": "template_structure",
+                "reason": "This is an optional template cover example, not a separate requirement.",
+                "obligations": [{
+                    "id": "C1-O1", "status": "covered",
+                    "reason": "The field appears as an optional template example.",
+                    "actor": "template", "action": "display",
+                    "target": "cover field label 培养单位", "source_quote": "培养单位",
+                    "force": "optional", "applicability": "applicable", "route": "example",
+                }],
+            }],
+            "unsupported_items": [], "reported_conflicts": [],
+        }
+        request = native.build_obligation_coverage_request(
+            candidate, chunk, run_id=chunk["provenance"]["run_id"], chunk_index=1,
+        )
+        request.update(attempt=1, provider_attempt=1, output_policy="review_draft")
+        check = request["checks"][0]
+        result = {
+            "check_id": check["check_id"], "verdict": "consistent",
+            "rationale": "The source is an informational cover label and names no independent duty.",
+            "identified_obligations": [], "evidence_quotes": [check["document_text"]],
+            "machine_obligation_ids": [],
+        }
+        return chunk, candidate, request, result
+
+    def test_narrow_uncertainty_conflict_is_preserved_only_in_review_draft(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, _, request, result = self.packet(Path(tmp) / "packet")
+            check = request["checks"][0]
+            before = copy.deepcopy((check, result))
+            validated = native.validate_obligation_coverage_response(
+                {"results": [result]}, [check], allow_draft_disputes=True,
+            )
+            self.assertEqual(validated, [result])
+            dispute = informational_uncertainty_dispute(check, result)
+            self.assertIsNotNone(dispute)
+            self.assertEqual(dispute["primary_review_context"], check["review_context"])
+            self.assertEqual(dispute["independent_result"], result)
+            self.assertFalse(dispute["coverage_complete"])
+            self.assertFalse(dispute["execution_authorized"])
+            self.assertFalse(dispute["submission_ready"])
+            self.assertEqual(before, (check, result))
+
+            envelope = {
+                "results": [result],
+                "source_classification_disputes": [dispute],
+                "status": "completed_with_disputes",
+                "coverage_complete": False,
+                "submission_ready": False,
+            }
+            native.validate_draft_dispute_envelope(
+                envelope, request, output_policy="review_draft",
+            )
+            with self.assertRaises(native.NativeSemanticReviewError):
+                native.validate_obligation_coverage_response(
+                    {"results": [result]}, [check], allow_draft_disputes=False,
+                )
+            for mutation in (
+                lambda x: x.update(source_classification_disputes=[]),
+                lambda x: x.update(status="completed"),
+                lambda x: x.update(coverage_complete=True),
+                lambda x: x.update(submission_ready=True),
+            ):
+                forged = copy.deepcopy(envelope)
+                mutation(forged)
+                with self.assertRaises(ValueError):
+                    native.validate_draft_dispute_envelope(
+                        forged, request, output_policy="review_draft",
+                    )
+
+            altered = copy.deepcopy(result)
+            altered["identified_obligations"][0]["force"] = "required"
+            self.assertIsNone(informational_uncertainty_dispute(check, altered))
+
+    def test_informational_primary_atom_with_empty_independent_inventory_stays_strict(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _, _, request, _ = self.packet(Path(tmp) / "packet")
+            check = copy.deepcopy(request["checks"][0])
+            check["review_context"]["primary_obligations"] = [{
+                "id": "C1-O1", "status": "covered", "actor": "template",
+                "action": "display", "target": "cover field label 10043",
+                "source_quote": "10043", "force": "optional",
+                "applicability": "applicable", "route": "example",
+            }]
+            result = {
+                "check_id": "C1", "verdict": "consistent",
+                "rationale": "The source is only an informational cover label.",
+                "identified_obligations": [], "evidence_quotes": ["10043"],
+                "machine_obligation_ids": [],
+            }
+            self.assertIsNone(informational_uncertainty_dispute(check, result))
+            with self.assertRaises(native.TypedSourceAtomAlignmentError):
+                native.validate_obligation_coverage_response(
+                    {"results": [result]}, [check], allow_draft_disputes=True,
+                )
+
+    def test_optional_template_example_is_retained_only_after_bound_final_retry(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp) / "packet"
+            chunk, candidate, first_request, result = self.template_example_packet(directory)
+            check = first_request["checks"][0]
+            with self.assertRaises(native.TypedSourceAtomAlignmentError):
+                native.validate_obligation_coverage_response(
+                    {"results": [result]}, first_request["checks"],
+                    allow_draft_disputes=True, review_request=first_request,
+                )
+
+            raw = transport.enveloped(wire.RetryScopeTests().wire({"results": [result]}, first_request))
+            with ExitStack() as stack:
+                transport.EmptyInventoryVerdictTests().mock_transport(stack, [raw])
+                def current_request_process(command, **kwargs):
+                    last = Path(command[command.index("--output-last-message") + 1])
+                    child = last.parent
+                    owner = child.parent if child.name.startswith("native-batch-") else child
+                    current_request = json.loads((owner / "request.json").read_text())
+                    current_raw = transport.enveloped(
+                        wire.RetryScopeTests().wire({"results": [result]}, current_request)
+                    )
+                    text = json.dumps(current_raw, ensure_ascii=False)
+                    last.write_text(text, encoding="utf-8")
+                    events = [
+                        {"type": "item.completed", "item": {"type": "agent_message", "text": text}},
+                        {"type": "turn.completed"},
+                    ]
+                    return transport.CompletedProcess(command, 0,
+                        "\n".join(json.dumps(event) for event in events), "")
+                stack.enter_context(patch.object(native, "run_process", side_effect=current_request_process))
+                stack.enter_context(patch.object(bridge, "INDEPENDENT_REVIEW_RETRY_BACKOFF_SECONDS", 0))
+                pointer = bridge._run_independent_obligation_coverage_review(
+                    candidate, chunk, review_dir=directory,
+                    run_id=first_request["run_id"], chunk_index=1, attempt=1,
+                    host_runtime="codex", model="gpt-6-luna", timeout=5,
+                    agent_id="main", runner="exec", binary="codex", config_path=None,
+                    controller=bridge.RunController(), output_policy="review_draft",
+                )
+
+            self.assertEqual(pointer["provider_attempt"], 2)
+            self.assertEqual(pointer["status"], "completed_with_disputes")
+            envelope = json.loads((directory / pointer["audit_path"]).read_text())
+            self.assertFalse(envelope["coverage_complete"])
+            self.assertFalse(envelope["submission_ready"])
+            self.assertEqual(len(envelope["source_classification_disputes"]), 1)
+            dispute = envelope["source_classification_disputes"][0]
+            self.assertEqual(dispute["policy"], "source_bound_template_example_alignment_dispute_v1")
+            self.assertFalse(dispute["execution_authorized"])
+            self.assertFalse(dispute["submission_ready"])
+            retry_dir = directory / "independent-review-chunk-0001-attempt-01-provider-attempt-02"
+            retry_request = json.loads((retry_dir / "request.json").read_text())
+            self.assertTrue(native.typed_alignment_retry_feedback_is_bound(retry_request))
+            self.assertEqual(
+                native.validate_obligation_coverage_response(
+                    {"results": [result]}, retry_request["checks"],
+                    allow_draft_disputes=True, review_request=retry_request,
+                ),
+                [result],
+            )
+
+            bridge._validate_completed_obligation_ledger_chain(
+                directory, envelope, pointer, candidate, chunk,
+                chunk_index=1, attempt=1, output_policy="review_draft",
+            )
+            candidate_path = directory / "accepted-candidate.json"
+            bridge._write_json(candidate_path, candidate)
+            full_request = json.loads((directory / "llm-request.json").read_text())
+            audit = {
+                "chunk_count": 1, "adapter_id": "codex", "host_runtime": "codex",
+                "chunk_lifecycle": [{
+                    "chunk_index": 1, "status": "completed", "remote_operation_state": "completed",
+                }],
+                "chunk_runs": [{
+                    "chunk_index": 1, "response_path": str(candidate_path),
+                    "accepted_response_sha256": sha256_json(candidate),
+                    "independent_obligation_review": pointer,
+                }],
+            }
+            receipts = pipeline._validate_independent_obligation_receipts(
+                audit=audit, review_root=directory, expected_run_id=first_request["run_id"],
+                expected_request_body_sha=request_body_sha256(full_request),
+                expected_request_envelope_sha=None, expected_request_file_sha=None,
+                output_policy="review_draft",
+            )
+            self.assertEqual(receipts[0]["source_classification_disputes"], [dispute])
+            self.assertEqual(receipts[0]["manual_review_required_clause_ids"], ["C1"])
+            with self.assertRaises(ValueError):
+                pipeline.enforce_obligation_review_output_policy(
+                    [result], output_policy="submission", source_classification_disputes=[dispute],
+                )
+
+            gates = pipeline._classification_dispute_release_gates(receipts, clauses=chunk["clauses"])
+            self.assertEqual(len(gates), 1)
+            self.assertIn("可选的模板示例字段", gates[0]["reason"])
+            binding = manual_fixtures.ManualReviewTests._binding(run_id=receipts[0]["run_id"])
+            ledger = build_manual_review_ledger({}, [], binding=binding, release_gates=gates)
+            self.assertEqual(load_and_validate(ledger, ROOT / "schema/manual-review-ledger.schema.json"), [])
+            self.assertFalse(ledger["submission_ready"])
+            docx_path = Path(tmp) / "template-example-draft.docx"
+            doc = Document()
+            doc.add_paragraph("保留模板来源")
+            append_manual_review_markers(doc, ledger)
+            doc.save(docx_path)
+            self.assertTrue(audit_manual_review_markers(docx_path, ledger)["valid"])
+            marker_text = "\n".join(item.text for item in Document(docx_path).paragraphs)
+            self.assertIn("模板示例字段是否应保留", marker_text)
+            self.assertIn("确认前不可提交", marker_text)
+
+            unbound = copy.deepcopy(retry_request)
+            unbound["retry_feedback"]["checks_sha256"] = "0" * 64
+            self.assertIsNone(template_example_alignment_dispute(check, result, request=unbound))
+            with self.assertRaises(native.TypedSourceAtomAlignmentError):
+                native.validate_obligation_coverage_response(
+                    {"results": [result]}, unbound["checks"],
+                    allow_draft_disputes=True, review_request=unbound,
+                )
+
+    def test_production_receipts_and_visible_nonrelease_gate_reconstruct_the_dispute(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp) / "packet"
+            chunk, candidate, request, result = self.packet(directory)
+            raw = transport.enveloped(wire.RetryScopeTests().wire({"results": [result]}, request))
+            with ExitStack() as stack:
+                transport.EmptyInventoryVerdictTests().mock_transport(stack, [raw])
+                pointer = bridge._run_independent_obligation_coverage_review(
+                    candidate, chunk, review_dir=directory,
+                    run_id=request["run_id"], chunk_index=1, attempt=1,
+                    host_runtime="codex", model="gpt-6-luna", timeout=5,
+                    agent_id="main", runner="exec", binary="codex", config_path=None,
+                    controller=bridge.RunController(), output_policy="review_draft",
+                )
+            self.assertEqual(pointer["status"], "completed_with_disputes")
+            envelope = json.loads((directory / pointer["audit_path"]).read_text())
+            self.assertFalse(envelope["coverage_complete"])
+            self.assertFalse(envelope["submission_ready"])
+            self.assertEqual(len(envelope["source_classification_disputes"]), 1)
+            self.assertEqual(envelope["source_classification_disputes"][0]["independent_result"], result)
+
+            def bridge_consume():
+                bridge._validate_completed_obligation_ledger_chain(
+                    directory, envelope, pointer, candidate, chunk,
+                    chunk_index=1, attempt=1, output_policy="review_draft",
+                )
+
+            bridge_consume()
+            candidate_path = directory / "accepted-candidate.json"
+            bridge._write_json(candidate_path, candidate)
+            full_request = json.loads((directory / "llm-request.json").read_text())
+            audit = {
+                "chunk_count": 1, "adapter_id": "codex", "host_runtime": "codex",
+                "chunk_lifecycle": [{
+                    "chunk_index": 1, "status": "completed", "remote_operation_state": "completed",
+                }],
+                "chunk_runs": [{
+                    "chunk_index": 1, "response_path": str(candidate_path),
+                    "accepted_response_sha256": sha256_json(candidate),
+                    "independent_obligation_review": pointer,
+                }],
+            }
+            receipts = pipeline._validate_independent_obligation_receipts(
+                audit=audit, review_root=directory, expected_run_id=request["run_id"],
+                expected_request_body_sha=request_body_sha256(full_request),
+                expected_request_envelope_sha=None, expected_request_file_sha=None,
+                output_policy="review_draft",
+            )
+            self.assertEqual(receipts[0]["source_classification_disputes"], envelope["source_classification_disputes"])
+            self.assertEqual(receipts[0]["manual_review_required_clause_ids"], ["C1"])
+            with self.assertRaises(ValueError):
+                pipeline.enforce_obligation_review_output_policy(
+                    [result], output_policy="submission",
+                    source_classification_disputes=envelope["source_classification_disputes"],
+                )
+
+            gates = pipeline._classification_dispute_release_gates(
+                receipts, clauses=chunk["clauses"],
+            )
+            self.assertEqual(len(gates), 1)
+            binding = manual_fixtures.ManualReviewTests._binding(run_id=receipts[0]["run_id"])
+            ledger = build_manual_review_ledger({}, [], binding=binding, release_gates=gates)
+            self.assertEqual(load_and_validate(ledger, ROOT / "schema/manual-review-ledger.schema.json"), [])
+            self.assertFalse(ledger["submission_ready"])
+            docx_path = Path(tmp) / "draft.docx"
+            doc = Document()
+            doc.add_paragraph("保留来源原文")
+            append_manual_review_markers(doc, ledger)
+            doc.save(docx_path)
+            self.assertTrue(audit_manual_review_markers(docx_path, ledger)["valid"])
+            rendered_text = "\n".join(item.text for item in Document(docx_path).paragraphs)
+            self.assertIn("待人工判断", rendered_text)
+            self.assertIn("确认前不可提交", rendered_text)
+
+            forged = copy.deepcopy(envelope)
+            forged["source_classification_disputes"] = []
+            with self.assertRaises(ValueError):
+                native.validate_draft_dispute_envelope(
+                    forged, request, output_policy="review_draft",
+                )
 
 
 if __name__=="__main__":unittest.main()

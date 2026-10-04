@@ -160,8 +160,16 @@ class ApplicabilityReassessmentTests(unittest.TestCase):
 
     def test_new_generation_schema_is_host_neutral_without_changing_history_or_retries(self):
         raw, _, chunk, _ = captured_case(); canonical = copy.deepcopy(chunk["response_schema"])
-        fresh = bridge.compact_model_packet(chunk)["response_schema"]
-        self.assertEqual(fresh, primary_generation_schema(canonical))
+        fresh = primary_generation_schema(canonical)
+        native_packet_schema = bridge.compact_model_packet(chunk)["response_schema"]
+        self.assertEqual(
+            native_packet_schema["properties"]["response_wire_format"]["enum"],
+            [bridge.PRIMARY_CLAUSE_REVIEW_WIRE_FORMAT],
+        )
+        self.assertEqual(
+            set(native_packet_schema["properties"]["clause_reviews"]["required"]),
+            {item["id"] for item in chunk["clauses"]},
+        )
         self.assertEqual(bridge.compact_model_packet(chunk, fresh_primary=False)["response_schema"], canonical)
         for schema in (fresh, native_output_schema(fresh)):
             branches = schema["properties"]["clause_reviews"]["items"]["anyOf"]

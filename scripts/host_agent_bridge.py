@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from artifact_io import atomic_write_text
+from failure_diagnostics import exception_diagnostics
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPTS = ROOT / "scripts"
@@ -202,7 +203,9 @@ from host_review_contract import (  # noqa: E402
     validate_response as _shared_validate_response,
 )
 from host_review_schema import (  # noqa: E402
+    PRIMARY_CLAUSE_REVIEW_WIRE_FORMAT,
     native_output_schema,
+    primary_clause_review_wire_schema,
     primary_generation_schema,
     normalize_native_response,
     require_native_schema,
@@ -258,6 +261,7 @@ from document_text_font import materialize_document_font_references
 from section_description import project_section_description_claims
 from unresolved_label_assessment import build_unresolved_label_assessments
 from source_inventory_dispute import build_inventory_existence_disputes
+from source_classification_dispute import build_informational_uncertainty_disputes
 from administrative_relation_projection import (
     project_administrative_copies, project_copied_administrative_qualifiers,
 )
@@ -395,6 +399,40 @@ def compact_model_packet(chunk: dict[str, Any], *, fresh_primary: bool = True) -
             "$defs": copy.deepcopy(contract.get("$defs", {})),
         }
     response_schema = chunk.get("response_schema")
+    if isinstance(response_schema, dict):
+        if fresh_primary:
+            model_response_schema = primary_generation_schema(response_schema)
+            if model_response_schema.get("properties", {}).get("contract_version", {}).get("const") == "3.0":
+                clauses_for_wire = chunk.get("clauses")
+                clause_ids = [
+                    item.get("id") for item in clauses_for_wire
+                    if isinstance(item, dict)
+                ] if isinstance(clauses_for_wire, list) else []
+                model_response_schema = primary_clause_review_wire_schema(
+                    model_response_schema, clause_ids,
+                )
+        else:
+            model_response_schema = copy.deepcopy(response_schema)
+    else:
+        model_response_schema = {}
+    response_contract = {
+        "required": [
+            "contract_version", "requirements", "clause_reviews",
+            "unsupported_items", "reported_conflicts",
+        ],
+        "allowed_classifications": [
+            "covered", "executable", "external_compliance", "ignored", "informational",
+            "not_applicable", "requires_metadata", "requires_source_content", "unresolved",
+            "requires_source_verification", "unsupported", "unsupported_backend", "unverifiable", "verify_existing",
+        ],
+    }
+    if (isinstance(model_response_schema, dict)
+            and model_response_schema.get("properties", {}).get("response_wire_format", {}).get("enum")
+            == [PRIMARY_CLAUSE_REVIEW_WIRE_FORMAT]):
+        response_contract["required"].append("response_wire_format")
+        response_contract["clause_reviews_encoding"] = (
+            "object keyed by every current clause ID; each value repeats the matching clause_id"
+        )
     rule_spec = chunk.get("rule_spec")
     existing_requirements = (
         rule_spec.get("requirements", [])
@@ -451,8 +489,7 @@ def compact_model_packet(chunk: dict[str, Any], *, fresh_primary: bool = True) -
         "page_evidence": chunk.get("page_evidence", {}),
         "allowed_roles": contract.get("allowed_roles", []) if isinstance(contract, dict) else [],
         "requirement_contract": compact_contract,
-        "response_schema": (primary_generation_schema(response_schema) if fresh_primary
-                            else copy.deepcopy(response_schema)) if isinstance(response_schema, dict) else {},
+        "response_schema": model_response_schema,
         "declarations_schema": role_properties.get("declarations") if isinstance(role_properties, dict) else None,
         "rule_spec_advisory": {
             key: rule_spec[key]
@@ -460,17 +497,7 @@ def compact_model_packet(chunk: dict[str, Any], *, fresh_primary: bool = True) -
             if isinstance(rule_spec, dict) and key in rule_spec
         },
         "eligible_existing_requirements": existing_requirements,
-        "response_contract": {
-            "required": [
-                "contract_version", "requirements", "clause_reviews",
-                "unsupported_items", "reported_conflicts",
-            ],
-            "allowed_classifications": [
-                "covered", "executable", "external_compliance", "ignored", "informational",
-                "not_applicable", "requires_metadata", "requires_source_content", "unresolved",
-                "requires_source_verification", "unsupported", "unsupported_backend", "unverifiable", "verify_existing",
-            ],
-        },
+        "response_contract": response_contract,
     }
 
 
@@ -965,6 +992,23 @@ def _contract_repair_guidance(
     return "\n".join(f"- {rule}" for rule in rules) or "- Re-read the current chunk contract and regenerate the complete JSON object."
 
 
+def _is_external_only_non_requirement_relation(record: Any) -> bool:
+    """Return true only for a source-bound relation to external-only clauses."""
+    return (
+        isinstance(record, dict)
+        and record.get("code") == "non_requirement_classification_relation"
+        and record.get("mechanically_removable") is False
+        and record.get("relation_category") == "non_requirement_classification"
+        and isinstance(record.get("requirement_index"), int)
+        and isinstance(record.get("clause_classifications"), dict)
+        and bool(record["clause_classifications"])
+        and all(
+            values == ["external_compliance"]
+            for values in record["clause_classifications"].values()
+        )
+    )
+
+
 def _fresh_semantic_split_reason(records: Any) -> str | None:
     """Identify incompatible errors before offering a bounded parent retry.
 
@@ -988,17 +1032,7 @@ def _fresh_semantic_split_reason(records: Any) -> str | None:
         return "mixed_executable_external_relation"
     external_records = [
         record for record in records
-        if isinstance(record, dict)
-        and record.get("code") == "non_requirement_classification_relation"
-        and record.get("mechanically_removable") is False
-        and record.get("relation_category") == "non_requirement_classification"
-        and isinstance(record.get("requirement_index"), int)
-        and isinstance(record.get("clause_classifications"), dict)
-        and record["clause_classifications"]
-        and all(
-            values == ["external_compliance"]
-            for values in record["clause_classifications"].values()
-        )
+        if _is_external_only_non_requirement_relation(record)
     ]
     orphan_records = [
         record for record in records
@@ -1047,9 +1081,7 @@ def _structured_contract_repair_guidance(
     external_relation_pointers = {
         str(record.get("json_pointer"))
         for record in records
-        if isinstance(record, dict)
-        and record.get("code") == "non_requirement_classification_relation"
-        and record.get("mechanically_removable") is False
+        if _is_external_only_non_requirement_relation(record)
     }
     for record in records:
         if not isinstance(record, dict):
@@ -5449,6 +5481,305 @@ def _v3_uncovered_obligation_reclassification_allowed(
     return repaired is not None
 
 
+def _v3_mixed_declaration_relation_target(
+    previous_response: Any,
+    records: list[dict[str, Any]],
+    chunk: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """Find one exact declaration group that already renders a mixed clause.
+
+    This proves only a requirement edge to an existing printed declaration.
+    It does not classify the clause or discharge any external obligation.
+    """
+    if (
+        not isinstance(previous_response, dict)
+        or previous_response.get("contract_version") != HOST_REVIEW_CONTRACT_V3
+        or not isinstance(chunk, dict)
+        or not isinstance(records, list)
+        or len(records) != 1
+        or not isinstance(records[0], dict)
+        or records[0].get("code") != "missing_derived_requirement"
+        or records[0].get("blocked_by_parent_relation")
+        or not isinstance(chunk.get("clauses"), list)
+        or not isinstance(chunk.get("evidence_context"), dict)
+    ):
+        return None
+    record = records[0]
+    match = re.fullmatch(r"\$\.clause_reviews\[(\d+)\]", str(record.get("json_pointer") or ""))
+    if (
+        match is None
+        or record.get("raw_error")
+        != f"{record['json_pointer']}: executable_review_requires_derived_requirement"
+    ):
+        return None
+    reviews = previous_response.get("clause_reviews")
+    requirements = previous_response.get("requirements")
+    if not isinstance(reviews, list) or not isinstance(requirements, list):
+        return None
+    review_index = int(match.group(1))
+    if review_index >= len(reviews):
+        return None
+    review = reviews[review_index]
+    if (
+        not isinstance(review, dict)
+        or review.get("classification") != "executable_with_external_check"
+        or record.get("clause_id") not in (None, review.get("clause_id"))
+    ):
+        return None
+    obligations = review.get("obligations")
+    if not isinstance(obligations, list) or len(obligations) < 2:
+        return None
+    obligation_ids = [
+        item.get("id") for item in obligations if isinstance(item, dict)
+    ]
+    obligation_routes = {
+        (item.get("status"), item.get("route"))
+        for item in obligations if isinstance(item, dict)
+    }
+    if (
+        len(obligation_ids) != len(obligations)
+        or any(not isinstance(value, str) or not value for value in obligation_ids)
+        or len(set(obligation_ids)) != len(obligation_ids)
+        or obligation_routes != {("covered", "automatic"), ("unverifiable", "human")}
+    ):
+        return None
+
+    clauses = chunk["clauses"]
+    clause_map = {
+        item.get("id"): item for item in clauses
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    if len(clause_map) != len(clauses):
+        return None
+    clause_id = review.get("clause_id")
+    clause = clause_map.get(clause_id)
+    if not isinstance(clause, dict):
+        return None
+    clause_evidence_ids = clause.get("evidence_ids")
+    if (
+        not isinstance(clause_evidence_ids, list)
+        or not clause_evidence_ids
+        or any(not isinstance(value, str) or not value for value in clause_evidence_ids)
+        or len(set(clause_evidence_ids)) != len(clause_evidence_ids)
+    ):
+        return None
+    evidence_context = chunk["evidence_context"]
+    try:
+        _exact_clause_source_text(clause, evidence_context)
+        for obligation in obligations:
+            bind_atom_quote(
+                obligation.get("source_quote"), clause_id,
+                clause_map, evidence_context,
+            )
+    except (NativeSemanticReviewError, ValueError, TypeError, KeyError):
+        return None
+
+    candidates = _fixed_declaration_candidates(
+        clauses, evidence_context,
+        anchor=chunk.get("declaration_anchor_preference"),
+    )
+    matching_requirements: list[tuple[int, dict[str, Any], dict[str, Any]]] = []
+    for candidate in candidates:
+        candidate_clause_ids = candidate.get("clause_ids")
+        candidate_evidence_ids = candidate.get("evidence_ids")
+        if (
+            not isinstance(candidate_clause_ids, list)
+            or clause_id not in candidate_clause_ids
+            or not (set(clause_evidence_ids) & set(candidate.get("body_evidence_ids", [])))
+            or not isinstance(candidate_evidence_ids, list)
+        ):
+            continue
+        try:
+            for candidate_clause_id in candidate_clause_ids:
+                candidate_clause = clause_map[candidate_clause_id]
+                _exact_clause_source_text(candidate_clause, evidence_context)
+                span = candidate_clause["source_span"]
+                if span.get("location") != evidence_context[span["evidence_id"]].get("location"):
+                    raise ValueError("declaration source location mismatch")
+        except (NativeSemanticReviewError, ValueError, TypeError, KeyError):
+            continue
+        for requirement_index, requirement in enumerate(requirements):
+            if not isinstance(requirement, dict) or requirement.get("role") != "declarations":
+                continue
+            properties = requirement.get("properties")
+            items = properties.get("items") if isinstance(properties, dict) else None
+            if (
+                not isinstance(properties, dict)
+                or properties.get("before_role") != candidate.get("before_role")
+                or not isinstance(items, list)
+                or len(items) != 1
+                or not isinstance(items[0], dict)
+                or items[0].get("source_evidence_ids") != candidate_evidence_ids
+                or requirement.get("existing_requirement_id") not in (None, "")
+            ):
+                continue
+            edge_ids = requirement.get("clause_ids")
+            evidence_ids = requirement.get("evidence_ids")
+            if (
+                not isinstance(edge_ids, list)
+                or not edge_ids
+                or clause_id in edge_ids
+                or len(set(edge_ids)) != len(edge_ids)
+                or any(value not in clause_map for value in edge_ids)
+                or not isinstance(evidence_ids, list)
+            ):
+                continue
+            selected_evidence_ids = list(dict.fromkeys(
+                str(evidence_id)
+                for edge_id in edge_ids
+                for evidence_id in (clause_map[edge_id].get("evidence_ids") or [])
+            ))
+            if (
+                evidence_ids != selected_evidence_ids
+                or not set(clause_evidence_ids) <= set(evidence_ids)
+                or not matches_declaration_render_selection(
+                    candidate, edge_ids, items[0].get("source_evidence_ids"),
+                )
+            ):
+                continue
+            matching_requirements.append((requirement_index, requirement, candidate))
+    if len(matching_requirements) != 1:
+        return None
+    requirement_index, requirement, candidate = matching_requirements[0]
+    return {
+        "clause_id": clause_id,
+        "review_index": review_index,
+        "requirement_index": requirement_index,
+        "clause_evidence_ids": list(clause_evidence_ids),
+        "requirement_clause_ids": copy.deepcopy(requirement["clause_ids"]),
+        "source_candidate": copy.deepcopy(candidate),
+    }
+
+
+def _declaration_render_properties_without_item_ids(properties: Any) -> Any:
+    if not isinstance(properties, dict) or not isinstance(properties.get("items"), list):
+        return None
+    normalized = copy.deepcopy(properties)
+    if len(normalized["items"]) != 1 or not isinstance(normalized["items"][0], dict):
+        return None
+    normalized["items"][0].pop("id", None)
+    return normalized
+
+
+def _v3_mixed_declaration_relation_completion_response(
+    previous_response: Any,
+    current_response: Any,
+    records: list[dict[str, Any]],
+    *,
+    chunk: dict[str, Any],
+) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+    """Attach a mixed clause to its already selected exact declaration group.
+
+    A retry may express the missing edge directly or add a duplicate declaration
+    item. The latter is discarded only when its complete render payload is an
+    exact duplicate of the unique source-bound parent declaration. The output
+    always preserves the parent item and its human obligations without adding a
+    second rendered declaration.
+    """
+    plan = _v3_mixed_declaration_relation_target(previous_response, records, chunk)
+    if (
+        plan is None
+        or not isinstance(current_response, dict)
+        or current_response.get("contract_version") != HOST_REVIEW_CONTRACT_V3
+        or not _retry_fingerprints_complete(_retry_input_fingerprints(chunk))
+    ):
+        return None, None
+    for response in (previous_response, current_response):
+        provenance = response.get("provenance")
+        if provenance is not None and provenance != chunk.get("provenance"):
+            return None, None
+    for key in set(previous_response) | set(current_response):
+        if key in {"provenance", "requirements"}:
+            continue
+        if previous_response.get(key) != current_response.get(key):
+            return None, None
+    previous_requirements = previous_response.get("requirements")
+    current_requirements = current_response.get("requirements")
+    if not isinstance(previous_requirements, list) or not isinstance(current_requirements, list):
+        return None, None
+
+    source_parent, _parent_materialization = _materialize_fixed_declaration_source_text(
+        previous_response, chunk,
+    )
+    source_current, _current_materialization = _materialize_fixed_declaration_source_text(
+        current_response, chunk,
+    )
+    parent_requirements = source_parent.get("requirements")
+    retry_requirements = source_current.get("requirements")
+    requirement_index = int(plan["requirement_index"])
+    clause_id = str(plan["clause_id"])
+    if (
+        not isinstance(parent_requirements, list)
+        or not isinstance(retry_requirements, list)
+        or requirement_index >= len(parent_requirements)
+    ):
+        return None, None
+    parent_requirement = parent_requirements[requirement_index]
+    if not isinstance(parent_requirement, dict):
+        return None, None
+
+    expected_direct = copy.deepcopy(parent_requirements)
+    expected_edges = list(expected_direct[requirement_index].get("clause_ids", []))
+    order = {item.get("id"): index for index, item in enumerate(chunk["clauses"])}
+    if clause_id not in order or any(value not in order for value in expected_edges):
+        return None, None
+    expected_edges.append(clause_id)
+    expected_direct[requirement_index]["clause_ids"] = sorted(
+        set(expected_edges), key=lambda value: order[value],
+    )
+    direct_link = retry_requirements == expected_direct
+
+    duplicate_proposal: dict[str, Any] | None = None
+    if not direct_link:
+        if (
+            len(retry_requirements) != len(parent_requirements) + 1
+            or retry_requirements[:len(parent_requirements)] != parent_requirements
+        ):
+            return None, None
+        duplicate_proposal = retry_requirements[-1]
+        target_clause = next(
+            (item for item in chunk["clauses"] if item.get("id") == clause_id), None,
+        )
+        if (
+            not isinstance(duplicate_proposal, dict)
+            or duplicate_proposal.get("role") != "declarations"
+            or duplicate_proposal.get("clause_ids") != [clause_id]
+            or duplicate_proposal.get("evidence_ids")
+            != (target_clause.get("evidence_ids") if isinstance(target_clause, dict) else None)
+            or duplicate_proposal.get("existing_requirement_id") not in (None, "")
+            or _declaration_render_properties_without_item_ids(
+                duplicate_proposal.get("properties")
+            ) != _declaration_render_properties_without_item_ids(
+                parent_requirement.get("properties")
+            )
+        ):
+            return None, None
+
+    repaired = copy.deepcopy(source_parent)
+    repaired_requirement = repaired["requirements"][requirement_index]
+    repaired_requirement["clause_ids"] = expected_direct[requirement_index]["clause_ids"]
+    rematerialized, _audit = _materialize_fixed_declaration_source_text(repaired, chunk)
+    if rematerialized != repaired or validate_host_agent_response(repaired, chunk):
+        return None, None
+    return repaired, {
+        "rule_id": "source_bound_mixed_declaration_relation_reuse_v1",
+        "target_clause_id": clause_id,
+        "target_review_index": plan["review_index"],
+        "existing_requirement_index": requirement_index,
+        "source_candidate": copy.deepcopy(plan["source_candidate"]),
+        "source_evidence_ids": copy.deepcopy(plan["source_candidate"]["evidence_ids"]),
+        "human_obligation_ids_preserved": [
+            item["id"] for item in previous_response["clause_reviews"][plan["review_index"]]["obligations"]
+            if item.get("status") == "unverifiable" and item.get("route") == "human"
+        ],
+        "duplicate_declaration_proposal_discarded": duplicate_proposal is not None,
+        "duplicate_proposal_sha256": (
+            _response_sha256(duplicate_proposal) if duplicate_proposal is not None else None
+        ),
+        "accepted_relation_change": "added_target_clause_to_existing_declaration",
+    }
+
+
 def _v3_relation_completion_response(
     previous_response: Any,
     current_response: Any,
@@ -5492,6 +5823,13 @@ def _v3_relation_completion_response(
         or current_response.get("contract_version") != HOST_REVIEW_CONTRACT_V3
     ):
         return None, None
+    mixed_declaration_repair, mixed_declaration_audit = (
+        _v3_mixed_declaration_relation_completion_response(
+            previous_response, current_response, records, chunk=chunk,
+        )
+    )
+    if mixed_declaration_repair is not None:
+        return mixed_declaration_repair, mixed_declaration_audit
     # Relation completion may change only requirements.  Protect every current
     # and future response-level semantic field, not just today's known arrays.
     for key in set(previous_response) | set(current_response):
@@ -11037,6 +11375,7 @@ def _host_prompt(*, request_path: Path, chunk_path: Path,
                  retry_error_records: list[dict[str, Any]] | None = None,
                  provenance: dict[str, Any] | None = None) -> str:
     contract_version = HOST_REVIEW_CONTRACT_V2
+    packet: Any = None
     try:
         packet = strict_json_loads(chunk_path.read_text(encoding="utf-8"))
         if isinstance(packet, dict) and packet.get("contract_version") in SUPPORTED_HOST_REVIEW_CONTRACTS:
@@ -11093,9 +11432,7 @@ def _host_prompt(*, request_path: Path, chunk_path: Path,
     v3_external_relation_retry = (
         v3_non_requirement_projection_retry
         and any(
-            isinstance(record, dict)
-            and record.get("code") == "non_requirement_classification_relation"
-            and record.get("mechanically_removable") is False
+            _is_external_only_non_requirement_relation(record)
             for record in (retry_error_records or [])
         )
     )
@@ -11143,6 +11480,7 @@ def _host_prompt(*, request_path: Path, chunk_path: Path,
                     "identify the exact file read by the prompt"
                 )
         retry_parent_inline = None
+        parent_response: dict[str, Any] | None = None
         try:
             parent_response = strict_json_loads(
                 retry_parent_response_path.read_text(encoding="utf-8")
@@ -11161,6 +11499,39 @@ def _host_prompt(*, request_path: Path, chunk_path: Path,
             # The path and hash remain in the prompt.  The bridge still fails
             # closed if the retry changes unapproved semantic fields.
             retry_parent_inline = None
+        mixed_declaration_plan = (
+            _v3_mixed_declaration_relation_target(
+                parent_response, retry_error_records or [], packet,
+            )
+            if contract_version == HOST_REVIEW_CONTRACT_V3
+            and isinstance(parent_response, dict)
+            and isinstance(packet, dict)
+            else None
+        )
+        v3_mixed_declaration_relation_retry = mixed_declaration_plan is not None
+        if mixed_declaration_plan is not None:
+            retry_guidance = (
+                "- This mixed clause has a covered printable obligation and a separate human-only obligation. "
+                f"Its exact source text is already in the unique declaration requirement at index "
+                f"{mixed_declaration_plan['requirement_index']}. Add only clause ID "
+                f"{mixed_declaration_plan['clause_id']} to that requirement's clause_ids. Preserve its "
+                "evidence_ids and source-backed declaration payload. Do not add a second declaration item "
+                "or change the review, obligations, or human route."
+            )
+            if retry_hint:
+                retry_text = (
+                    "\nThis is a retry after the previous attempt was rejected locally. "
+                    "Do not discuss the failure; return a newly generated valid JSON object. "
+                    f"Reason category: {retry_hint}.\n"
+                    "Apply the following targeted contract repair rules:\n"
+                    f"{retry_guidance}\n"
+                )
+        mixed_declaration_change_rule = (
+            "For this source-proved mixed declaration, add only the named clause ID to the existing "
+            f"declaration requirement at index {mixed_declaration_plan['requirement_index']}. Keep its "
+            "evidence IDs, properties, and all reviews unchanged; never add a second declaration."
+            if mixed_declaration_plan is not None else None
+        )
         requirement_change_rule = (
             "Change ONLY the classification of the reviews named in the CLASSIFICATION-ONLY REASSESSMENT targets, "
             "and only to a source-supported covered/executable classification. Freeze all obligations "
@@ -11173,6 +11544,8 @@ def _host_prompt(*, request_path: Path, chunk_path: Path,
             if v3_source_fragment_binding_retry else
             "For this retry, preserve every requirement and every clause review exactly except the specific obligations arrays named by external_action_obligations_missing records. Add only source-derived external duties with status unverifiable; do not remove or edit the invalid source-only requirement yourself. Afterward the bridge may project that requirement only if its exact source, evidence, and external-only relation pass the existing deterministic checks."
             if v3_external_action_inventory_retry else
+            mixed_declaration_change_rule
+            if v3_mixed_declaration_relation_retry and mixed_declaration_change_rule is not None else
             "For every distinct executable clause explicitly identified by the validator as missing an authoritative requirement edge, "
             "the retry must add one evidence-backed requirement for that clause. Preserve every existing non-placeholder "
             "requirement and review unchanged. If the parent contains a requirement with empty clause_ids, empty evidence_ids, "
@@ -11345,6 +11718,17 @@ non-quote error cannot use this context-selection rule; return unchanged."""
         retry_invariant = """\nFINAL RETRY INVARIANT: do not remove or modify an external-duty requirement, any requirement source edge, or any clause review. The bridge alone can project a proved empty DOCX shell while preserving pending atomic duties. If no such exact code-owned repair exists, return unchanged and fail closed; do not use a generic non-requirement deletion rule."""
     elif v3_non_requirement_projection_retry:
         retry_invariant = """\nFINAL RETRY INVARIANT: copy every clause_review classification, obligation, reason, and evidence ID from the repair baseline exactly. Remove only validator-identified informational-only requirement objects with mechanically_removable=true; preserve every other requirement and all source edges exactly. External, unresolved, unsupported, and prerequisite-bound objects are not generic deletion candidates. If this exact projection is not possible, return the parent unchanged and fail closed."""
+    elif v3_mixed_declaration_relation_retry and mixed_declaration_plan is not None:
+        retry_invariant = f"""\nFINAL RETRY INVARIANT: source-bound mixed declaration edge completion only.
+Append {mixed_declaration_plan['clause_id']} to
+requirements[{mixed_declaration_plan['requirement_index']}].clause_ids, the one
+existing declaration requirement selected by exact current source evidence.
+Preserve its evidence_ids and render payload. Preserve the complete
+clause_review, including every covered obligation and every unverifiable human
+obligation. Do not add or duplicate a declaration requirement/item, alter
+classifications, obligations, reasons, verification or any other field. If the
+target no longer maps uniquely to this exact source group, return unchanged and
+let the bridge fail closed."""
     elif v3_relation_addition_retry:
         retry_invariant = """\nFINAL RETRY INVARIANT: copy every clause_review classification and obligation
 from the repair baseline exactly. Preserve every non-placeholder requirement
@@ -12219,6 +12603,8 @@ def _validate_completed_obligation_ledger_chain(
     expected_request = build_obligation_coverage_request(
         accepted_response, chunk, run_id=str(provenance["run_id"]),
         chunk_index=chunk_index,
+        wire_schema_policy=review_request.get("native_wire_schema_policy"),
+        partition_policy=review_request.get("native_review_partition_policy"),
     )
     expected_request["attempt"] = attempt
     expected_request["provider_attempt"] = provider_attempt
@@ -12255,6 +12641,7 @@ def _validate_completed_obligation_ledger_chain(
         normalized_response = copy.deepcopy(reconstructed_response)
         normalized_results = validate_obligation_coverage_response(
             normalized_response, checks, allow_draft_disputes=output_policy == "review_draft",
+            review_request=review_request,
         )
         reconstructed_compilation = bind_validated_source_reference_selections(
             reconstructed_compilation, reconstructed_response, normalized_response,
@@ -12421,6 +12808,11 @@ def _validate_completed_obligation_ledger_chain(
     inventory_disputes = build_inventory_existence_disputes(review_request["checks"], results)
     if inventory_disputes:
         expected_ledger_metadata["source_inventory_disputes"] = inventory_disputes
+    classification_disputes = build_informational_uncertainty_disputes(
+        review_request["checks"], results, request=review_request,
+    )
+    if classification_disputes:
+        expected_ledger_metadata["source_classification_disputes"] = classification_disputes
     if ledger != expected_ledger_metadata:
         raise ValueError(
             f"Host Agent chunk {chunk_index} AO ledger does not match the canonical current-run reconstruction"
@@ -12765,6 +13157,11 @@ def _write_obligation_analysis_ledger(
     inventory_disputes = build_inventory_existence_disputes(coverage_request["checks"], result_items)
     if inventory_disputes:
         ledger["source_inventory_disputes"] = inventory_disputes
+    classification_disputes = build_informational_uncertainty_disputes(
+        coverage_request["checks"], result_items, request=coverage_request,
+    )
+    if classification_disputes:
+        ledger["source_classification_disputes"] = classification_disputes
     ledger_path = output_dir / "obligation-analysis-ledger.json"
     if ledger_path.exists():
         raise ValueError(f"refusing to overwrite obligation analysis ledger: {ledger_path}")
@@ -12936,13 +13333,18 @@ def _run_independent_obligation_coverage_review(
         inventory_disputes = build_inventory_existence_disputes(
             coverage_request["checks"], review_result.get("results") or [],
         )
-        has_disputes = bool(incomplete_results or inventory_disputes)
+        classification_disputes = build_informational_uncertainty_disputes(
+            coverage_request["checks"], review_result.get("results") or [],
+            request=coverage_request,
+        )
+        has_disputes = bool(incomplete_results or inventory_disputes or classification_disputes)
         envelope = {
             "schema_version": "1.0",
             "protocol": OBLIGATION_COVERAGE_PROTOCOL,
             "status": ("completed_with_disputes" if output_policy == "review_draft" else "rejected") if has_disputes else "completed",
             "coverage_complete": not has_disputes,
             **({"source_inventory_disputes": inventory_disputes} if inventory_disputes else {}),
+            **({"source_classification_disputes": classification_disputes} if classification_disputes else {}),
             "submission_ready": False,
             "run_id": run_id,
             "chunk_index": chunk_index,
@@ -13825,6 +14227,10 @@ def _run_independent_obligation_coverage_review(
             "error_type": type(review_error).__name__,
             "error": str(review_error),
             "review_output_dir": str(output_dir.resolve()),
+            "failure_diagnostics": exception_diagnostics(review_error),
+            "failure_observed_at": datetime.now(timezone.utc).isoformat(),
+            "retryable": False,
+            "submission_ready": False,
             **({"failure_code": "max_output_tokens", "retryable": False,
                 "checks_count": len(coverage_request["checks"]),
                 "failure_artifacts": failure_artifacts,
@@ -14218,6 +14624,7 @@ def run_bridge(
                 "message": str(error),
                 "cause_type": type(underlying_error).__name__ if underlying_error else None,
                 "cause_message": str(underlying_error) if underlying_error else None,
+                "failure_diagnostics": exception_diagnostics(error),
             },
             "primary_error": primary_error,
             "primary_failure_selection": copy.deepcopy(primary_failure_selection) or {

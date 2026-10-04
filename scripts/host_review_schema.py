@@ -13,6 +13,7 @@ from typing import Any
 
 from compliance import classification_requires_requirement
 from format_contract_guards import registered_input_catalog, input_prerequisite_generation_schema
+from responsibility_ledger import route_for_obligation
 
 
 def applicability_value_schema() -> dict[str, Any]:
@@ -38,6 +39,9 @@ def applicability_value_schema() -> dict[str, Any]:
 
 
 _COMPOSITION_KEYS = {"$ref", "const", "enum", "anyOf"}
+PRIMARY_CLAUSE_REVIEW_WIRE_FORMAT = "host_review_v3_clause_reviews_by_id_v1"
+_PRIMARY_CLAUSE_REVIEW_WIRE_FIELD = "response_wire_format"
+_PRIMARY_CLAUSE_REVIEW_DEF = "primaryClauseReviewByIdV1"
 
 # OpenAI-compatible strict structured outputs accept the shape of JSON data,
 # but not every JSON-Schema validation keyword.  These constraints remain in
@@ -146,7 +150,7 @@ def _project_native_schema(node: Any) -> Any:
 
 
 def primary_generation_schema(response_schema: dict[str, Any]) -> dict[str, Any]:
-    """Require explicit modality/scope in NEW v3 primary proposals, on any host.
+    """Require coherent explicit dimensions in NEW v3 primary proposals.
 
     This is not the canonical historical-response schema, not an interpretation,
     and not the independent-review schema. Retries keep their parent contract;
@@ -159,16 +163,188 @@ def primary_generation_schema(response_schema: dict[str, Any]) -> dict[str, Any]
     if properties.get("contract_version", {}).get("const") != "3.0":
         return schema
     items = properties.get("clause_reviews", {}).get("items", {})
+    generated_branches = []
     for branch in items.get("anyOf", [items]):
         atom = branch.get("properties", {}).get("obligations", {}).get("items", {})
         fields = atom.get("properties", {})
         if not all(name in fields for name in ("force", "applicability")):
+            generated_branches.append(branch)
             continue
         required = atom.setdefault("required", [])
         for name in ("force", "applicability"):
             if name not in required:
                 required.append(name)
+        _couple_covered_scope_for_generation(atom)
+        classifications = branch.get("properties", {}).get("classification", {}).get("enum", [])
+        statuses = fields.get("status", {}).get("enum", [])
+        if not classifications or not statuses or "route" not in fields:
+            generated_branches.append(branch)
+            continue
+        # Equal routing vectors share a review branch. The source classification
+        # and status remain model choices; only their existing derived route is
+        # constrained. Explicit routes are required by declaration projection.
+        groups: dict[tuple[str, ...], list[str]] = {}
+        for classification in classifications:
+            routes = tuple(route_for_obligation(classification, status) for status in statuses)
+            groups.setdefault(routes, []).append(classification)
+        for names in groups.values():
+            generated = copy.deepcopy(branch)
+            generated["properties"]["classification"]["enum"] = names
+            _couple_routes_for_generation(
+                generated["properties"]["obligations"]["items"], names[0],
+            )
+            generated_branches.append(generated)
+    if "anyOf" in items:
+        items["anyOf"] = generated_branches
+    elif generated_branches:
+        properties["clause_reviews"]["items"] = {"anyOf": generated_branches}
+    # This value is a deterministic projection of a narrowly recognized exact
+    # source policy. Let the bridge materialize it only after an exact source
+    # binding; a model-authored value can otherwise attach it to a label-only
+    # clause and fail the source binding contract.
+    administration = schema.get("$defs", {}).get("nonPublicAdministrationSpec")
+    if isinstance(administration, dict):
+        admin_properties = administration.get("properties")
+        if isinstance(admin_properties, dict):
+            admin_properties.pop("publication_default_policy", None)
     return schema
+
+
+def _clause_review_ids(response_schema: dict[str, Any]) -> set[str]:
+    """Collect the clause IDs permitted by a canonical v3 review item schema."""
+    items = (response_schema.get("properties", {}).get("clause_reviews", {})
+             if isinstance(response_schema.get("properties"), dict) else {})
+    item_schema = items.get("items") if isinstance(items, dict) else None
+    found: set[str] = set()
+
+    def visit(node: Any) -> None:
+        if not isinstance(node, dict):
+            return
+        properties = node.get("properties")
+        clause_id = properties.get("clause_id") if isinstance(properties, dict) else None
+        enum = clause_id.get("enum") if isinstance(clause_id, dict) else None
+        if isinstance(enum, list):
+            found.update(value for value in enum if isinstance(value, str) and value)
+        for key in ("anyOf", "allOf", "oneOf"):
+            children = node.get(key)
+            if isinstance(children, list):
+                for child in children:
+                    visit(child)
+
+    visit(item_schema)
+    return found
+
+
+def primary_clause_review_wire_schema(
+    response_schema: dict[str, Any], clause_ids: list[str],
+) -> dict[str, Any]:
+    """Require one keyed review slot for every exact current v3 clause ID.
+
+    The canonical local response remains an array. This versioned native
+    transport object makes missing/extra clause slots structurally impossible
+    under strict output decoding while allowing existing array receipts to be
+    replayed unchanged.
+    """
+    schema = copy.deepcopy(response_schema)
+    properties = schema.get("properties")
+    if (not isinstance(properties, dict)
+            or properties.get("contract_version", {}).get("const") != "3.0"):
+        return schema
+    existing_format = properties.get(_PRIMARY_CLAUSE_REVIEW_WIRE_FIELD)
+    review_container = properties.get("clause_reviews")
+    if (isinstance(existing_format, dict)
+            and existing_format.get("enum") == [PRIMARY_CLAUSE_REVIEW_WIRE_FORMAT]
+            and isinstance(review_container, dict)
+            and review_container.get("type") == "object"):
+        return schema
+
+    ids = list(clause_ids)
+    if (not ids or any(not isinstance(value, str) or not value for value in ids)
+            or len(set(ids)) != len(ids)):
+        raise ValueError("fresh v3 primary response requires unique current clause IDs")
+    if set(ids) != _clause_review_ids(schema):
+        raise ValueError("fresh v3 primary clause IDs do not match the canonical response schema")
+    if not isinstance(review_container, dict) or review_container.get("type") != "array":
+        raise ValueError("fresh v3 primary response has no canonical clause-review array")
+    item_schema = review_container.get("items")
+    if not isinstance(item_schema, dict):
+        raise ValueError("fresh v3 primary response has no clause-review item schema")
+    definitions = schema.setdefault("$defs", {})
+    if not isinstance(definitions, dict) or _PRIMARY_CLAUSE_REVIEW_DEF in definitions:
+        raise ValueError("fresh v3 primary clause-review wire definition collides with an existing definition")
+    definitions[_PRIMARY_CLAUSE_REVIEW_DEF] = copy.deepcopy(item_schema)
+    properties["clause_reviews"] = {
+        "type": "object",
+        "properties": {
+            clause_id: {"$ref": f"#/$defs/{_PRIMARY_CLAUSE_REVIEW_DEF}"}
+            for clause_id in ids
+        },
+        "required": ids,
+        "additionalProperties": False,
+        "description": (
+            "Versioned native transport map: include every required current clause ID "
+            "exactly once as a key. The value's clause_id must equal that key."
+        ),
+    }
+    properties[_PRIMARY_CLAUSE_REVIEW_WIRE_FIELD] = {
+        "type": "string",
+        "enum": [PRIMARY_CLAUSE_REVIEW_WIRE_FORMAT],
+        "description": "Transport format marker; the local bridge removes it after exact canonicalization.",
+    }
+    required = schema.setdefault("required", [])
+    if _PRIMARY_CLAUSE_REVIEW_WIRE_FIELD not in required:
+        required.append(_PRIMARY_CLAUSE_REVIEW_WIRE_FIELD)
+    return schema
+
+
+def _couple_routes_for_generation(atom: dict[str, Any], classification: str) -> None:
+    """Mirror the responsibility ledger without rewriting a producer answer."""
+    required = atom.setdefault("required", [])
+    if "route" not in required:
+        required.append("route")
+    if isinstance(atom.get("anyOf"), list):
+        for alternative in atom["anyOf"]:
+            _couple_routes_for_generation(alternative, classification)
+        return
+    groups: dict[str, list[str]] = {}
+    for status in atom["properties"]["status"]["enum"]:
+        groups.setdefault(route_for_obligation(classification, status), []).append(status)
+    if len(groups) == 1:
+        atom["properties"]["route"]["enum"] = list(groups)
+        return
+    alternatives = []
+    for route, statuses in groups.items():
+        alternative = copy.deepcopy(atom)
+        alternative["properties"]["status"]["enum"] = statuses
+        alternative["properties"]["route"]["enum"] = [route]
+        alternatives.append(alternative)
+    atom["anyOf"] = alternatives
+
+
+def _couple_covered_scope_for_generation(atom: dict[str, Any]) -> None:
+    """Express the existing covered/scope invariant with portable anyOf.
+
+    Operates only on a generation-schema copy. Complete object alternatives
+    survive native projection, unlike conditional assertions. All semantic
+    fields remain model-owned; this supplies neither a duty nor its scope.
+    """
+    if isinstance(atom.get("anyOf"), list):
+        for alternative in atom["anyOf"]:
+            _couple_covered_scope_for_generation(alternative)
+        return
+    fields = atom.get("properties", {})
+    statuses = fields.get("status", {}).get("enum", [])
+    scopes = fields.get("applicability", {}).get("enum", [])
+    if "covered" not in statuses or not set(scopes).intersection({"unknown", "conflicted"}):
+        return
+    covered = copy.deepcopy(atom)
+    covered["properties"]["status"]["enum"] = ["covered"]
+    covered["properties"]["applicability"]["enum"] = [
+        value for value in scopes if value not in {"unknown", "conflicted"}
+    ]
+    pending = copy.deepcopy(atom)
+    pending["properties"]["status"]["enum"] = [value for value in statuses if value != "covered"]
+    atom["anyOf"] = [covered] if not pending["properties"]["status"]["enum"] else [covered, pending]
 
 
 def native_output_schema(response_schema: dict[str, Any]) -> dict[str, Any]:
@@ -285,10 +461,36 @@ def _schema_for_value(schema: dict[str, Any], value: Any, root: dict[str, Any]) 
     return resolved
 
 
+def _decode_primary_clause_review_wire(
+    response: Any, response_schema: dict[str, Any],
+) -> Any:
+    """Decode only the explicitly marked, exact-key v3 transport shape."""
+    if (not isinstance(response, dict)
+            or response.get("contract_version") != "3.0"
+            or response.get(_PRIMARY_CLAUSE_REVIEW_WIRE_FIELD)
+            != PRIMARY_CLAUSE_REVIEW_WIRE_FORMAT):
+        return response
+    keyed = response.get("clause_reviews")
+    expected_ids = sorted(_clause_review_ids(response_schema))
+    if (not isinstance(keyed, dict) or not expected_ids
+            or set(keyed) != set(expected_ids)):
+        return response
+    reviews: list[dict[str, Any]] = []
+    for clause_id in expected_ids:
+        review = keyed.get(clause_id)
+        if not isinstance(review, dict) or review.get("clause_id") != clause_id:
+            return response
+        reviews.append(copy.deepcopy(review))
+    decoded = copy.deepcopy(response)
+    decoded.pop(_PRIMARY_CLAUSE_REVIEW_WIRE_FIELD, None)
+    decoded["clause_reviews"] = reviews
+    return decoded
+
+
 def normalize_native_response(
     response: Any, response_schema: dict[str, Any],
 ) -> Any:
-    """Canonicalize provider-required nullable optionals before local checks.
+    """Canonicalize native wire encodings and provider-required null optionals.
 
     Native strict schemas encode local optional properties as required nullable
     properties.  A ``null`` at a property that is optional in the local
@@ -299,10 +501,14 @@ def normalize_native_response(
     reviews retain their inventory-presence signal for context-edge repair.
     Nonempty inventories and required arrays are never erased. Required nulls and values
     in unconstrained branches are preserved for the normal fail-closed
-    validator.  Requirement ``properties`` is represented by the union of the
-    registered role schemas, so nullable provider fields can be normalized
+    validator. Fresh v3 primary calls may also use the explicitly marked keyed
+    clause map; it is decoded only when every current key is present and each
+    row's ``clause_id`` matches the key. Historical canonical arrays pass
+    through unchanged. Requirement ``properties`` is represented by the union of
+    the registered role schemas, so nullable provider fields can be normalized
     without turning an arbitrary object into an accepted semantic payload.
     """
+    response = _decode_primary_clause_review_wire(response, response_schema)
     root = response_schema
 
     def normalize(value: Any, schema: Any) -> Any:

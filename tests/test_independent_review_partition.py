@@ -17,19 +17,24 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 import native_semantic_review as native
 from independent_review_partition import (
-    POLICY, partition_packets, partition_schema, join_partition_responses, validate_partition_receipt,
+    POLICY, PREVIOUS_SINGLE_CHECK_POLICY, LEGACY_SINGLE_CHECK_POLICY,
+    KEYED_TWO_POLICY, KEYED_POLICIES, COMPACT_ORIENTATION_POLICIES,
+    ARRAY_TWO_POLICY, LEGACY_POLICY,
+    partition_limits, partition_packets, partition_schema,
+    join_partition_responses, validate_partition_receipt,
 )
 from semantic_contract import sha256_file, sha256_json
 from semantic_source_references import build_source_reference_packet, source_reference_schema, source_inventory_generation_schema
 from host_review_schema import native_schema_support_errors
 
 
-def request(count=15):
+def request(count=15, policy=POLICY):
+    limits = partition_limits(policy)
     return {
         "protocol": native.OBLIGATION_COVERAGE_PROTOCOL, "run_id": "current-run",
         "chunk_index": 7, "case_id": "non-bsu-case", "attempt": 1, "provider_attempt": 1,
         "provenance": {"run_id": "current-run", "source_sha256": "a" * 64},
-        **({"native_review_partition_policy": POLICY} if count > 8 else {}),
+        **({"native_review_partition_policy": policy} if limits and count >= limits[0] else {}),
         "checks": [{"check_id": f"section-{index:02d}", "document_text": "本节为说明性标题。",
                     "review_context": {"classification": "informational", "requires_requirement": False,
                                        "primary_obligations": [], "linked_requirements": [],
@@ -38,12 +43,21 @@ def request(count=15):
     }
 
 
+def keyed_wire(packet, response):
+    """Script the new producer shape without changing the test's judgments."""
+    if packet.get("native_review_partition", {}).get("policy") in KEYED_POLICIES:
+        rows = response["results"]
+        assert len({r["check_id"] for r in rows}) == len(rows)
+        return {"results": {r["check_id"]: r for r in rows}}
+    return response
+
+
 def raw(packet):
-    return {"results": [{"check_id": check["check_id"], "verdict": "consistent",
+    return keyed_wire(packet, {"results": [{"check_id": check["check_id"], "verdict": "consistent",
                          "rationale": "Exact source is an informational heading, without a duty.",
                          "evidence_refs": [check["source_spans"][0]["ref_id"]],
                          "identified_obligations": {"first": None, "remaining": []}}
-                        for check in packet["checks"]]}
+                        for check in packet["checks"]]})
 
 
 def fake_process(command, **kwargs):
@@ -80,12 +94,66 @@ def test_partition_is_lossless_and_preserves_whole_graph_selectors():
     before = copy.deepcopy(req)
     packet = build_source_reference_packet(req)
     batches = partition_packets(req, packet)
-    assert [len(item["checks"]) for item in batches] == [4, 4, 4, 3]
+    assert [len(item["checks"]) for item in batches] == [1] * 15
     assert [check for batch in batches for check in batch["checks"]] == packet["checks"]
     for batch in batches:
-        assert batch["orientation_only_checks"] == packet["checks"]
+        focus_ids = {check["check_id"] for check in batch["checks"]}
+        assert batch["orientation_only_checks"] == [
+            check for check in packet["checks"] if check["check_id"] not in focus_ids]
+        combined = batch["checks"] + batch["orientation_only_checks"]
+        assert {check["check_id"]: check for check in combined} == {
+            check["check_id"]: check for check in packet["checks"]}
         assert batch["source_reference_request_sha256"] == sha256_json(req)
     assert req == before
+
+
+@pytest.mark.parametrize("policy,count,sizes", [
+    (POLICY, 1, None), (POLICY, 2, [1, 1]), (POLICY, 3, [1, 1, 1]),
+    (POLICY, 8, [1] * 8), (POLICY, 9, [1] * 9),
+    (PREVIOUS_SINGLE_CHECK_POLICY, 8, [1] * 8),
+    (LEGACY_SINGLE_CHECK_POLICY, 3, [1] * 3),
+    (KEYED_TWO_POLICY, 2, None), (KEYED_TWO_POLICY, 3, [2, 1]),
+    (KEYED_TWO_POLICY, 8, [2, 2, 2, 2]),
+    (LEGACY_POLICY, 7, None), (LEGACY_POLICY, 8, [4, 4]),
+    (LEGACY_POLICY, 9, [4, 4, 1]),
+])
+def test_inclusive_boundary_retains_every_check_and_below_threshold_stays_unpartitioned(policy, count, sizes):
+    req = request(count, policy)
+    packet = build_source_reference_packet(req)
+    if sizes is None:
+        with pytest.raises(ValueError): partition_packets(req, packet)
+        return
+    children = partition_packets(req, packet)
+    assert [len(child["checks"]) for child in children] == sizes
+    assert [check for child in children for check in child["checks"]] == packet["checks"]
+    for child in children:
+        focus_ids = {check["check_id"] for check in child["checks"]}
+        expected_orientation = ([check for check in packet["checks"] if check["check_id"] not in focus_ids]
+                                if policy in COMPACT_ORIENTATION_POLICIES else packet["checks"])
+        assert child["orientation_only_checks"] == expected_orientation
+
+
+def test_captured_eight_check_failure_gets_complete_context_without_reusing_a_response(tmp_path):
+    fixture = json.loads((ROOT / "tests/fixtures/eight-check-output-limit-request.json").read_text())
+    historical = fixture["request"]
+    assert fixture["fixture_kind"] == "captured_request_not_a_native_receipt"
+    assert len(historical["checks"]) == 8 and "native_review_partition_policy" not in historical
+    # Existing nonpartition evidence is not rewrapped as partition evidence.
+    validate_partition_receipt(historical, tmp_path, {}, {"adapter_id": "codex"})
+    current = copy.deepcopy(historical)
+    current["run_id"] = current["provenance"]["run_id"] = "offline-boundary-reproduction"
+    current["native_review_partition_policy"] = POLICY
+    packet = build_source_reference_packet(current)
+    children = partition_packets(current, packet)
+    assert [len(child["checks"]) for child in children] == [1] * 8
+    assert [check for child in children for check in child["checks"]] == packet["checks"]
+    for child in children:
+        focus_ids = {check["check_id"] for check in child["checks"]}
+        assert child["orientation_only_checks"] == [
+            check for check in packet["checks"] if check["check_id"] not in focus_ids]
+        assert child["native_review_partition"]["whole_request_sha256"] == sha256_json(current)
+        assert child["source_reference_request_sha256"] == sha256_json(current)
+    assert historical == fixture["request"] and "native_review_partition_policy" not in historical
 
 
 def test_schema_keeps_selected_constraints_and_prunes_only_unreachable_defs():
@@ -102,7 +170,7 @@ def test_schema_keeps_selected_constraints_and_prunes_only_unreachable_defs():
 
 @pytest.mark.parametrize("mutation", ["missing", "duplicate", "extra", "wrong-batch", "extra-key", "missing-batch"])
 def test_exact_union_rejects_invalid_child_coverage(mutation):
-    req = request()
+    req = request(policy=ARRAY_TWO_POLICY)
     batches = partition_packets(req, build_source_reference_packet(req))
     responses = [raw(batch) for batch in batches]
     if mutation == "missing":
@@ -121,14 +189,19 @@ def test_exact_union_rejects_invalid_child_coverage(mutation):
         join_partition_responses(batches, responses)
 
 
-def test_real_native_entrypoint_aggregate_and_replay(tmp_path):
-    req = request()
+@pytest.mark.parametrize("policy,batches", [
+    (POLICY, 15), (LEGACY_SINGLE_CHECK_POLICY, 15), (KEYED_TWO_POLICY, 8),
+    (PREVIOUS_SINGLE_CHECK_POLICY, 15),
+    (ARRAY_TWO_POLICY, 8), (LEGACY_POLICY, 4),
+])
+def test_real_native_entrypoint_aggregate_and_replay(tmp_path, policy, batches):
+    req = request(policy=policy)
     audit = run(req, tmp_path)
     assert len(audit["results"]) == 15
     assert audit["result_event_types"] is None  # Deliberately not a fabricated native turn.
     aggregate = json.loads((tmp_path / "raw-response.json").read_text())
     validate_partition_receipt(req, tmp_path, aggregate, audit)
-    assert len(list(tmp_path.glob("native-batch-*/stdout.jsonl"))) == 4
+    assert len(list(tmp_path.glob("native-batch-*/stdout.jsonl"))) == batches
 
 
 @pytest.mark.parametrize("name", ["source-reference-packet.json", "prompt.txt", "provider-response-schema.json", "stdout.jsonl", "last-message.txt", "raw-response.json"])
@@ -169,7 +242,8 @@ def test_missing_projection_pointer_cannot_be_hidden(tmp_path):
         validate_partition_receipt(req, tmp_path, aggregate, audit)
 
 
-def test_failed_child_preserves_failure_and_never_writes_accepted_aggregate(tmp_path):
+@pytest.mark.parametrize("count", [8, 15])
+def test_failed_child_preserves_failure_and_never_writes_accepted_aggregate(tmp_path, count):
     calls = 0
     def fail_second(command, **kwargs):
         nonlocal calls
@@ -178,7 +252,7 @@ def test_failed_child_preserves_failure_and_never_writes_accepted_aggregate(tmp_
             return CompletedProcess(command, 1, '{"type":"turn.failed","error":{"message":"Incomplete response returned, reason: max_output_tokens"}}', "limit")
         return fake_process(command, **kwargs)
     with pytest.raises(native.NativeOutputLimitError):
-        run(request(), tmp_path, fail_second)
+        run(request(count), tmp_path, fail_second)
     assert calls == 2
     assert (tmp_path / "native-batch-0002/stdout.jsonl").is_file()
     assert not (tmp_path / "response.json").exists()
@@ -187,9 +261,10 @@ def test_failed_child_preserves_failure_and_never_writes_accepted_aggregate(tmp_
 
 
 def test_legacy_nonpartition_receipts_are_unchanged(tmp_path):
-    validate_partition_receipt(request(4), tmp_path, {}, {"adapter_id": "codex"})
+    legacy = request(4, policy=None)
+    validate_partition_receipt(legacy, tmp_path, {}, {"adapter_id": "codex"})
     with pytest.raises(ValueError):
-        partition_packets(request(4), build_source_reference_packet(request(4)))
+        partition_packets(legacy, build_source_reference_packet(legacy))
 
 
 def test_preexisting_child_is_rejected_before_top_level_writes(tmp_path):
@@ -209,14 +284,23 @@ def test_cancellation_has_unknown_not_fake_success_and_no_partial_aggregate(tmp_
     assert not (tmp_path / "response.json").exists()
 
 
-def test_deadline_is_shared_not_restarted_per_child(tmp_path):
+@pytest.mark.parametrize("policy,count,expected", [
+    (POLICY, 8, list(range(890, 810, -10))),
+    (POLICY, 15, list(range(890, 740, -10))),
+    (LEGACY_SINGLE_CHECK_POLICY, 15, list(range(890, 740, -10))),
+    (KEYED_TWO_POLICY, 8, [890, 880, 870, 860]),
+    (KEYED_TWO_POLICY, 15, [890, 880, 870, 860, 850, 840, 830, 820]),
+    (LEGACY_POLICY, 8, [890, 880]),
+    (LEGACY_POLICY, 15, [890, 880, 870, 860]),
+])
+def test_deadline_is_shared_not_restarted_per_child(tmp_path, policy, count, expected):
     budgets = []
     def observe(command, **kwargs):
         budgets.append(kwargs["timeout"])
         return fake_process(command, **kwargs)
-    with patch.object(native.time, "monotonic", side_effect=[0, 10, 20, 30, 40]):
-        run(request(), tmp_path, observe)
-    assert budgets == [890, 880, 870, 860]
+    with patch.object(native.time, "monotonic", side_effect=range(0, 170, 10)):
+        run(request(count, policy), tmp_path, observe)
+    assert budgets == expected
 
 
 def test_partitioned_corrective_retry_replays_parent_and_locks_all_siblings(tmp_path):
@@ -239,6 +323,7 @@ def test_partitioned_corrective_retry_replays_parent_and_locks_all_siblings(tmp_
             packet = json.loads((path.parent / "source-reference-packet.json").read_text())
             ids = packet["native_review_partition"]["check_ids"]
             response = {"results": [item for item in wire["results"] if item["check_id"] in ids]}
+            response = keyed_wire(packet, response)
             text = json.dumps(response, ensure_ascii=False)
             path.write_text(text)
             events = [{"type": "item.completed", "item": {"type": "agent_message", "text": text}}, {"type": "turn.completed"}]
@@ -260,14 +345,14 @@ def test_partitioned_corrective_retry_replays_parent_and_locks_all_siblings(tmp_
         prepare_retry_scope(retry, output, native.OBLIGATION_COVERAGE_SCHEMA, provider_nullable_optionals=True)
 
 
-def committed_partition(tmp_path):
+def committed_partition(tmp_path, count=15):
     """Drive actual producer plus both receipt consumers, not extracted funcs."""
     import hashlib
     import requirements_engine as engine
     import host_agent_bridge as bridge
     from semantic_contract import attach_request_provenance
     clauses, evidence = [], {"evidence": []}
-    for index in range(15):
+    for index in range(count):
         text = f"本节为说明性标题{index}。"
         eid, cid = f"evidence-{index}", f"clause-{index:02d}"
         clauses.append({"id": cid, "text": text, "evidence_ids": [eid],
@@ -279,7 +364,7 @@ def committed_partition(tmp_path):
     req["case_id"] = "different-case"
     req = attach_request_provenance(req, source_sha256="a" * 64, evidence_doc=evidence, clauses=clauses, run_id="current-run")
     review_dir = tmp_path / "requirements"
-    engine.prepare_host_agent_review_packets(req, clauses, evidence, "a" * 64, review_dir, chunk_size=64)
+    engine.prepare_host_agent_review_packets(req, clauses, evidence, "a" * 64, review_dir, chunk_size=8 if count == 8 else 64)
     chunks = json.loads((review_dir / "llm-request-chunks.json").read_text())
     assert len(chunks) == 1
     chunk = chunks[0]
@@ -305,11 +390,13 @@ def committed_partition(tmp_path):
 
 
 @pytest.mark.parametrize("tamper", [False, True])
-def test_both_actual_receipt_consumers_replay_native_children(tmp_path, tamper):
+@pytest.mark.parametrize("count", [8, 15])
+def test_both_actual_receipt_consumers_replay_native_children(tmp_path, tamper, count):
     import host_agent_bridge as bridge
     import thesis_format_pipeline as pipeline
     from semantic_contract import request_body_sha256, request_envelope_sha256
-    req, chunk, candidate, review_dir, audit, envelope, envelope_path = committed_partition(tmp_path)
+    req, chunk, candidate, review_dir, audit, envelope, envelope_path = committed_partition(tmp_path, count)
+    assert len(list(envelope_path.parent.glob("native-batch-*"))) == count
     pointer = audit["chunk_runs"][0]["independent_obligation_review"]
     if tamper:
         child_root = envelope_path.parent

@@ -1,0 +1,139 @@
+{
+  "fixture_kind": "captured_primary_route_conflict_for_offline_tests_not_a_receipt",
+  "run_id": "f9a581b9-0a44-4f64-9721-971c748a9224",
+  "source_clause": {
+    "id": "C00070",
+    "text": "关键词是为了便于做文献索引和检索工作而从论文中选取出来用以表示全文主题内容信息的单词或术语，在论文中有明确出处",
+    "evidence_ids": [
+      "E00060"
+    ],
+    "source_kind": "paragraph",
+    "location": {
+      "part": "document",
+      "child_index": 66,
+      "order": 59
+    },
+    "part_index": 0,
+    "source_span": {
+      "evidence_id": "E00060",
+      "start_offset": 0,
+      "end_offset": 55,
+      "text": "关键词是为了便于做文献索引和检索工作而从论文中选取出来用以表示全文主题内容信息的单词或术语，在论文中有明确出处",
+      "source_sha256": "0516d447cdd25926da0a8201b3e2bb7406725d0cfe89d01503a06a55ed3e253e",
+      "location": {
+        "part": "document",
+        "child_index": 66,
+        "order": 59
+      }
+    },
+    "source_text_full": "关键词是为了便于做文献索引和检索工作而从论文中选取出来用以表示全文主题内容信息的单词或术语，在论文中有明确出处，关键词在摘要内容后另起一行，一般3～8个，之间用分号分开。",
+    "deterministic_obligation_keys": []
+  },
+  "evidence_context": {
+    "E00060": {
+      "id": "E00060",
+      "kind": "paragraph",
+      "text": "关键词是为了便于做文献索引和检索工作而从论文中选取出来用以表示全文主题内容信息的单词或术语，在论文中有明确出处，关键词在摘要内容后另起一行，一般3～8个，之间用分号分开。",
+      "style_id": null,
+      "runs": [
+        {
+          "text": "关键词是为了便于做文献索引和检索工作而从论文中选取出来用以表示全文主题内容信息的单词或术语，在论文中有明确出处",
+          "format": {
+            "fonts": {
+              "eastAsia": "宋体",
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            },
+            "size_pt": 12.0
+          }
+        },
+        {
+          "text": "，",
+          "format": {
+            "fonts": {
+              "eastAsia": "宋体",
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            },
+            "size_pt": 12.0
+          }
+        },
+        {
+          "text": "关键词在摘要内容后另起一行，一般3～",
+          "format": {
+            "fonts": {
+              "eastAsia": "宋体",
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            },
+            "size_pt": 12.0
+          }
+        },
+        {
+          "text": "8",
+          "format": {
+            "fonts": {
+              "eastAsia": "宋体",
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            },
+            "size_pt": 12.0
+          }
+        },
+        {
+          "text": "个，之间用分号分开。",
+          "format": {
+            "fonts": {
+              "eastAsia": "宋体",
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            },
+            "size_pt": 12.0
+          }
+        }
+      ],
+      "location": {
+        "part": "document",
+        "child_index": 66,
+        "order": 59
+      },
+      "context_before": [
+        "这部分是论文的摘要",
+        "中文摘要是论文内容的简要陈述，一般以第三人称语气撰写，300～1000字（如遇特殊需要字数可以略多），不加评论和解释,是一篇具有独立性和完整性的短文，能准确反映论文的中心思想，规范的学术用语，逻辑性强、结构严谨，体现出论文的新理论、新方法、新技术等。其内容包括：目的意义、研究方法、研究成果和结论，应与论文等同的主要信息，要突出本论文的创造性成果，不可出现图、表、化学方程式、非公知公用的符号和术语。"
+      ],
+      "context_after": [
+        "关键词：术语；最多7个汉字；最少3组，最多8组",
+        "ABSTRACT"
+      ],
+      "style_name": null,
+      "xml_locator": {
+        "part": "document",
+        "child_index": 66,
+        "order": 59
+      }
+    }
+  },
+  "review": {
+    "clause_id": "C00070",
+    "classification": "unresolved",
+    "reason": "The clause says keywords are selected from the thesis and have clear provenance there, but the declared keyword content-constraint properties do not represent this sourcing duty.",
+    "obligations": [
+      {
+        "id": "C00070-keyword-provenance",
+        "status": "unresolved",
+        "reason": "The source-origin requirement for each keyword has no declared executable property in the contract.",
+        "actor": null,
+        "action": "Select keywords from the thesis and ensure they have clear provenance in it",
+        "target": "Chinese keywords",
+        "condition": null,
+        "source_quote": "从论文中选取出来用以表示全文主题内容信息的单词或术语，在论文中有明确出处",
+        "force": "required",
+        "applicability": "applicable",
+        "route": "human"
+      }
+    ],
+    "normative_basis": "explicit_normative_text"
+  },
+  "raw_file_sha256": "d78f982c0ec64b077cf43c7e3b084bceda6f72605536c2fc5dff66c5aaad8774",
+  "raw_error": "$.clause_reviews[4].obligations[0].route: responsibility_route_conflict"
+}

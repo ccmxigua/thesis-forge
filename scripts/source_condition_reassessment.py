@@ -59,7 +59,9 @@ def _scope_feedback(candidate, chunk, request, rejected_review, *, allow_target)
         return None
     try:
         expected = build_obligation_coverage_request(
-            candidate, chunk, run_id=request["run_id"], chunk_index=request["chunk_index"])
+            candidate, chunk, run_id=request["run_id"], chunk_index=request["chunk_index"],
+            wire_schema_policy=request.get("native_wire_schema_policy"),
+            partition_policy=request.get("native_review_partition_policy"))
         for key in ("attempt", "provider_attempt", "output_policy", "retry_feedback"):
             if key in request:
                 expected[key] = copy.deepcopy(request[key])

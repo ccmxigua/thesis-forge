@@ -1,0 +1,225 @@
+{
+  "fixture_kind": "captured_excerpt_not_a_native_receipt",
+  "run_id": "2910c153-7cd8-409e-a504-0aacb6e6a9b6",
+  "original_files": [
+    {
+      "path": "build/fresh-bsu-codex-luna-20261003T062545Z-bc7da49-uncertainty/bsu/work/review/requirements/independent-review-chunk-0002-attempt-02-provider-attempt-02/request.json",
+      "sha256": "a6c1434cf45e59f2730a13879820531ead559188fb6f443fc045d70a1f18db9f"
+    },
+    {
+      "path": "build/fresh-bsu-codex-luna-20261003T062545Z-bc7da49-uncertainty/bsu/work/review/requirements/independent-review-chunk-0002-attempt-02-provider-attempt-02/raw-response.json",
+      "sha256": "3f4456f703b111a72d0a84671f2cc0d82ebfb9b1da84136cbae91bf3d3627a5a"
+    },
+    {
+      "path": "build/fresh-bsu-codex-luna-20261003T062545Z-bc7da49-uncertainty/bsu/work/review/requirements/independent-review-chunk-0002-attempt-02-provider-attempt-02/compiled-response.json",
+      "sha256": "19c4907e17651e44905a56171adbae293f5d3d4998833a32a8687f10b8a55a1a"
+    },
+    {
+      "path": "build/fresh-bsu-codex-luna-20261003T062545Z-bc7da49-uncertainty/bsu/work/review/requirements/independent-review-chunk-0002-attempt-02-provider-attempt-02/source-reference-compilation.json",
+      "sha256": "66e354a17f61c7475e02124a19b6c5f2773a739abfc7d278d41f9e190b623a28"
+    },
+    {
+      "path": "build/fresh-bsu-codex-luna-20261003T062545Z-bc7da49-uncertainty/bsu/work/review/requirements/llm-response-chunk-0002.attempt-02.json",
+      "sha256": "92dcafafd822fddcef893e6644f22bcec57d20bd58a8cd22edaad6ae5d5f8ee6"
+    }
+  ],
+  "check": {
+    "check_id": "C00010",
+    "document_text": "一级学科",
+    "review_context": {
+      "semantic_clause_text": "一级学科",
+      "classification": "executable",
+      "primary_normative_basis": "template_structure",
+      "requires_requirement": true,
+      "reason": "The evidence shows a fixed cover field label in the source template.",
+      "primary_obligations": [
+        {
+          "id": "C00010-label",
+          "status": "covered",
+          "reason": "The cover label is represented by a source-backed cover_field_label requirement.",
+          "actor": "document",
+          "action": "display",
+          "target": "一级学科：",
+          "source_quote": "一级学科",
+          "force": "required",
+          "applicability": "applicable",
+          "route": "automatic"
+        }
+      ],
+      "primary_obligation_quote_bindings": [
+        {
+          "primary_obligation_id": "C00010-label",
+          "original_source_quote": "一级学科：",
+          "review_source_quote": "一级学科",
+          "source_binding": {
+            "policy": "current_source_occurrence_quote_v1",
+            "clause_binding": {
+              "text": "一级学科",
+              "source_fragments": [
+                {
+                  "clause_id": "C00010",
+                  "evidence_id": "E00010",
+                  "start_offset": 0,
+                  "end_offset": 4,
+                  "source_sha256": "06ba8c66746446083ab88e9d0f118b1243c9648aab57ed1c12f0fbe3f70339d4",
+                  "text": "一级学科",
+                  "source_kind": "paragraph",
+                  "separator_before": "",
+                  "location": {
+                    "part": "document",
+                    "child_index": 11,
+                    "order": 9
+                  }
+                }
+              ]
+            },
+            "quote_start_offset": 0,
+            "quote_end_offset": 5,
+            "quote_sha256": "cbd44a9645e277fa413f9161ea7414eefdffa36327aee0af659d8cd5c30db2c4",
+            "context_is_not_execution_scope": true
+          },
+          "original_quote_sha256": "cbd44a9645e277fa413f9161ea7414eefdffa36327aee0af659d8cd5c30db2c4",
+          "review_quote_sha256": "f99a9319beddab55bf771cf5e991e3801ffe0c0c320ac8ad07fc30e3a5723f08",
+          "semantic_dimensions_unchanged": true
+        }
+      ],
+      "linked_requirements": [
+        {
+          "requirement_ref": "RR6cf175a55c92151e9d92",
+          "source_requirement_id": null,
+          "role": "cover_field_label",
+          "properties": {
+            "text": "一级学科："
+          },
+          "evidence_ids": [
+            "E00010"
+          ],
+          "verification": {
+            "mode": "static_docx",
+            "checks": [
+              "Verify the cover field label is present with the source wording."
+            ]
+          }
+        }
+      ],
+      "source_clause_support": [],
+      "cited_evidence": {
+        "E00010": {
+          "id": "E00010",
+          "kind": "paragraph",
+          "text": "一级学科：",
+          "style_id": null,
+          "runs": [
+            {
+              "text": "一级学科：",
+              "format": {
+                "fonts": {
+                  "eastAsia": "黑体",
+                  "ascii": "黑体",
+                  "hAnsi": "黑体"
+                },
+                "size_pt": 14.0
+              }
+            }
+          ],
+          "location": {
+            "part": "document",
+            "child_index": 11,
+            "order": 9
+          },
+          "context_before": [
+            "MASTER'S THESIS",
+            "培养单位："
+          ],
+          "context_after": [
+            "二级学科：",
+            "论文作者："
+          ],
+          "style_name": null,
+          "xml_locator": {
+            "part": "document",
+            "child_index": 11,
+            "order": 9
+          }
+        }
+      },
+      "machine_obligation_ids": [],
+      "manual_review_codes": [],
+      "source_content_verification_codes": [],
+      "pending_source_work": [],
+      "section_description": null
+    }
+  },
+  "raw_result": {
+    "check_id": "C00010",
+    "verdict": "consistent",
+    "rationale": "The source is the fixed cover label “一级学科.” The linked requirement preserves the label; the colon in its rendered text does not change the source label’s meaning.",
+    "identified_obligations": {
+      "first": {
+        "force": "required",
+        "applicability": "applicable",
+        "actor": "document",
+        "action": "display",
+        "target": "一级学科",
+        "condition": null,
+        "obligation_summary": "Preserve the fixed cover field label.",
+        "primary_obligation_id": "C00010-label",
+        "requirement_refs": [
+          "RR6cf175a55c92151e9d92"
+        ],
+        "pending_work_code": null,
+        "disposition": "represented",
+        "source_ref": "Qf4f1576293f49abc"
+      },
+      "remaining": []
+    },
+    "evidence_refs": [
+      "Qf4f1576293f49abc"
+    ]
+  },
+  "compiled_result": {
+    "check_id": "C00010",
+    "verdict": "consistent",
+    "rationale": "The source is the fixed cover label “一级学科.” The linked requirement preserves the label; the colon in its rendered text does not change the source label’s meaning.",
+    "identified_obligations": [
+      {
+        "force": "required",
+        "applicability": "applicable",
+        "actor": "document",
+        "action": "display",
+        "target": "一级学科",
+        "obligation_summary": "Preserve the fixed cover field label.",
+        "primary_obligation_id": "C00010-label",
+        "requirement_refs": [
+          "RR6cf175a55c92151e9d92"
+        ],
+        "disposition": "represented",
+        "source_quote": "一级学科"
+      }
+    ],
+    "evidence_quotes": [
+      "一级学科"
+    ],
+    "machine_obligation_ids": []
+  },
+  "primary_review": {
+    "clause_id": "C00010",
+    "classification": "executable",
+    "reason": "The evidence shows a fixed cover field label in the source template.",
+    "obligations": [
+      {
+        "id": "C00010-label",
+        "status": "covered",
+        "reason": "The cover label is represented by a source-backed cover_field_label requirement.",
+        "actor": "document",
+        "action": "display",
+        "target": "一级学科：",
+        "source_quote": "一级学科：",
+        "force": "required",
+        "applicability": "applicable",
+        "route": "automatic"
+      }
+    ],
+    "normative_basis": "template_structure"
+  }
+}

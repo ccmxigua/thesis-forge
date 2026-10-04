@@ -273,8 +273,12 @@ def test_full_bridge_routes_one_proposal_and_requires_fresh_native_review(tmp_pa
 
     def independent(command, **kwargs):
         path = Path(command[command.index("--output-last-message") + 1]).parent
-        request = json.loads((path / "request.json").read_text())
-        reviews.append(request)
+        packet = json.loads((path / "source-reference-packet.json").read_text())
+        partition = packet.get("native_review_partition")
+        owner = path.parent if partition else path
+        request = json.loads((owner / "request.json").read_text())
+        if not partition or partition["batch_index"] == 1:
+            reviews.append(request)  # One logical review can have multiple native children.
         results = []
         for i, check in enumerate(request["checks"]):
             context = check["review_context"]
@@ -292,7 +296,12 @@ def test_full_bridge_routes_one_proposal_and_requires_fresh_native_review(tmp_pa
                     reviewed["action" if i == 0 else "condition"] = "A different scripted reviewer interpretation"
                 item["identified_obligations"] = [reviewed]
             results.append(item)
-        return finish(command, transport.enveloped(wire.wire({"results": results}, request)))
+        response = transport.enveloped(wire.wire({"results": results}, request))
+        if partition:
+            response["results"] = [r for r in response["results"] if r["check_id"] in partition["check_ids"]]
+            from tests.test_independent_review_partition import keyed_wire
+            response = keyed_wire(packet, response)
+        return finish(command, response)
 
     output = tmp_path / "merged.json"
     with patch.dict(os.environ, {"THESIS_FORGE_HOST_RUNTIME": "codex"}), \

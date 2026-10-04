@@ -278,7 +278,9 @@ def _pending_verdict_generation_branches(
             candidate = copy.deepcopy(atom)
             candidate["properties"]["disposition"] = {"enum": [disposition]}
             if primary:
-                ids = [item["id"] for item in primary if item.get("status") == status]
+                permitted_ids = candidate["properties"].get("primary_obligation_id", {}).get("enum", [])
+                ids = [item["id"] for item in primary
+                       if item.get("status") == status and item["id"] in permitted_ids]
                 if not ids or "primary_obligation_id" not in candidate["required"]:
                     continue
                 candidate["properties"]["primary_obligation_id"] = {"enum": ids}
@@ -300,6 +302,84 @@ def _pending_verdict_generation_branches(
         })
         alternatives.append(pending)
     return alternatives
+
+
+def _uncertain_verdict_generation_branches(
+    alternatives: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Generate uncertainty atoms without disguising missing source duties.
+
+    Only new generation is constrained. Historical raw results still compile
+    unchanged and must pass the canonical source/semantic validators. An
+    unrepresented duty remains reportable through the diagnostic alternatives.
+    """
+    coupled = []
+    for alternative in alternatives:
+        verdicts = alternative["properties"]["verdict"]["enum"]
+        if "uncertain" not in verdicts:
+            coupled.append(alternative)
+            continue
+        other = copy.deepcopy(alternative)
+        other["properties"]["verdict"]["enum"] = [v for v in verdicts if v != "uncertain"]
+        if other["properties"]["verdict"]["enum"]:
+            coupled.append(other)
+        inventory = alternative["properties"]["identified_obligations"]
+        atoms = inventory["items"].get("anyOf", [inventory["items"]])
+        ambiguous_atoms = []
+        for atom in atoms:
+            if "ambiguous" in atom["properties"]["disposition"].get("enum", []):
+                ambiguous = copy.deepcopy(atom)
+                ambiguous["properties"]["disposition"] = {"enum": ["ambiguous"]}
+                ambiguous_atoms.append(ambiguous)
+        if ambiguous_atoms:
+            uncertain = copy.deepcopy(alternative)
+            uncertain["properties"]["verdict"] = {"enum": ["uncertain"]}
+            # The generation envelope supplies a required first atom. Keep
+            # historical empty arrays on the existing typed-correction path
+            # when this wire schema is also used to validate retry scope.
+            uncertain["properties"]["identified_obligations"].update({
+                "items": {"anyOf": ambiguous_atoms},
+            })
+            coupled.append(uncertain)
+    return coupled
+
+
+def _primary_target_reference_branches(
+    atoms: list[dict[str, Any]], primary: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Offer explicit reviewer agreement, never infer target equivalence.
+
+    Literal targets remain available for disagreement, newly found duties and
+    historical responses. A reference requires the same current primary ID in
+    both fields. Other typed dimensions and all coverage gates are unchanged.
+    """
+    expanded = []
+    for atom in atoms:
+        expanded.append(atom)
+        props = atom["properties"]
+        allowed = props.get("primary_obligation_id", {}).get("enum", [])
+        if "target" not in props:
+            continue
+        for item in primary:
+            if (not isinstance(item, dict) or item.get("id") not in allowed
+                    or not isinstance(item.get("target"), str)
+                    or not item["target"].strip() or item["target"] == "unknown"):
+                continue
+            selected = copy.deepcopy(atom)
+            selected["properties"]["primary_obligation_id"] = {"enum": [item["id"]]}
+            selected["required"] = list(dict.fromkeys(selected["required"] + ["primary_obligation_id"]))
+            selected["properties"]["target"] = {
+                "type": "object", "additionalProperties": False,
+                "required": ["primary_target_ref"],
+                "properties": {"primary_target_ref": {"enum": [item["id"]]}},
+                "description": (
+                    "Explicit independent judgment that this current primary target is faithful. "
+                    "Resolve its exact representation; this is a primary claim, not source evidence. "
+                    "If target meaning or scope differs, use a literal target instead."
+                ),
+            }
+            expanded.append(selected)
+    return expanded
 
 
 def source_reference_schema(
@@ -448,7 +528,8 @@ def source_reference_schema(
                             registered["required"].append("pending_work_code")
                         registered["properties"]["requirement_refs"]["maxItems"] = 0
                         pending_scoped.append(registered)
-            compiled_obligation_branches = pending_scoped
+            compiled_obligation_branches = _primary_target_reference_branches(
+                pending_scoped, primary_obligations or [])
             # RR selectors are identity, not a semantic coverage decision.
             # Bind them for EVERY disposition in generation and compilation,
             # not just represented atoms. Otherwise an unrepresented or
@@ -556,7 +637,8 @@ def source_reference_schema(
                 # reportable: the canonical semantic validator, not this
                 # generation shape, decides whether the inventory justifies
                 # incomplete. Never project an empty result to consistent.
-                alternatives = branch.get("anyOf") or [copy.deepcopy(branch)]
+                alternatives = _uncertain_verdict_generation_branches(
+                    branch.get("anyOf") or [copy.deepcopy(branch)])
                 nonempty_diagnostics = []
                 for alternative in alternatives:
                     verdicts = alternative["properties"]["verdict"].get("enum", [])
@@ -659,11 +741,25 @@ def compile_source_reference_response(
                 ref = obligation.pop("source_ref")
                 obligation["source_quote"] = spans[ref]["text"]
                 selected.append(ref)
-                obligation_selections.append({
+                selection = {
                     "obligation_index": obligation_index,
                     "source_ref": ref,
                     "span": copy.deepcopy(spans[ref]),
-                })
+                }
+                if isinstance(obligation.get("target"), dict):
+                    primary_id = obligation["target"]["primary_target_ref"]
+                    primary = next(item for item in check["review_context"]["primary_obligations"]
+                                   if item["id"] == primary_id)
+                    obligation["target"] = primary["target"]
+                    selection["target_selection"] = {
+                        "policy": "explicit_primary_target_reference_v1",
+                        "primary_obligation_id": primary_id,
+                        "primary_sha256": sha256_json(primary),
+                        "resolved_target_sha256": sha256_json(primary["target"]),
+                        "agreement_selected_by_reviewer": True,
+                        "mechanical_equivalence_claimed": False,
+                    }
+                obligation_selections.append(selection)
         else:
             obligation_selections = []
         selections.append({"check_id": check_id, "spans": [

@@ -1,0 +1,1504 @@
+{
+  "fixture_kind": "captured_request_not_a_native_receipt",
+  "original_path": "build/fresh-bsu-codex-luna-20261003T065231Z-bc7da49-target-reference/bsu/work/review/requirements/independent-review-chunk-0003-attempt-01/request.json",
+  "original_sha256": "3f1dec0315683551f4a19976b05c27b524ffbaf3f01676ec6b8674e86c031a8c",
+  "request": {
+    "protocol": "native_source_obligation_coverage_review_v8",
+    "run_id": "346d5e60-8ee0-4d94-b409-de642c777de3",
+    "chunk_index": 3,
+    "case_id": "bsu",
+    "provenance": {
+      "version": "1.0",
+      "origin": "fresh_host_agent",
+      "source_sha256": "1e9d38b307dbef8c3bf97b85ba5def70eaf7e2dba50cf25da978e007fc907059",
+      "evidence_sha256": "54a39166108b2f02753fa146844d99ee744d42b8f0b6d06790650bbd8046ed35",
+      "clause_sha256": "ae1643632b03643b87bcfa9efc82403fa5a7ea6eccbf4318b50213e350f87175",
+      "request_sha256": "e90e6358994c84297e9da3017022e021d6a9a6d6a44f29013810f116aa271964",
+      "run_id": "346d5e60-8ee0-4d94-b409-de642c777de3"
+    },
+    "source_sha256": "1e9d38b307dbef8c3bf97b85ba5def70eaf7e2dba50cf25da978e007fc907059",
+    "clause_sha256": "ae1643632b03643b87bcfa9efc82403fa5a7ea6eccbf4318b50213e350f87175",
+    "evidence_sha256": "54a39166108b2f02753fa146844d99ee744d42b8f0b6d06790650bbd8046ed35",
+    "request_sha256": "e90e6358994c84297e9da3017022e021d6a9a6d6a44f29013810f116aa271964",
+    "content_context": {
+      "artifact": "thesis_manuscript",
+      "availability": "not_included_in_obligation_review_request",
+      "meaning": "This request omits manuscript body text; it does not assert whether the user supplied a manuscript to the pipeline."
+    },
+    "checks": [
+      {
+        "check_id": "C00017",
+        "document_text": "10043",
+        "review_context": {
+          "semantic_clause_text": "10043",
+          "classification": "informational",
+          "primary_normative_basis": "sample_content",
+          "requires_requirement": false,
+          "reason": "The value 10043 is sample content in a cover table cell; it does not establish a rule to copy that school code.",
+          "primary_obligations": [],
+          "primary_obligation_quote_bindings": [],
+          "linked_requirements": [],
+          "source_clause_support": [],
+          "cited_evidence": {
+            "E00017": {
+              "id": "E00017",
+              "kind": "table_cell",
+              "text": "10043",
+              "style_id": "af",
+              "runs": [
+                {
+                  "text": "10043",
+                  "format": {
+                    "fonts": {},
+                    "size_pt": 14.0
+                  }
+                }
+              ],
+              "location": {
+                "part": "document",
+                "table_child_index": 19,
+                "row": 0,
+                "column": 3,
+                "paragraph": 0,
+                "order": 16
+              },
+              "table_row_context": {
+                "protocol": "current-source-table-row/v1",
+                "part": "document",
+                "table_child_index": 19,
+                "row": 0,
+                "table_grid_columns": 4,
+                "bidi_visual": false,
+                "grid_before": 0,
+                "grid_after": 0,
+                "cells": [
+                  {
+                    "column": 0,
+                    "paragraphs": [
+                      {
+                        "paragraph": 0,
+                        "text": "中图分类号：",
+                        "text_sha256": "8ec509eb95dcaf9fe415d0e4a4f6a4890ecdb94e7221fff833ae8f0d0d75fee4",
+                        "evidence_id": "E00015"
+                      }
+                    ],
+                    "grid_span": 1,
+                    "vertical_merge": null,
+                    "horizontal_merge": null,
+                    "has_nested_table": false
+                  },
+                  {
+                    "column": 1,
+                    "paragraphs": [
+                      {
+                        "paragraph": 0,
+                        "text": "",
+                        "text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                        "evidence_id": null
+                      }
+                    ],
+                    "grid_span": 1,
+                    "vertical_merge": null,
+                    "horizontal_merge": null,
+                    "has_nested_table": false
+                  },
+                  {
+                    "column": 2,
+                    "paragraphs": [
+                      {
+                        "paragraph": 0,
+                        "text": "学校代码：",
+                        "text_sha256": "42d630ad9eced7630d8d46bb5add5474db0e378bc2f724d09851d111f5668c5a",
+                        "evidence_id": "E00016"
+                      }
+                    ],
+                    "grid_span": 1,
+                    "vertical_merge": null,
+                    "horizontal_merge": null,
+                    "has_nested_table": false
+                  },
+                  {
+                    "column": 3,
+                    "paragraphs": [
+                      {
+                        "paragraph": 0,
+                        "text": "10043",
+                        "text_sha256": "2b08a540da4b46beb4613aae4c542e9b7e1bbcacbd525d10d59bc29ebca59168",
+                        "evidence_id": "E00017"
+                      }
+                    ],
+                    "grid_span": 1,
+                    "vertical_merge": null,
+                    "horizontal_merge": null,
+                    "has_nested_table": false
+                  }
+                ],
+                "row_sha256": "c2927bfb1c896593866e24eb55ac06e9e30c5525784b34eb3a2b09be81260782"
+              },
+              "context_before": [
+                "中图分类号：",
+                "学校代码："
+              ],
+              "context_after": [
+                "UDC分类号：",
+                "密级："
+              ],
+              "style_name": "段",
+              "xml_locator": {
+                "part": "document",
+                "table_child_index": 19,
+                "row": 0,
+                "column": 3,
+                "paragraph": 0,
+                "order": 16
+              }
+            }
+          },
+          "machine_obligation_ids": [],
+          "manual_review_codes": [],
+          "source_content_verification_codes": [],
+          "pending_source_work": [],
+          "section_description": null,
+          "table_structure_context": {
+            "protocol": "current-source-table-row/v1",
+            "source_row": {
+              "protocol": "current-source-table-row/v1",
+              "part": "document",
+              "table_child_index": 19,
+              "row": 0,
+              "table_grid_columns": 4,
+              "bidi_visual": false,
+              "grid_before": 0,
+              "grid_after": 0,
+              "cells": [
+                {
+                  "column": 0,
+                  "paragraphs": [
+                    {
+                      "paragraph": 0,
+                      "text": "中图分类号：",
+                      "text_sha256": "8ec509eb95dcaf9fe415d0e4a4f6a4890ecdb94e7221fff833ae8f0d0d75fee4",
+                      "evidence_id": "E00015"
+                    }
+                  ],
+                  "grid_span": 1,
+                  "vertical_merge": null,
+                  "horizontal_merge": null,
+                  "has_nested_table": false
+                },
+                {
+                  "column": 1,
+                  "paragraphs": [
+                    {
+                      "paragraph": 0,
+                      "text": "",
+                      "text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                      "evidence_id": null
+                    }
+                  ],
+                  "grid_span": 1,
+                  "vertical_merge": null,
+                  "horizontal_merge": null,
+                  "has_nested_table": false
+                },
+                {
+                  "column": 2,
+                  "paragraphs": [
+                    {
+                      "paragraph": 0,
+                      "text": "学校代码：",
+                      "text_sha256": "42d630ad9eced7630d8d46bb5add5474db0e378bc2f724d09851d111f5668c5a",
+                      "evidence_id": "E00016"
+                    }
+                  ],
+                  "grid_span": 1,
+                  "vertical_merge": null,
+                  "horizontal_merge": null,
+                  "has_nested_table": false
+                },
+                {
+                  "column": 3,
+                  "paragraphs": [
+                    {
+                      "paragraph": 0,
+                      "text": "10043",
+                      "text_sha256": "2b08a540da4b46beb4613aae4c542e9b7e1bbcacbd525d10d59bc29ebca59168",
+                      "evidence_id": "E00017"
+                    }
+                  ],
+                  "grid_span": 1,
+                  "vertical_merge": null,
+                  "horizontal_merge": null,
+                  "has_nested_table": false
+                }
+              ],
+              "row_sha256": "c2927bfb1c896593866e24eb55ac06e9e30c5525784b34eb3a2b09be81260782"
+            },
+            "target_evidence_id": "E00017",
+            "target_column": 3,
+            "immediate_left_column": 2,
+            "relationship": "same_row_immediate_left_unmerged",
+            "meaning": "Source geometry only; field meaning and candidate coverage require independent semantic review."
+          }
+        }
+      },
+      {
+        "check_id": "C00018",
+        "document_text": "UDC分类号",
+        "review_context": {
+          "semantic_clause_text": "UDC分类号",
+          "classification": "executable",
+          "primary_normative_basis": "template_structure",
+          "requires_requirement": true,
+          "reason": "The source table presents UDC classification as a cover label, a fixed template structure.",
+          "primary_obligations": [
+            {
+              "id": "C00018-label",
+              "status": "covered",
+              "reason": "The exact printed label is bound to the cover field label requirement.",
+              "actor": "document generator",
+              "action": "print",
+              "target": "UDC classification label on the cover",
+              "source_quote": "UDC分类号",
+              "force": "required",
+              "applicability": "applicable",
+              "route": "automatic"
+            }
+          ],
+          "primary_obligation_quote_bindings": [
+            {
+              "primary_obligation_id": "C00018-label",
+              "original_source_quote": "UDC分类号：",
+              "review_source_quote": "UDC分类号",
+              "source_binding": {
+                "policy": "current_source_occurrence_quote_v1",
+                "clause_binding": {
+                  "text": "UDC分类号",
+                  "source_fragments": [
+                    {
+                      "clause_id": "C00018",
+                      "evidence_id": "E00018",
+                      "start_offset": 0,
+                      "end_offset": 6,
+                      "source_sha256": "3b82b855ed1f99f6b4a0e1214ebb0cd12198251e56efb96ad1a8ef31f11e2b1f",
+                      "text": "UDC分类号",
+                      "source_kind": "table_cell",
+                      "separator_before": "",
+                      "location": {
+                        "part": "document",
+                        "table_child_index": 19,
+                        "row": 1,
+                        "column": 0,
+                        "paragraph": 0,
+                        "order": 17
+                      }
+                    }
+                  ]
+                },
+                "quote_start_offset": 0,
+                "quote_end_offset": 7,
+                "quote_sha256": "599562985b23d89c577c6c9959c7c117033910440138d65812cfcc7a4951f851",
+                "context_is_not_execution_scope": true
+              },
+              "original_quote_sha256": "599562985b23d89c577c6c9959c7c117033910440138d65812cfcc7a4951f851",
+              "review_quote_sha256": "7d6cfc30704258842e505b19bcd5dc9d3b89723de60c9db0ddafdd1e1530e79e",
+              "semantic_dimensions_unchanged": true
+            }
+          ],
+          "linked_requirements": [
+            {
+              "requirement_ref": "RR60aef4e53935499b778d",
+              "source_requirement_id": null,
+              "role": "cover_field_label",
+              "properties": {
+                "text": "UDC分类号："
+              },
+              "evidence_ids": [
+                "E00018"
+              ],
+              "verification": {
+                "mode": "static_docx",
+                "checks": [
+                  "Verify the exact source-bound label is present on the cover"
+                ]
+              }
+            }
+          ],
+          "source_clause_support": [],
+          "cited_evidence": {
+            "E00018": {
+              "id": "E00018",
+              "kind": "table_cell",
+              "text": "UDC分类号：",
+              "style_id": "af",
+              "runs": [
+                {
+                  "text": "UDC",
+                  "format": {
+                    "fonts": {},
+                    "size_pt": 14.0
+                  }
+                },
+                {
+                  "text": "分类号",
+                  "format": {
+                    "fonts": {},
+                    "size_pt": 14.0
+                  }
+                },
+                {
+                  "text": "：",
+                  "format": {
+                    "fonts": {},
+                    "size_pt": 14.0
+                  }
+                }
+              ],
+              "location": {
+                "part": "document",
+                "table_child_index": 19,
+                "row": 1,
+                "column": 0,
+                "paragraph": 0,
+                "order": 17
+              },
+              "table_row_context": {
+                "protocol": "current-source-table-row/v1",
+                "part": "document",
+                "table_child_index": 19,
+                "row": 1,
+                "table_grid_columns": 4,
+                "bidi_visual": false,
+                "grid_before": 0,
+                "grid_after": 0,
+                "cells": [
+                  {
+                    "column": 0,
+                    "paragraphs": [
+                      {
+                        "paragraph": 0,
+                        "text": "UDC分类号：",
+                        "text_sha256": "3b82b855ed1f99f6b4a0e1214ebb0cd12198251e56efb96ad1a8ef31f11e2b1f",
+                        "evidence_id": "E00018"
+                      }
+                    ],
+                    "grid_span": 1,
+                    "vertical_merge": null,
+                    "horizontal_merge": null,
+                    "has_nested_table": false
+                  },
+                  {
+                    "column": 1,
+                    "paragraphs": [
+                      {
+                        "paragraph": 0,
+                        "text": "",
+                        "text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                        "evidence_id": null
+                      }
+                    ],
+                    "grid_span": 1,
+                    "vertical_merge": null,
+                    "horizontal_merge": null,
+                    "has_nested_table": false
+                  },
+                  {
+                    "column": 2,
+                    "paragraphs": [
+                      {
+                        "paragraph": 0,
+                        "text": "密级：",
+                        "text_sha256": "fd823570588d706787c8a64d21249774e356182318a265ea2c36d69b6a08fb52",
+                        "evidence_id": "E00019"
+                      }
+                    ],
+                    "grid_span": 1,
+                    "vertical_merge": null,
+                    "horizontal_merge": null,
+                    "has_nested_table": false
+                  },
+                  {
+                    "column": 3,
+                    "paragraphs": [
+                      {
+                        "paragraph": 0,
+                        "text": "",
+                        "text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                        "evidence_id": null
+                      }
+                    ],
+                    "grid_span": 1,
+                    "vertical_merge": null,
+                    "horizontal_merge": null,
+                    "has_nested_table": false
+                  }
+                ],
+                "row_sha256": "15f9000fa5b79d260781c07d0b7df323f757d8a9bf649dd6ec4d9d43429ee29c"
+              },
+              "context_before": [
+                "学校代码：",
+                "10043"
+              ],
+              "context_after": [
+                "密级：",
+                "硕 士 学 位 论 文"
+              ],
+              "style_name": "段",
+              "xml_locator": {
+                "part": "document",
+                "table_child_index": 19,
+                "row": 1,
+                "column": 0,
+                "paragraph": 0,
+                "order": 17
+              }
+            }
+          },
+          "machine_obligation_ids": [],
+          "manual_review_codes": [],
+          "source_content_verification_codes": [],
+          "pending_source_work": [],
+          "section_description": null,
+          "table_structure_context": {
+            "protocol": "current-source-table-row/v1",
+            "source_row": {
+              "protocol": "current-source-table-row/v1",
+              "part": "document",
+              "table_child_index": 19,
+              "row": 1,
+              "table_grid_columns": 4,
+              "bidi_visual": false,
+              "grid_before": 0,
+              "grid_after": 0,
+              "cells": [
+                {
+                  "column": 0,
+                  "paragraphs": [
+                    {
+                      "paragraph": 0,
+                      "text": "UDC分类号：",
+                      "text_sha256": "3b82b855ed1f99f6b4a0e1214ebb0cd12198251e56efb96ad1a8ef31f11e2b1f",
+                      "evidence_id": "E00018"
+                    }
+                  ],
+                  "grid_span": 1,
+                  "vertical_merge": null,
+                  "horizontal_merge": null,
+                  "has_nested_table": false
+                },
+                {
+                  "column": 1,
+                  "paragraphs": [
+                    {
+                      "paragraph": 0,
+                      "text": "",
+                      "text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                      "evidence_id": null
+                    }
+                  ],
+                  "grid_span": 1,
+                  "vertical_merge": null,
+                  "horizontal_merge": null,
+                  "has_nested_table": false
+                },
+                {
+                  "column": 2,
+                  "paragraphs": [
+                    {
+                      "paragraph": 0,
+                      "text": "密级：",
+                      "text_sha256": "fd823570588d706787c8a64d21249774e356182318a265ea2c36d69b6a08fb52",
+                      "evidence_id": "E00019"
+                    }
+                  ],
+                  "grid_span": 1,
+                  "vertical_merge": null,
+                  "horizontal_merge": null,
+                  "has_nested_table": false
+                },
+                {
+                  "column": 3,
+                  "paragraphs": [
+                    {
+                      "paragraph": 0,
+                      "text": "",
+                      "text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                      "evidence_id": null
+                    }
+                  ],
+                  "grid_span": 1,
+                  "vertical_merge": null,
+                  "horizontal_merge": null,
+                  "has_nested_table": false
+                }
+              ],
+              "row_sha256": "15f9000fa5b79d260781c07d0b7df323f757d8a9bf649dd6ec4d9d43429ee29c"
+            },
+            "target_evidence_id": "E00018",
+            "target_column": 0,
+            "immediate_left_column": null,
+            "relationship": "geometry_not_unique",
+            "meaning": "Source geometry only; field meaning and candidate coverage require independent semantic review."
+          }
+        }
+      },
+      {
+        "check_id": "C00019",
+        "document_text": "密级",
+        "review_context": {
+          "semantic_clause_text": "密级",
+          "classification": "executable",
+          "primary_normative_basis": "template_structure",
+          "requires_requirement": true,
+          "reason": "The source table presents a security-marking label on the cover. This establishes the printed label, not a marking value or approval.",
+          "primary_obligations": [
+            {
+              "id": "C00019-label",
+              "status": "covered",
+              "reason": "The exact printed label is bound to the cover field label requirement; no value or approval is inferred.",
+              "actor": "document generator",
+              "action": "print",
+              "target": "security-marking label on the cover",
+              "source_quote": "密级",
+              "force": "required",
+              "applicability": "applicable",
+              "route": "automatic"
+            }
+          ],
+          "primary_obligation_quote_bindings": [
+            {
+              "primary_obligation_id": "C00019-label",
+              "original_source_quote": "密级：",
+              "review_source_quote": "密级",
+              "source_binding": {
+                "policy": "current_source_occurrence_quote_v1",
+                "clause_binding": {
+                  "text": "密级",
+                  "source_fragments": [
+                    {
+                      "clause_id": "C00019",
+                      "evidence_id": "E00019",
+                      "start_offset": 0,
+                      "end_offset": 2,
+                      "source_sha256": "fd823570588d706787c8a64d21249774e356182318a265ea2c36d69b6a08fb52",
+                      "text": "密级",
+                      "source_kind": "table_cell",
+                      "separator_before": "",
+                      "location": {
+                        "part": "document",
+                        "table_child_index": 19,
+                        "row": 1,
+                        "column": 2,
+                        "paragraph": 0,
+                        "order": 18
+                      }
+                    }
+                  ]
+                },
+                "quote_start_offset": 0,
+                "quote_end_offset": 3,
+                "quote_sha256": "28367f5b98c059ba2d60ea5ed378bc3f32126d731151f7f28972d4b92c9e40d5",
+                "context_is_not_execution_scope": true
+              },
+              "original_quote_sha256": "28367f5b98c059ba2d60ea5ed378bc3f32126d731151f7f28972d4b92c9e40d5",
+              "review_quote_sha256": "2866f2ce67f182a38bbc96609f4f7c000d7762b9d94ae3c080dc255e0c4b5bbf",
+              "semantic_dimensions_unchanged": true
+            }
+          ],
+          "linked_requirements": [
+            {
+              "requirement_ref": "RR0db4aff002e1041f73d2",
+              "source_requirement_id": null,
+              "role": "cover_field_label",
+              "properties": {
+                "text": "密级："
+              },
+              "evidence_ids": [
+                "E00019"
+              ],
+              "verification": {
+                "mode": "static_docx",
+                "checks": [
+                  "Verify the exact source-bound label is present on the cover"
+                ]
+              }
+            }
+          ],
+          "source_clause_support": [],
+          "cited_evidence": {
+            "E00019": {
+              "id": "E00019",
+              "kind": "table_cell",
+              "text": "密级：",
+              "style_id": "af",
+              "runs": [
+                {
+                  "text": "密级：",
+                  "format": {
+                    "fonts": {},
+                    "size_pt": 14.0
+                  }
+                }
+              ],
+              "location": {
+                "part": "document",
+                "table_child_index": 19,
+                "row": 1,
+                "column": 2,
+                "paragraph": 0,
+                "order": 18
+              },
+              "table_row_context": {
+                "protocol": "current-source-table-row/v1",
+                "part": "document",
+                "table_child_index": 19,
+                "row": 1,
+                "table_grid_columns": 4,
+                "bidi_visual": false,
+                "grid_before": 0,
+                "grid_after": 0,
+                "cells": [
+                  {
+                    "column": 0,
+                    "paragraphs": [
+                      {
+                        "paragraph": 0,
+                        "text": "UDC分类号：",
+                        "text_sha256": "3b82b855ed1f99f6b4a0e1214ebb0cd12198251e56efb96ad1a8ef31f11e2b1f",
+                        "evidence_id": "E00018"
+                      }
+                    ],
+                    "grid_span": 1,
+                    "vertical_merge": null,
+                    "horizontal_merge": null,
+                    "has_nested_table": false
+                  },
+                  {
+                    "column": 1,
+                    "paragraphs": [
+                      {
+                        "paragraph": 0,
+                        "text": "",
+                        "text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                        "evidence_id": null
+                      }
+                    ],
+                    "grid_span": 1,
+                    "vertical_merge": null,
+                    "horizontal_merge": null,
+                    "has_nested_table": false
+                  },
+                  {
+                    "column": 2,
+                    "paragraphs": [
+                      {
+                        "paragraph": 0,
+                        "text": "密级：",
+                        "text_sha256": "fd823570588d706787c8a64d21249774e356182318a265ea2c36d69b6a08fb52",
+                        "evidence_id": "E00019"
+                      }
+                    ],
+                    "grid_span": 1,
+                    "vertical_merge": null,
+                    "horizontal_merge": null,
+                    "has_nested_table": false
+                  },
+                  {
+                    "column": 3,
+                    "paragraphs": [
+                      {
+                        "paragraph": 0,
+                        "text": "",
+                        "text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                        "evidence_id": null
+                      }
+                    ],
+                    "grid_span": 1,
+                    "vertical_merge": null,
+                    "horizontal_merge": null,
+                    "has_nested_table": false
+                  }
+                ],
+                "row_sha256": "15f9000fa5b79d260781c07d0b7df323f757d8a9bf649dd6ec4d9d43429ee29c"
+              },
+              "context_before": [
+                "10043",
+                "UDC分类号："
+              ],
+              "context_after": [
+                "硕 士 学 位 论 文",
+                "（学术学位）"
+              ],
+              "style_name": "段",
+              "xml_locator": {
+                "part": "document",
+                "table_child_index": 19,
+                "row": 1,
+                "column": 2,
+                "paragraph": 0,
+                "order": 18
+              }
+            }
+          },
+          "machine_obligation_ids": [],
+          "manual_review_codes": [],
+          "source_content_verification_codes": [],
+          "pending_source_work": [],
+          "section_description": null,
+          "table_structure_context": {
+            "protocol": "current-source-table-row/v1",
+            "source_row": {
+              "protocol": "current-source-table-row/v1",
+              "part": "document",
+              "table_child_index": 19,
+              "row": 1,
+              "table_grid_columns": 4,
+              "bidi_visual": false,
+              "grid_before": 0,
+              "grid_after": 0,
+              "cells": [
+                {
+                  "column": 0,
+                  "paragraphs": [
+                    {
+                      "paragraph": 0,
+                      "text": "UDC分类号：",
+                      "text_sha256": "3b82b855ed1f99f6b4a0e1214ebb0cd12198251e56efb96ad1a8ef31f11e2b1f",
+                      "evidence_id": "E00018"
+                    }
+                  ],
+                  "grid_span": 1,
+                  "vertical_merge": null,
+                  "horizontal_merge": null,
+                  "has_nested_table": false
+                },
+                {
+                  "column": 1,
+                  "paragraphs": [
+                    {
+                      "paragraph": 0,
+                      "text": "",
+                      "text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                      "evidence_id": null
+                    }
+                  ],
+                  "grid_span": 1,
+                  "vertical_merge": null,
+                  "horizontal_merge": null,
+                  "has_nested_table": false
+                },
+                {
+                  "column": 2,
+                  "paragraphs": [
+                    {
+                      "paragraph": 0,
+                      "text": "密级：",
+                      "text_sha256": "fd823570588d706787c8a64d21249774e356182318a265ea2c36d69b6a08fb52",
+                      "evidence_id": "E00019"
+                    }
+                  ],
+                  "grid_span": 1,
+                  "vertical_merge": null,
+                  "horizontal_merge": null,
+                  "has_nested_table": false
+                },
+                {
+                  "column": 3,
+                  "paragraphs": [
+                    {
+                      "paragraph": 0,
+                      "text": "",
+                      "text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                      "evidence_id": null
+                    }
+                  ],
+                  "grid_span": 1,
+                  "vertical_merge": null,
+                  "horizontal_merge": null,
+                  "has_nested_table": false
+                }
+              ],
+              "row_sha256": "15f9000fa5b79d260781c07d0b7df323f757d8a9bf649dd6ec4d9d43429ee29c"
+            },
+            "target_evidence_id": "E00019",
+            "target_column": 2,
+            "immediate_left_column": null,
+            "relationship": "geometry_not_unique",
+            "meaning": "Source geometry only; field meaning and candidate coverage require independent semantic review."
+          }
+        }
+      },
+      {
+        "check_id": "C00020",
+        "document_text": "硕 士 学 位 论 文",
+        "review_context": {
+          "semantic_clause_text": "硕 士 学 位 论 文",
+          "classification": "executable",
+          "primary_normative_basis": "fixed_statement",
+          "requires_requirement": true,
+          "reason": "The source presents the Chinese thesis-type phrase as fixed cover text.",
+          "primary_obligations": [
+            {
+              "id": "C00020-fixed-text",
+              "status": "covered",
+              "reason": "The exact source text is bound to a Chinese thesis-type requirement.",
+              "actor": "document generator",
+              "action": "print",
+              "target": "Chinese thesis-type text on the cover",
+              "source_quote": "硕 士 学 位 论 文",
+              "force": "required",
+              "applicability": "applicable",
+              "route": "automatic"
+            }
+          ],
+          "primary_obligation_quote_bindings": [
+            {
+              "primary_obligation_id": "C00020-fixed-text",
+              "original_source_quote": "硕 士 学 位 论 文",
+              "review_source_quote": "硕 士 学 位 论 文",
+              "source_binding": {
+                "policy": "current_source_occurrence_quote_v1",
+                "clause_binding": {
+                  "text": "硕 士 学 位 论 文",
+                  "source_fragments": [
+                    {
+                      "clause_id": "C00020",
+                      "evidence_id": "E00020",
+                      "start_offset": 0,
+                      "end_offset": 11,
+                      "source_sha256": "0739f355b45511f0350b3ee7168c1da45abc71acd1044b259406cc5f9280b206",
+                      "text": "硕 士 学 位 论 文",
+                      "source_kind": "paragraph",
+                      "separator_before": "",
+                      "location": {
+                        "part": "document",
+                        "child_index": 23,
+                        "order": 19
+                      }
+                    }
+                  ]
+                },
+                "quote_start_offset": 0,
+                "quote_end_offset": 11,
+                "quote_sha256": "fae580865b108ca6520d362d6be9129c81249c6621db18d73fca6b0f158b3045",
+                "context_is_not_execution_scope": true
+              },
+              "original_quote_sha256": "fae580865b108ca6520d362d6be9129c81249c6621db18d73fca6b0f158b3045",
+              "review_quote_sha256": "fae580865b108ca6520d362d6be9129c81249c6621db18d73fca6b0f158b3045",
+              "semantic_dimensions_unchanged": true
+            }
+          ],
+          "linked_requirements": [
+            {
+              "requirement_ref": "RRa12d3e35c7aee9df8679",
+              "source_requirement_id": null,
+              "role": "thesis_type_zh",
+              "properties": {
+                "text": "硕 士 学 位 论 文"
+              },
+              "evidence_ids": [
+                "E00020"
+              ],
+              "verification": {
+                "mode": "static_docx",
+                "checks": [
+                  "Verify the exact source-bound thesis-type text is present on the cover"
+                ]
+              }
+            }
+          ],
+          "source_clause_support": [],
+          "cited_evidence": {
+            "E00020": {
+              "id": "E00020",
+              "kind": "paragraph",
+              "text": "硕 士 学 位 论 文",
+              "style_id": "af",
+              "runs": [
+                {
+                  "text": "硕",
+                  "format": {
+                    "fonts": {},
+                    "size_pt": 22.0,
+                    "bold": true
+                  }
+                },
+                {
+                  "text": "士",
+                  "format": {
+                    "fonts": {},
+                    "size_pt": 22.0,
+                    "bold": true
+                  }
+                },
+                {
+                  "text": "学 位 论 文",
+                  "format": {
+                    "fonts": {},
+                    "size_pt": 22.0,
+                    "bold": true
+                  }
+                }
+              ],
+              "location": {
+                "part": "document",
+                "child_index": 23,
+                "order": 19
+              },
+              "context_before": [
+                "UDC分类号：",
+                "密级："
+              ],
+              "context_after": [
+                "（学术学位）",
+                "论文题目（中文）"
+              ],
+              "style_name": "段",
+              "xml_locator": {
+                "part": "document",
+                "child_index": 23,
+                "order": 19
+              }
+            }
+          },
+          "machine_obligation_ids": [],
+          "manual_review_codes": [],
+          "source_content_verification_codes": [],
+          "pending_source_work": [],
+          "section_description": null
+        }
+      },
+      {
+        "check_id": "C00021",
+        "document_text": "（学术学位）",
+        "review_context": {
+          "semantic_clause_text": "（学术学位）",
+          "classification": "executable",
+          "primary_normative_basis": "fixed_statement",
+          "requires_requirement": true,
+          "reason": "The source presents the academic-degree phrase as fixed cover text.",
+          "primary_obligations": [
+            {
+              "id": "C00021-fixed-text",
+              "status": "covered",
+              "reason": "The exact source text is bound to a Chinese thesis-type requirement.",
+              "actor": "document generator",
+              "action": "print",
+              "target": "Chinese degree-category text on the cover",
+              "source_quote": "（学术学位）",
+              "force": "required",
+              "applicability": "applicable",
+              "route": "automatic"
+            }
+          ],
+          "primary_obligation_quote_bindings": [
+            {
+              "primary_obligation_id": "C00021-fixed-text",
+              "original_source_quote": "（学术学位）",
+              "review_source_quote": "（学术学位）",
+              "source_binding": {
+                "policy": "current_source_occurrence_quote_v1",
+                "clause_binding": {
+                  "text": "（学术学位）",
+                  "source_fragments": [
+                    {
+                      "clause_id": "C00021",
+                      "evidence_id": "E00021",
+                      "start_offset": 0,
+                      "end_offset": 6,
+                      "source_sha256": "611040c2295fee68782c17ac6443dbbe67ae3a16f5b51dfd3cb79e66f83489d9",
+                      "text": "（学术学位）",
+                      "source_kind": "paragraph",
+                      "separator_before": "",
+                      "location": {
+                        "part": "document",
+                        "child_index": 24,
+                        "order": 20
+                      }
+                    }
+                  ]
+                },
+                "quote_start_offset": 0,
+                "quote_end_offset": 6,
+                "quote_sha256": "80928af129e7be0cfd70082dd594d264f26a849edb5a39763a0e2f6838193204",
+                "context_is_not_execution_scope": true
+              },
+              "original_quote_sha256": "80928af129e7be0cfd70082dd594d264f26a849edb5a39763a0e2f6838193204",
+              "review_quote_sha256": "80928af129e7be0cfd70082dd594d264f26a849edb5a39763a0e2f6838193204",
+              "semantic_dimensions_unchanged": true
+            }
+          ],
+          "linked_requirements": [
+            {
+              "requirement_ref": "RR6094375eebaf72ec8ee0",
+              "source_requirement_id": null,
+              "role": "thesis_type_zh",
+              "properties": {
+                "text": "（学术学位）"
+              },
+              "evidence_ids": [
+                "E00021"
+              ],
+              "verification": {
+                "mode": "static_docx",
+                "checks": [
+                  "Verify the exact source-bound degree-category text is present on the cover"
+                ]
+              }
+            }
+          ],
+          "source_clause_support": [],
+          "cited_evidence": {
+            "E00021": {
+              "id": "E00021",
+              "kind": "paragraph",
+              "text": "（学术学位）",
+              "style_id": "Default",
+              "runs": [
+                {
+                  "text": "（学术学位）",
+                  "format": {
+                    "fonts": {
+                      "hAnsi": "宋体"
+                    },
+                    "size_pt": 16.0
+                  }
+                }
+              ],
+              "location": {
+                "part": "document",
+                "child_index": 24,
+                "order": 20
+              },
+              "context_before": [
+                "密级：",
+                "硕 士 学 位 论 文"
+              ],
+              "context_after": [
+                "论文题目（中文）",
+                "English title（英文）"
+              ],
+              "style_name": "Default",
+              "xml_locator": {
+                "part": "document",
+                "child_index": 24,
+                "order": 20
+              }
+            }
+          },
+          "machine_obligation_ids": [],
+          "manual_review_codes": [],
+          "source_content_verification_codes": [],
+          "pending_source_work": [],
+          "section_description": null
+        }
+      },
+      {
+        "check_id": "C00022",
+        "document_text": "论文题目（中文）",
+        "review_context": {
+          "semantic_clause_text": "论文题目（中文）",
+          "classification": "executable",
+          "primary_normative_basis": "template_structure",
+          "requires_requirement": true,
+          "reason": "The source presents a Chinese thesis-title label on the cover as fixed template structure.",
+          "primary_obligations": [
+            {
+              "id": "C00022-label",
+              "status": "covered",
+              "reason": "The exact printed label is bound to the cover field label requirement.",
+              "actor": "document generator",
+              "action": "print",
+              "target": "Chinese thesis-title label on the cover",
+              "source_quote": "论文题目（中文）",
+              "force": "required",
+              "applicability": "applicable",
+              "route": "automatic"
+            }
+          ],
+          "primary_obligation_quote_bindings": [
+            {
+              "primary_obligation_id": "C00022-label",
+              "original_source_quote": "论文题目（中文）",
+              "review_source_quote": "论文题目（中文）",
+              "source_binding": {
+                "policy": "current_source_occurrence_quote_v1",
+                "clause_binding": {
+                  "text": "论文题目（中文）",
+                  "source_fragments": [
+                    {
+                      "clause_id": "C00022",
+                      "evidence_id": "E00022",
+                      "start_offset": 0,
+                      "end_offset": 8,
+                      "source_sha256": "3f8d3dd03edc1fcbd255b8501917fcdf97ef1499f345589f0cc426de5a0dfad6",
+                      "text": "论文题目（中文）",
+                      "source_kind": "paragraph",
+                      "separator_before": "",
+                      "location": {
+                        "part": "document",
+                        "child_index": 25,
+                        "order": 21
+                      }
+                    }
+                  ]
+                },
+                "quote_start_offset": 0,
+                "quote_end_offset": 8,
+                "quote_sha256": "422a08e5d1efee92f4ee8d2fdbffa2150e2f8195cb0591bc7d64e44be1322fb6",
+                "context_is_not_execution_scope": true
+              },
+              "original_quote_sha256": "422a08e5d1efee92f4ee8d2fdbffa2150e2f8195cb0591bc7d64e44be1322fb6",
+              "review_quote_sha256": "422a08e5d1efee92f4ee8d2fdbffa2150e2f8195cb0591bc7d64e44be1322fb6",
+              "semantic_dimensions_unchanged": true
+            }
+          ],
+          "linked_requirements": [
+            {
+              "requirement_ref": "RR4350744edef56c4a9b2d",
+              "source_requirement_id": null,
+              "role": "cover_field_label",
+              "properties": {
+                "text": "论文题目（中文）"
+              },
+              "evidence_ids": [
+                "E00022"
+              ],
+              "verification": {
+                "mode": "static_docx",
+                "checks": [
+                  "Verify the exact source-bound label is present on the cover"
+                ]
+              }
+            }
+          ],
+          "source_clause_support": [],
+          "cited_evidence": {
+            "E00022": {
+              "id": "E00022",
+              "kind": "paragraph",
+              "text": "论文题目（中文）",
+              "style_id": "Default",
+              "runs": [
+                {
+                  "text": "论文题目",
+                  "format": {
+                    "fonts": {
+                      "eastAsia": "黑体",
+                      "ascii": "黑体",
+                      "hAnsi": "黑体"
+                    },
+                    "size_pt": 16.0
+                  }
+                },
+                {
+                  "text": "（中文）",
+                  "format": {
+                    "fonts": {
+                      "eastAsia": "黑体",
+                      "ascii": "黑体",
+                      "hAnsi": "黑体"
+                    },
+                    "size_pt": 16.0
+                  }
+                }
+              ],
+              "location": {
+                "part": "document",
+                "child_index": 25,
+                "order": 21
+              },
+              "context_before": [
+                "硕 士 学 位 论 文",
+                "（学术学位）"
+              ],
+              "context_after": [
+                "English title（英文）",
+                "论文作者                          指导教师"
+              ],
+              "style_name": "Default",
+              "xml_locator": {
+                "part": "document",
+                "child_index": 25,
+                "order": 21
+              }
+            }
+          },
+          "machine_obligation_ids": [],
+          "manual_review_codes": [],
+          "source_content_verification_codes": [],
+          "pending_source_work": [],
+          "section_description": null
+        }
+      },
+      {
+        "check_id": "C00023",
+        "document_text": "English title（英文）",
+        "review_context": {
+          "semantic_clause_text": "English title（英文）",
+          "classification": "executable",
+          "primary_normative_basis": "template_structure",
+          "requires_requirement": true,
+          "reason": "The source presents an English thesis-title label on the cover as fixed template structure.",
+          "primary_obligations": [
+            {
+              "id": "C00023-label",
+              "status": "covered",
+              "reason": "The exact printed label is bound to the cover field label requirement.",
+              "actor": "document generator",
+              "action": "print",
+              "target": "English thesis-title label on the cover",
+              "source_quote": "English title（英文）",
+              "force": "required",
+              "applicability": "applicable",
+              "route": "automatic"
+            }
+          ],
+          "primary_obligation_quote_bindings": [
+            {
+              "primary_obligation_id": "C00023-label",
+              "original_source_quote": "English title（英文）",
+              "review_source_quote": "English title（英文）",
+              "source_binding": {
+                "policy": "current_source_occurrence_quote_v1",
+                "clause_binding": {
+                  "text": "English title（英文）",
+                  "source_fragments": [
+                    {
+                      "clause_id": "C00023",
+                      "evidence_id": "E00023",
+                      "start_offset": 0,
+                      "end_offset": 17,
+                      "source_sha256": "164bc4aa4c8c5d821bdb909b07b705fc2788696b77478f8b3ceb0156623105bb",
+                      "text": "English title（英文）",
+                      "source_kind": "paragraph",
+                      "separator_before": "",
+                      "location": {
+                        "part": "document",
+                        "child_index": 26,
+                        "order": 22
+                      }
+                    }
+                  ]
+                },
+                "quote_start_offset": 0,
+                "quote_end_offset": 17,
+                "quote_sha256": "5c121038d695134345b5c057e37dd1a7c9ac7c7425fbff00fafacc25ba7afcc5",
+                "context_is_not_execution_scope": true
+              },
+              "original_quote_sha256": "5c121038d695134345b5c057e37dd1a7c9ac7c7425fbff00fafacc25ba7afcc5",
+              "review_quote_sha256": "5c121038d695134345b5c057e37dd1a7c9ac7c7425fbff00fafacc25ba7afcc5",
+              "semantic_dimensions_unchanged": true
+            }
+          ],
+          "linked_requirements": [
+            {
+              "requirement_ref": "RRef79d9f97e451002b7b2",
+              "source_requirement_id": null,
+              "role": "cover_field_label",
+              "properties": {
+                "text": "English title（英文）"
+              },
+              "evidence_ids": [
+                "E00023"
+              ],
+              "verification": {
+                "mode": "static_docx",
+                "checks": [
+                  "Verify the exact source-bound label is present on the cover"
+                ]
+              }
+            }
+          ],
+          "source_clause_support": [],
+          "cited_evidence": {
+            "E00023": {
+              "id": "E00023",
+              "kind": "paragraph",
+              "text": "English title（英文）",
+              "style_id": "Default",
+              "runs": [
+                {
+                  "text": "English title",
+                  "format": {
+                    "fonts": {
+                      "ascii": "Times New Roman"
+                    },
+                    "size_pt": 16.0
+                  }
+                },
+                {
+                  "text": "（英文）",
+                  "format": {
+                    "fonts": {
+                      "ascii": "Times New Roman"
+                    },
+                    "size_pt": 16.0
+                  }
+                }
+              ],
+              "location": {
+                "part": "document",
+                "child_index": 26,
+                "order": 22
+              },
+              "context_before": [
+                "（学术学位）",
+                "论文题目（中文）"
+              ],
+              "context_after": [
+                "论文作者                          指导教师",
+                "申请学位                          培养单位"
+              ],
+              "style_name": "Default",
+              "xml_locator": {
+                "part": "document",
+                "child_index": 26,
+                "order": 22
+              }
+            }
+          },
+          "machine_obligation_ids": [],
+          "manual_review_codes": [],
+          "source_content_verification_codes": [],
+          "pending_source_work": [],
+          "section_description": null
+        }
+      },
+      {
+        "check_id": "C00024",
+        "document_text": "论文作者                          指导教师",
+        "review_context": {
+          "semantic_clause_text": "论文作者 指导教师",
+          "classification": "executable",
+          "primary_normative_basis": "template_structure",
+          "requires_requirement": true,
+          "reason": "The source presents author and supervisor labels together on the cover as fixed template structure.",
+          "primary_obligations": [
+            {
+              "id": "C00024-labels",
+              "status": "covered",
+              "reason": "The exact source line, including its spacing, is bound to a cover field-label requirement.",
+              "actor": "document generator",
+              "action": "print",
+              "target": "author and supervisor labels on the cover",
+              "source_quote": "论文作者                          指导教师",
+              "force": "required",
+              "applicability": "applicable",
+              "route": "automatic"
+            }
+          ],
+          "primary_obligation_quote_bindings": [
+            {
+              "primary_obligation_id": "C00024-labels",
+              "original_source_quote": "论文作者                          指导教师",
+              "review_source_quote": "论文作者                          指导教师",
+              "source_binding": {
+                "policy": "current_source_occurrence_quote_v1",
+                "clause_binding": {
+                  "text": "论文作者                          指导教师",
+                  "source_fragments": [
+                    {
+                      "clause_id": "C00024",
+                      "evidence_id": "E00024",
+                      "start_offset": 0,
+                      "end_offset": 34,
+                      "source_sha256": "336d12f5aca91b861261ba3006aec60d8f0c59a49eef02134ca000360ecf6e27",
+                      "text": "论文作者                          指导教师",
+                      "source_kind": "paragraph",
+                      "separator_before": "",
+                      "location": {
+                        "part": "document",
+                        "child_index": 28,
+                        "order": 23
+                      }
+                    }
+                  ]
+                },
+                "quote_start_offset": 0,
+                "quote_end_offset": 34,
+                "quote_sha256": "eeb0c4e86e5ddb158869186f19784149e38d2503dfafcbc105c23688032d077e",
+                "context_is_not_execution_scope": true
+              },
+              "original_quote_sha256": "eeb0c4e86e5ddb158869186f19784149e38d2503dfafcbc105c23688032d077e",
+              "review_quote_sha256": "eeb0c4e86e5ddb158869186f19784149e38d2503dfafcbc105c23688032d077e",
+              "semantic_dimensions_unchanged": true
+            }
+          ],
+          "linked_requirements": [
+            {
+              "requirement_ref": "RRf46737d47ae1e93f5f52",
+              "source_requirement_id": null,
+              "role": "cover_field_label",
+              "properties": {
+                "text": "论文作者                          指导教师"
+              },
+              "evidence_ids": [
+                "E00024"
+              ],
+              "verification": {
+                "mode": "static_docx",
+                "checks": [
+                  "Verify the exact source-bound author and supervisor labels and their spacing are present on the cover"
+                ]
+              }
+            }
+          ],
+          "source_clause_support": [],
+          "cited_evidence": {
+            "E00024": {
+              "id": "E00024",
+              "kind": "paragraph",
+              "text": "论文作者                          指导教师",
+              "style_id": "af",
+              "runs": [
+                {
+                  "text": "论文作者",
+                  "format": {
+                    "fonts": {},
+                    "size_pt": 12.0
+                  }
+                },
+                {
+                  "text": "指导教师",
+                  "format": {
+                    "fonts": {},
+                    "size_pt": 12.0
+                  }
+                }
+              ],
+              "location": {
+                "part": "document",
+                "child_index": 28,
+                "order": 23
+              },
+              "context_before": [
+                "论文题目（中文）",
+                "English title（英文）"
+              ],
+              "context_after": [
+                "申请学位                          培养单位",
+                "一级学科                          二级学科"
+              ],
+              "style_name": "段",
+              "xml_locator": {
+                "part": "document",
+                "child_index": 28,
+                "order": 23
+              }
+            }
+          },
+          "machine_obligation_ids": [],
+          "manual_review_codes": [],
+          "source_content_verification_codes": [],
+          "pending_source_work": [],
+          "section_description": null
+        }
+      }
+    ],
+    "attempt": 1,
+    "provider_attempt": 1,
+    "output_policy": "review_draft"
+  },
+  "terminal_failure": "max_output_tokens"
+}

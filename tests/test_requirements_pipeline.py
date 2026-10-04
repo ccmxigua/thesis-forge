@@ -1850,6 +1850,7 @@ b&=2\notag
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
             manifest = json.loads((td / "work" / "pipeline-manifest.json").read_text())
             self.assertEqual(manifest["status"], "host_review_required")
+            self.assertIs(manifest["submission_ready"], False)
             review_manifest = json.loads(
                 (td / "work" / "requirements" / "host-agent-review-manifest.json").read_text()
             )

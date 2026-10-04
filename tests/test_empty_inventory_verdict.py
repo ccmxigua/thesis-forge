@@ -134,15 +134,32 @@ class EmptyInventoryVerdictTests(unittest.TestCase):
 
     def mock_transport(self, stack, raws):
         context = SimpleNamespace(runtime="codex", as_audit=lambda: {"host_runtime": "codex"})
-        def command(**kw):
-            kw["last_message_path"].write_text("{}", encoding="utf-8")
-            return ["codex"]
+        remaining, by_request = iter(raws), {}
+        def process(command, **kwargs):
+            last = Path(command[command.index("--output-last-message") + 1])
+            child = last.parent
+            partitioned = child.name.startswith("native-batch-")
+            owner = child.parent if partitioned else child
+            if owner not in by_request:
+                by_request[owner] = next(remaining)
+            response = copy.deepcopy(by_request[owner])
+            if partitioned:
+                packet = json.loads((child / "source-reference-packet.json").read_text())
+                ids = packet["native_review_partition"]["check_ids"]
+                all_ids = {c["check_id"] for c in packet["orientation_only_checks"]}
+                response["results"] = [r for r in response["results"]
+                    if r.get("check_id") in ids or r.get("check_id") not in all_ids]
+                from tests.test_independent_review_partition import keyed_wire
+                response = keyed_wire(packet, response)
+            text = json.dumps(response, ensure_ascii=False)
+            last.write_text(text, encoding="utf-8")
+            events = [{"type": "item.completed", "item": {"type": "agent_message", "text": text}},
+                      {"type": "turn.completed"}]
+            return CompletedProcess(command, 0, "\n".join(json.dumps(e) for e in events), "")
         for obj, name, value in ((native, "require_host_runtime", context), (native, "automatic_adapter_id", "codex"),
-            (native.codex_adapter, "resolve_binary", "codex"), (native.codex_adapter, "probe_capabilities", {"output_schema_supported":True}),
-            (native, "run_process", CompletedProcess(["codex"],0,"{}",""))):
+            (native.codex_adapter, "resolve_binary", "codex"), (native.codex_adapter, "probe_capabilities", {"output_schema_supported":True})):
             stack.enter_context(patch.object(obj,name,return_value=value))
-        stack.enter_context(patch.object(native.codex_adapter,"build_command",side_effect=command))
-        stack.enter_context(patch.object(native.codex_adapter,"parse_result",side_effect=[(r,{"event_types":["task_complete"]}) for r in raws]))
+        stack.enter_context(patch.object(native,"run_process",side_effect=process))
 
     def test_native_runner_and_resealed_consumer_proof(self):
         raw = enveloped(self.helper.wire(self.corrected, self.retry))

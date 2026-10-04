@@ -1,0 +1,201 @@
+{
+  "fixture_kind": "captured_source_and_invalid_primary_proposals_not_a_receipt",
+  "origin_run_id": "54f4e84e-3c7f-45b0-b41f-0f769ee23864",
+  "source_clause": {
+    "id": "C00003",
+    "text": "10043",
+    "evidence_ids": [
+      "E00003"
+    ],
+    "source_kind": "table_cell",
+    "location": {
+      "part": "document",
+      "table_child_index": 0,
+      "row": 0,
+      "column": 3,
+      "paragraph": 0,
+      "order": 2
+    },
+    "part_index": 0,
+    "source_span": {
+      "evidence_id": "E00003",
+      "start_offset": 0,
+      "end_offset": 5,
+      "text": "10043",
+      "source_sha256": "2b08a540da4b46beb4613aae4c542e9b7e1bbcacbd525d10d59bc29ebca59168",
+      "location": {
+        "part": "document",
+        "table_child_index": 0,
+        "row": 0,
+        "column": 3,
+        "paragraph": 0,
+        "order": 2
+      }
+    },
+    "source_text_full": "10043",
+    "deterministic_obligation_keys": []
+  },
+  "evidence_context": {
+    "E00003": {
+      "id": "E00003",
+      "kind": "table_cell",
+      "text": "10043",
+      "style_id": null,
+      "runs": [
+        {
+          "text": "10043",
+          "format": {
+            "fonts": {
+              "eastAsia": "宋体",
+              "ascii": "宋体",
+              "hAnsi": "宋体"
+            },
+            "size_pt": 14.0
+          }
+        }
+      ],
+      "location": {
+        "part": "document",
+        "table_child_index": 0,
+        "row": 0,
+        "column": 3,
+        "paragraph": 0,
+        "order": 2
+      },
+      "table_row_context": {
+        "protocol": "current-source-table-row/v1",
+        "part": "document",
+        "table_child_index": 0,
+        "row": 0,
+        "table_grid_columns": 4,
+        "bidi_visual": false,
+        "grid_before": 0,
+        "grid_after": 0,
+        "cells": [
+          {
+            "column": 0,
+            "paragraphs": [
+              {
+                "paragraph": 0,
+                "text": "分类号：",
+                "text_sha256": "d6faa287076f0dd00ace75a523b8f0658d28f00c32d82731eb18b6465c074635",
+                "evidence_id": "E00001"
+              }
+            ],
+            "grid_span": 1,
+            "vertical_merge": null,
+            "horizontal_merge": null,
+            "has_nested_table": false
+          },
+          {
+            "column": 1,
+            "paragraphs": [
+              {
+                "paragraph": 0,
+                "text": "",
+                "text_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+                "evidence_id": null
+              }
+            ],
+            "grid_span": 1,
+            "vertical_merge": null,
+            "horizontal_merge": null,
+            "has_nested_table": false
+          },
+          {
+            "column": 2,
+            "paragraphs": [
+              {
+                "paragraph": 0,
+                "text": "学校代码：",
+                "text_sha256": "42d630ad9eced7630d8d46bb5add5474db0e378bc2f724d09851d111f5668c5a",
+                "evidence_id": "E00002"
+              }
+            ],
+            "grid_span": 1,
+            "vertical_merge": null,
+            "horizontal_merge": null,
+            "has_nested_table": false
+          },
+          {
+            "column": 3,
+            "paragraphs": [
+              {
+                "paragraph": 0,
+                "text": "10043",
+                "text_sha256": "2b08a540da4b46beb4613aae4c542e9b7e1bbcacbd525d10d59bc29ebca59168",
+                "evidence_id": "E00003"
+              }
+            ],
+            "grid_span": 1,
+            "vertical_merge": null,
+            "horizontal_merge": null,
+            "has_nested_table": false
+          }
+        ],
+        "row_sha256": "1cde9084bf441623b9041ed84f884e60eecfbdabe453824a51a35e99ad8869ba"
+      },
+      "context_before": [
+        "分类号：",
+        "学校代码："
+      ],
+      "context_after": [
+        "密  级：",
+        "学    号："
+      ],
+      "style_name": null,
+      "xml_locator": {
+        "part": "document",
+        "table_child_index": 0,
+        "row": 0,
+        "column": 3,
+        "paragraph": 0,
+        "order": 2
+      }
+    }
+  },
+  "first_review": {
+    "clause_id": "C00003",
+    "classification": "informational",
+    "reason": "10043 is a populated example value in the cover table; the evidence does not prescribe copying it as a requirement.",
+    "obligations": [
+      {
+        "id": "C00003-O1",
+        "status": "covered",
+        "reason": "This clause is sample content and imposes no document-generation obligation.",
+        "actor": null,
+        "action": null,
+        "target": "sample school-code value",
+        "condition": null,
+        "source_quote": "10043",
+        "force": "unknown",
+        "applicability": "unknown",
+        "route": "example"
+      }
+    ],
+    "normative_basis": "sample_content"
+  },
+  "retry_review": {
+    "clause_id": "C00003",
+    "classification": "informational",
+    "reason": "10043 is a populated example value in the cover table; the evidence does not prescribe copying it as a requirement.",
+    "obligations": [
+      {
+        "id": "C00003-O1",
+        "status": "covered",
+        "reason": "This clause is sample content and imposes no document-generation obligation.",
+        "actor": null,
+        "action": null,
+        "target": "sample school-code value",
+        "condition": null,
+        "source_quote": "10043",
+        "force": "unknown",
+        "applicability": "not_applicable",
+        "route": "example"
+      }
+    ],
+    "normative_basis": "sample_content"
+  },
+  "first_error": "undecided_scope_cannot_be_covered",
+  "terminal_error": "retry changed semantic fields and requires explicit semantic re-review: $.clause_reviews[2].obligations[0].applicability"
+}

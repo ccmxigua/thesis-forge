@@ -19,6 +19,16 @@ atom definitions keep the source-bound unions compact. This is a portable
 JSON object/enum/anyOf/ref constraint, not a provider-specific array-length
 keyword, a school-specific rule or an automatic semantic decision.
 
+The bc7da49 fresh BSU exposed a nonempty `uncertain` result whose atom was
+`unrepresented`. New generation couples `uncertain` to nonempty `ambiguous`
+atoms, including every remaining atom, using portable whole-result branches.
+Actual omissions remain expressible as `incomplete`/`unrepresented`; an
+independent no-duty conclusion remains expressible as empty `consistent`.
+This constrains encoding, not the source interpretation or pending duty.
+Raw parsing and the canonical validator are unchanged: the captured conflict
+still rejects, and foreign sources or unsafe primary uncertainty still fail.
+No corrective-call budget is extended by this generation constraint.
+
 The compiler copies and converts the envelope into the unchanged canonical
 array. It never changes verdicts, atoms, source selections or their order.
 Closed keys, null-head/nonempty-tail and malformed atom checks fail closed.

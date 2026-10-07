@@ -1504,6 +1504,24 @@ b&=2\notag
         properties = parse_properties("论文题目仿宋14磅，行距16磅，段前段后0磅")
         self.assertEqual(properties["paragraph"]["line_spacing"],
                          {"type": "exact", "value": 16.0, "unit": "pt"})
+        self.assertEqual(properties["paragraph"]["space_before_pt"], 0.0)
+        self.assertEqual(properties["paragraph"]["space_after_pt"], 0.0)
+
+    def test_shared_and_distinct_paragraph_point_spacing_are_not_conflated(self) -> None:
+        from scripts.requirements_engine import parse_properties
+        shared = parse_properties("段前、段后各为0磅")["paragraph"]
+        self.assertEqual(shared["space_before_pt"], 0.0)
+        self.assertEqual(shared["space_after_pt"], 0.0)
+
+        distinct = parse_properties("段前2磅，段后5磅")["paragraph"]
+        self.assertEqual(distinct["space_before_pt"], 2.0)
+        self.assertEqual(distinct["space_after_pt"], 5.0)
+
+        lines = parse_properties("段前0.5行，段后1行")["paragraph"]
+        self.assertEqual(lines["space_before_lines"], 0.5)
+        self.assertEqual(lines["space_after_lines"], 1.0)
+        self.assertNotIn("space_before_pt", lines)
+        self.assertNotIn("space_after_pt", lines)
 
     def test_fresh_extraction_refuses_to_rebuild_over_host_review_artifacts(self) -> None:
         from scripts.requirements_engine import prepare_fresh_extraction

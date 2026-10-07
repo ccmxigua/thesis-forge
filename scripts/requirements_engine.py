@@ -1177,6 +1177,19 @@ def parse_properties(text: str) -> dict[str, Any]:
         if m: _set_nested(out, ("paragraph", key + "_lines"), line_count(m.group(1)))
         m = re.search(label + r"(?:各|均)?(?:空|为|设置为)?\s*(\d+(?:\.\d+)?)\s*(?:磅|pt)", text, re.I)
         if m: _set_nested(out, ("paragraph", key + "_pt"), float(m.group(1)))
+    # A compact shared-point declaration omits punctuation and the word
+    # "各" in common templates ("段前段后0磅").  Bind the shared value to both
+    # properties only when one value directly follows the paired labels;
+    # separate values remain governed by the label-specific expressions above.
+    m = re.search(
+        r"段前\s*(?:[、,，和及]\s*)?段后(?:各|均)?(?:空|为|设置为)?\s*"
+        r"(\d+(?:\.\d+)?)\s*(?:磅|pt)",
+        text, re.I,
+    )
+    if m:
+        value = float(m.group(1))
+        _set_nested(out, ("paragraph", "space_before_pt"), value)
+        _set_nested(out, ("paragraph", "space_after_pt"), value)
     # Combined expression: 段前、段后各空一行
     m = re.search(r"段前[、,，和及]\s*段后(?:各|均)?空?\s*([一二半]|\d+(?:\.\d+)?)\s*行", text)
     if m:

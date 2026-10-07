@@ -52,6 +52,8 @@ from source_literal_binding import (
 from manual_review import (
     add_manual_review_items,
     filter_manual_marker_ledger,
+    review_draft_conflicts_have_exact_markers,
+    review_draft_unresolved_clauses_have_markers,
     validate_manual_review_ledger_ingress,
     write_manual_review_ledger,
 )
@@ -436,6 +438,8 @@ def _current_manual_review_binding(
 def format_spec_blockers(
     spec: dict[str, Any], compliance_mode: str = "full",
     confirmed_semantic_issue_ids: set[str] | None = None,
+    *, review_draft_manual_ledger: dict[str, Any] | None = None,
+    allow_source_bound_review_draft_conflicts: bool = False,
 ) -> list[str]:
     """Identify concrete apply-time blockers for the selected compliance mode."""
     confirmed_semantic_issue_ids = confirmed_semantic_issue_ids or set()
@@ -450,7 +454,12 @@ def format_spec_blockers(
         blockers.append("status_needs_clarification")
     if remaining_unresolved: blockers.append("unresolved_clauses")
     if completeness.get("missing_clause_ids"): blockers.append("missing_clauses")
-    if spec.get("blocking_errors"): blockers.append("blocking_errors")
+    if spec.get("blocking_errors") and not (
+        allow_source_bound_review_draft_conflicts
+        and compliance_mode == "supported_subset"
+        and review_draft_conflicts_have_exact_markers(spec, review_draft_manual_ledger)
+    ):
+        blockers.append("blocking_errors")
     if compliance_mode == "full" and confirmed_semantic_issue_ids:
         blockers.append("confirmed_semantic_issues")
     if compliance_mode == "full" and completeness.get("unsupported_items"):
@@ -4025,6 +4034,54 @@ def main(argv: list[str]) -> int:
             pipeline_manifest = load_json(args.pipeline_manifest)
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             raise SystemExit(f"invalid pipeline manifest: {exc}") from exc
+    manual_review_ledger = None
+    manual_review_ingress_record: dict[str, Any] | None = None
+    if args.manual_review_items:
+        try:
+            ledger_bytes = args.manual_review_items.read_bytes()
+            manual_review_ledger = strict_json_loads(ledger_bytes.decode("utf-8"))
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            raise SystemExit(f"invalid manual-review ledger: {exc}") from exc
+        if not isinstance(manual_review_ledger, dict):
+            raise SystemExit("invalid manual-review ledger: expected a JSON object")
+        ledger_errors = load_and_validate(
+            manual_review_ledger,
+            Path(__file__).resolve().parents[1] / "schema" / "manual-review-ledger.schema.json",
+        )
+        if ledger_errors:
+            raise SystemExit("invalid manual-review ledger schema:\n" + "\n".join(ledger_errors))
+        expected_binding, current_binding_errors = _current_manual_review_binding(
+            args, spec, pipeline_manifest,
+        )
+        input_sha256 = hashlib.sha256(ledger_bytes).hexdigest()
+        host_receipts = pipeline_manifest.get("host_review_receipts")
+        semantic_ledger_receipt = (
+            host_receipts.get("semantic_review_ledger")
+            if isinstance(host_receipts, dict) else None
+        )
+        expected_semantic_ledger_sha256 = (
+            semantic_ledger_receipt.get("sha256")
+            if isinstance(semantic_ledger_receipt, dict) else None
+        )
+        ingress_errors = current_binding_errors + validate_manual_review_ledger_ingress(
+            manual_review_ledger,
+            expected_binding=expected_binding,
+            expected_ledger_sha256=pipeline_manifest.get("manual_review_ledger_input_sha256"),
+            actual_ledger_sha256=input_sha256,
+            expected_semantic_review_ledger_sha256=expected_semantic_ledger_sha256,
+        )
+        if ingress_errors:
+            raise SystemExit(
+                "invalid manual-review current-run binding:\n" + "\n".join(ingress_errors)
+            )
+        manual_review_ingress_record = {
+            "status": "validated",
+            "case_id": expected_binding["case_id"],
+            "run_id": expected_binding["run_id"],
+            "ledger_input_sha256": input_sha256,
+            "binding": copy.deepcopy(expected_binding),
+        }
+        manual_review_ledger = filter_manual_marker_ledger(manual_review_ledger)
     raw_content_instances = spec.get("content_instances", spec.get("cover_field_instances", []))
     content_instance_source_bindings: dict[str, list[dict[str, Any]]] = {}
     content_instance_source_binding_record: dict[str, Any] = {"status": "not_required", "count": 0}
@@ -4115,18 +4172,30 @@ def main(argv: list[str]) -> int:
             semantic_issue_binding = copy.deepcopy(semantic_issue_ledger.get("binding"))
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             raise SystemExit(f"invalid semantic issue ledger: {exc}") from exc
-    blockers = format_spec_blockers(spec, compliance_mode, confirmed_semantic_issue_ids)
+    blockers = format_spec_blockers(
+        spec, compliance_mode, confirmed_semantic_issue_ids,
+        review_draft_manual_ledger=(
+            manual_review_ledger if args.output_policy == "review_draft" else None
+        ),
+        allow_source_bound_review_draft_conflicts=(args.output_policy == "review_draft"),
+    )
     preview_bypassed_blockers = []
     preview_mode = args.preview_placeholders or args.output_policy == "review_draft"
     if preview_mode:
         if compliance_mode != "supported_subset":
             raise SystemExit("review-draft placeholders require supported-subset application mode")
-        preview_bypassed_blockers = sorted(set(blockers) & {
-            "status_needs_clarification", "unresolved_clauses", "open_questions",
-        })
-        blockers = [item for item in blockers if item not in {
-            "status_needs_clarification", "unresolved_clauses", "open_questions",
-        }]
+        if args.output_policy == "review_draft":
+            if review_draft_unresolved_clauses_have_markers(
+                spec, manual_review_ledger, confirmed_semantic_issue_ids,
+            ):
+                preview_bypassed_blockers = sorted(set(blockers) & {
+                    "status_needs_clarification", "unresolved_clauses",
+                })
+        else:
+            preview_bypassed_blockers = sorted(set(blockers) & {
+                "status_needs_clarification", "unresolved_clauses", "open_questions",
+            })
+        blockers = [item for item in blockers if item not in preview_bypassed_blockers]
     if blockers:
         raise SystemExit(f"refusing to apply a blocked format spec: {', '.join(blockers)}")
     capability_report = None
@@ -4165,56 +4234,9 @@ def main(argv: list[str]) -> int:
         raise SystemExit(
             "evaluation-unit source integrity validation failed:\n"
             + "\n".join(evaluation_unit_errors)
-        )
+    )
     doc = Document(args.input); args.out_dir.mkdir(parents=True, exist_ok=True)
-    manual_review_ledger = None
-    manual_review_ingress_record: dict[str, Any] | None = None
-    if args.manual_review_items:
-        try:
-            ledger_bytes = args.manual_review_items.read_bytes()
-            manual_review_ledger = strict_json_loads(ledger_bytes.decode("utf-8"))
-        except (OSError, ValueError, json.JSONDecodeError) as exc:
-            raise SystemExit(f"invalid manual-review ledger: {exc}") from exc
-        if not isinstance(manual_review_ledger, dict):
-            raise SystemExit("invalid manual-review ledger: expected a JSON object")
-        ledger_errors = load_and_validate(
-            manual_review_ledger,
-            Path(__file__).resolve().parents[1] / "schema" / "manual-review-ledger.schema.json",
-        )
-        if ledger_errors:
-            raise SystemExit("invalid manual-review ledger schema:\n" + "\n".join(ledger_errors))
-        expected_binding, current_binding_errors = _current_manual_review_binding(
-            args, spec, pipeline_manifest,
-        )
-        input_sha256 = hashlib.sha256(ledger_bytes).hexdigest()
-        host_receipts = pipeline_manifest.get("host_review_receipts")
-        semantic_ledger_receipt = (
-            host_receipts.get("semantic_review_ledger")
-            if isinstance(host_receipts, dict) else None
-        )
-        expected_semantic_ledger_sha256 = (
-            semantic_ledger_receipt.get("sha256")
-            if isinstance(semantic_ledger_receipt, dict) else None
-        )
-        ingress_errors = current_binding_errors + validate_manual_review_ledger_ingress(
-            manual_review_ledger,
-            expected_binding=expected_binding,
-            expected_ledger_sha256=pipeline_manifest.get("manual_review_ledger_input_sha256"),
-            actual_ledger_sha256=input_sha256,
-            expected_semantic_review_ledger_sha256=expected_semantic_ledger_sha256,
-        )
-        if ingress_errors:
-            raise SystemExit(
-                "invalid manual-review current-run binding:\n" + "\n".join(ingress_errors)
-            )
-        manual_review_ingress_record = {
-            "status": "validated",
-            "case_id": expected_binding["case_id"],
-            "run_id": expected_binding["run_id"],
-            "ledger_input_sha256": input_sha256,
-            "binding": copy.deepcopy(expected_binding),
-        }
-        manual_review_ledger = filter_manual_marker_ledger(manual_review_ledger)
+    if args.manual_review_items and isinstance(manual_review_ledger, dict):
         write_manual_review_ledger(args.manual_review_items, manual_review_ledger)
     if args.output_policy == "review_draft":
         ensure_manual_review_styles(doc)

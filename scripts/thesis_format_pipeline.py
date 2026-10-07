@@ -41,8 +41,11 @@ from semantic_issue_confirmation import (
     confirmed_clause_ids,
 )
 from manual_review import (
+    HUMAN_MARKER_CATEGORIES,
     add_manual_review_items,
     build_manual_review_ledger,
+    review_draft_conflicts_have_exact_markers,
+    review_draft_unresolved_clauses_have_markers,
     write_manual_review_ledger,
 )
 from native_semantic_review import (
@@ -2267,6 +2270,8 @@ def requirement_blockers(
     spec: dict[str, Any], questions: list[Any], compliance_mode: str = "full",
     satisfied_clause_ids: set[str] | None = None,
     confirmed_semantic_issue_ids: set[str] | None = None,
+    *, review_draft_manual_ledger: dict[str, Any] | None = None,
+    allow_source_bound_review_draft_conflicts: bool = False,
 ) -> list[str]:
     """Return conditions that make the selected compliance mode unsafe."""
     satisfied_clause_ids = satisfied_clause_ids or set()
@@ -2284,7 +2289,12 @@ def requirement_blockers(
         blockers.append("status_needs_clarification")
     if unresolved_ids: blockers.append("unresolved_clauses")
     if completeness.get("missing_clause_ids"): blockers.append("missing_clauses")
-    if spec.get("blocking_errors"): blockers.append("blocking_errors")
+    if spec.get("blocking_errors") and not (
+        allow_source_bound_review_draft_conflicts
+        and compliance_mode == "supported_subset"
+        and _reported_conflicts_have_exact_draft_markers(spec, review_draft_manual_ledger)
+    ):
+        blockers.append("blocking_errors")
     if questions:
         remaining_questions = [item for item in questions
                                if isinstance(item, dict)
@@ -2304,6 +2314,179 @@ def requirement_blockers(
         if spec.get("semantic_review_provenance_valid") is not True:
             blockers.append("semantic_review_provenance_invalid")
     return blockers
+
+
+def _reported_conflicts_have_exact_draft_markers(
+    spec: dict[str, Any], ledger: dict[str, Any] | None,
+) -> bool:
+    """Keep the pipeline entrypoint while sharing the check with DOCX apply."""
+    return review_draft_conflicts_have_exact_markers(spec, ledger)
+
+
+def _is_current_run_review_draft_ledger(
+    spec: dict[str, Any], ledger: dict[str, Any] | None,
+) -> bool:
+    if not isinstance(ledger, dict) or ledger.get("policy") != "review_draft_only" \
+            or ledger.get("submission_ready") is not False:
+        return False
+    binding = ledger.get("binding")
+    return bool(
+        isinstance(binding, dict)
+        and isinstance(spec.get("run_id"), str)
+        and spec.get("run_id")
+        and binding.get("run_id") == spec.get("run_id")
+    )
+
+
+def _source_bound_review_draft_preview_bypasses(
+    spec: dict[str, Any], questions: list[Any], blockers: list[str],
+    ledger: dict[str, Any] | None,
+    satisfied_clause_ids: set[str] | None = None,
+    confirmed_semantic_issue_ids: set[str] | None = None,
+) -> set[str]:
+    """Select preview bypasses only when every human item has a current marker."""
+    if not _is_current_run_review_draft_ledger(spec, ledger):
+        return set()
+    assert isinstance(ledger, dict)
+    items = ledger.get("items")
+    if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
+        return set()
+    if any(not isinstance(item.get(key), list)
+           for item in items for key in ("clause_ids", "question_ids")):
+        return set()
+    human_items = [item for item in items if item.get("category") in HUMAN_MARKER_CATEGORIES]
+    question_ids = {
+        question_id for item in human_items for question_id in item.get("question_ids", [])
+        if isinstance(question_id, str) and question_id
+    }
+    bypasses: set[str] = set()
+    excluded_ids = (satisfied_clause_ids or set()) | (confirmed_semantic_issue_ids or set())
+    completeness = spec.get("completeness") if isinstance(spec.get("completeness"), dict) else {}
+    unresolved_ids = {
+        str(value) for value in completeness.get("unresolved_clause_ids", [])
+        if isinstance(value, str) and value
+    } - excluded_ids
+    if ("unresolved_clauses" in blockers
+            and review_draft_unresolved_clauses_have_markers(spec, ledger, excluded_ids)):
+        bypasses.add("unresolved_clauses")
+    if "status_needs_clarification" in blockers and (
+        unresolved_ids
+        and review_draft_unresolved_clauses_have_markers(spec, ledger, excluded_ids)
+    ):
+        bypasses.add("status_needs_clarification")
+    if "open_questions" in blockers and questions:
+        remaining: list[dict[str, Any]] = []
+        for item in questions:
+            if not isinstance(item, dict):
+                return bypasses
+            if str(item.get("clause_id")) in excluded_ids:
+                continue
+            remaining.append(item)
+        if remaining and all(
+            isinstance(item.get("question_id") or item.get("id"), str)
+            and (item.get("question_id") or item.get("id")) in question_ids
+            and item.get("scope") != "global"
+            for item in remaining
+        ):
+            bypasses.add("open_questions")
+    return bypasses
+
+
+def _reported_conflict_release_gates(
+    semantic_conflicts: Any, *, clauses: list[dict[str, Any]],
+    evidence_doc: dict[str, Any],
+) -> list[dict[str, Any]]:
+    """Project unresolved source conflicts into source-bound review-draft markers."""
+    if semantic_conflicts is None:
+        return []
+    if not isinstance(semantic_conflicts, list):
+        raise ValueError("semantic conflicts must be an array")
+    if not isinstance(clauses, list) or not isinstance(evidence_doc, dict):
+        raise ValueError("conflict source bindings are unavailable")
+    evidence_records = evidence_doc.get("evidence")
+    if not isinstance(evidence_records, list):
+        raise ValueError("conflict source evidence must be an array")
+    clauses_by_id = {
+        str(item.get("id")): item for item in clauses
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    evidence_by_id = {
+        str(item.get("id")): item for item in evidence_records
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    gates: list[dict[str, Any]] = []
+    for index, conflict in enumerate(semantic_conflicts):
+        if not isinstance(conflict, dict):
+            raise ValueError(f"semantic conflict {index} must be an object")
+        if conflict.get("status") not in {"unresolved", "requires_human_review"}:
+            continue
+        clause_ids = conflict.get("clause_ids")
+        evidence_ids = conflict.get("evidence_ids")
+        reason = conflict.get("reason")
+        if (not isinstance(clause_ids, list) or not clause_ids
+                or not all(isinstance(value, str) and value for value in clause_ids)
+                or len(clause_ids) != len(set(clause_ids))):
+            raise ValueError(f"semantic conflict {index} has invalid clause bindings")
+        if (not isinstance(evidence_ids, list) or not evidence_ids
+                or not all(isinstance(value, str) and value for value in evidence_ids)
+                or len(evidence_ids) != len(set(evidence_ids))):
+            raise ValueError(f"semantic conflict {index} has invalid evidence bindings")
+        if not isinstance(reason, str) or not reason.strip():
+            raise ValueError(f"semantic conflict {index} has no review reason")
+        source_clauses = [clauses_by_id.get(clause_id) for clause_id in clause_ids]
+        if any(clause is None for clause in source_clauses):
+            raise ValueError(f"semantic conflict {index} references an unknown clause")
+        bound_evidence_ids = {
+            str(evidence_id)
+            for clause in source_clauses
+            for evidence_id in (clause.get("evidence_ids") or [])
+        }
+        if not set(evidence_ids).issubset(bound_evidence_ids):
+            raise ValueError(f"semantic conflict {index} cites evidence outside its clauses")
+        if any(evidence_id not in evidence_by_id for evidence_id in evidence_ids):
+            raise ValueError(f"semantic conflict {index} cites missing evidence")
+        source_texts: list[str] = []
+        for evidence_id in evidence_ids:
+            evidence = evidence_by_id[evidence_id]
+            text = evidence.get("text")
+            if not isinstance(text, str) or not text.strip():
+                raise ValueError(f"semantic conflict {index} cites evidence without source text")
+            exact_spans: list[tuple[str, str]] = []
+            for clause_id, clause in zip(clause_ids, source_clauses):
+                span = clause.get("source_span") if isinstance(clause, dict) else None
+                if not isinstance(span, dict) or span.get("evidence_id") != evidence_id:
+                    continue
+                start, end = span.get("start_offset"), span.get("end_offset")
+                source_span_text = span.get("text")
+                if (not isinstance(start, int) or isinstance(start, bool)
+                        or not isinstance(end, int) or isinstance(end, bool)
+                        or not isinstance(source_span_text, str)
+                        or not 0 <= start < end <= len(text)
+                        or text[start:end] != source_span_text
+                        or hashlib.sha256(text.encode("utf-8")).hexdigest() != span.get("source_sha256")):
+                    raise ValueError(f"semantic conflict {index} has an invalid source span for {clause_id}")
+                exact_spans.append((clause_id, source_span_text))
+            if exact_spans:
+                source_texts.extend(
+                    f"{clause_id} [{evidence_id}]: {source_span_text}"
+                    for clause_id, source_span_text in exact_spans
+                )
+            else:
+                source_texts.append(f"{evidence_id}: {text}")
+        gates.append({
+            "source_code": f"reported_conflict:{index}",
+            "category": "semantic_content_review",
+            "clause_ids": list(clause_ids),
+            "evidence_ids": list(evidence_ids),
+            "source_text": "\n".join(source_texts),
+            "reason": reason,
+            "action": "对照来源证据人工核对冲突并记录结论；完成前不得提交。",
+            "producer_records": [{
+                "producer": "reported_semantic_conflict",
+                "record": copy.deepcopy(conflict),
+            }],
+        })
+    return gates
 
 
 PREVIEW_PLACEHOLDER_BLOCKERS = {
@@ -3184,6 +3367,11 @@ def _main(argv: list[str]) -> int:
         evidence_context_path = requirements_dir / "evidence-context.json"
         evidence_file_record = file_record(evidence_context_path) if evidence_context_path.is_file() else {}
         manual_review_release_gates: list[dict[str, Any]] = []
+        manual_review_release_gates.extend(
+            _reported_conflict_release_gates(
+                spec.get("semantic_conflicts"), clauses=clauses, evidence_doc=evidence_doc,
+            )
+        )
         if not has_official_template:
             baseline_kind = (
                 "中性参考文档"
@@ -3332,10 +3520,26 @@ def _main(argv: list[str]) -> int:
         execution_compliance_mode,
         satisfied_clause_ids,
         confirmed_semantic_issue_ids,
+        review_draft_manual_ledger=(
+            manual_review_ledger if args.output_policy == "review_draft" else None
+        ),
+        allow_source_bound_review_draft_conflicts=(args.output_policy == "review_draft"),
     )
     if args.preview_placeholders or args.output_policy == "review_draft":
-        preview_blockers = sorted(set(blockers) & PREVIEW_PLACEHOLDER_BLOCKERS)
-        blockers = [item for item in blockers if item not in PREVIEW_PLACEHOLDER_BLOCKERS]
+        if args.output_policy == "review_draft":
+            source_bound_bypasses = _source_bound_review_draft_preview_bypasses(
+                spec, questions, blockers, manual_review_ledger,
+                satisfied_clause_ids, confirmed_semantic_issue_ids,
+            )
+            preview_blockers = sorted(
+                set(blockers) & PREVIEW_PLACEHOLDER_BLOCKERS & source_bound_bypasses
+            )
+        else:
+            preview_blockers = sorted(set(blockers) & PREVIEW_PLACEHOLDER_BLOCKERS)
+        if args.output_policy == "review_draft":
+            blockers = [item for item in blockers if item not in preview_blockers]
+        else:
+            blockers = [item for item in blockers if item not in PREVIEW_PLACEHOLDER_BLOCKERS]
         manifest["preview_bypassed_requirement_blockers"] = preview_blockers
     if blockers:
         manifest.update(status="blocked", reason="requirements need clarification",

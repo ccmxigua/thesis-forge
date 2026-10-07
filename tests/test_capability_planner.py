@@ -450,7 +450,8 @@ class CapabilityPlannerTest(unittest.TestCase):
         for finding_item, record in zip(report["findings"], records):
             evidence_by_kind = {item["kind"]: item["value"] for item in finding_item["evidence"]}
             self.assertEqual(set(evidence_by_kind), {
-                "clause_id", "source_status", "scope", "requirement_ids", "evidence_ids", "reason"})
+                "clause_id", "source_status", "scope", "category", "requirement_ids",
+                "evidence_ids", "reason"})
             self.assertEqual(evidence_by_kind["clause_id"], record["clause_id"])
             self.assertEqual(evidence_by_kind["evidence_ids"], record["evidence_ids"])
             self.assertTrue(finding_item["blocking"])

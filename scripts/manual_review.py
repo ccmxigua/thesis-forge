@@ -61,6 +61,122 @@ KNOWN_TECHNICAL_CATEGORIES = frozenset({
     "property_validation", "semantic_validation", "execution_failure",
 })
 
+
+def _is_current_run_review_draft_ledger(
+    spec: dict[str, Any], ledger: dict[str, Any] | None,
+) -> bool:
+    if not isinstance(ledger, dict) or ledger.get("policy") != "review_draft_only" \
+            or ledger.get("submission_ready") is not False:
+        return False
+    binding = ledger.get("binding")
+    return bool(
+        isinstance(binding, dict)
+        and isinstance(spec.get("run_id"), str)
+        and spec.get("run_id")
+        and binding.get("run_id") == spec.get("run_id")
+    )
+
+
+def review_draft_conflicts_have_exact_markers(
+    spec: dict[str, Any], ledger: dict[str, Any] | None,
+) -> bool:
+    """Check that only the spec's current-run reported conflicts are marker-backed."""
+    conflicts = spec.get("semantic_conflicts")
+    errors = spec.get("blocking_errors")
+    if not isinstance(conflicts, list) or not conflicts or not isinstance(errors, list) or not errors:
+        return False
+    if not _is_current_run_review_draft_ledger(spec, ledger):
+        return False
+    assert isinstance(ledger, dict)
+    ledger_items = ledger.get("items")
+    if not isinstance(ledger_items, list):
+        return False
+
+    unresolved: list[tuple[int, dict[str, Any]]] = []
+    for index, conflict in enumerate(conflicts):
+        if not isinstance(conflict, dict):
+            return False
+        if conflict.get("status") in {"unresolved", "requires_human_review"}:
+            for key in ("clause_ids", "evidence_ids"):
+                values = conflict.get(key)
+                if (not isinstance(values, list) or not values
+                        or not all(isinstance(value, str) and value for value in values)
+                        or len(values) != len(set(values))):
+                    return False
+            unresolved.append((index, conflict))
+    if not unresolved or len(errors) != len(unresolved):
+        return False
+
+    expected_errors = [{
+        "type": "llm_reported_conflict",
+        "conflict_index": index,
+        "conflict_type": conflict.get("type"),
+        "status": conflict.get("status"),
+        "reason": conflict.get("reason"),
+        "clause_ids": copy.deepcopy(conflict.get("clause_ids") or []),
+        "evidence_ids": copy.deepcopy(conflict.get("evidence_ids") or []),
+    } for index, conflict in unresolved]
+    if errors != expected_errors:
+        return False
+
+    markers_by_code: dict[str, list[dict[str, Any]]] = {}
+    for item in ledger_items:
+        if not isinstance(item, dict):
+            return False
+        if item.get("category") == "semantic_content_review":
+            source_code = item.get("source_code")
+            if isinstance(source_code, str):
+                if any(not isinstance(item.get(key), list)
+                       for key in ("clause_ids", "evidence_ids")):
+                    return False
+                if any(not isinstance(value, str) or not value
+                       for key in ("clause_ids", "evidence_ids") for value in item[key]):
+                    return False
+                markers_by_code.setdefault(source_code, []).append(item)
+    expected_codes = {f"reported_conflict:{index}" for index, _ in unresolved}
+    if set(markers_by_code) & expected_codes != expected_codes:
+        return False
+    for index, conflict in unresolved:
+        matches = markers_by_code.get(f"reported_conflict:{index}", [])
+        if len(matches) != 1:
+            return False
+        marker = matches[0]
+        if (set(marker.get("clause_ids") or []) != set(conflict.get("clause_ids") or [])
+                or set(marker.get("evidence_ids") or []) != set(conflict.get("evidence_ids") or [])):
+            return False
+    return True
+
+
+def review_draft_unresolved_clauses_have_markers(
+    spec: dict[str, Any], ledger: dict[str, Any] | None,
+    excluded_clause_ids: set[str] | None = None,
+) -> bool:
+    """Require a current-run human marker for every unresolved clause bypassed in draft mode."""
+    if not _is_current_run_review_draft_ledger(spec, ledger):
+        return False
+    completeness = spec.get("completeness") if isinstance(spec.get("completeness"), dict) else {}
+    raw_ids = completeness.get("unresolved_clause_ids")
+    if not isinstance(raw_ids, list) or not raw_ids:
+        return False
+    unresolved = {
+        value for value in raw_ids
+        if isinstance(value, str) and value
+    } - (excluded_clause_ids or set())
+    if not unresolved:
+        return False
+    assert isinstance(ledger, dict)
+    items = ledger.get("items")
+    if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
+        return False
+    marked = {
+        clause_id for item in items
+        if item.get("category") in HUMAN_MARKER_CATEGORIES
+        and isinstance(item.get("clause_ids"), list)
+        for clause_id in item["clause_ids"]
+        if isinstance(clause_id, str) and clause_id
+    }
+    return unresolved.issubset(marked)
+
 # This is a document-facing policy, not a compliance result.  It is repeated
 # in the ledger so a consumer cannot mistake a visually marked draft for a
 # submission artifact or silently change the review-marker appearance.

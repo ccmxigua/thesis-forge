@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 from contextlib import ExitStack
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -31,6 +32,7 @@ from manual_review_display import append_manual_review_markers, audit_manual_rev
 from draft_scorecard import build_scorecard, append_scorecard, audit_scorecard
 from format_spec_validation import load_and_validate
 from docx import Document
+import apply_format_spec
 
 
 class InventoryDisputeTests(unittest.TestCase):
@@ -342,6 +344,126 @@ class ClassificationDisputeTests(unittest.TestCase):
             altered = copy.deepcopy(result)
             altered["identified_obligations"][0]["force"] = "required"
             self.assertIsNone(informational_uncertainty_dispute(check, altered))
+
+    def test_source_bound_reported_conflict_gets_draft_marker_and_only_that_blocker_is_relaxed(self):
+        source_text = "正文使用宋体或仿宋；两处规定冲突。"
+        source_sha256 = hashlib.sha256(source_text.encode("utf-8")).hexdigest()
+        clauses = [{
+            "id": "C-conflict", "text": source_text, "evidence_ids": ["E-conflict"],
+            "source_span": {
+                "evidence_id": "E-conflict", "start_offset": 0,
+                "end_offset": len(source_text), "text": source_text,
+                "source_sha256": source_sha256,
+            },
+        }]
+        evidence_doc = {"evidence": [{"id": "E-conflict", "text": source_text}]}
+        conflict = {
+            "type": "source_conflict", "reason": "两个来源位置给出了不同字体。",
+            "clause_ids": ["C-conflict"], "evidence_ids": ["E-conflict"],
+            "status": "requires_human_review",
+        }
+        spec = {
+            "run_id": "conflict-draft-run", "status": "needs_clarification",
+            "completeness": {"unresolved_clause_ids": ["C-conflict"]},
+            "semantic_conflicts": [conflict],
+            "blocking_errors": [{
+                "type": "llm_reported_conflict", "conflict_index": 0,
+                "conflict_type": conflict["type"], "status": conflict["status"],
+                "reason": conflict["reason"], "clause_ids": ["C-conflict"],
+                "evidence_ids": ["E-conflict"],
+            }],
+        }
+        gates = pipeline._reported_conflict_release_gates(
+            [conflict], clauses=clauses, evidence_doc=evidence_doc,
+        )
+        ledger = build_manual_review_ledger(
+            {}, [], binding=manual_fixtures.ManualReviewTests._binding(
+                run_id=spec["run_id"],
+            ), release_gates=gates,
+        )
+        self.assertEqual(len(ledger["items"]), 1)
+        marker = ledger["items"][0]
+        self.assertEqual(marker["category"], "semantic_content_review")
+        self.assertEqual(marker["clause_ids"], ["C-conflict"])
+        self.assertEqual(marker["evidence_ids"], ["E-conflict"])
+        self.assertFalse(ledger["submission_ready"])
+
+        draft_blockers = pipeline.requirement_blockers(
+            spec, [], "supported_subset", review_draft_manual_ledger=ledger,
+            allow_source_bound_review_draft_conflicts=True,
+        )
+        self.assertNotIn("blocking_errors", draft_blockers)
+        preview_bypasses = pipeline._source_bound_review_draft_preview_bypasses(
+            spec, [], draft_blockers, ledger,
+        )
+        self.assertIn("unresolved_clauses", preview_bypasses)
+        submission_blockers = pipeline.requirement_blockers(
+            spec, [], "supported_subset", review_draft_manual_ledger=ledger,
+        )
+        self.assertIn("blocking_errors", submission_blockers)
+        full_mode_blockers = pipeline.requirement_blockers(
+            spec, [], "full", review_draft_manual_ledger=ledger,
+            allow_source_bound_review_draft_conflicts=True,
+        )
+        self.assertIn("blocking_errors", full_mode_blockers)
+        application_blockers = apply_format_spec.format_spec_blockers(
+            spec, "supported_subset", review_draft_manual_ledger=ledger,
+            allow_source_bound_review_draft_conflicts=True,
+        )
+        self.assertNotIn("blocking_errors", application_blockers)
+        self.assertIn("blocking_errors", apply_format_spec.format_spec_blockers(
+            spec, "supported_subset", allow_source_bound_review_draft_conflicts=True,
+        ))
+
+        unbound = copy.deepcopy(ledger)
+        unbound["binding"]["run_id"] = "stale-run"
+        self.assertIn("blocking_errors", pipeline.requirement_blockers(
+            spec, [], "supported_subset", review_draft_manual_ledger=unbound,
+            allow_source_bound_review_draft_conflicts=True,
+        ))
+        self.assertNotIn("unresolved_clauses", pipeline._source_bound_review_draft_preview_bypasses(
+            spec, [], ["unresolved_clauses"], unbound,
+        ))
+        mixed_errors = copy.deepcopy(spec)
+        mixed_errors["blocking_errors"].append({"type": "llm_contract", "reason": "bad contract"})
+        self.assertIn("blocking_errors", pipeline.requirement_blockers(
+            mixed_errors, [], "supported_subset", review_draft_manual_ledger=ledger,
+            allow_source_bound_review_draft_conflicts=True,
+        ))
+        with self.assertRaisesRegex(ValueError, "evidence outside its clauses"):
+            pipeline._reported_conflict_release_gates(
+                [{**conflict, "evidence_ids": ["E-unrelated"]}],
+                clauses=clauses, evidence_doc=evidence_doc,
+            )
+        with self.assertRaisesRegex(ValueError, "invalid source span"):
+            pipeline._reported_conflict_release_gates(
+                [conflict], clauses=[{
+                    **clauses[0], "source_span": {
+                        **clauses[0]["source_span"], "source_sha256": "0" * 64,
+                    },
+                }], evidence_doc=evidence_doc,
+            )
+        global_question = [{"question_id": "Q-global", "scope": "global", "question": "workflow issue"}]
+        self.assertNotIn("open_questions", pipeline._source_bound_review_draft_preview_bypasses(
+            spec, global_question, ["open_questions"], ledger,
+        ))
+        bound_question = {
+            "question_id": "Q-source", "scope": "clause", "clause_id": "C-conflict",
+            "evidence_ids": ["E-conflict"], "question": "请人工判断来源冲突的适用规则。",
+        }
+        question_spec = {"run_id": "question-run", "status": "semantic_resolved"}
+        question_ledger = build_manual_review_ledger(
+            {}, [bound_question], binding=manual_fixtures.ManualReviewTests._binding(
+                run_id=question_spec["run_id"],
+            ),
+        )
+        question_blockers = pipeline.requirement_blockers(
+            question_spec, [bound_question], "supported_subset",
+        )
+        self.assertIn("open_questions", question_blockers)
+        self.assertIn("open_questions", pipeline._source_bound_review_draft_preview_bypasses(
+            question_spec, [bound_question], question_blockers, question_ledger,
+        ))
 
     def test_informational_primary_atom_with_empty_independent_inventory_stays_strict(self):
         with tempfile.TemporaryDirectory() as tmp:

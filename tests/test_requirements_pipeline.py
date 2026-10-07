@@ -3004,7 +3004,7 @@ b&=2\notag
         self.assertEqual(requirements_engine.validate_spec(spec, {"E1", "E2"}), [])
         self.assertTrue(any("fields.variant" in str(item.get("property")) for item in conflicts), conflicts)
 
-    def test_offline_full_review_draft_records_backend_gap_without_release(self) -> None:
+    def test_offline_full_review_draft_keeps_backend_gap_and_source_conflict_unreleased(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             td = Path(td); req = td / "requirements.docx"; target = td / "target.docx"
             preview = td / "preview"; response = td / "response.json"; work = td / "work"
@@ -3034,6 +3034,13 @@ b&=2\notag
             bound["provenance"] = json.loads(
                 (td / "preflight-work" / "requirements" / "llm-request.json").read_text(encoding="utf-8")
             )["provenance"]
+            bound["reported_conflicts"] = [{
+                "type": "source_conflict",
+                "reason": "两处来源要求对该图示规则的解释不一致，需人工核对。",
+                "clause_ids": [unsupported["id"]],
+                "evidence_ids": unsupported["evidence_ids"],
+                "status": "requires_human_review",
+            }]
             response.write_text(json.dumps(bound, ensure_ascii=False), encoding="utf-8")
             result = run_raw("scripts/thesis_format_pipeline.py", str(req), str(target), str(td / "output.docx"),
                              "--work-dir", str(work), "--llm-response", str(response),
@@ -3045,9 +3052,20 @@ b&=2\notag
             manifest = json.loads((work / "pipeline-manifest.json").read_text())
             self.assertEqual(manifest["output_policy"], "review_draft")
             self.assertEqual(manifest["capability_backend_gaps"], 1)
+            manual_ledger = json.loads(Path(manifest["manual_review_items"]).read_text())
+            conflict_markers = [
+                item for item in manual_ledger["items"]
+                if item["source_code"] == "reported_conflict:0"
+            ]
+            self.assertEqual(len(conflict_markers), 1)
+            self.assertEqual(conflict_markers[0]["category"], "semantic_content_review")
+            self.assertEqual(conflict_markers[0]["clause_ids"], [unsupported["id"]])
+            self.assertEqual(conflict_markers[0]["evidence_ids"], unsupported["evidence_ids"])
+            self.assertFalse(manual_ledger["submission_ready"])
             report = json.loads((work / "application" / "validation-report.json").read_text())
             self.assertFalse(report["docx_fully_compliant"])
             self.assertFalse(report["submission_ready"])
+            self.assertTrue(report["manual_review_marker_audit"]["valid"])
             self.assertTrue((td / "output.docx").is_file())
             self.assertTrue(report["review_draft_ready"])
             self.assertTrue(report["draft_scorecard_audit"]["valid"])

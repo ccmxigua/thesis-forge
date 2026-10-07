@@ -282,6 +282,30 @@ class CapabilityPlannerTest(unittest.TestCase):
         self.assertEqual(report["requirements"][0]["missing_declared_inputs"], [])
         self.assertEqual(report["requirements"][0]["category"], "supported")
 
+    def test_cover_field_contract_properties_are_supported_without_wildcarding_unknown_fields(self) -> None:
+        fields = [{
+            "id": "title_zh", "label": "题目",
+            "value_from": "thesis_profile.cover_metadata.title_zh",
+            "display_policy": "required", "label_display_policy": "with_value",
+            "order": 1,
+        }]
+        spec = {"requirements": [{
+            "id": "R-cover-fields", "role": "cover",
+            "properties": {"institution": "示例大学", "fields": fields},
+            "clause_ids": ["C-cover-fields"],
+        }], "clause_compliance": [{
+            "clause_id": "C-cover-fields", "scope": "docx",
+            "status": "pending_execution", "requirement_ids": ["R-cover-fields"],
+            "evidence_ids": ["E-cover-fields"],
+        }]}
+        report = self.planner.plan_capabilities(spec, self.registry, "full")
+
+        self.assertEqual(report["requirements"][0]["disposition"], "supported")
+        self.assertTrue(report["execution_ready"])
+        unknown = self.planner.classify_property(
+            "cover", "fields.future_property", self.registry, None, None)
+        self.assertEqual(unknown["disposition"], "unknown")
+
     def test_runtime_anchor_inventory_satisfies_runtime_prerequisite(self) -> None:
         spec = {"requirements": [{
             "id": "R-anchor", "role": "declarations",

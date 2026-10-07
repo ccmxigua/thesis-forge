@@ -569,16 +569,16 @@ def build_manual_review_ledger(
             continue
         evidence = finding.get("evidence")
         category = next(iter(_values(evidence, "category")), "")
-        # In supported-subset analysis, a confirmed semantic issue is
-        # intentionally non-blocking in the capability report.  It still
-        # needs a visible red marker so the analysis result cannot be mistaken
-        # for an interpreted requirement.
-        if not finding.get("blocking") and category != "confirmed_semantic_issue":
-            continue
         if category not in HUMAN_MARKER_CATEGORIES | KNOWN_TECHNICAL_CATEGORIES:
             raise ValueError(
                 f"unknown capability finding category cannot be silently discarded: {category!r}"
             )
+        # Non-blocking findings in supported-subset mode still need a visible
+        # marker when they represent a human decision or prerequisite. Keep
+        # technical gaps in the technical report without presenting them as
+        # author TODOs.
+        if not finding.get("blocking") and category not in HUMAN_MARKER_CATEGORIES:
+            continue
         if category not in HUMAN_MARKER_CATEGORIES:
             continue
         clause_ids = _values(evidence, "clause_id") or _ids_from_text(finding.get("message"), CLAUSE_RE)

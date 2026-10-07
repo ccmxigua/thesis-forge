@@ -1143,6 +1143,39 @@ class ManualReviewTests(unittest.TestCase):
         self.assertEqual(ledger["items"][0]["category"], "confirmed_semantic_issue")
         self.assertFalse(ledger["items"][0]["original_blocking"])
 
+    def test_nonblocking_source_bound_human_prerequisite_gets_marker_but_technical_gap_does_not(self) -> None:
+        ledger = build_manual_review_ledger({
+            "findings": [
+                {
+                    "code": "capability.clause_input_prerequisite",
+                    "blocking": False,
+                    "message": "Clause C-input requires source metadata.",
+                    "evidence": [
+                        {"kind": "category", "value": "input_prerequisite"},
+                        {"kind": "clause_id", "value": "C-input"},
+                        {"kind": "evidence_id", "value": "E-input"},
+                    ],
+                },
+                {
+                    "code": "capability.backend_gap",
+                    "blocking": False,
+                    "message": "The backend cannot apply a technical property.",
+                    "evidence": [
+                        {"kind": "category", "value": "backend_capability_gap"},
+                        {"kind": "clause_id", "value": "C-technical"},
+                        {"kind": "evidence_id", "value": "E-technical"},
+                    ],
+                },
+            ],
+        }, [])
+
+        self.assertFalse(ledger["submission_ready"])
+        self.assertEqual(len(ledger["items"]), 1)
+        item = ledger["items"][0]
+        self.assertEqual(item["category"], "input_prerequisite")
+        self.assertEqual(item["clause_ids"], ["C-input"])
+        self.assertEqual(item["evidence_ids"], ["E-input"])
+
     def test_strict_audit_recognizes_manual_marker_as_placeholder(self) -> None:
         pattern = dict(PLACEHOLDER_PATTERNS)["manual_review_marker"]
         self.assertIsNotNone(pattern.search("【MR-0001｜人工待审】"))

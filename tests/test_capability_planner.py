@@ -535,6 +535,20 @@ class CapabilityPlannerTest(unittest.TestCase):
         self.assertEqual(summary["external_not_applicable"], 1)
         self.assertEqual(summary["gaps"], 1)
 
+    def test_supported_subset_clause_finding_preserves_human_category_and_source_ids(self) -> None:
+        spec = {"requirements": [], "clause_compliance": [{
+            "clause_id": "C-input", "scope": "docx", "status": "requires_metadata",
+            "requirement_ids": [], "evidence_ids": ["E-input"],
+        }]}
+        report = self.planner.plan_capabilities(spec, self.registry, "supported_subset")
+        finding = report["findings"][0]
+        evidence_by_kind = {item["kind"]: item["value"] for item in finding["evidence"]}
+
+        self.assertFalse(finding["blocking"])
+        self.assertEqual(evidence_by_kind["category"], "input_prerequisite")
+        self.assertEqual(evidence_by_kind["clause_id"], "C-input")
+        self.assertEqual(evidence_by_kind["evidence_ids"], ["E-input"])
+
     def test_duplicate_named_clause_records_do_not_inflate_clause_counts(self) -> None:
         records = [
             {"clause_id": "C1", "scope": "docx", "status": "requires_metadata",

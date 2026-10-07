@@ -874,6 +874,7 @@ def plan_capabilities(spec: dict[str, Any], registry: dict[str, Any], compliance
                 f"Clause {clause['clause_id']} is not execution-ready: {reason}.",
                 [evidence("clause_id", clause["clause_id"]),
                  evidence("source_status", status), evidence("scope", clause["scope"]),
+                 evidence("category", category),
                  evidence("requirement_ids", clause["requirement_ids"]),
                  evidence("evidence_ids", clause["evidence_ids"]), evidence("reason", reason)],
             )

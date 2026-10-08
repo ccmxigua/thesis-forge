@@ -21,6 +21,17 @@ python3 scripts/thesis_format.py /absolute/requirements.docx /absolute/thesis.do
 
 `--auto-host-agent` 是另行显式授权的原生 CLI 批跑，不是普通 skill 默认。该 Codex 子进程默认 `gpt-6-luna` 是批跑策略，不能宣称继承了当前聊天模型；显式 BSU 验证可继续固定它。正式发布门禁不受上述默认入口变化影响。
 
+若生成 DOCX 含动态 TOC 字段，且当前环境只有 LibreOffice headless PDF 导出能力，可在语义审查和 DOCX 生成完成后，使用 `scripts/toc_materializer.py` 写入来源绑定的目录缓存：
+
+```bash
+python3 scripts/toc_materializer.py /absolute/source.docx /absolute/review-baseline.docx \
+  /absolute/new-review-draft.docx --work-dir /absolute/new-toc-render-evidence
+python3 scripts/audit_toc_materialization.py /absolute/source.docx /absolute/new-review-draft.docx \
+  /absolute/final-rendered.pdf --out /absolute/new-toc-render-evidence/independent-toc-audit.json
+```
+
+该入口只从来源 DOCX 的目录域深度和语义标题读取条目，要求输出标题唯一匹配；使用 LibreOffice 实际 PDF 书签页码填入动态 `PAGEREF` 字段缓存，并重渲染直到缓存与最终分页一致。它不会调用或声称 Word/LibreOffice 更新了字段；分节重启、非十进制页码、重复或缺失书签、缓存不收敛以及不可见目录行均失败关闭。新 DOCX、渲染及审计报告必须放在新路径。该结果仍是 `submission_ready=false` 的可编辑审查草稿，不能代替 Word 发布验收或人工格式审查。
+
 以下 V2 overlay、`convert.sh` 和 API 说明属于旧版兼容工具，不是新文档的来源审查入口，也不能证明学校要求已满足。
 
 **V2 通用毕业论文 LaTeX → DOCX 转换管线（旧版）** — 支持多校配置及转换工具。

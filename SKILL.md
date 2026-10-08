@@ -1343,6 +1343,20 @@ text are not sufficient evidence. The Word exporter stages work inside Word's
 container, runs children in a process group, and commits final DOCX, PDF, and
 reports only after independent path/hash validation.
 
+For review drafts in a cloud runtime where LibreOffice headless PDF export is
+available but no field-update API is available, the separate
+`scripts/toc_materializer.py` entry point can populate the cached TOC result
+from source-bound headings and actual PDF outline destinations. It restores
+source heading outline levels in the derived output, retains the dynamic TOC
+and `PAGEREF` instructions, rerenders until the cached pages equal the final
+PDF bookmarks, and independently checks visible TOC rows and order. It does
+not claim that Word or LibreOffice refreshed fields. Section page restarts,
+non-decimal formats, ambiguous/missing destinations, wrapped visible rows, or
+non-convergence fail closed; this path remains a review-draft aid and does not
+replace the Word release gate above. Run
+`scripts/audit_toc_materialization.py` against the final source, DOCX, and PDF
+as a separate verifier; preserve its report with the new derived artifact.
+
 The pipeline writes a durable `running` manifest before external conversion or
 extraction. Unexpected exceptions and interrupts close it as terminal
 `failed`/`interrupted` records. `--allow-existing-work` is limited to a

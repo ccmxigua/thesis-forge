@@ -178,6 +178,15 @@ def validate_requirement_evaluation_units(
         if not isinstance(requirement_id, str) or not requirement_id:
             errors.append(f"evaluation_units_requirement_id_missing:{index}")
             continue
+        resolved_by = requirement.get("resolved_by")
+        if resolved_by in {"rule", "template", "user"}:
+            if "evaluation_units" in requirement:
+                errors.append("evaluation_units_non_semantic_requirement:" + requirement_id)
+            # Evaluation units are a projection of the accepted semantic
+            # review requirements. Deterministic/template/user requirements
+            # can cite the same source clauses, but they do not inherit the
+            # reviewer's obligation inventory merely through that citation.
+            continue
         clause_ids = requirement.get("clause_ids") or []
         if not isinstance(clause_ids, list) or any(not isinstance(cid, str) for cid in clause_ids):
             errors.append("evaluation_units_requirement_clause_ids_invalid:" + requirement_id)

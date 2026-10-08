@@ -527,5 +527,77 @@ class ConditionReassessmentTests(unittest.TestCase):
             if profile["security_level"] == "classified":
                 self.assertTrue(applier.audit_cover(doc, cover, profile))
 
+    def test_ordered_embargo_range_shares_one_source_label_and_audits_fail_closed(self):
+        cover = {"institution": "示例学校", "fields": [], "non_public_administration": {
+            "applicability": {"status": "conditional", "conditions": []},
+            "public_policy": "blank", "source_region": "official_admin_table",
+            "fields": [
+                {"id": "embargo_start", "label": "保密期限",
+                 "value_from": "thesis_profile.cover_metadata.embargo_start",
+                 "display_policy": "blank_when_public", "label_display_policy": "always",
+                 "order": 2},
+                {"id": "embargo_until", "label": "保密期限",
+                 "value_from": "thesis_profile.cover_metadata.embargo_until",
+                 "display_policy": "blank_when_public", "label_display_policy": "always",
+                 "order": 3},
+            ],
+        }}
+        profile = {"security_level": "public"}
+
+        def generated_cover():
+            contract = applier.compile_cover_contract(cover, profile)
+            self.assertEqual(
+                [field["id"] for field in contract["non_public_administration"]["fields"]],
+                ["embargo_start", "embargo_until"],
+            )
+            rendered_labels = [field for field in contract["fields"]
+                               if field.get("value_kind") == "label_only"]
+            self.assertEqual(len(rendered_labels), 1)
+            self.assertEqual(rendered_labels[0]["id"], "embargo_start")
+            doc = Document()
+            doc.add_paragraph("正文")
+            counts = applier.apply_cover(doc, cover, profile, contract)
+            self.assertEqual(counts["label_only_fields_written"], 1)
+            with tempfile.TemporaryDirectory() as td:
+                path = Path(td) / "range-cover.docx"
+                doc.save(path)
+                return Document(path)
+
+        correct = generated_cover()
+        labels = [p for p in correct.paragraphs if p.text.strip() == "保密期限："]
+        self.assertEqual(len(labels), 1)
+        self.assertEqual(applier.audit_cover(correct, cover, profile), [])
+
+        missing = generated_cover()
+        label = next(p for p in missing.paragraphs if p.text.strip() == "保密期限：")
+        label._p.getparent().remove(label._p)
+        missing_findings = applier.audit_cover(missing, cover, profile)
+        self.assertTrue(any(
+            item.get("property") == "fields.embargo_start/embargo_until"
+            and item.get("template_value") == 0
+            for item in missing_findings
+        ), missing_findings)
+
+        duplicate = generated_cover()
+        label = next(p for p in duplicate.paragraphs if p.text.strip() == "保密期限：")
+        extra = label.insert_paragraph_before("保密期限：")
+        extra.style = label.style
+        duplicate_findings = applier.audit_cover(duplicate, cover, profile)
+        self.assertTrue(any(
+            item.get("property") == "fields.embargo_start/embargo_until"
+            and item.get("template_value") == 2
+            for item in duplicate_findings
+        ), duplicate_findings)
+
+        incorrect = generated_cover()
+        label = next(p for p in incorrect.paragraphs if p.text.strip() == "保密期限：")
+        label.text = "保密期限起止："
+        incorrect_findings = applier.audit_cover(incorrect, cover, profile)
+        self.assertTrue(any(
+            item.get("property") == "fields.embargo_start/embargo_until"
+            and item.get("template_value") == 0
+            for item in incorrect_findings
+        ), incorrect_findings)
+
 
 if __name__ == "__main__": unittest.main()

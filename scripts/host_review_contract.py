@@ -1945,6 +1945,51 @@ def validate_response(response: Any, chunk: dict[str, Any]) -> list[str]:
         for clause_id in clause_map
     }
 
+    # A fixed declaration may render source clauses whose real-world effect
+    # remains pending. The source projector deliberately requires explicit
+    # routes and current-source quotes for mixed execution reviews before it
+    # materializes that text. Enforce the same prerequisites here so a packet
+    # cannot pass validation and fail later as an empty declaration payload.
+    declaration_mixed_clause_ids: set[str] = set()
+    if contract_version == HOST_REVIEW_CONTRACT_V3:
+        reviews_by_clause_id = {
+            str(review.get("clause_id")): review
+            for review in response.get("clause_reviews", [])
+            if isinstance(review, dict) and isinstance(review.get("clause_id"), str)
+        }
+        for requirement in requirements:
+            if not isinstance(requirement, dict) or requirement.get("role") != "declarations":
+                continue
+            properties = requirement.get("properties")
+            declaration_items = properties.get("items") if isinstance(properties, dict) else None
+            if not isinstance(declaration_items, list):
+                continue
+            for declaration in declaration_items:
+                if not isinstance(declaration, dict):
+                    continue
+                source_ids = declaration.get("source_evidence_ids")
+                if source_ids is None:
+                    source_ids = requirement.get("evidence_ids")
+                candidates = [
+                    candidate
+                    for candidate in derive_fixed_declaration_candidates(
+                        clauses, evidence_context,
+                        anchor=chunk.get("declaration_anchor_preference"),
+                    )
+                    if matches_declaration_render_selection(
+                        candidate, requirement.get("clause_ids"), source_ids,
+                    )
+                ]
+                if len(candidates) != 1:
+                    continue
+                declaration_mixed_clause_ids.update(
+                    clause_id
+                    for clause_id in (requirement.get("clause_ids") or [])
+                    if isinstance(clause_id, str)
+                    and reviews_by_clause_id.get(clause_id, {}).get("classification")
+                    == "executable_with_external_check"
+                )
+
     relation_analysis = (
         analyze_requirement_relations(response, clauses)
         if contract_version == HOST_REVIEW_CONTRACT_V3 else []
@@ -2009,6 +2054,18 @@ def validate_response(response: Any, chunk: dict[str, Any]) -> list[str]:
             if not isinstance(atom, dict):
                 continue
             proposed_route = atom.get("route")
+            if clause_id in declaration_mixed_clause_ids:
+                if proposed_route is None:
+                    errors.append(
+                        f"$.clause_reviews[{review_index}].obligations[{atom_index}].route: "
+                        "mixed_declaration_requires_explicit_route"
+                    )
+                quote = atom.get("source_quote")
+                if not isinstance(quote, str) or not quote.strip():
+                    errors.append(
+                        f"$.clause_reviews[{review_index}].obligations[{atom_index}].source_quote: "
+                        "mixed_declaration_requires_current_source_quote"
+                    )
             if proposed_route is not None and proposed_route != route_for_obligation(str(classification), atom.get("status")):
                 errors.append(f"$.clause_reviews[{review_index}].obligations[{atom_index}].route: responsibility_route_conflict")
             if atom.get("source_quote") is not None:

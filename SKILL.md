@@ -724,6 +724,35 @@ review drafts and offline tests. It requires
 `--require-submission-ready` or `--strict-release`; a supplied response without
 current host receipts must never be presented as submission-ready.
 
+### Confirmed profile across a recorded TEX-to-DOCX source chain
+
+An explicit thesis profile is bound to the exact input bytes. A profile
+extracted from a TEX file therefore cannot be passed directly with a DOCX
+input. When a user has confirmed that the profile values apply to one exact
+fixed DOCX, the host-neutral `thesis_format.py` entry point supports a narrow
+`--profile-confirmation-migration` on the non-release `review_draft` route. The
+parent `pipeline-manifest.json` must bind the TEX input and exact intermediate
+DOCX; its conversion/reuse step, extraction manifest, request source anchor,
+requirements input, and both profile records must agree by path, byte count,
+and SHA-256. Only the six allow-listed provenance fields may differ. The
+parent request continues to use its original profile, while the confirmed
+copy is used for generation. The new manifest records this parent-child
+lineage and keeps `submission_ready=false`.
+
+This confirmation means the listed profile values apply to that fixed source
+DOCX. It does not certify an official school template or claim that a
+converter was re-executed. Official-template authority comes only from a
+separately supplied and verified official template/profile. The source TEX
+identity, fixed DOCX identity, and their recorded parent-child relationship
+remain separate provenance facts.
+
+For the supported wrapper, pass `--offline-parent-merge-receipt`, the matching
+`--run-id`, `--profile-confirmation-migration`, and the confirmed
+`--thesis-profile` to packet preparation and the later offline
+`--llm-response` continuation. Preparation and generation do not call a
+model; the current conversation is responsible for semantic review when a
+fresh packet set is being reviewed.
+
 ### Visible review-draft placeholders
 
 Every ledger item must have one visible `MR-xxxx` marker in the editable DOCX.

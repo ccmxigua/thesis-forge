@@ -57,6 +57,15 @@ class DeclarationInformationalHeadingTests(unittest.TestCase):
     def test_serialization_prints_each_source_paragraph_once_not_an_attestation(self):
         raw, chunk, group = incident(fragments=True)
         candidate, _ = bridge.prepare_native_response_candidate(raw, chunk)
+        declaration = candidate["requirements"][0]["properties"]["items"][0]
+        self.assertEqual(
+            declaration["heading"],
+            chunk["evidence_context"][group["heading_evidence_ids"][0]]["text"],
+        )
+        self.assertEqual(
+            declaration["body_parts"],
+            [chunk["evidence_context"][eid]["text"] for eid in group["body_evidence_ids"]],
+        )
         spec = {"schema_version": "1.0", "source_document": "current.docx", "status": "semantic_resolved",
                 "roles": {}, "requirements": [], "declarations": candidate["requirements"][0]["properties"]}
         materialize_declaration_resources(spec, "informational-heading-offline",
@@ -72,6 +81,109 @@ class DeclarationInformationalHeadingTests(unittest.TestCase):
                 self.assertTrue(review["obligations"])
                 self.assertTrue(all(a["status"] == "unverifiable" and a["route"] == "human"
                                     for a in review["obligations"]))
+
+    def test_authorization_with_mixed_external_action_materializes_from_exact_source(self):
+        raw, chunk, group = incident()
+        raw = copy.deepcopy(raw)
+        clause_id = "C00058"
+        clause = next(item for item in chunk["clauses"] if item["id"] == clause_id)
+        span = clause["source_span"]
+        review = next(item for item in raw["clause_reviews"] if item["clause_id"] == clause_id)
+        review["classification"] = "executable_with_external_check"
+        review["reason"] = "The source text is printed; actual author consent remains a separate human action."
+        review["obligations"] = [
+            {"id": "authorization-text", "status": "covered",
+             "reason": "The fixed text is printed exactly."},
+            {"id": "author-consent", "status": "unverifiable",
+             "actor": "author", "action": "confirm consent",
+             "target": "authorization", "reason": "Printing does not establish consent."},
+        ]
+        semantic_obligations = copy.deepcopy(review["obligations"])
+
+        raw_errors = bridge.validate_host_agent_response(raw, chunk)
+        self.assertTrue(any("mixed_declaration_requires_explicit_route" in error for error in raw_errors), raw_errors)
+        self.assertTrue(any("mixed_declaration_requires_current_source_quote" in error for error in raw_errors), raw_errors)
+        candidate, audit = bridge.prepare_native_response_candidate(raw, chunk)
+        self.assertEqual(bridge.validate_host_agent_response(candidate, chunk), [])
+        self.assertEqual(len(audit["declaration_source_text_projections"]), 1)
+        projection = audit["declaration_source_text_projections"][0]
+        self.assertEqual(projection["clause_ids"], group["clause_ids"])
+        declaration = candidate["requirements"][0]["properties"]["items"][0]
+        self.assertEqual(
+            declaration["body_parts"],
+            [chunk["evidence_context"][eid]["text"] for eid in group["body_evidence_ids"]],
+        )
+        source_quote = chunk["evidence_context"][span["evidence_id"]]["text"][
+            span["start_offset"]:span["end_offset"]
+        ]
+        candidate_review = next(
+            item for item in candidate["clause_reviews"] if item["clause_id"] == clause_id
+        )
+        self.assertEqual(
+            {atom["route"] for atom in candidate_review["obligations"]}, {"automatic", "human"},
+        )
+        self.assertEqual(
+            {atom["source_quote"] for atom in candidate_review["obligations"]}, {source_quote},
+        )
+        self.assertEqual(
+            {(atom["status"], atom["route"]) for atom in candidate_review["obligations"]},
+            {("covered", "automatic"), ("unverifiable", "human")},
+        )
+        for original, projected in zip(semantic_obligations, candidate_review["obligations"]):
+            for field in ("id", "status", "reason", "actor", "action", "target"):
+                self.assertEqual(projected.get(field), original.get(field), field)
+        projections = audit["declaration_source_text_projections"][0]["obligation_field_projections"]
+        self.assertEqual({entry["field"] for entry in projections}, {"route", "source_quote"})
+
+    def test_declaration_mixed_action_with_conflicting_route_or_unbound_quote_is_rejected(self):
+        raw, chunk, _ = incident()
+        raw = copy.deepcopy(raw)
+        review = next(item for item in raw["clause_reviews"] if item["clause_id"] == "C00058")
+        review["classification"] = "executable_with_external_check"
+        review["reason"] = "The printed authorization text and a separate human action are both present."
+        review["obligations"] = [
+            {"id": "text", "status": "covered", "route": "human",
+             "source_quote": "an unrelated source", "reason": "Printed."},
+            {"id": "consent", "status": "unverifiable", "route": "automatic",
+             "source_quote": "another source", "reason": "Requires author action."},
+        ]
+        errors = bridge.validate_host_agent_response(raw, chunk)
+        self.assertTrue(any("responsibility_route_conflict" in error for error in errors), errors)
+        self.assertTrue(any("must_equal_current_source_subspan" in error for error in errors), errors)
+        projected, audits = bridge._materialize_fixed_declaration_source_text(raw, chunk)
+        self.assertEqual(projected, raw)
+        self.assertEqual(audits, [])
+
+    def test_nonadjacent_source_fragment_is_not_grouped_as_one_declaration(self):
+        raw, chunk, _ = incident()
+        chunk = copy.deepcopy(chunk)
+        clause = next(item for item in chunk["clauses"] if item["id"] == "C00055")
+        span = clause["source_span"]
+        evidence = chunk["evidence_context"][span["evidence_id"]]
+        # Keep the source text/hash exact while creating a physical-node gap.
+        # A source grouping must stop instead of joining over unreviewed text.
+        for location in (clause.get("location"), span.get("location"), evidence.get("location")):
+            location["child_index"] += 1
+        self.assertEqual(
+            derive_fixed_declaration_candidates(
+                chunk["clauses"], chunk["evidence_context"],
+                anchor=chunk["declaration_anchor_preference"],
+            ),
+            [],
+        )
+        projected, audits = bridge._materialize_fixed_declaration_source_text(raw, chunk)
+        self.assertEqual(projected, raw)
+        self.assertEqual(audits, [])
+
+    def test_unresolved_requirement_edge_cannot_be_materialized(self):
+        raw, chunk, _ = incident()
+        raw = copy.deepcopy(raw)
+        review = next(item for item in raw["clause_reviews"] if item["clause_id"] == "C00058")
+        review["classification"] = "unresolved"
+        review["obligations"] = []
+        projected, audits = bridge._materialize_fixed_declaration_source_text(raw, chunk)
+        self.assertEqual(projected, raw)
+        self.assertEqual(audits, [])
 
     def test_structure_predicate_rejects_empty_foreign_duplicate_and_reordered_edges(self):
         raw, _, group = incident()

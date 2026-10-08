@@ -16,7 +16,7 @@ import sys
 import zipfile
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 from uuid import uuid4
 import xml.etree.ElementTree as ET
 
@@ -61,6 +61,7 @@ from semantic_contract import (
     evidence_payload,
     request_body_sha256,
     request_envelope_sha256,
+    sha256_bytes,
     sha256_file,
     sha256_json,
     strict_json_dumps,
@@ -3648,8 +3649,39 @@ def merge_host_agent_review_packets(
     review_dir: Path,
     *,
     response_out: Path | None = None,
+    response_projector: Callable[[dict[str, Any], dict[str, Any]], tuple[dict[str, Any], list[dict[str, Any]]]] | None = None,
+    artifact_dir: Path | None = None,
+    parent_receipt_path: Path | None = None,
+    derivation_code_fingerprint_sha256: str | None = None,
 ) -> tuple[dict[str, Any], dict[str, Any]]:
-    """Validate and deterministically merge host-Agent chunk responses."""
+    """Validate and deterministically merge host-Agent chunk responses.
+
+    ``response_projector`` may apply a named, source-bound code projection
+    before validating the accepted response. Callers must provide an
+    auditable deterministic projector; its returned audit records are kept in
+    the merge receipt. The provider-authored response files are never changed.
+    An optional, disjoint ``artifact_dir`` supports an append-only derived
+    merge. Such a merge must cite and verify its accepted parent receipt; the
+    original request, response files, and receipt remain read-only.
+    """
+    review_dir = review_dir.resolve()
+    artifact_dir = (artifact_dir or review_dir).resolve()
+    if artifact_dir != review_dir and (
+        artifact_dir in review_dir.parents or review_dir in artifact_dir.parents
+    ):
+        raise ValueError("derived merge artifact directory must be disjoint from its read-only input directory")
+    if artifact_dir != review_dir and parent_receipt_path is None:
+        raise ValueError("a separate merge artifact directory requires --parent-receipt lineage")
+    if parent_receipt_path is not None and artifact_dir == review_dir:
+        raise ValueError("a parent-linked merge must write to a separate artifact directory")
+    if parent_receipt_path is not None and response_projector is None:
+        raise ValueError("a parent-linked merge requires an explicit deterministic response projector")
+    if parent_receipt_path is not None and (
+        not isinstance(derivation_code_fingerprint_sha256, str)
+        or len(derivation_code_fingerprint_sha256) != 64
+        or any(char not in "0123456789abcdef" for char in derivation_code_fingerprint_sha256)
+    ):
+        raise ValueError("a parent-linked merge requires the fixed derivation code fingerprint")
     manifest_path = review_dir / "host-agent-review-manifest.json"
     manifest = strict_json_loads(manifest_path.read_text(encoding="utf-8"))
     if manifest.get("protocol") != "host_agent_semantic_review":
@@ -3692,16 +3724,51 @@ def merge_host_agent_review_packets(
         raise ValueError("host-agent chunk projection does not match its declared manifest")
 
     response_out_path = (
-        _merge_output_path(review_dir, response_out)
+        _merge_output_path(artifact_dir, response_out)
         if response_out is not None else None
     )
-    merge_receipt_path = review_dir.resolve() / "merge-receipt.json"
+    merge_receipt_path = artifact_dir / "merge-receipt.json"
+    ledger_path = artifact_dir / "semantic-review-ledger.json"
+    merge_commit_path = artifact_dir / "merge-commit.json"
     if response_out_path and response_out_path == merge_receipt_path:
         raise ValueError("merged response and merge receipt must use distinct paths")
     if response_out_path and response_out_path.exists():
         raise ValueError(f"refusing to overwrite existing merge artifact: {response_out_path}")
     if merge_receipt_path.exists():
         raise ValueError(f"refusing to overwrite existing merge artifact: {merge_receipt_path}")
+
+    parent_receipt: dict[str, Any] | None = None
+    parent_receipt_sha256: str | None = None
+    parent_aggregate_sha256: str | None = None
+    if parent_receipt_path is not None:
+        parent_path = parent_receipt_path.expanduser().resolve()
+        if parent_path in {merge_receipt_path, ledger_path, merge_commit_path, response_out_path}:
+            raise ValueError("parent merge receipt cannot be an output artifact")
+        parent_receipt = strict_json_loads(parent_path.read_text(encoding="utf-8"))
+        if not isinstance(parent_receipt, dict) or parent_receipt.get("status") != "merged":
+            raise ValueError("parent merge receipt is not an accepted merged receipt")
+        expected_run_id = full_request["provenance"].get("run_id")
+        expected_request_sha = full_request["provenance"].get("request_sha256")
+        if (parent_receipt.get("run_id") != expected_run_id
+                or parent_receipt.get("request_sha256") != expected_request_sha):
+            raise ValueError("parent merge receipt is bound to a different run or request")
+        parent_request_code_fingerprint = full_request.get("runtime_context", {}).get(
+            "code_fingerprint_sha256"
+        )
+        if (
+            not isinstance(parent_request_code_fingerprint, str)
+            or len(parent_request_code_fingerprint) != 64
+            or any(char not in "0123456789abcdef" for char in parent_request_code_fingerprint)
+        ):
+            raise ValueError("parent semantic request has no valid request code fingerprint")
+        parent_aggregate_path = parent_receipt.get("merged_response_path")
+        if not isinstance(parent_aggregate_path, str) or not Path(parent_aggregate_path).is_file():
+            raise ValueError("parent merge receipt does not bind an existing aggregate response")
+        parent_aggregate = strict_json_loads(Path(parent_aggregate_path).read_text(encoding="utf-8"))
+        parent_aggregate_sha256 = sha256_json(parent_aggregate)
+        if parent_receipt.get("aggregate_sha256") != parent_aggregate_sha256:
+            raise ValueError("parent merge receipt aggregate hash does not match its response")
+        parent_receipt_sha256 = sha256_file(parent_path)
 
     full_clauses = full_request.get("clauses")
     if not isinstance(full_clauses, list) or not full_clauses:
@@ -3728,6 +3795,8 @@ def merge_host_agent_review_packets(
     aggregate_unsupported: list[str] = []
     aggregate_conflicts: list[dict[str, Any]] = []
     response_clause_counts: list[int] = []
+    response_projection_audits: list[dict[str, Any]] = []
+    input_response_files: list[dict[str, Any]] = []
     for index, (chunk_request, response_name) in enumerate(zip(request_chunks, response_files), start=1):
         if not isinstance(chunk_request, dict):
             raise ValueError(f"host-agent request chunk {index}/{len(request_chunks)} is not an object")
@@ -3791,6 +3860,31 @@ def merge_host_agent_review_packets(
         response = strict_json_loads(response_path.read_text(encoding="utf-8"))
         if not isinstance(response, dict):
             raise ValueError(f"host-agent response {index}/{len(request_chunks)} is not an object")
+        raw_response_file_sha256 = sha256_file(response_path)
+        input_response_files.append({
+            "chunk_index": index,
+            "path": str(response_path.resolve()),
+            "sha256": raw_response_file_sha256,
+        })
+        if response_projector is not None:
+            response, projection_audits = response_projector(response, chunk_request)
+            if not isinstance(response, dict) or not isinstance(projection_audits, list):
+                raise ValueError(
+                    f"host-agent response {index}/{len(request_chunks)} projector returned an invalid result"
+                )
+            for audit in projection_audits:
+                if not isinstance(audit, dict):
+                    raise ValueError(
+                        f"host-agent response {index}/{len(request_chunks)} projector returned an invalid audit"
+                    )
+                response_projection_audits.append({
+                    "chunk_index": index,
+                    "raw_response_file_sha256": raw_response_file_sha256,
+                    "projected_response_sha256": sha256_json(response),
+                    "projected_response_bytes_sha256": sha256_bytes(canonical_json(response)),
+                    "projected_response_serialization": "canonical_json_utf8_v1",
+                    **copy.deepcopy(audit),
+                })
         contract_version = str(full_request.get("contract_version") or HOST_REVIEW_CONTRACT_V2)
         if response.get("contract_version") != contract_version:
             raise ValueError(
@@ -3897,8 +3991,6 @@ def merge_host_agent_review_packets(
             + "; ".join(aggregate_errors[:12])
         )
     ledger = build_semantic_review_ledger(aggregate, full_clauses)
-    ledger_path = review_dir.resolve() / "semantic-review-ledger.json"
-    merge_commit_path = review_dir.resolve() / "merge-commit.json"
     metadata = {
         "protocol": "host_agent_semantic_review",
         "chunked": len(request_chunks) > 1,
@@ -3942,7 +4034,25 @@ def merge_host_agent_review_packets(
         "source_verification_classification_projection": (
             source_verification_classification_projections
         ),
+        "response_projection_policy": (
+            "explicit_deterministic_projector_v1" if response_projector is not None else "none"
+        ),
+        "input_response_files": input_response_files,
+        "declaration_source_text_projection": response_projection_audits,
     }
+    if parent_receipt is not None and parent_receipt_path is not None:
+        metadata["derivation"] = {
+            "kind": "append_only_deterministic_reprojection",
+            "model_request_made": False,
+            "parent_merge_receipt_path": str(parent_receipt_path.expanduser().resolve()),
+            "parent_merge_receipt_sha256": parent_receipt_sha256,
+            "parent_aggregate_sha256": parent_aggregate_sha256,
+            "parent_run_id": parent_receipt.get("run_id"),
+            "parent_request_code_fingerprint_sha256": parent_request_code_fingerprint,
+            "derivation_code_fingerprint_sha256": derivation_code_fingerprint_sha256,
+            "run_id_preserved": True,
+            "raw_chunk_responses_preserved": True,
+        }
     receipt = {
         "schema_version": "1.0",
         "status": "merged",
@@ -3957,7 +4067,7 @@ def merge_host_agent_review_packets(
     _write_json_artifacts_atomic(
         artifacts,
         commit_marker_path=merge_commit_path,
-        commit_root=review_dir.resolve().parent,
+        commit_root=artifact_dir.parent,
         commit_metadata={
             "schema_version": "1.0",
             "status": "committed",

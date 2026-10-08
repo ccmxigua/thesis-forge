@@ -431,7 +431,20 @@ def validate_clause_contract(instance: Any) -> list[str]:
         rids = record.get("requirement_ids") or []
         if state == "pending_execution" and not rids:
             errors.append(f"$.clause_compliance[{i}].requirement_ids: pending_execution requires at least one requirement")
-        if state != "pending_execution" and state not in {"generated_and_verified", "verified_existing"} and rids:
+        obligations = record.get("obligations") if isinstance(record.get("obligations"), list) else []
+        obligation_statuses = {
+            item.get("status") for item in obligations if isinstance(item, dict)
+        }
+        mixed_external_pending = (
+            state == "unverifiable"
+            and bool(rids)
+            and "covered" in obligation_statuses
+            and "unverifiable" in obligation_statuses
+            and obligation_statuses <= {"covered", "unverifiable"}
+        )
+        if (state != "pending_execution"
+                and state not in {"generated_and_verified", "verified_existing"}
+                and rids and not mixed_external_pending):
             errors.append(f"$.clause_compliance[{i}].requirement_ids: state {state!r} must not reference executable requirements")
         for rid in rids:
             req = req_map.get(rid)

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+import argparse
 import hashlib
 import json
 import os
@@ -10,14 +11,22 @@ import tempfile
 import unittest
 from pathlib import Path
 from docx import Document
+from types import SimpleNamespace
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import requirements_engine as engine  # noqa: E402
 import offline_review_receipt  # noqa: E402
+import apply_format_spec as apply_spec  # noqa: E402
+import host_agent_bridge as bridge  # noqa: E402
 from semantic_contract import attach_request_provenance, sha256_file, sha256_json  # noqa: E402
-from thesis_format_pipeline import validate_offline_merge_receipt  # noqa: E402
+from thesis_format_pipeline import (  # noqa: E402
+    runtime_code_fingerprint,
+    validate_offline_merge_receipt,
+    validate_semantic_review_configuration,
+)
 
 
 def _write(path: Path, payload: dict) -> None:
@@ -86,6 +95,67 @@ class PortableReviewDraftTests(unittest.TestCase):
         self.assertIs(result["submission_ready"], False)
         self.assertIs(result["independent_review_verified"], False)
         self.assertIs(result["provider_model_verified"], False)
+        self.assertEqual(result["aggregate_sha256"], sha256_json(self.response))
+
+    def test_evaluation_units_accept_only_a_revalidated_offline_merge_receipt(self) -> None:
+        extraction_path = self.work / "review" / "requirements" / "extraction-manifest.json"
+        _write(extraction_path, self.extraction)
+        source_clauses_path = self.work / "review" / "requirements" / "requirement-clauses.json"
+        source_clauses_path.write_text("[]\n", encoding="utf-8")
+        verified_offline = self._check()
+        pipeline_manifest = {
+            "run_id": "fresh-run", "work_dir": str(self.work),
+            "offline_review_receipt": verified_offline,
+            "source_clause_record": {
+                "path": str(source_clauses_path.resolve()),
+                "bytes": source_clauses_path.stat().st_size,
+                "sha256": sha256_file(source_clauses_path),
+            },
+        }
+        spec = {"requirements": [{"id": "R1", "evaluation_units": []}]}
+        with patch.object(apply_spec, "validate_requirement_evaluation_units", return_value=([], {})) as validate_units:
+            errors, _ = apply_spec.validate_current_evaluation_units(
+                spec, pipeline_manifest=pipeline_manifest,
+                source_clauses_path=source_clauses_path,
+                source_extraction_manifest_path=extraction_path,
+            )
+        self.assertEqual(errors, [])
+        self.assertEqual(validate_units.call_args.kwargs["expected_response_sha256"],
+                         sha256_json(self.response))
+
+        pipeline_manifest["offline_review_receipt"] = copy.deepcopy(verified_offline)
+        pipeline_manifest["offline_review_receipt"]["response"]["sha256"] = "f" * 64
+        errors, _ = apply_spec.validate_current_evaluation_units(
+            spec, pipeline_manifest=pipeline_manifest,
+            source_clauses_path=source_clauses_path,
+            source_extraction_manifest_path=extraction_path,
+        )
+        self.assertTrue(any("offline_review_receipt_invalid" in item for item in errors))
+
+    def test_review_spec_without_evaluation_units_does_not_synthesize_projection(self) -> None:
+        extraction_path = self.work / "review" / "requirements" / "extraction-manifest.json"
+        _write(extraction_path, self.extraction)
+        source_clauses_path = self.work / "review" / "requirements" / "requirement-clauses.json"
+        source_clauses_path.write_text("[]\n", encoding="utf-8")
+        pipeline_manifest = {
+            "run_id": "fresh-run", "work_dir": str(self.work),
+            "offline_review_receipt": self._check(),
+            "source_clause_record": {
+                "path": str(source_clauses_path.resolve()),
+                "bytes": source_clauses_path.stat().st_size,
+                "sha256": sha256_file(source_clauses_path),
+            },
+        }
+        with patch.object(apply_spec, "validate_requirement_evaluation_units") as validate_units:
+            errors, projected = apply_spec.validate_current_evaluation_units(
+                {"requirements": [{"id": "R1"}]},
+                pipeline_manifest=pipeline_manifest,
+                source_clauses_path=source_clauses_path,
+                source_extraction_manifest_path=extraction_path,
+            )
+        self.assertEqual(errors, [])
+        self.assertEqual(projected, {})
+        validate_units.assert_not_called()
 
     def test_portable_cli_works_without_codex_or_other_native_cli(self) -> None:
         extraction_path = self.work / "review" / "requirements" / "extraction-manifest.json"
@@ -165,6 +235,7 @@ class PortableReviewDraftTests(unittest.TestCase):
         request = engine.build_llm_request(
             [], clauses, evidence, {}, "full", contract_version="3.0",
         )
+        request["runtime_context"] = {"code_fingerprint_sha256": "c" * 64}
         request = attach_request_provenance(
             request, source_sha256=digest, evidence_doc=evidence,
             clauses=clauses, run_id="portable-agent-run",
@@ -196,12 +267,210 @@ class PortableReviewDraftTests(unittest.TestCase):
             "llm_request_file_sha256": receipt["request_file_sha256"],
             "runtime_context": receipt["runtime_context"],
         }
+        _write(review_dir / "extraction-manifest.json", extraction)
         result = validate_offline_merge_receipt(
             response_path=response_path, receipt_path=receipt_path,
             extraction_manifest=extraction, work=portable_work,
         )
         self.assertEqual(result["run_id"], "portable-agent-run")
         self.assertFalse(result["submission_ready"])
+        parent_identity = offline_review_receipt.validate_offline_parent_merge_receipt(
+            parent_receipt_path=receipt_path,
+        )
+        self.assertEqual(parent_identity["parent_run_id"], "portable-agent-run")
+        self.assertEqual(
+            parent_identity["inherited_request_code_fingerprint_sha256"], "c" * 64,
+        )
+
+        child_work = Path(self.temporary.name) / "derived-run"
+        child_artifacts = child_work / "review" / "requirements"
+        child_response_path = child_artifacts / "host-agent-response.json"
+        child_receipt_path = child_artifacts / "merge-receipt.json"
+        engine.merge_host_agent_review_packets(
+            review_dir, response_out=child_response_path,
+            response_projector=bridge._materialize_fixed_declaration_source_text,
+            artifact_dir=child_artifacts, parent_receipt_path=receipt_path,
+            derivation_code_fingerprint_sha256=runtime_code_fingerprint()["sha256"],
+        )
+        with self.assertRaisesRegex(ValueError, "fixed declaration projection audit"):
+            offline_review_receipt.validate_offline_parent_merge_receipt(
+                parent_receipt_path=receipt_path,
+                child_receipt_path=child_receipt_path,
+                child_response_path=child_response_path,
+                child_work=child_work,
+                current_code_fingerprint_sha256=runtime_code_fingerprint()["sha256"],
+            )
+
+    def _make_deterministic_declaration_child(self) -> tuple[Path, Path, Path, str]:
+        incident = json.loads(
+            (ROOT / "tests" / "fixtures" / "declaration-informational-heading-incident.json")
+            .read_text(encoding="utf-8")
+        )
+        source = copy.deepcopy(incident["source"])
+        clauses = source["clauses"]
+        evidence = {
+            "evidence": list(source["evidence_context"].values()),
+            "structure_evidence": {"sections": [{
+                "first_paragraphs": [{"text": "摘要", "style_name": "Abstract Title CN"}],
+            }]},
+        }
+        run_id = "deterministic-declaration-parent-run"
+        request = engine.build_llm_request(
+            [], clauses, evidence, {}, "full", contract_version="3.0",
+        )
+        request.update(source)
+        request["runtime_context"] = {"code_fingerprint_sha256": "c" * 64}
+        request = attach_request_provenance(
+            request, source_sha256="d" * 64, evidence_doc=evidence,
+            clauses=clauses, run_id=run_id,
+        )
+        root = Path(self.temporary.name) / "deterministic-projection"
+        parent_work = root / "parent"
+        parent_dir = parent_work / "review" / "requirements"
+        engine.prepare_host_agent_review_packets(
+            request, clauses, evidence, "d" * 64, parent_dir, chunk_size=100,
+        )
+        chunk = json.loads((parent_dir / "llm-request-chunks.json").read_text())[0]
+        raw_response = bridge.normalize_native_response(
+            copy.deepcopy(incident["raw"]), chunk["response_schema"],
+        )
+        raw_response["provenance"] = chunk["provenance"]
+        _write(parent_dir / chunk["batch"]["response_filename"], raw_response)
+        parent_response = parent_dir / "parent-aggregate.json"
+        engine.merge_host_agent_review_packets(parent_dir, response_out=parent_response)
+        parent_receipt = parent_dir / "merge-receipt.json"
+        parent_value = json.loads(parent_receipt.read_text(encoding="utf-8"))
+        _write(parent_dir / "extraction-manifest.json", {
+            "run_id": run_id,
+            "llm_request_body_sha256": parent_value["request_body_sha256"],
+            "llm_request_envelope_sha256": parent_value["request_envelope_sha256"],
+            "llm_request_file_sha256": parent_value["request_file_sha256"],
+            "runtime_context": parent_value["runtime_context"],
+        })
+
+        current_fingerprint = runtime_code_fingerprint()["sha256"]
+        child_work = root / "child"
+        child_dir = child_work / "review" / "requirements"
+        child_response = child_dir / "host-agent-response.json"
+        merged = subprocess.run(
+            [
+                sys.executable, str(ROOT / "scripts" / "merge_host_agent_review.py"),
+                str(parent_dir), "--response-out", str(child_response),
+                "--artifact-dir", str(child_dir), "--parent-receipt", str(parent_receipt),
+            ],
+            capture_output=True, text=True, check=False,
+        )
+        if merged.returncode:
+            raise AssertionError(merged.stderr[-2500:] + merged.stdout[-1500:])
+        return parent_receipt, child_work, child_response, current_fingerprint
+
+    def test_parent_projection_is_replayed_from_raw_bytes_and_child_is_byte_bound(self) -> None:
+        parent_receipt, child_work, child_response, current_fingerprint = (
+            self._make_deterministic_declaration_child()
+        )
+        child_receipt = child_work / "review" / "requirements" / "merge-receipt.json"
+        verified = offline_review_receipt.validate_offline_parent_merge_receipt(
+            parent_receipt_path=parent_receipt,
+            child_receipt_path=child_receipt,
+            child_response_path=child_response,
+            child_work=child_work,
+            current_code_fingerprint_sha256=current_fingerprint,
+        )
+        self.assertTrue(verified["child_verification"]["deterministic_projection_replay_verified"])
+        self.assertFalse(verified["model_request_made"])
+        self.assertFalse(verified["submission_ready"])
+        child = json.loads(child_receipt.read_text(encoding="utf-8"))
+        projection = child["declaration_source_text_projection"][0]
+        self.assertEqual(projection["projected_response_serialization"], "canonical_json_utf8_v1")
+        self.assertEqual(
+            projection["projected_response_bytes_sha256"],
+            projection["projected_response_sha256"],
+        )
+
+        original_response_bytes = child_response.read_bytes()
+        original_receipt_bytes = child_receipt.read_bytes()
+
+        def restore() -> tuple[dict, dict]:
+            child_response.write_bytes(original_response_bytes)
+            child_value = json.loads(original_receipt_bytes)
+            child_receipt.write_bytes(original_receipt_bytes)
+            return child_value, child
+
+        # Even a tampered response with a freshly recomputed aggregate digest
+        # must fail because it cannot be reproduced from the immutable packet.
+        tampered_response = json.loads(original_response_bytes)
+        tampered_response["requirements"][0]["properties"]["items"][0]["body_parts"][0] += "已篡改"
+        _write(child_response, tampered_response)
+        tampered_receipt = json.loads(original_receipt_bytes)
+        tampered_receipt["aggregate_sha256"] = sha256_json(tampered_response)
+        _write(child_receipt, tampered_receipt)
+        with self.assertRaisesRegex(ValueError, "differ from deterministic parent replay"):
+            offline_review_receipt.validate_offline_parent_merge_receipt(
+                parent_receipt_path=parent_receipt, child_receipt_path=child_receipt,
+                child_response_path=child_response, child_work=child_work,
+                current_code_fingerprint_sha256=current_fingerprint,
+            )
+        restore()
+
+        # Path, aggregate-summary, and code-identity substitution are rejected
+        # before consuming the projection hash claim.
+        mutations = [
+            ("parent_merge_receipt_path", str(child_receipt)),
+            ("parent_aggregate_sha256", "f" * 64),
+            ("parent_request_code_fingerprint_sha256", "e" * 64),
+            ("derivation_code_fingerprint_sha256", "c" * 64),
+        ]
+        for field, value in mutations:
+            with self.subTest(field=field):
+                changed, _ = restore()
+                changed["derivation"][field] = value
+                _write(child_receipt, changed)
+                with self.assertRaisesRegex(ValueError, "not bound to the verified parent run"):
+                    offline_review_receipt.validate_offline_parent_merge_receipt(
+                        parent_receipt_path=parent_receipt, child_receipt_path=child_receipt,
+                        child_response_path=child_response, child_work=child_work,
+                        current_code_fingerprint_sha256=current_fingerprint,
+                    )
+        restore()
+
+        missing_audit, _ = restore()
+        missing_audit["declaration_source_text_projection"] = []
+        _write(child_receipt, missing_audit)
+        with self.assertRaisesRegex(ValueError, "no fixed declaration projection audit"):
+            offline_review_receipt.validate_offline_parent_merge_receipt(
+                parent_receipt_path=parent_receipt, child_receipt_path=child_receipt,
+                child_response_path=child_response, child_work=child_work,
+                current_code_fingerprint_sha256=current_fingerprint,
+            )
+        restore()
+
+        altered_projection_hash, _ = restore()
+        projection = altered_projection_hash["declaration_source_text_projection"][0]
+        projection["projected_response_sha256"] = "0" * 64
+        projection["projected_response_bytes_sha256"] = "0" * 64
+        _write(child_receipt, altered_projection_hash)
+        with self.assertRaisesRegex(ValueError, "differs from deterministic parent replay"):
+            offline_review_receipt.validate_offline_parent_merge_receipt(
+                parent_receipt_path=parent_receipt, child_receipt_path=child_receipt,
+                child_response_path=child_response, child_work=child_work,
+                current_code_fingerprint_sha256=current_fingerprint,
+            )
+        restore()
+
+    def test_parent_lineage_rejects_non_review_draft_policy(self) -> None:
+        args = SimpleNamespace(
+            prepare_host_review=True, llm_response=None,
+            host_agent_audit=None, merge_receipt=None,
+            allow_offline_review=False, output_policy="submission",
+            require_submission_ready=False, strict_release=False,
+            offline_merge_receipt=None,
+            offline_parent_merge_receipt=Path("parent/merge-receipt.json"),
+            run_id="same-run", analysis_mode="llm_primary", compliance_mode="full",
+            template_profile=None, render_report=None, allow_unresolved=False,
+            preview_placeholders=False,
+        )
+        with self.assertRaises(SystemExit):
+            validate_semantic_review_configuration(args, argparse.ArgumentParser())
 
     def test_real_wrapper_prepare_merge_and_continue_without_native_cli(self) -> None:
         self._real_wrapper_flow(defaults=False)

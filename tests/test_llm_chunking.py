@@ -17,8 +17,12 @@ from semantic_contract import HOST_AGENT_ORIGIN, attach_request_provenance  # no
 
 
 class HostAgentReviewTests(unittest.TestCase):
-    def _request(self, clauses: list[dict], evidence: dict) -> dict:
+    def _request(
+        self, clauses: list[dict], evidence: dict, *, code_fingerprint: str | None = None,
+    ) -> dict:
         request = engine.build_llm_request([], clauses, evidence, {}, "full")
+        if code_fingerprint is not None:
+            request["runtime_context"] = {"code_fingerprint_sha256": code_fingerprint}
         return attach_request_provenance(
             request, source_sha256="a" * 64, evidence_doc=evidence, clauses=clauses,
         )
@@ -121,6 +125,9 @@ class HostAgentReviewTests(unittest.TestCase):
                 )
             merged, metadata = engine.merge_host_agent_review_packets(
                 review_dir, response_out=review_dir / "llm-response.json",
+                response_projector=lambda response, _chunk: (
+                    response, [{"rule_id": "test_projection", "change_kind": "none"}],
+                ),
             )
             self.assertTrue(metadata["chunked"])
             self.assertEqual(metadata["chunk_count"], 2)
@@ -136,6 +143,22 @@ class HostAgentReviewTests(unittest.TestCase):
             )
             receipt = json.loads((review_dir / "merge-receipt.json").read_text())
             ledger = json.loads((review_dir / "semantic-review-ledger.json").read_text())
+            projections = metadata["declaration_source_text_projection"]
+            self.assertEqual(len(projections), 2)
+            for index, (projection, chunk) in enumerate(zip(projections, chunks), start=1):
+                self.assertEqual(projection["chunk_index"], index)
+                self.assertEqual(projection["rule_id"], "test_projection")
+                self.assertEqual(projection["change_kind"], "none")
+                raw_path = review_dir / chunk["batch"]["response_filename"]
+                self.assertEqual(
+                    projection["raw_response_file_sha256"], engine.sha256_file(raw_path),
+                )
+                self.assertRegex(projection["projected_response_sha256"], r"^[0-9a-f]{64}$")
+            self.assertEqual(
+                receipt["declaration_source_text_projection"],
+                metadata["declaration_source_text_projection"],
+            )
+            self.assertEqual(receipt["response_projection_policy"], "explicit_deterministic_projector_v1")
             self.assertEqual(
                 metadata["source_verification_classification_policy_version"],
                 "source-verification-classification-v7",
@@ -148,6 +171,88 @@ class HostAgentReviewTests(unittest.TestCase):
             self.assertEqual(receipt["semantic_review_ledger_sha256"], engine.sha256_json(ledger))
             self.assertEqual(ledger["response_sha256"], receipt["aggregate_sha256"])
             self.assertEqual(metadata["semantic_review_ledger_sha256"], receipt["semantic_review_ledger_sha256"])
+
+    def test_invalid_response_projection_fails_before_merge_artifacts(self) -> None:
+        clause = {"id": "C1", "text": "正文使用宋体", "evidence_ids": ["E1"],
+                  "source_kind": "paragraph", "location": {}, "part_index": 0}
+        evidence = {"evidence": [{"id": "E1", "text": clause["text"], "kind": "paragraph"}]}
+        request = self._request([clause], evidence)
+        with tempfile.TemporaryDirectory() as td:
+            review_dir = Path(td)
+            engine.prepare_host_agent_review_packets(
+                request, [clause], evidence, "a" * 64, review_dir, chunk_size=1,
+            )
+            chunk = json.loads((review_dir / "llm-request-chunks.json").read_text())[0]
+            (review_dir / chunk["batch"]["response_filename"]).write_text(
+                json.dumps(self._response_for_chunk(chunk), ensure_ascii=False), encoding="utf-8",
+            )
+            with self.assertRaisesRegex(ValueError, "projector returned an invalid result"):
+                engine.merge_host_agent_review_packets(
+                    review_dir,
+                    response_projector=lambda _response, _chunk: ([], []),
+                )
+            self.assertFalse((review_dir / "merge-receipt.json").exists())
+            self.assertFalse((review_dir / "llm-response.json").exists())
+
+    def test_parent_linked_reprojection_writes_only_to_a_disjoint_artifact_dir(self) -> None:
+        clause = {"id": "C1", "text": "正文使用宋体", "evidence_ids": ["E1"],
+                  "source_kind": "paragraph", "location": {}, "part_index": 0}
+        evidence = {"evidence": [{"id": "E1", "text": clause["text"], "kind": "paragraph"}]}
+        request = self._request([clause], evidence, code_fingerprint="c" * 64)
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            review_dir = root / "source" / "review"
+            engine.prepare_host_agent_review_packets(
+                request, [clause], evidence, "a" * 64, review_dir, chunk_size=1,
+            )
+            chunk = json.loads((review_dir / "llm-request-chunks.json").read_text())[0]
+            response_path = review_dir / chunk["batch"]["response_filename"]
+            response_path.write_text(
+                json.dumps(self._response_for_chunk(chunk), ensure_ascii=False), encoding="utf-8",
+            )
+            parent_aggregate_path = review_dir / "parent-aggregate.json"
+            engine.merge_host_agent_review_packets(
+                review_dir, response_out=parent_aggregate_path,
+            )
+            parent_receipt_path = review_dir / "merge-receipt.json"
+            frozen_hashes = {
+                path: engine.sha256_file(path)
+                for path in (response_path, parent_aggregate_path, parent_receipt_path,
+                             review_dir / "semantic-review-ledger.json",
+                             review_dir / "merge-commit.json")
+            }
+
+            artifact_dir = root / "derived"
+            child_aggregate_path = artifact_dir / "host-agent-response.json"
+            merged, metadata = engine.merge_host_agent_review_packets(
+                review_dir,
+                response_out=child_aggregate_path,
+                response_projector=lambda response, _chunk: (
+                    response, [{"rule_id": "test_projection", "change_kind": "none"}],
+                ),
+                artifact_dir=artifact_dir,
+                parent_receipt_path=parent_receipt_path,
+                derivation_code_fingerprint_sha256="d" * 64,
+            )
+
+            self.assertEqual(merged["provenance"], request["provenance"])
+            self.assertEqual(metadata["derivation"]["kind"], "append_only_deterministic_reprojection")
+            self.assertIs(metadata["derivation"]["model_request_made"], False)
+            self.assertIs(metadata["derivation"]["run_id_preserved"], True)
+            self.assertEqual(
+                metadata["derivation"]["parent_merge_receipt_sha256"],
+                engine.sha256_file(parent_receipt_path),
+            )
+            child_receipt = json.loads((artifact_dir / "merge-receipt.json").read_text())
+            self.assertEqual(child_receipt["derivation"], metadata["derivation"])
+            self.assertEqual(len(child_receipt["input_response_files"]), 1)
+            self.assertEqual(
+                child_receipt["input_response_files"][0]["sha256"],
+                frozen_hashes[response_path],
+            )
+            self.assertTrue(all(engine.sha256_file(path) == digest
+                                for path, digest in frozen_hashes.items()))
+            self.assertTrue((artifact_dir / "merge-commit.json").is_file())
 
     def test_merge_receipt_records_source_projection_audits(self) -> None:
         clause = {

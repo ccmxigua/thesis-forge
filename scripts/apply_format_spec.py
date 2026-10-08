@@ -88,6 +88,7 @@ from property_receipts import (
     expected_receipt_ids,
     flatten,
 )
+from offline_review_receipt import validate_offline_merge_receipt
 from responsibility_ledger import validate_requirement_evaluation_units
 
 ROLE_STYLES = {role: style_aliases(role) for role in role_names()}
@@ -272,18 +273,61 @@ def validate_current_evaluation_units(
     *,
     pipeline_manifest: dict[str, Any] | None,
     source_clauses_path: Path | None,
+    source_extraction_manifest_path: Path | None = None,
 ) -> tuple[list[str], dict[str, list[dict[str, Any]]]]:
     """Load and verify evaluation units against manifest-bound source evidence."""
     has_units = any(
         isinstance(requirement, dict) and "evaluation_units" in requirement
         for requirement in spec.get("requirements", [])
     )
+    # Review-draft specs do not necessarily declare evaluation-unit projections.
+    # In that case there is no projection to authenticate against the semantic
+    # ledger; deriving units here would turn an optional analysis artifact into
+    # a new requirement and reject otherwise valid drafts.
+    if not has_units:
+        return [], {}
     if pipeline_manifest is None:
-        return (["evaluation_units_require_pipeline_manifest"] if has_units else []), {}
+        return ["evaluation_units_require_pipeline_manifest"], {}
     host_receipts = pipeline_manifest.get("host_review_receipts")
-    if not isinstance(host_receipts, dict):
-        return (["evaluation_units_host_review_receipt_missing"] if has_units else []), {}
-    ledger_record = host_receipts.get("semantic_review_ledger")
+    expected_response_sha256: str | None = None
+    if isinstance(host_receipts, dict):
+        ledger_record = host_receipts.get("semantic_review_ledger")
+        expected_response_sha256 = host_receipts.get("aggregate_sha256")
+    else:
+        offline = pipeline_manifest.get("offline_review_receipt")
+        if not isinstance(offline, dict):
+            return (["evaluation_units_host_review_receipt_missing"] if has_units else []), {}
+        if (offline.get("status") != "offline_merged_without_independent_review"
+                or offline.get("submission_ready") is not False
+                or source_extraction_manifest_path is None
+                or not source_extraction_manifest_path.is_file()):
+            return (["evaluation_units_offline_review_receipt_invalid"] if has_units else []), {}
+        try:
+            extraction_manifest = strict_json_read(source_extraction_manifest_path)
+            work_value = pipeline_manifest.get("work_dir")
+            if not isinstance(work_value, str) or not work_value:
+                raise ValueError("offline pipeline work directory is missing")
+            response_value = offline.get("response")
+            receipt_value = offline.get("merge_receipt")
+            if (not isinstance(response_value, dict) or not isinstance(response_value.get("path"), str)
+                    or not isinstance(receipt_value, dict) or not isinstance(receipt_value.get("path"), str)):
+                raise ValueError("offline response or merge receipt path is missing")
+            verified = validate_offline_merge_receipt(
+                response_path=Path(response_value["path"]),
+                receipt_path=Path(receipt_value["path"]),
+                extraction_manifest=extraction_manifest,
+                work=Path(work_value),
+            )
+            if any(offline.get(key) != verified.get(key) for key in (
+                "status", "submission_ready", "response", "merge_receipt",
+                "semantic_review_ledger", "merge_commit_marker", "run_id",
+                "request_body_sha256", "aggregate_sha256",
+            )):
+                raise ValueError("offline receipt record differs from current verified artifacts")
+        except (OSError, ValueError, json.JSONDecodeError, TypeError) as exc:
+            return ([f"evaluation_units_offline_review_receipt_invalid:{exc}"] if has_units else []), {}
+        ledger_record = verified.get("semantic_review_ledger")
+        expected_response_sha256 = verified.get("aggregate_sha256")
     if ledger_record is None and not has_units:
         return [], {}
     if not isinstance(ledger_record, dict) or not isinstance(ledger_record.get("path"), str):
@@ -316,7 +360,7 @@ def validate_current_evaluation_units(
     return validate_requirement_evaluation_units(
         spec, semantic_ledger, source_clauses,
         expected_run_id=pipeline_manifest.get("run_id"),
-        expected_response_sha256=host_receipts.get("aggregate_sha256"),
+        expected_response_sha256=expected_response_sha256,
     )
 
 
@@ -786,6 +830,47 @@ def _compile_non_public_administration(cover: dict[str, Any], profile: dict[str,
     }
 
 
+def _shared_embargo_range_label_ids(fields: Any) -> frozenset[str]:
+    """Identify the one source label that binds the ordered embargo date range.
+
+    BSU's source row has one visible ``保密期限`` label followed by a date
+    range.  The executable contract keeps the two endpoints distinct, but the
+    linear review-draft cover should render that shared label only once.  Keep
+    this projection narrow: it applies only when both endpoint IDs, source
+    metadata paths, identical labels, and source order are all present.
+    """
+    if not isinstance(fields, list):
+        return frozenset()
+    pair = [
+        field for field in fields
+        if isinstance(field, dict)
+        and field.get("id") in {"embargo_start", "embargo_until"}
+    ]
+    if len(pair) != 2:
+        return frozenset()
+    by_id = {field.get("id"): field for field in pair}
+    start = by_id.get("embargo_start")
+    end = by_id.get("embargo_until")
+    if not isinstance(start, dict) or not isinstance(end, dict):
+        return frozenset()
+    start_order = start.get("order")
+    end_order = end.get("order")
+    if (
+        start.get("label_display_policy") != "always"
+        or end.get("label_display_policy") != "always"
+        or not isinstance(start.get("label"), str)
+        or not start.get("label")
+        or start.get("label") != end.get("label")
+        or start.get("value_from") != "thesis_profile.cover_metadata.embargo_start"
+        or end.get("value_from") != "thesis_profile.cover_metadata.embargo_until"
+        or isinstance(start_order, bool) or not isinstance(start_order, int)
+        or isinstance(end_order, bool) or not isinstance(end_order, int)
+        or start_order >= end_order
+    ):
+        return frozenset()
+    return frozenset({"embargo_start", "embargo_until"})
+
+
 def compile_cover_contract(cover: dict[str, Any], profile: dict[str, Any]) -> dict[str, Any]:
     """Compile written requirements and trusted instance data into an executable contract."""
     metadata, trusted = _trusted_cover_metadata(profile)
@@ -817,8 +902,13 @@ def compile_cover_contract(cover: dict[str, Any], profile: dict[str, Any]) -> di
         # An explicitly source-required printed label is not an approval or
         # security value. Keep it in source order even when values remain
         # blank/pending; never synthesize or render administrative completion.
-        for field in cover["non_public_administration"].get("fields", []):
+        admin_fields = cover["non_public_administration"].get("fields", [])
+        shared_embargo_label_ids = _shared_embargo_range_label_ids(admin_fields)
+        for field in admin_fields:
             if field.get("label_display_policy") == "always":
+                if (field.get("id") == "embargo_until"
+                        and shared_embargo_label_ids):
+                    continue
                 fields.append({"id": field["id"], "label": field["label"], "order": field["order"],
                     "required": False, "value": "", "value_kind": "label_only",
                     "label_display_policy": "always", "source": "source_label_only",
@@ -1024,12 +1114,12 @@ def audit_cover(doc: Document, cover: dict[str, Any], profile: dict[str, Any],
     if not generated_cover or not _paragraph_has_page_break(generated_cover[-1]):
         findings.append({"role": "cover", "property": "page_break", "template_value": False,
                          "required_value": "explicit page break after generated cover"})
-    label_fields = [field for field in cover.get("non_public_administration", {}).get("fields", [])
-                    if field.get("label_display_policy") == "always"]
-    for field in [*cover.get("fields", []), *label_fields]:
-        value, placeholder = ("", False) if field in label_fields else _cover_field_value(cover, metadata, field)
+    def check_field(field: dict[str, Any], *, label_only: bool = False) -> None:
+        value, placeholder = (("", False) if label_only
+                              else _cover_field_value(cover, metadata, field))
         expected = _cover_field_text(field, value)
-        if expected is None: continue
+        if expected is None:
+            return
         expected_style = {"title_zh": mappings.get("thesis_title_zh", {}).get("style_name") or generated_style("thesis_title_zh") or "Thesis Cover Title ZH",
                           "title_en": mappings.get("thesis_title_en", {}).get("style_name") or generated_style("thesis_title_en") or "Thesis Cover Title EN"}.get(
             field["id"], generated_style("cover_field_value") or "Thesis Cover Field Value")
@@ -1039,6 +1129,38 @@ def audit_cover(doc: Document, cover: dict[str, Any], profile: dict[str, Any],
                            "exactly one neutral placeholder on the generated cover" if placeholder else
                            "exactly one trusted metadata value on the generated cover")
             findings.append({"role": "cover", "property": f"fields.{field['id']}", "template_value": len(matches), "required_value": requirement})
+
+    for field in cover.get("fields", []):
+        if isinstance(field, dict):
+            check_field(field)
+
+    label_fields = [field for field in cover.get("non_public_administration", {}).get("fields", [])
+                    if isinstance(field, dict) and field.get("label_display_policy") == "always"]
+    shared_embargo_label_ids = _shared_embargo_range_label_ids(label_fields)
+    label_groups: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    for field in label_fields:
+        expected = _cover_field_text(field, "")
+        if expected is None:
+            continue
+        expected_style = generated_style("cover_field_value") or "Thesis Cover Field Value"
+        label_groups.setdefault((expected, expected_style), []).append(field)
+    for (expected, expected_style), fields_for_label in label_groups.items():
+        ids = [str(field.get("id") or "") for field in fields_for_label]
+        shared_ids_in_group = set(ids) & set(shared_embargo_label_ids)
+        expected_count = len(fields_for_label) - max(0, len(shared_ids_in_group) - 1)
+        matches = [p for p in cover_block if p.text.strip() == expected and p.style.name == expected_style]
+        if len(matches) != expected_count:
+            if shared_embargo_label_ids and shared_ids_in_group == set(shared_embargo_label_ids):
+                property_name = "fields.embargo_start/embargo_until"
+                requirement = "exactly one shared source label for the ordered embargo date range"
+            elif len(ids) == 1:
+                property_name = f"fields.{ids[0]}"
+                requirement = "exactly one source label on the generated cover"
+            else:
+                property_name = "fields.shared_label." + "/".join(ids)
+                requirement = f"exactly {expected_count} source label instances on the generated cover"
+            findings.append({"role": "cover", "property": property_name,
+                             "template_value": len(matches), "required_value": requirement})
     administration = compile_cover_contract(cover, profile).get("non_public_administration")
     if isinstance(administration, dict):
         if administration.get("status") == "blank_public":
@@ -1959,6 +2081,18 @@ def validate_content_instance_source_bindings(
             current_source_sha256 = None
         if current_source_sha256 != manifest_source_sha256:
             errors.append("extraction_source_document_hash_mismatch")
+    try:
+        locator_source_document = (
+            str(Path(manifest_source_document).expanduser().resolve())
+            if isinstance(manifest_source_document, str) and manifest_source_document
+            else None
+        )
+    except (OSError, RuntimeError, ValueError):
+        locator_source_document = None
+    locator_source_record = {
+        "source_document": locator_source_document,
+        "source_document_sha256": manifest_source_sha256,
+    }
 
     manifest_clause_sha = extraction_manifest.get("requirement_clauses_sha256")
     if not isinstance(manifest_clause_sha, str) or manifest_clause_sha != clause_artifact_sha256:
@@ -2087,6 +2221,7 @@ def validate_content_instance_source_bindings(
                     "source_kind": item["source_kind"],
                     "location": copy.deepcopy(item["location"]),
                     "separator_before": item["separator_before"],
+                    **locator_source_record,
                 } for item in expected_fragment_binding["source_fragments"])
         for clause_id in clause_ids:
             clause = clauses_by_id.get(clause_id)
@@ -2154,6 +2289,7 @@ def validate_content_instance_source_bindings(
                         or (evidence.get("location") if isinstance(evidence, dict) else None)
                         or clause.get("location")
                     ),
+                    **locator_source_record,
                 })
         if not set(evidence_ids) <= expected_evidence_ids:
             errors.append(f"{label}:evidence_ids_not_supported_by_clause_sources")
@@ -2317,6 +2453,8 @@ def _validate_source_binding_paragraph(paragraph: Paragraph, binding: dict[str, 
 def apply_content_instance_overrides(
     doc: Document, spec: dict[str, Any], mappings: dict[str, Any],
     source_bindings: dict[str, list[dict[str, Any]]],
+    *, target_source_document: Path | None = None,
+    source_paragraphs: list[Paragraph] | None = None,
 ) -> list[dict[str, Any]]:
     """Apply per-instance style overrides without merging literal text into roles.
 
@@ -2334,7 +2472,46 @@ def apply_content_instance_overrides(
     raw_instances = spec.get("content_instances", spec.get("cover_field_instances", []))
     if not isinstance(raw_instances, list) or not raw_instances:
         return []
-    paragraphs = _content_instance_paragraphs(doc)
+    # Match against the source document's original paragraph elements. The
+    # formatting pipeline may have inserted editable placeholders before this
+    # point; those generated nodes cannot satisfy a source-bound literal.
+    paragraphs = (
+        source_paragraphs if source_paragraphs is not None
+        else _content_instance_paragraphs(doc)
+    )
+    target_source_path = (
+        target_source_document.expanduser().resolve()
+        if isinstance(target_source_document, Path) else None
+    )
+    target_source_sha256 = None
+    if target_source_path is not None:
+        try:
+            target_source_sha256 = hashlib.sha256(target_source_path.read_bytes()).hexdigest()
+        except OSError as exc:
+            raise ValueError(f"cannot verify content-instance target source: {exc}") from exc
+
+    def location_belongs_to_target(binding: dict[str, Any]) -> bool:
+        binding_source = binding.get("source_document")
+        if binding_source is None:
+            # Keep strict behavior for legacy callers without file provenance;
+            # their locator is treated as explicitly bound to the target.
+            return True
+        if not isinstance(binding_source, str) or not binding_source:
+            raise ValueError("content-instance locator source document is malformed")
+        if target_source_path is None:
+            return False
+        try:
+            same_path = Path(binding_source).expanduser().resolve() == target_source_path
+        except (OSError, RuntimeError, ValueError):
+            return False
+        if not same_path:
+            return False
+        expected_file_sha256 = binding.get("source_document_sha256")
+        if (not isinstance(expected_file_sha256, str)
+                or expected_file_sha256 != target_source_sha256):
+            raise ValueError("content-instance target source bytes differ from locator source")
+        return True
+
     records: list[dict[str, Any]] = []
     for instance in raw_instances:
         if not isinstance(instance, dict):
@@ -2355,7 +2532,8 @@ def apply_content_instance_overrides(
             fragment_text = binding.get("text")
             if not isinstance(fragment_text, str) or not fragment_text:
                 raise ValueError(f"content instance {instance_id!r} source binding lacks exact text")
-            if isinstance(binding.get("location"), dict):
+            if (isinstance(binding.get("location"), dict)
+                    and location_belongs_to_target(binding)):
                 paragraph = _paragraph_at_source_location(doc, binding)
                 if paragraph is None:
                     raise ValueError(
@@ -2404,7 +2582,7 @@ def apply_content_instance_overrides(
             "source_bindings": copy.deepcopy(source_bindings.get(instance_id, [])),
             "match_count": len(matches),
             "applied_count": applied,
-            "binding_policy": "exact_source_location_or_unique_legacy_literal",
+            "binding_policy": "source_file_bound_location_or_unique_target_literal",
             "status": status,
             "reason": ("literal content was matched and its instance style was applied"
                        if status == "applied" else
@@ -4228,6 +4406,7 @@ def main(argv: list[str]) -> int:
         validate_current_evaluation_units(
             spec, pipeline_manifest=pipeline_manifest,
             source_clauses_path=args.source_clauses,
+            source_extraction_manifest_path=args.source_extraction_manifest,
         )
     )
     if evaluation_unit_errors:
@@ -4235,7 +4414,9 @@ def main(argv: list[str]) -> int:
             "evaluation-unit source integrity validation failed:\n"
             + "\n".join(evaluation_unit_errors)
     )
-    doc = Document(args.input); args.out_dir.mkdir(parents=True, exist_ok=True)
+    doc = Document(args.input)
+    original_source_paragraphs = _content_instance_paragraphs(doc)
+    args.out_dir.mkdir(parents=True, exist_ok=True)
     if args.manual_review_items and isinstance(manual_review_ledger, dict):
         write_manual_review_ledger(args.manual_review_items, manual_review_ledger)
     if args.output_policy == "review_draft":
@@ -4443,6 +4624,8 @@ def main(argv: list[str]) -> int:
     )
     content_instance_audit = apply_content_instance_overrides(
         doc, spec, mappings, content_instance_source_bindings,
+        target_source_document=args.input,
+        source_paragraphs=original_source_paragraphs,
     )
     pending_content = insert_missing_content_placeholders(
         doc, spec, mappings, review_draft=args.output_policy == "review_draft",

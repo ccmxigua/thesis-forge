@@ -61,7 +61,11 @@ from native_semantic_review import (
     validate_obligation_coverage_response,
     validate_draft_dispute_envelope,
 )
-from offline_review_receipt import validate_offline_merge_receipt
+from offline_review_receipt import (
+    validate_offline_merge_receipt,
+    validate_offline_parent_merge_receipt,
+)
+from profile_confirmation_migration import validate_profile_confirmation_migration
 from obligation_workflow import OBLIGATION_ANALYSIS_LEDGER_PROTOCOL, work_type_for_disposition
 from responsibility_ledger import canonical_review_atom
 from semantic_source_references import (
@@ -165,6 +169,36 @@ def validate_semantic_review_configuration(args: argparse.Namespace, parser: arg
             "--offline-merge-receipt requires --allow-offline-review and --llm-response, "
             "and cannot be combined with native host-agent receipts"
         )
+    if args.offline_parent_merge_receipt:
+        if (
+            args.output_policy != "review_draft"
+            or args.require_submission_ready
+            or args.strict_release
+            or not args.run_id
+            or not (args.prepare_host_review or (
+                args.llm_response and args.offline_merge_receipt and args.allow_offline_review
+            ))
+        ):
+            parser.error(
+                "--offline-parent-merge-receipt requires an explicit --run-id and either "
+                "--prepare-host-review or a non-release offline review_draft continuation"
+            )
+        if args.host_agent_audit or args.merge_receipt:
+            parser.error("append-only offline parent lineage cannot be combined with native receipts")
+    profile_migration = getattr(args, "profile_confirmation_migration", None)
+    if profile_migration:
+        if (
+            not args.offline_parent_merge_receipt
+            or not args.thesis_profile
+            or Path(args.input).suffix.lower() != ".docx"
+            or args.output_policy != "review_draft"
+            or args.require_submission_ready
+            or args.strict_release
+        ):
+            parser.error(
+                "--profile-confirmation-migration requires an offline parent receipt, "
+                "an explicit thesis profile, fixed DOCX input, and non-release review_draft"
+            )
     if (
         args.compliance_mode == "full"
         and args.llm_response
@@ -2754,6 +2788,16 @@ def _main(argv: list[str]) -> int:
                    help="non-release test mode only; requires --output-policy review_draft and permits compilation without a native call receipt")
     p.add_argument("--offline-merge-receipt", type=Path,
                    help="current-run packet merge receipt; validates offline review bytes but never proves independent review or release readiness")
+    p.add_argument("--offline-parent-merge-receipt", type=Path,
+                   help="verified parent receipt for append-only fixed-declaration reprojection; reconstructs the exact old request identity under current pipeline code")
+    p.add_argument(
+        "--profile-confirmation-migration", type=Path,
+        help=(
+            "explicitly validate a user-confirmed profile provenance projection against "
+            "the exact parent profile/request and fixed DOCX; the parent profile remains "
+            "the semantic review identity, while the confirmed profile is used for generation"
+        ),
+    )
     p.add_argument("--preview-placeholders", action="store_true",
                    help="opt-in supported-subset preview: continue past unresolved requirement semantics while keeping the artifact non-submission-ready")
     p.add_argument(
@@ -2812,6 +2856,24 @@ def _main(argv: list[str]) -> int:
 
     work = args.work_dir.resolve()
     current_code_fingerprint = runtime_code_fingerprint()
+    offline_parent_identity: dict[str, Any] | None = None
+    semantic_request_code_fingerprint = current_code_fingerprint["sha256"]
+    if args.offline_parent_merge_receipt:
+        try:
+            offline_parent_identity = validate_offline_parent_merge_receipt(
+                parent_receipt_path=args.offline_parent_merge_receipt,
+                child_receipt_path=args.offline_merge_receipt,
+                child_response_path=args.llm_response,
+                child_work=work if args.llm_response else None,
+                current_code_fingerprint_sha256=current_code_fingerprint["sha256"],
+            )
+        except (OSError, ValueError, json.JSONDecodeError, TypeError) as exc:
+            p.error(f"offline parent merge lineage is invalid: {exc}")
+        if args.run_id != offline_parent_identity.get("parent_run_id"):
+            p.error("--run-id must preserve the verified offline parent semantic-review run")
+        semantic_request_code_fingerprint = str(
+            offline_parent_identity["inherited_request_code_fingerprint_sha256"]
+        )
     requirements_dir = (args.requirements_dir.resolve() if args.requirements_dir
                         else work / "requirements")
     if requirements_dir == work or work not in requirements_dir.parents:
@@ -2823,6 +2885,7 @@ def _main(argv: list[str]) -> int:
     source_clause_path = requirements_dir / "requirement-clauses.json"
     metadata_path = work / "semantic-metadata.json"
     canonical_profile_path = work / "thesis-profile.json"
+    request_profile_path: Path | None = None
     section_plan_path = work / "section-plan.json"
     assembly_plan_path = work / "assembly-plan.json"
     assembly_report_path = work / "assembly-execution.json"
@@ -2924,6 +2987,26 @@ def _main(argv: list[str]) -> int:
         },
         "output": str(args.output.resolve()), "work_dir": str(work), "steps": steps,
         "code_fingerprint": current_code_fingerprint,
+        "semantic_request_code_fingerprint_sha256": semantic_request_code_fingerprint,
+        "offline_parent_merge_lineage": (
+            {
+                "policy": "append_only_fixed_declaration_projection_v1",
+                "parent_merge_receipt": offline_parent_identity["parent_merge_receipt"],
+                "parent_run_id": offline_parent_identity["parent_run_id"],
+                "parent_request_sha256": offline_parent_identity["parent_request_sha256"],
+                "parent_request_envelope_sha256": offline_parent_identity[
+                    "parent_request_envelope_sha256"
+                ],
+                "parent_request_file_sha256": offline_parent_identity[
+                    "parent_request_file_sha256"
+                ],
+                "inherited_request_code_fingerprint_sha256": semantic_request_code_fingerprint,
+                "current_pipeline_code_fingerprint_sha256": current_code_fingerprint["sha256"],
+                "model_request_made": False,
+                "submission_ready": False,
+            }
+            if offline_parent_identity else None
+        ),
         "case_id": args.case_id,
         "output_policy": args.output_policy,
         "submission_ready": False,
@@ -3058,6 +3141,46 @@ def _main(argv: list[str]) -> int:
         manifest["inputs"]["thesis_profile_source"] = file_record(args.thesis_profile)
         manifest["inputs"]["thesis_profile"] = file_record(canonical_profile_path)
 
+    request_profile_path = canonical_profile_path if canonical_profile is not None else None
+    profile_migration_record: dict[str, Any] | None = None
+    if args.profile_confirmation_migration:
+        try:
+            profile_migration_record = validate_profile_confirmation_migration(
+                parent_receipt_path=args.offline_parent_merge_receipt,
+                current_source_path=source_input,
+                requirements_path=requirements_source,
+                confirmed_profile_path=args.thesis_profile.resolve(),
+                confirmation_record_path=args.profile_confirmation_migration.resolve(),
+                expected_run_id=str(args.run_id or ""),
+            )
+        except (OSError, ValueError, json.JSONDecodeError, TypeError) as exc:
+            manifest.update(
+                status="failed",
+                reason="profile confirmation migration validation failed",
+                profile_confirmation_migration_error=str(exc),
+            )
+            write_json(manifest_path, manifest)
+            print(json.dumps(manifest, ensure_ascii=False))
+            return 2
+        request_profile_path = Path(profile_migration_record["parent_profile"]["path"])
+        profile_migration_record["parent_request_body_sha256"] = (
+            offline_parent_identity["parent_request_sha256"] if offline_parent_identity else None
+        )
+        profile_migration_record["parent_request_envelope_sha256"] = (
+            offline_parent_identity["parent_request_envelope_sha256"] if offline_parent_identity else None
+        )
+        profile_migration_record["parent_request_file_sha256"] = (
+            offline_parent_identity["parent_request_file_sha256"] if offline_parent_identity else None
+        )
+        manifest["profile_confirmation_migration"] = profile_migration_record
+        manifest["inputs"]["profile_confirmation_record"] = file_record(
+            args.profile_confirmation_migration.resolve()
+        )
+        manifest["inputs"]["review_request_thesis_profile"] = profile_migration_record[
+            "parent_profile"
+        ]
+        write_json(manifest_path, manifest)
+
     profile_official_template = official_template_from_profile(args.template_profile) if args.template_profile else None
     official_template_evidence = (
         args.style_template.resolve() if args.style_template else profile_official_template
@@ -3106,11 +3229,11 @@ def _main(argv: list[str]) -> int:
     req_cmd = [sys.executable, str(ROOT / "scripts" / "requirements_engine.py"), str(requirements_source), "--out", str(requirements_dir),
                "--analysis-mode", args.analysis_mode, "--structure-docx", str(effective_input),
                "--host-review-chunk-size", str(args.host_review_chunk_size),
-               "--code-fingerprint", current_code_fingerprint["sha256"]]
+               "--code-fingerprint", semantic_request_code_fingerprint]
     if args.case_id:
         req_cmd += ["--case-id", args.case_id]
-    if canonical_profile is not None:
-        req_cmd += ["--thesis-profile", str(canonical_profile_path)]
+    if request_profile_path is not None:
+        req_cmd += ["--thesis-profile", str(request_profile_path)]
     if official_template_evidence:
         req_cmd += ["--official-template-evidence-docx", str(official_template_evidence)]
     if args.compliance_mode == "full" or args.strict_release:
@@ -3128,6 +3251,47 @@ def _main(argv: list[str]) -> int:
     if result.returncode:
         manifest.update(status="failed", reason="requirements analysis failed")
         write_json(manifest_path, manifest); print(json.dumps(manifest, ensure_ascii=False)); return result.returncode
+
+    if offline_parent_identity is not None:
+        generated_request_path = requirements_dir / "llm-request.json"
+        try:
+            generated_request = read_json(generated_request_path)
+            generated_request_identity = {
+                "request_body_sha256": request_body_sha256(generated_request),
+                "request_envelope_sha256": request_envelope_sha256(generated_request),
+                "request_file_sha256": sha256_file(generated_request_path),
+            }
+            expected_request_identity = {
+                "request_body_sha256": offline_parent_identity["parent_request_sha256"],
+                "request_envelope_sha256": offline_parent_identity[
+                    "parent_request_envelope_sha256"
+                ],
+                "request_file_sha256": offline_parent_identity[
+                    "parent_request_file_sha256"
+                ],
+            }
+        except (OSError, ValueError, json.JSONDecodeError, TypeError) as exc:
+            manifest.update(
+                status="failed", reason="offline parent request reconstruction failed",
+                offline_parent_request_error=str(exc),
+            )
+            write_json(manifest_path, manifest)
+            print(json.dumps(manifest, ensure_ascii=False))
+            return 10
+        manifest["offline_parent_request_reconstruction"] = {
+            "expected": expected_request_identity,
+            "actual": generated_request_identity,
+            "exact_match": generated_request_identity == expected_request_identity,
+            "submission_ready": False,
+        }
+        if generated_request_identity != expected_request_identity:
+            manifest.update(
+                status="failed", reason="offline parent semantic request changed",
+            )
+            write_json(manifest_path, manifest)
+            print(json.dumps(manifest, ensure_ascii=False))
+            return 10
+        write_json(manifest_path, manifest)
 
     extraction_manifest = read_json(requirements_dir / "extraction-manifest.json")
     normalization = extraction_manifest.get("requirements_input_normalization")

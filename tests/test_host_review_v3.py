@@ -12,7 +12,8 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import host_agent_bridge as bridge  # noqa: E402
-from format_spec_validation import load_and_validate, schema_support_errors, validate_instance  # noqa: E402
+from format_spec_validation import (load_and_validate, schema_support_errors,
+                                    validate_clause_contract, validate_instance)  # noqa: E402
 from host_review_contract import (  # noqa: E402
     HOST_REVIEW_CONTRACT_V3,
     _abstract_obligation_gaps,
@@ -45,14 +46,25 @@ def _with_test_source_spans(clauses: list[dict], evidence_doc: dict) -> list[dic
         for item in evidence_doc.get("evidence", [])
         if isinstance(item, dict) and item.get("id")
     }
+    evidence_order = {
+        str(item.get("id")): index
+        for index, item in enumerate(evidence_doc.get("evidence", []))
+        if isinstance(item, dict) and item.get("id")
+    }
     for clause in clauses:
-        if isinstance(clause.get("source_span"), dict):
-            continue
         evidence_ids = clause.get("evidence_ids") or []
         if len(evidence_ids) != 1:
             raise AssertionError("test source span needs exactly one evidence id")
         evidence_id = str(evidence_ids[0])
         source_text = evidence_by_id[evidence_id]["text"]
+        evidence_location = evidence_by_id[evidence_id].setdefault(
+            "location", {"part": "document", "child_index": evidence_order[evidence_id],
+                         "order": evidence_order[evidence_id]},
+        )
+        clause.setdefault("location", copy.deepcopy(evidence_location))
+        if isinstance(clause.get("source_span"), dict):
+            clause["source_span"].setdefault("location", copy.deepcopy(evidence_location))
+            continue
         clause_text = clause["text"]
         start = source_text.find(clause_text)
         if start < 0 or source_text.find(clause_text, start + 1) >= 0:
@@ -64,7 +76,7 @@ def _with_test_source_spans(clauses: list[dict], evidence_doc: dict) -> list[dic
             "end_offset": end,
             "text": source_text[start:end],
             "source_sha256": hashlib.sha256(source_text.encode("utf-8")).hexdigest(),
-            "location": {},
+            "location": copy.deepcopy(evidence_location),
         }
     return clauses
 
@@ -239,6 +251,83 @@ class HostReviewV3Tests(unittest.TestCase):
         unlinked = copy.deepcopy(response)
         unlinked["requirements"] = []
         self.assertTrue(validate_response(unlinked, request))
+
+    def test_clause_contract_allows_only_explicit_mixed_external_pending_requirement_edge(self) -> None:
+        base = {
+            "analysis_mode": "llm_primary",
+            "requirements": [{"id": "R-MIX", "role": "body_text", "clause_ids": ["C-MIX"]}],
+            "clause_compliance": [{
+                "clause_id": "C-MIX", "status": "unverifiable",
+                "requirement_ids": ["R-MIX"],
+                "obligations": [
+                    {"id": "docx", "status": "covered", "reason": "A DOCX rule is represented."},
+                    {"id": "signature", "status": "unverifiable", "reason": "Human signature remains pending."},
+                ],
+            }],
+        }
+        self.assertEqual(validate_clause_contract(base), [])
+
+        for mutate in (
+            lambda record: record.update(obligations=[{
+                "id": "signature", "status": "unverifiable", "reason": "No covered DOCX obligation."
+            }]),
+            lambda record: record.update(obligations=[
+                {"id": "docx", "status": "covered", "reason": "Covered."},
+                {"id": "unknown", "status": "unresolved", "reason": "Not an external action."},
+            ]),
+            lambda record: record.update(status="input_provided_unverified"),
+        ):
+            with self.subTest(mutate=mutate):
+                broken = copy.deepcopy(base)
+                mutate(broken["clause_compliance"][0])
+                self.assertTrue(validate_clause_contract(broken))
+
+    def test_compiled_clause_compliance_projects_rich_obligations_to_schema(self) -> None:
+        clauses = [{"id": "C-VERIFY", "evidence_ids": ["E-VERIFY"]}]
+        review = {
+            "clause_id": "C-VERIFY",
+            "classification": "requires_source_verification",
+            "reason": "The source requires a human check.",
+            "obligations": [{
+                "id": "verify-source",
+                "status": "unverifiable",
+                "reason": "The input needs human verification.",
+                "actor": "Author",
+                "action": "Check the source fact",
+                "target": "Thesis content",
+                "condition": "Before submission",
+                "source_quote": "Check this source fact",
+                "force": "required",
+                "applicability": "applicable",
+                "route": "human",
+            }],
+        }
+        records = build_clause_records(clauses, {"C-VERIFY": review}, {}, set())
+        self.assertEqual(records[0]["status"], "input_provided_unverified")
+        self.assertEqual(records[0]["obligations"], [{
+            "id": "verify-source",
+            "status": "unverifiable",
+            "reason": "The input needs human verification.",
+        }])
+        spec = {
+            "schema_version": "1.0",
+            "source_document": "test.docx",
+            "roles": {},
+            "requirements": [],
+            "status": "semantic_resolved",
+            "analysis_mode": "llm_primary",
+            "compliance_mode": "full",
+            "clause_compliance": records,
+        }
+        self.assertEqual(
+            load_and_validate(spec, ROOT / "schema" / "format-spec.schema.json"),
+            [],
+        )
+        invalid_spec = copy.deepcopy(spec)
+        invalid_spec["clause_compliance"][0]["obligations"][0]["actor"] = "Author"
+        self.assertTrue(
+            load_and_validate(invalid_spec, ROOT / "schema" / "format-spec.schema.json")
+        )
 
     def test_shorter_security_marking_fact_requires_exact_allowance_property(self) -> None:
         clause = {"id": "C50", "text": "注：限制★2年(可少于2年)"}

@@ -58,6 +58,43 @@ class ThesisFormatWrapperTests(unittest.TestCase):
         self.assertNotIn("--host-agent-audit", command)
         self.assertNotIn("--strict-release", command)
 
+    def test_profile_confirmation_lineage_is_forwarded_for_prepare_and_offline_generate(self) -> None:
+        with patch.object(wrapper, "run_stage", return_value=0) as run:
+            self.assertEqual(wrapper.main([
+                "requirements.docx", "fixed-source.docx", "output.docx",
+                "--work-dir", "build/run", "--thesis-profile", "confirmed-profile.json",
+                "--prepare-agent-review", "--offline-parent-merge-receipt", "parent-receipt.json",
+                "--profile-confirmation-migration", "confirmation.json", "--run-id", "parent-run",
+            ]), 0)
+        prepare = run.call_args.args[0]
+        self.assertIn("--prepare-host-review", prepare)
+        self.assertIn("--offline-parent-merge-receipt", prepare)
+        self.assertIn("--profile-confirmation-migration", prepare)
+        self.assertEqual(prepare[prepare.index("--run-id") + 1], "parent-run")
+        self.assertNotIn("--auto-host-agent", prepare)
+
+        with tempfile.TemporaryDirectory() as td:
+            work = Path(td)
+            review = work / "review" / "requirements"
+            review.mkdir(parents=True)
+            (review / "extraction-manifest.json").write_text(json.dumps({"run_id": "parent-run"}))
+            (review / "merge-receipt.json").write_text("{}")
+            with patch.object(wrapper, "run_stage", return_value=0) as run:
+                self.assertEqual(wrapper.main([
+                    "requirements.docx", "fixed-source.docx", str(work / "output.docx"),
+                    "--work-dir", str(work), "--thesis-profile", "confirmed-profile.json",
+                    "--llm-response", "review/requirements/host-agent-response.json",
+                    "--offline-parent-merge-receipt", "parent-receipt.json",
+                    "--profile-confirmation-migration", "confirmation.json", "--run-id", "parent-run",
+                ]), 0)
+            generate = run.call_args.args[0]
+            self.assertIn("--llm-response", generate)
+            self.assertIn("--allow-offline-review", generate)
+            self.assertIn("--offline-merge-receipt", generate)
+            self.assertIn("--offline-parent-merge-receipt", generate)
+            self.assertIn("--profile-confirmation-migration", generate)
+            self.assertIn("--allow-existing-work", generate)
+
     def test_packet_preparation_does_not_select_native_adapter(self) -> None:
         with patch.object(wrapper, "run_stage", return_value=0) as run_stage:
             code = wrapper.main([

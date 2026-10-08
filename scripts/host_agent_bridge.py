@@ -268,7 +268,7 @@ from administrative_relation_projection import (
 from responsibility_projection import project_redundant_render_entities
 from context_relation_projection import project_context_edges
 from declaration_signature_projection import project_signature_only_declarations
-from responsibility_ledger import canonical_review_atom
+from responsibility_ledger import canonical_review_atom, route_for_obligation
 from repair_transaction import repair_receipt
 from source_atom_metadata import project_atom_metadata, bind_atom_quote
 from publication_policy_inventory import (
@@ -550,12 +550,12 @@ def _materialize_fixed_declaration_source_text(
         for item in clauses
         if isinstance(item, dict) and isinstance(item.get("id"), str)
     }
+    projected = copy.deepcopy(response)
     reviews_by_id = {
         str(item.get("clause_id")): item
-        for item in response.get("clause_reviews", [])
+        for item in projected.get("clause_reviews", [])
         if isinstance(item, dict) and isinstance(item.get("clause_id"), str)
     }
-    projected = copy.deepcopy(response)
     audits: list[dict[str, Any]] = []
     provenance = chunk.get("provenance")
     provenance = provenance if isinstance(provenance, dict) else {}
@@ -599,6 +599,7 @@ def _materialize_fixed_declaration_source_text(
         except (NativeSemanticReviewError, ValueError, TypeError, KeyError):
             continue
         mixed_valid = True
+        obligation_field_projections: list[dict[str, Any]] = []
         for clause_id in raw_clause_ids:
             review = reviews_by_id.get(clause_id, {})
             if review.get("classification") != "executable_with_external_check":
@@ -608,11 +609,62 @@ def _materialize_fixed_declaration_source_text(
                     or any(not isinstance(atom, dict) or not isinstance(atom.get("id"), str)
                            or not atom["id"] for atom in atoms)
                     or len({atom["id"] for atom in atoms}) != len(atoms)
-                    or not any(atom.get("status") == "covered" and atom.get("route") == "automatic" for atom in atoms)
-                    or not any(atom.get("status") == "unverifiable" and atom.get("route") == "human" for atom in atoms)
+                    or not any(atom.get("status") == "covered" for atom in atoms)
+                    or not any(atom.get("status") == "unverifiable" for atom in atoms)
                     or any((atom.get("status"), atom.get("route")) not in {
-                        ("covered", "automatic"), ("unverifiable", "human")} for atom in atoms)):
+                        ("covered", "automatic"), ("unverifiable", "human")} for atom in atoms
+                        if atom.get("route") is not None)):
                 mixed_valid = False
+                break
+            source_clause = clause_by_id.get(clause_id)
+            try:
+                exact_source_quote = _exact_clause_source_text(source_clause, evidence_context)
+            except (NativeSemanticReviewError, ValueError, TypeError, KeyError):
+                mixed_valid = False
+                break
+            for atom in atoms:
+                expected_route = route_for_obligation(
+                    "executable_with_external_check", atom.get("status"),
+                )
+                if expected_route not in {"automatic", "human"}:
+                    mixed_valid = False
+                    break
+                if atom.get("route") is None:
+                    atom["route"] = expected_route
+                    obligation_field_projections.append({
+                        "clause_id": clause_id,
+                        "obligation_id": atom["id"],
+                        "field": "route",
+                        "derived_from": {"classification": review["classification"],
+                                         "status": atom["status"]},
+                        "value": expected_route,
+                    })
+                elif atom.get("route") != expected_route:
+                    mixed_valid = False
+                    break
+                quote = atom.get("source_quote")
+                if not isinstance(quote, str) or not quote.strip():
+                    atom["source_quote"] = exact_source_quote
+                    quote = exact_source_quote
+                    span = source_clause.get("source_span", {})
+                    obligation_field_projections.append({
+                        "clause_id": clause_id,
+                        "obligation_id": atom["id"],
+                        "field": "source_quote",
+                        "source_evidence_id": span.get("evidence_id"),
+                        "source_span": {
+                            "start_offset": span.get("start_offset"),
+                            "end_offset": span.get("end_offset"),
+                            "source_sha256": span.get("source_sha256"),
+                        },
+                        "quote_sha256": hashlib.sha256(quote.encode("utf-8")).hexdigest(),
+                    })
+                try:
+                    bind_atom_quote(quote, clause_id, clause_by_id, evidence_context)
+                except (ValueError, TypeError, KeyError):
+                    mixed_valid = False
+                    break
+            if not mixed_valid:
                 break
             try:
                 for atom in atoms:
@@ -734,10 +786,11 @@ def _materialize_fixed_declaration_source_text(
             continue
         before_heading = supplied_heading
         before_body_parts = copy.deepcopy(supplied_body_parts)
-        if (not redundant_body and before_heading == expected_heading and before_body_parts == expected_body_parts
+        if (not obligation_field_projections and not redundant_body
+                and before_heading == expected_heading and before_body_parts == expected_body_parts
                 and (not signature_lines or item.get("source_signature_lines") == signature_lines)):
             continue
-        before_sha256 = _response_sha256(projected)
+        before_sha256 = _response_sha256(response)
         if redundant_body:
             item.pop("body")
         item["heading"] = expected_heading
@@ -747,7 +800,9 @@ def _materialize_fixed_declaration_source_text(
         after_sha256 = _response_sha256(projected)
         audits.append({
             "rule_id": "fixed_declaration_source_text_materialization_v1",
-            "rule_version": 1,
+            "rule_version": 2,
+            "response_sha256_before_projection": before_sha256,
+            "obligation_field_projections": obligation_field_projections,
             "requirement_index": requirement_index,
             "run_id": provenance.get("run_id"),
             "case_id": provenance.get("case_id"),

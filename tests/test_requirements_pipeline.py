@@ -3485,7 +3485,114 @@ b&=2\notag
         self.assertEqual(first.style.name, "Normal")
         self.assertEqual(second.style.name, "Targeted Cover Literal")
         self.assertEqual(audit[0]["match_count"], 1)
-        self.assertEqual(audit[0]["binding_policy"], "exact_source_location_or_unique_legacy_literal")
+        self.assertEqual(audit[0]["binding_policy"], "source_file_bound_location_or_unique_target_literal")
+
+    def test_content_instance_uses_literal_search_when_locator_belongs_to_requirements_file(self) -> None:
+        from docx.enum.style import WD_STYLE_TYPE
+
+        with tempfile.TemporaryDirectory() as td:
+            directory = Path(td)
+            requirements_source = directory / "requirements.docx"
+            requirement_doc = Document()
+            requirement_doc.add_paragraph("要求来源中的其他文本")
+            requirement_doc.save(requirements_source)
+
+            target_source = directory / "thesis.docx"
+            doc = Document()
+            first = doc.add_paragraph("与要求来源同 child index，但内容不同")
+            matched = doc.add_paragraph("封面学位类型")
+            doc.styles.add_style("Targeted Degree Type", WD_STYLE_TYPE.PARAGRAPH)
+            doc.save(target_source)
+            source_text = "封面学位类型"
+            bindings = {"CFI-cross-document": [{
+                "clause_id": "C7", "evidence_id": "E7",
+                "start_offset": 0, "end_offset": len(source_text),
+                "source_sha256": hashlib.sha256(source_text.encode("utf-8")).hexdigest(),
+                "text": source_text, "source_kind": "paragraph",
+                "location": {"part": "document", "child_index": 0, "order": 0},
+                "source_document": str(requirements_source.resolve()),
+                "source_document_sha256": hashlib.sha256(requirements_source.read_bytes()).hexdigest(),
+            }]}
+            audit = apply_format_spec.apply_content_instance_overrides(
+                doc,
+                {"content_instances": [{
+                    "id": "CFI-cross-document", "role": "cover_field_label",
+                    "text": source_text, "style_properties": {},
+                }]},
+                {"cover_field_label": {"style_name": "Targeted Degree Type"}},
+                bindings,
+                target_source_document=target_source,
+            )
+            self.assertEqual(first.style.name, "Normal")
+            self.assertEqual(matched.style.name, "Targeted Degree Type")
+            self.assertEqual(audit[0]["status"], "shared_style_present")
+            self.assertEqual(audit[0]["match_count"], 1)
+
+    def test_content_instance_generated_placeholders_cannot_satisfy_missing_source_literal(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            directory = Path(td)
+            requirements_source = directory / "requirements.docx"
+            requirement_doc = Document()
+            requirement_doc.add_paragraph("要求模板中包含的内容")
+            requirement_doc.save(requirements_source)
+
+            target_source = directory / "thesis.docx"
+            doc = Document()
+            doc.add_paragraph("论文来源中没有该字段")
+            doc.save(target_source)
+            original_source_paragraphs = apply_format_spec._content_instance_paragraphs(doc)
+            literal = "要求模板中包含的内容"
+            # Model the two duplicate placeholders later inserted by the
+            # application stage. They are not source evidence for this field.
+            doc.add_paragraph(literal)
+            doc.add_paragraph(literal)
+            bindings = {"CFI-absent": [{
+                "clause_id": "C8", "evidence_id": "E8",
+                "start_offset": 0, "end_offset": len(literal),
+                "source_sha256": hashlib.sha256(literal.encode("utf-8")).hexdigest(),
+                "text": literal, "source_kind": "paragraph",
+                "location": {"part": "document", "child_index": 0, "order": 0},
+                "source_document": str(requirements_source.resolve()),
+                "source_document_sha256": hashlib.sha256(requirements_source.read_bytes()).hexdigest(),
+            }]}
+            audit = apply_format_spec.apply_content_instance_overrides(
+                doc,
+                {"content_instances": [{
+                    "id": "CFI-absent", "role": "cover_field_label",
+                    "text": literal, "style_properties": {},
+                }]},
+                {}, bindings, target_source_document=target_source,
+                source_paragraphs=original_source_paragraphs,
+            )
+            self.assertEqual(audit[0]["status"], "not_present")
+            self.assertEqual(audit[0]["match_count"], 0)
+            self.assertEqual([p.text for p in Document(target_source).paragraphs], ["论文来源中没有该字段"])
+
+    def test_same_file_stale_content_instance_locator_is_still_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            target_source = Path(td) / "thesis.docx"
+            doc = Document()
+            doc.add_paragraph("当前段落与旧证据不一致")
+            doc.save(target_source)
+            literal = "旧证据中的文本"
+            binding = {"CFI-stale-file": [{
+                "clause_id": "C9", "evidence_id": "E9",
+                "start_offset": 0, "end_offset": len(literal),
+                "source_sha256": hashlib.sha256(literal.encode("utf-8")).hexdigest(),
+                "text": literal, "source_kind": "paragraph",
+                "location": {"part": "document", "child_index": 0, "order": 0},
+                "source_document": str(target_source.resolve()),
+                "source_document_sha256": hashlib.sha256(target_source.read_bytes()).hexdigest(),
+            }]}
+            with self.assertRaisesRegex(ValueError, "does not match its bound evidence hash"):
+                apply_format_spec.apply_content_instance_overrides(
+                    doc,
+                    {"content_instances": [{
+                        "id": "CFI-stale-file", "role": "cover_field_label",
+                        "text": literal, "style_properties": {},
+                    }]},
+                    {}, binding, target_source_document=target_source,
+                )
 
     def test_content_instance_style_override_rejects_repeated_literal_in_target_paragraph(self) -> None:
         doc = Document()

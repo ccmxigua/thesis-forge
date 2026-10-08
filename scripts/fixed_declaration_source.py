@@ -31,6 +31,67 @@ def _compact(value: Any) -> str:
     return re.sub(r"\s+", "", str(value or ""))
 
 
+def _source_position(
+    clause: dict[str, Any], evidence_context: dict[str, Any],
+) -> tuple[str, int, str, int, int] | None:
+    """Return a checked source-span position for continuity decisions."""
+    span = clause.get("source_span")
+    if not isinstance(span, dict):
+        return None
+    evidence_id = span.get("evidence_id")
+    evidence = evidence_context.get(evidence_id) if isinstance(evidence_id, str) else None
+    if not isinstance(evidence, dict):
+        return None
+    locations = [
+        value for value in (
+            span.get("location"), evidence.get("location"), clause.get("location"),
+        ) if isinstance(value, dict)
+    ]
+    if not locations:
+        return None
+    location = locations[0]
+    if any(
+        value.get("part") != location.get("part")
+        or value.get("child_index") != location.get("child_index")
+        for value in locations[1:]
+    ):
+        return None
+    part = location.get("part")
+    child_index = location.get("child_index")
+    start, end = span.get("start_offset"), span.get("end_offset")
+    source_text = evidence.get("text")
+    if (
+        not isinstance(part, str) or not part
+        or isinstance(child_index, bool) or not isinstance(child_index, int)
+        or isinstance(start, bool) or not isinstance(start, int)
+        or isinstance(end, bool) or not isinstance(end, int)
+        or not isinstance(source_text, str)
+        or not 0 <= start < end <= len(source_text)
+        or source_text[start:end] != span.get("text")
+    ):
+        return None
+    return part, child_index, evidence_id, start, end
+
+
+def _source_follows_contiguously(
+    previous: dict[str, Any], following: dict[str, Any],
+    evidence_context: dict[str, Any],
+) -> bool:
+    """Require same-paragraph ordered spans or immediately adjacent source nodes."""
+    before = _source_position(previous, evidence_context)
+    after = _source_position(following, evidence_context)
+    if before is None or after is None or before[0] != after[0]:
+        return False
+    if before[1] == after[1]:
+        # Two extracted clauses can share a paragraph/evidence record. The
+        # exact paragraph is materialized, so punctuation between clause
+        # fragments is retained; overlaps or reordered fragments are not.
+        return before[2] == after[2] and after[3] >= before[4]
+    # A fixed heading/body can span paragraphs, but an unrepresented source
+    # node between them makes the grouping ambiguous. Keep it unresolved.
+    return after[1] == before[1] + 1
+
+
 def is_fixed_declaration_heading(value: Any) -> bool:
     text = _compact(value)
     return len(text) <= 50 and bool(_HEADING.search(text))
@@ -135,6 +196,15 @@ def derive_fixed_declaration_candidates(
                 heading_location.get("child_index") is not None
                 and following_location.get("child_index") != heading_location.get("child_index")
             ):
+                break
+            previous = (
+                signature_clauses[-1]
+                if signature_clauses
+                else body_clauses[-1]
+                if body_clauses
+                else clause
+            )
+            if not _source_follows_contiguously(previous, following, evidence_context):
                 break
             evidence_ids = [str(value) for value in following.get("evidence_ids", [])]
             evidence_texts = [

@@ -118,17 +118,36 @@ def exact_source_clause(clause_id: str, source: str, evidence_id: str = "E1") ->
 
 def bind_declaration_fixture_spans(chunk: dict) -> None:
     """Supply exact current source occurrences for old compact declaration fixtures."""
+    evidence_order = {
+        str(evidence_id): index
+        for index, evidence_id in enumerate(chunk["evidence_context"])
+    }
+    for evidence_id, evidence in chunk["evidence_context"].items():
+        location = evidence.get("location")
+        if not isinstance(location, dict):
+            location = {}
+        location.setdefault("part", "document")
+        location.setdefault("child_index", evidence_order[evidence_id])
+        location.setdefault("order", evidence_order[evidence_id])
+        evidence["location"] = location
     for clause in chunk["clauses"]:
-        if "source_span" in clause:
-            continue
         eid = clause["evidence_ids"][0]
         evidence = chunk["evidence_context"][eid]
+        clause_location = clause.get("location")
+        if not isinstance(clause_location, dict):
+            clause_location = {}
+        for key in ("part", "child_index", "order"):
+            clause_location.setdefault(key, evidence["location"].get(key))
+        clause["location"] = clause_location
+        if isinstance(clause.get("source_span"), dict):
+            clause["source_span"].setdefault("location", copy.deepcopy(evidence["location"]))
+            continue
         source, text = evidence["text"], clause["text"]
         start = source.index(text)
         clause["source_span"] = {
             "evidence_id": eid, "start_offset": start, "end_offset": start + len(text),
             "text": text, "source_sha256": hashlib.sha256(source.encode("utf-8")).hexdigest(),
-            **({"location": copy.deepcopy(evidence["location"])} if "location" in evidence else {}),
+            "location": copy.deepcopy(evidence["location"]),
         }
 
 
@@ -1645,17 +1664,26 @@ class HostAgentBridgeTests(unittest.TestCase):
             clauses = [
                 {"id": f"C{index}", "text": text,
                  "evidence_ids": [evidence_ids[index]], "source_kind": "paragraph",
-                 "location": {"part": "document", "order": index if index < 4 else index - 1}}
+                 "location": {"part": "document",
+                              "child_index": index if index < 4 else index - 1,
+                              "order": index if index < 4 else index - 1}}
                 for index, text in enumerate(texts)
             ]
             evidence = {"evidence": [
-                {"id": f"E{index}", "text": source, "kind": "paragraph"}
+                {"id": f"E{index}", "text": source, "kind": "paragraph",
+                 "location": {"part": "document", "child_index": index, "order": index}}
                 for index, source in enumerate([
                     "封面格式", "学位论文使用授权书", "本人同意提交论文电子版。",
                     "本人承诺：论文已完成；电子版与纸质版一致。",
                     "学位论文作者暨授权人签字", "年    月    日", "摘  要",
                 ])
             ]}
+            evidence_context = {
+                item["id"]: item for item in evidence["evidence"]
+            }
+            bind_declaration_fixture_spans({
+                "clauses": clauses, "evidence_context": evidence_context,
+            })
             request = engine.build_llm_request([], clauses, evidence, {}, "full")
             request = attach_request_provenance(
                 request, source_sha256="a" * 64, evidence_doc=evidence,
@@ -1694,6 +1722,8 @@ class HostAgentBridgeTests(unittest.TestCase):
             }
             for item in clauses
         }
+        source = {"clauses": clauses, "evidence_context": evidence}
+        bind_declaration_fixture_spans(source)
         first = bridge._fixed_declaration_candidates(clauses, evidence, anchor="abstract_title_zh")
         self.assertEqual([item["clause_ids"] for item in first], [
             ["C1", "C2"], ["C3", "C4"],
@@ -1711,6 +1741,8 @@ class HostAgentBridgeTests(unittest.TestCase):
                 evidence = {
                     item["evidence_ids"][0]: {"text": item["text"]} for item in clauses
                 }
+                source = {"clauses": clauses, "evidence_context": evidence}
+                bind_declaration_fixture_spans(source)
                 candidates = bridge._fixed_declaration_candidates(
                     clauses, evidence, anchor="abstract_title_zh",
                 )
@@ -5444,6 +5476,7 @@ class HostAgentBridgeTests(unittest.TestCase):
                 "E4": {"text": "摘要"},
             },
         }
+        bind_declaration_fixture_spans(chunk)
         changed = bridge._retry_change_paths(previous, current)
         self.assertEqual(
             changed,
@@ -8224,7 +8257,7 @@ class HostAgentBridgeTests(unittest.TestCase):
         self.assertIsNone(rejected)
 
     def test_fixed_declaration_candidate_is_derived_from_exact_chunk_evidence(self) -> None:
-        packet = bridge.compact_model_packet({
+        source = {
             "contract_version": "3.0",
             "clauses": [
                 {"id": "C1", "text": "学位论文使用授权书", "evidence_ids": ["E1"]},
@@ -8240,7 +8273,9 @@ class HostAgentBridgeTests(unittest.TestCase):
             },
             "declaration_anchor_preference": "abstract_title_zh",
             "requirement_contract": {},
-        })
+        }
+        bind_declaration_fixture_spans(source)
+        packet = bridge.compact_model_packet(source)
         self.assertEqual(packet["fixed_declaration_candidates"][0]["clause_ids"], ["C1", "C2"])
         self.assertEqual(packet["fixed_declaration_candidates"][0]["before_role"], "abstract_title_zh")
 
@@ -8422,6 +8457,8 @@ class HostAgentBridgeTests(unittest.TestCase):
         evidence = {
             item["evidence_ids"][0]: {"text": item["text"]} for item in clauses
         }
+        source = {"clauses": clauses, "evidence_context": evidence}
+        bind_declaration_fixture_spans(source)
         candidates = bridge._fixed_declaration_candidates(clauses, evidence, anchor="abstract_title_zh")
         self.assertEqual([item["clause_ids"] for item in candidates], [["C1", "C2"]])
 
@@ -8438,6 +8475,8 @@ class HostAgentBridgeTests(unittest.TestCase):
             item["evidence_ids"][0]: {"id": item["evidence_ids"][0], "text": item["text"]}
             for item in clauses
         }
+        source = {"clauses": clauses, "evidence_context": evidence}
+        bind_declaration_fixture_spans(source)
         chunks, _ = engine._source_atomic_chunks(clauses, 1)
         self.assertEqual([[item["id"] for item in chunk] for chunk in chunks], [
             ["C00038", "C00039", "C00049"], ["C00053", "C00054"], ["C00062"],

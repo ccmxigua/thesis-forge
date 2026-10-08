@@ -51,7 +51,46 @@ class ResponsibilityRepairTests(unittest.TestCase):
             # unreferenced informational zero inventories have canonical forms.
             # Every real obligation and all other review fields remain exact.
             expected = bridge.normalize_native_response(raw, chunk["response_schema"])
-            self.assertEqual(candidate["clause_reviews"], expected["clause_reviews"])
+            # The only newly projected obligation fields are deterministic
+            # source bindings for fixed declaration text. The semantic duty
+            # (identity, status, actors/actions/targets, and reason) remains
+            # exactly as reviewed.
+            self.assertEqual(len(candidate["clause_reviews"]), len(expected["clause_reviews"]))
+            clauses = {item["id"]: item for item in chunk["clauses"]}
+            for actual_review, expected_review in zip(
+                candidate["clause_reviews"], expected["clause_reviews"],
+            ):
+                self.assertEqual(actual_review["clause_id"], expected_review["clause_id"])
+                actual_semantics = copy.deepcopy(actual_review)
+                expected_semantics = copy.deepcopy(expected_review)
+                actual_atoms = actual_semantics.get("obligations", [])
+                expected_atoms = expected_semantics.get("obligations", [])
+                self.assertEqual(len(actual_atoms), len(expected_atoms))
+                projected_bindings = []
+                for actual_atom, expected_atom in zip(actual_atoms, expected_atoms):
+                    for atom in (actual_atom, expected_atom):
+                        atom.pop("route", None)
+                        atom.pop("source_quote", None)
+                    if actual_review.get("obligations"):
+                        original = next(
+                            item for item in candidate["clause_reviews"]
+                            if item["clause_id"] == actual_review["clause_id"]
+                        )
+                        if any(field in original["obligations"][0]
+                               for field in ("route", "source_quote")):
+                            projected_bindings.append(actual_review)
+                self.assertEqual(actual_semantics, expected_semantics)
+                for review in projected_bindings:
+                    clause = clauses[review["clause_id"]]
+                    span = clause["source_span"]
+                    source_text = chunk["evidence_context"][span["evidence_id"]]["text"]
+                    source_quote = source_text[span["start_offset"]:span["end_offset"]]
+                    for atom in review["obligations"]:
+                        self.assertEqual(
+                            atom["route"],
+                            bridge.route_for_obligation(review["classification"], atom["status"]),
+                        )
+                        self.assertEqual(atom["source_quote"], source_quote)
             self.assertEqual(bridge.validate_host_agent_response(candidate, chunk), [])
             transaction = audit["repair_transaction"]
             self.assertIsNotNone(transaction)
@@ -172,7 +211,8 @@ class ResponsibilityRepairTests(unittest.TestCase):
         )
         spec = {
             "run_id": "fresh-run", "semantic_review_provenance": provenance,
-            "requirements": [{"id": "R-current", "clause_ids": [clause["id"]],
+            "requirements": [{"id": "R-current", "resolved_by": "llm",
+                              "clause_ids": [clause["id"]],
                               "evaluation_units": expected_units}],
         }
         ledger = {
@@ -211,6 +251,56 @@ class ResponsibilityRepairTests(unittest.TestCase):
                     expected_run_id="fresh-run", expected_response_sha256=expected_response,
                 )
                 self.assertTrue(errors)
+
+    def test_nonsemantic_requirements_do_not_inherit_review_evaluation_units(self):
+        source_sha = "a" * 64
+        source_text = "关键词之间用分号隔开"
+        clause = {
+            "id": "C-rule", "text": source_text, "evidence_ids": ["E-rule"],
+            "source_span": {
+                "evidence_id": "E-rule", "start_offset": 0, "end_offset": len(source_text),
+                "text": source_text, "source_sha256": hashlib.sha256(source_text.encode()).hexdigest(),
+            },
+        }
+        atom = {
+            "id": "obligation-rule", "status": "covered", "actor": "author",
+            "action": "separate", "target": "keywords", "source_quote": "用分号隔开",
+            "force": "required", "applicability": "applicable",
+        }
+        provenance = {
+            "run_id": "fresh-run", "source_sha256": source_sha,
+            "clause_sha256": sha256_json([clause]),
+        }
+        review = {clause["id"]: {"classification": "executable", "obligations": [atom]}}
+        units = requirement_evaluation_units(
+            review, {clause["id"]: clause}, [clause["id"]], source_sha,
+        )
+        ledger = {
+            "provenance": copy.deepcopy(provenance), "response_sha256": "b" * 64,
+            "clauses": [{
+                "clause_id": clause["id"],
+                "source_text_sha256": hashlib.sha256(source_text.encode()).hexdigest(),
+                "classification": "executable", "obligations": [copy.deepcopy(atom)],
+            }],
+        }
+        spec = {
+            "run_id": "fresh-run", "semantic_review_provenance": provenance,
+            "requirements": [{"id": "R-rule", "resolved_by": "rule",
+                              "clause_ids": [clause["id"]]}],
+        }
+        errors, projected = validate_requirement_evaluation_units(
+            spec, ledger, [clause], expected_run_id="fresh-run",
+            expected_response_sha256="b" * 64,
+        )
+        self.assertEqual(errors, [])
+        self.assertEqual(projected, {})
+
+        spec["requirements"][0]["evaluation_units"] = units
+        errors, _ = validate_requirement_evaluation_units(
+            spec, ledger, [clause], expected_run_id="fresh-run",
+            expected_response_sha256="b" * 64,
+        )
+        self.assertEqual(errors, ["evaluation_units_non_semantic_requirement:R-rule"])
 
     def test_capability_apply_gate_binds_spec_mode_run_and_blocks_before_execution(self):
         with tempfile.TemporaryDirectory() as td:

@@ -105,6 +105,7 @@ def test_real_declaration_body_and_blank_signature_sources_are_preserved():
     source = copy.deepcopy(data["request"])
     evidence = {"evidence": list(source["evidence_context"].values())}
     chunk = engine.build_llm_request([], source["clauses"], evidence, {}, "full", contract_version="3.0")
+    chunk.update(source)
     response = normalize_native_response(data["raw_response"], chunk["response_schema"])
     before = copy.deepcopy((source, response))
     generated = primary_generation_schema(chunk["response_schema"])
@@ -131,8 +132,26 @@ def test_real_declaration_body_and_blank_signature_sources_are_preserved():
         for atom in review.get("obligations", []):
             atom.pop("route", None)
     assert any(validate_instance(review, review_schema) for review in omitted["clause_reviews"])
-    _, omitted_audits = bridge._materialize_fixed_declaration_source_text(omitted, source)
-    assert omitted_audits == []
+    projected_omitted, omitted_audits = bridge._materialize_fixed_declaration_source_text(
+        omitted, source,
+    )
+    assert len(omitted_audits) == 1
+    assert any(
+        item["field"] == "route"
+        for item in omitted_audits[0]["obligation_field_projections"]
+    )
+    residual_errors = bridge.validate_host_agent_response(projected_omitted, chunk)
+    assert not any("mixed_declaration_requires_explicit_route" in error for error in residual_errors)
+    assert not any("mixed_declaration_requires_current_source_quote" in error for error in residual_errors)
+    assert not any("responsibility_route_conflict" in error for error in residual_errors)
+    declaration_clause_ids = set(omitted_audits[0]["clause_ids"])
+    assert all(
+        atom.get("route") == route_for_obligation(review["classification"], atom["status"])
+        for review in projected_omitted["clause_reviews"]
+        if review["clause_id"] in declaration_clause_ids
+        and review["classification"] == "executable_with_external_check"
+        for atom in review.get("obligations", [])
+    )
     assert (source, response) == before
 
 

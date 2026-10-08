@@ -144,7 +144,19 @@ def build_clause_records(
         }
         obligations = review.get("obligations")
         if isinstance(obligations, list):
-            record["obligations"] = [dict(item) for item in obligations if isinstance(item, dict)]
+            # The host-review ledger carries the full actor/action/route/source
+            # binding. The compiled format spec intentionally stores the
+            # compact projection defined by format-spec.schema.json; retain
+            # the semantic detail in the separate review ledger.
+            record["obligations"] = [
+                {
+                    "id": item.get("id"),
+                    "status": item.get("status"),
+                    "reason": item.get("reason"),
+                }
+                for item in obligations
+                if isinstance(item, dict)
+            ]
         if mapping_blocked:
             # No executable requirement ID is retained for an unresolved
             # mapping; the schema and downstream gates must see a blocker.

@@ -45,6 +45,8 @@ def pipeline_command(args: argparse.Namespace, *, prepare_host_review: bool = Fa
                      host_agent_audit: Path | None = None,
                      merge_receipt: Path | None = None,
                      offline_merge_receipt: Path | None = None,
+                     offline_parent_merge_receipt: Path | None = None,
+                     profile_confirmation_migration: Path | None = None,
                      semantic_review_runtime: str | None = None,
                      semantic_review_model: str | None = None,
                      semantic_review_reasoning_effort: str | None = None) -> list[str]:
@@ -85,6 +87,10 @@ def pipeline_command(args: argparse.Namespace, *, prepare_host_review: bool = Fa
         command += ["--merge-receipt", str(merge_receipt)]
     if offline_merge_receipt:
         command += ["--allow-offline-review", "--offline-merge-receipt", str(offline_merge_receipt)]
+    if offline_parent_merge_receipt:
+        command += ["--offline-parent-merge-receipt", str(offline_parent_merge_receipt)]
+    if profile_confirmation_migration:
+        command += ["--profile-confirmation-migration", str(profile_confirmation_migration)]
     if semantic_review_runtime:
         command += ["--semantic-review-runtime", semantic_review_runtime,
                     "--semantic-review-model", str(semantic_review_model)]
@@ -137,6 +143,12 @@ def main(argv: list[str]) -> int:
                    help="offline complete contract-3.0 response, or an explicitly bound legacy 2.1 response, produced by the current host Agent")
     p.add_argument("--offline-review-draft", action="store_true",
                    help="complete the current agent's merged packet response as a non-release draft without Codex/OpenClaw CLI; never submission-ready")
+    p.add_argument("--offline-parent-merge-receipt", type=Path,
+                   help="append this review_draft continuation to an immutable parent review lineage")
+    p.add_argument("--profile-confirmation-migration", type=Path,
+                   help="validate a user-confirmed profile provenance projection against a parent TEX-to-DOCX run")
+    p.add_argument("--run-id",
+                   help="parent review run ID for an offline lineage prepare stage")
     p.add_argument("--host-review-chunk-size", type=int, default=DEFAULT_HOST_REVIEW_CHUNK_SIZE,
                    help="target clauses per fresh Host Agent packet (default: %(default)s; source-atomic groups may exceed target)")
     p.add_argument("--host-agent-timeout", type=int, default=900,
@@ -210,7 +222,8 @@ def main(argv: list[str]) -> int:
     # run_stage executes from ROOT. Resolve user paths in their invocation
     # directory first, so a loaded skill also works outside its checkout.
     for field in ("requirements", "input", "output", "work_dir", "llm_response",
-                  "style_template", "thesis_profile", "template_profile", "render_report"):
+                  "style_template", "thesis_profile", "template_profile", "render_report",
+                  "offline_parent_merge_receipt", "profile_confirmation_migration"):
         value = getattr(args, field)
         if value is not None:
             setattr(args, field, value.resolve())
@@ -227,6 +240,24 @@ def main(argv: list[str]) -> int:
         or args.require_submission_ready or args.strict_release
     ):
         p.error("--offline-review-draft requires --llm-response and review_draft, and cannot release a submission")
+    if args.offline_parent_merge_receipt:
+        if (not args.run_id or args.output_policy != "review_draft"
+                or args.require_submission_ready or args.strict_release
+                or args.auto_host_agent
+                or not (args.prepare_agent_review or (args.llm_response and args.offline_review_draft))):
+            p.error(
+                "--offline-parent-merge-receipt requires --run-id and either packet preparation "
+                "or an offline review_draft continuation; it cannot use a native adapter or release"
+            )
+    elif args.run_id:
+        p.error("--run-id is only accepted with --offline-parent-merge-receipt")
+    if args.profile_confirmation_migration and (
+        not args.offline_parent_merge_receipt or not args.thesis_profile
+    ):
+        p.error(
+            "--profile-confirmation-migration requires --offline-parent-merge-receipt "
+            "and --thesis-profile"
+        )
     if sum(bool(value) for value in (
         args.prepare_agent_review, args.auto_host_agent, bool(args.llm_response),
     )) > 1:
@@ -369,6 +400,9 @@ def main(argv: list[str]) -> int:
         command = pipeline_command(
             args, prepare_host_review=True,
             requirements_dir=args.work_dir.resolve() / "review" / "requirements",
+            run_id=args.run_id,
+            offline_parent_merge_receipt=args.offline_parent_merge_receipt,
+            profile_confirmation_migration=args.profile_confirmation_migration,
         )
     elif args.llm_response:
         review_requirements = args.work_dir.resolve() / "review" / "requirements"
@@ -388,6 +422,8 @@ def main(argv: list[str]) -> int:
             current_run_id = extraction["run_id"]
         except (OSError, ValueError, KeyError, TypeError) as exc:
             p.error(f"cannot read fresh semantic-review run_id: {exc}")
+        if args.run_id and str(current_run_id) != args.run_id:
+            p.error("--run-id does not match the child review extraction run ID")
         command = pipeline_command(
             args, llm_response=args.llm_response,
             requirements_dir=args.work_dir.resolve() / "execution" / "requirements",
@@ -395,6 +431,8 @@ def main(argv: list[str]) -> int:
             host_agent_audit=None if args.offline_review_draft else audit,
             merge_receipt=None if args.offline_review_draft else receipt,
             offline_merge_receipt=receipt if args.offline_review_draft else None,
+            offline_parent_merge_receipt=args.offline_parent_merge_receipt,
+            profile_confirmation_migration=args.profile_confirmation_migration,
         )
     else:
         p.error("final formatting requires --llm-response, or use --auto-host-agent for one-command execution")

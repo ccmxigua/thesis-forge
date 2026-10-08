@@ -1183,6 +1183,7 @@
             "informational",
             "requires_metadata",
             "requires_source_content",
+            "input_provided_unverified",
             "unsupported_backend",
             "unverifiable",
             "unresolved",

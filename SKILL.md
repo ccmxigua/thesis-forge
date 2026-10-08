@@ -696,6 +696,18 @@ the current contract remain in their technical reports and keep `format_ready` o
 marker layer rejects technical categories even if an old or hand-written ledger
 contains them. A red marker never means that a requirement passed.
 
+For a separate current-conversation review of the generated abstract checks,
+an exact-input-bound response can be supplied with
+`--current-session-semantic-review-response` alongside the offline
+`--llm-response --offline-review-draft` continuation. It must cover every
+current check once and cite exact substrings of that check's current text. The
+pipeline binds the response to the case, run, source bytes, format spec,
+ordered check text, request, and current code fingerprint, then writes a
+code-generated receipt. This route records provider/model identity as
+unverified, native invocation as false, and `submission_ready=false`; it does
+not call or impersonate a model. `uncertain` results remain visible as human
+review markers, and `noncompliant` results remain findings.
+
 Native coverage generation couples `uncertain` to a nonempty inventory of
 `ambiguous` source atoms; omitted duties remain `incomplete`/`unrepresented`.
 This does not resolve the source, rewrite a raw response, or extend retries.

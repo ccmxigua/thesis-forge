@@ -67,6 +67,10 @@ from native_semantic_review import (
     NativeSemanticReviewError,
     run_native_semantic_review,
 )
+from current_session_semantic_review import (
+    CurrentSessionSemanticReviewError,
+    validate_current_session_semantic_review_response,
+)
 from draft_scorecard import build_scorecard, append_scorecard, audit_scorecard
 from semantic_issue_confirmation import validate_bound_ledger_for_spec
 from compliance import annotate_satisfied_inputs, finalize_records, report as compliance_report
@@ -3328,7 +3332,7 @@ def build_semantic_content_checks(
 def semantic_content_review_items(
     review: dict[str, Any], checks: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    """Red-mark only semantic checks the native agent cannot resolve."""
+    """Red-mark only semantic checks the declared reviewer cannot resolve."""
     checks_by_id = {str(item["check_id"]): item for item in checks}
     items: list[dict[str, Any]] = []
     for result in review.get("results", []) if isinstance(review.get("results"), list) else []:
@@ -3364,8 +3368,10 @@ def semantic_content_review_items(
         source_code = f"semantic_review:{check_id}"
         verdict = str(result.get("verdict"))
         quotes = result.get("evidence_quotes") or []
+        current_session = review.get("review_mode") == "current_session"
+        reviewer_label = "当前会话 Agent" if current_session else "原生宿主 Agent"
         items.append({
-            "source_type": "native_semantic_review",
+            "source_type": "current_session_semantic_review" if current_session else "native_semantic_review",
             "source_code": source_code,
             "source_codes": [source_code],
             "category": "semantic_content_review",
@@ -3375,13 +3381,13 @@ def semantic_content_review_items(
             "evidence_ids": evidence_ids,
             "source_text": "\n".join(source_texts),
             "reason": (
-                f"原生宿主 Agent 判定 {verdict}：{result.get('rationale')}；"
+                f"{reviewer_label}判定 {verdict}：{result.get('rationale')}；"
                 f"原文证据：{' / '.join(str(value) for value in quotes)}"
             ),
             "action": (
                 "请依据原条款人工修改摘要内容后重新运行；系统不会自动改写论文正文。"
                 if verdict == "noncompliant" else
-                "当前宿主 Agent 无法可靠判断此项；请人工对照权威条款核实后重新运行。"
+                f"{reviewer_label}无法可靠判断此项；请人工对照权威条款核实后重新运行。"
             ),
             "placeholder_text": f"【待人工处理：{check_id}】",
             "original_blocking": True,
@@ -3403,12 +3409,14 @@ def semantic_content_review_findings(
         if check is None:
             raise ValueError(f"semantic review result has no current check: {result.get('check_id')}")
         requirements = check.get("source_requirements", [])
+        current_session = review.get("review_mode") == "current_session"
         findings.append({
             "role": "content_constraints",
             "property": f"{result['check_id']}.semantic_compliance",
             "template_value": "noncompliant",
             "required_value": "satisfied",
-            "failure_type": "native_semantic_noncompliance",
+            "failure_type": ("current_session_semantic_noncompliance" if current_session
+                              else "native_semantic_noncompliance"),
             "reason": str(result.get("rationale") or "当前文本未满足绑定的语义约束。"),
             "evidence_quotes": list(result.get("evidence_quotes") or []),
             "clause_ids": sorted({
@@ -3419,7 +3427,7 @@ def semantic_content_review_findings(
                 str(item.get("requirement_id")) for item in requirements
                 if isinstance(item, dict) and item.get("requirement_id")
             }),
-            "verification": "native_semantic",
+            "verification": "current_session_semantic" if current_session else "native_semantic",
         })
     return findings
 
@@ -4182,6 +4190,8 @@ def main(argv: list[str]) -> int:
                    help="explicit current host runtime for read-only abstract semantic review")
     p.add_argument("--semantic-review-model",
                    help="explicit model route for the current host's semantic review")
+    p.add_argument("--current-session-semantic-review-response", type=Path,
+                   help="source/input-bound response from this conversation; review_draft only, never native or release evidence")
     p.add_argument("--semantic-review-reasoning-effort", type=resolve_reasoning_effort,
                    help="explicit native Codex reasoning effort; no model-support claim")
     p.add_argument("--semantic-review-timeout", type=int, default=900)
@@ -4195,6 +4205,13 @@ def main(argv: list[str]) -> int:
         p.error("--manual-review-items requires --pipeline-manifest")
     if bool(args.semantic_review_runtime) != bool(args.semantic_review_model):
         p.error("--semantic-review-runtime and --semantic-review-model must be supplied together")
+    if args.current_session_semantic_review_response:
+        if args.output_policy != "review_draft":
+            p.error("--current-session-semantic-review-response is review_draft-only")
+        if args.semantic_review_runtime or args.semantic_review_model:
+            p.error("current-session semantic response cannot be mixed with a native runtime/model")
+        if not args.current_session_semantic_review_response.is_file():
+            p.error("current-session semantic response file does not exist")
     if args.semantic_review_reasoning_effort is not None and args.semantic_review_runtime != "codex":
         p.error("--semantic-review-reasoning-effort requires --semantic-review-runtime codex")
     if args.semantic_review_timeout <= 0:
@@ -4212,6 +4229,14 @@ def main(argv: list[str]) -> int:
             pipeline_manifest = load_json(args.pipeline_manifest)
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             raise SystemExit(f"invalid pipeline manifest: {exc}") from exc
+    if args.current_session_semantic_review_response:
+        code_record = pipeline_manifest.get("code_fingerprint") if isinstance(pipeline_manifest, dict) else None
+        if (not isinstance(code_record, dict)
+                or not isinstance(code_record.get("sha256"), str)
+                or re.fullmatch(r"[0-9a-f]{64}", code_record["sha256"]) is None):
+            raise SystemExit(
+                "current-session semantic response requires a pipeline manifest with a code fingerprint"
+            )
     manual_review_ledger = None
     manual_review_ingress_record: dict[str, Any] | None = None
     if args.manual_review_items:
@@ -4932,8 +4957,51 @@ def main(argv: list[str]) -> int:
         "response_sha256": None,
     }
     semantic_uncertainty_items: list[dict[str, Any]] = []
+    current_session_semantic_receipt: dict[str, Any] | None = None
+    if args.current_session_semantic_review_response and not semantic_checks:
+        raise SystemExit(
+            "current-session semantic response was supplied but the current document has no semantic checks"
+        )
     if semantic_checks:
-        if not args.semantic_review_runtime or not args.semantic_review_model:
+        if args.current_session_semantic_review_response:
+            try:
+                code_record = pipeline_manifest.get("code_fingerprint", {})
+                semantic_review, current_session_semantic_receipt = (
+                    validate_current_session_semantic_review_response(
+                        args.current_session_semantic_review_response,
+                        semantic_request,
+                        code_fingerprint_sha256=code_record["sha256"],
+                        output_policy=args.output_policy,
+                        native_runtime=args.semantic_review_runtime,
+                        native_model=args.semantic_review_model,
+                    )
+                )
+                semantic_review_complete = semantic_review.get("status") == "completed"
+                semantic_uncertainty_items = semantic_content_review_items(
+                    semantic_review, semantic_checks,
+                )
+                findings.extend(semantic_content_review_findings(
+                    semantic_review, semantic_checks,
+                ))
+            except (CurrentSessionSemanticReviewError, OSError, ValueError, TypeError) as exc:
+                semantic_review = {
+                    **semantic_review,
+                    "protocol": "current_session_semantic_content_review_v1",
+                    "review_mode": "current_session",
+                    "provider_model_verified": False,
+                    "native_invocation": False,
+                    "status": "failed",
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+                findings.append({
+                    "role": "content_constraints",
+                    "property": "current_session_semantic_review.execution",
+                    "template_value": "failed",
+                    "required_value": "completed exact-coverage source-bound current-session review",
+                    "failure_type": "current_session_semantic_review_failed",
+                    "reason": str(exc),
+                })
+        elif not args.semantic_review_runtime or not args.semantic_review_model:
             findings.append({
                 "role": "content_constraints",
                 "property": "native_semantic_review.configuration",
@@ -4989,7 +5057,12 @@ def main(argv: list[str]) -> int:
                         "failure_type": "native_semantic_review_failed",
                         "reason": str(exc),
                     })
-    write("native-semantic-content-review.json", semantic_review)
+    if semantic_review.get("review_mode") == "current_session":
+        write("current-session-semantic-content-review.json", semantic_review)
+        if current_session_semantic_receipt is not None:
+            write("current-session-semantic-review-receipt.json", current_session_semantic_receipt)
+    else:
+        write("native-semantic-content-review.json", semantic_review)
     expected_page = spec.get("page", {})
     if expected_page:
         section = check.sections[0]
@@ -5295,7 +5368,13 @@ def main(argv: list[str]) -> int:
               "output_policy": args.output_policy,
               "compliance_summary": {k: v for k, v in compliance.items() if k not in {"records", "external_checklist"}},
               "property_receipt_audit": property_receipt_audit,
-              "native_semantic_content_review": semantic_review,
+              "semantic_content_review": semantic_review,
+              "native_semantic_content_review": (
+                  semantic_review if semantic_review.get("review_mode") != "current_session" else None
+              ),
+              "current_session_semantic_content_review": (
+                  semantic_review if semantic_review.get("review_mode") == "current_session" else None
+              ),
               "findings": findings, "coverage_warnings": coverage_warnings, "styles_created": created,
               "role_coverage": coverage,
               "content_placeholder_policy": {

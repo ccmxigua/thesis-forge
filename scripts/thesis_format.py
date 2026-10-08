@@ -47,6 +47,7 @@ def pipeline_command(args: argparse.Namespace, *, prepare_host_review: bool = Fa
                      offline_merge_receipt: Path | None = None,
                      offline_parent_merge_receipt: Path | None = None,
                      profile_confirmation_migration: Path | None = None,
+                     current_session_semantic_review_response: Path | None = None,
                      semantic_review_runtime: str | None = None,
                      semantic_review_model: str | None = None,
                      semantic_review_reasoning_effort: str | None = None) -> list[str]:
@@ -91,6 +92,16 @@ def pipeline_command(args: argparse.Namespace, *, prepare_host_review: bool = Fa
         command += ["--offline-parent-merge-receipt", str(offline_parent_merge_receipt)]
     if profile_confirmation_migration:
         command += ["--profile-confirmation-migration", str(profile_confirmation_migration)]
+    if current_session_semantic_review_response:
+        if output_policy != "review_draft" or not llm_response:
+            raise ValueError(
+                "current-session semantic response requires an offline review_draft continuation"
+            )
+        if getattr(args, "auto_host_agent", False):
+            raise ValueError("current-session semantic response cannot be combined with --auto-host-agent")
+        if semantic_review_runtime or semantic_review_model:
+            raise ValueError("current-session semantic response cannot be mixed with a native semantic reviewer")
+        command += ["--current-session-semantic-review-response", str(current_session_semantic_review_response)]
     if semantic_review_runtime:
         command += ["--semantic-review-runtime", semantic_review_runtime,
                     "--semantic-review-model", str(semantic_review_model)]
@@ -141,6 +152,8 @@ def main(argv: list[str]) -> int:
                    help="expected native host runtime; must match THESIS_FORGE_HOST_RUNTIME")
     p.add_argument("--llm-response", type=Path,
                    help="offline complete contract-3.0 response, or an explicitly bound legacy 2.1 response, produced by the current host Agent")
+    p.add_argument("--current-session-semantic-review-response", type=Path,
+                   help="separate exact-input-bound current-session abstract review; review_draft only, no native/model attestation")
     p.add_argument("--offline-review-draft", action="store_true",
                    help="complete the current agent's merged packet response as a non-release draft without Codex/OpenClaw CLI; never submission-ready")
     p.add_argument("--offline-parent-merge-receipt", type=Path,
@@ -222,11 +235,14 @@ def main(argv: list[str]) -> int:
     # run_stage executes from ROOT. Resolve user paths in their invocation
     # directory first, so a loaded skill also works outside its checkout.
     for field in ("requirements", "input", "output", "work_dir", "llm_response",
-                  "style_template", "thesis_profile", "template_profile", "render_report",
+                  "current_session_semantic_review_response", "style_template", "thesis_profile", "template_profile", "render_report",
                   "offline_parent_merge_receipt", "profile_confirmation_migration"):
         value = getattr(args, field)
         if value is not None:
             setattr(args, field, value.resolve())
+    if (args.current_session_semantic_review_response
+            and not args.current_session_semantic_review_response.is_file()):
+        p.error("current-session semantic review response file does not exist")
     # Explicit executable paths have the same caller-relative contract; bare
     # command names retain their adapter's ordinary PATH lookup semantics.
     for field in ("codex_bin", "openclaw_bin"):
@@ -240,6 +256,15 @@ def main(argv: list[str]) -> int:
         or args.require_submission_ready or args.strict_release
     ):
         p.error("--offline-review-draft requires --llm-response and review_draft, and cannot release a submission")
+    if args.current_session_semantic_review_response and (
+        not args.llm_response or not args.offline_review_draft
+        or args.output_policy != "review_draft"
+        or args.auto_host_agent or args.strict_release or args.require_submission_ready
+    ):
+        p.error(
+            "--current-session-semantic-review-response requires an offline --llm-response "
+            "continuation under review_draft and cannot use a native host or release gate"
+        )
     if args.offline_parent_merge_receipt:
         if (not args.run_id or args.output_policy != "review_draft"
                 or args.require_submission_ready or args.strict_release
@@ -433,6 +458,7 @@ def main(argv: list[str]) -> int:
             offline_merge_receipt=receipt if args.offline_review_draft else None,
             offline_parent_merge_receipt=args.offline_parent_merge_receipt,
             profile_confirmation_migration=args.profile_confirmation_migration,
+            current_session_semantic_review_response=args.current_session_semantic_review_response,
         )
     else:
         p.error("final formatting requires --llm-response, or use --auto-host-agent for one-command execution")

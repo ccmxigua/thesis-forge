@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.local/thesis-forge/current-session-semantic-review-response.schema.json",
+  "title": "Source-bound current-session semantic review response",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "protocol",
+    "review_mode",
+    "provider_model_verified",
+    "native_invocation",
+    "binding",
+    "results"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "protocol": {"const": "current_session_semantic_content_review_v1"},
+    "review_mode": {"const": "current_session"},
+    "provider_model_verified": {"const": false},
+    "native_invocation": {"const": false},
+    "binding": {
+      "type": "object",
+      "required": [
+        "case_id",
+        "run_id",
+        "source_sha256",
+        "format_spec_sha256",
+        "document_text_sha256",
+        "request_sha256",
+        "checks_sha256",
+        "check_ids",
+        "code_fingerprint_sha256"
+      ],
+      "properties": {
+        "case_id": {"type": "string", "minLength": 1},
+        "run_id": {"type": "string", "minLength": 1},
+        "source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "format_spec_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "document_text_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "request_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "checks_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "check_ids": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1, "uniqueItems": true},
+        "code_fingerprint_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      },
+      "additionalProperties": false
+    },
+    "results": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["check_id", "verdict", "rationale", "evidence_quotes"],
+        "properties": {
+          "check_id": {"type": "string", "minLength": 1},
+          "verdict": {"enum": ["satisfied", "noncompliant", "uncertain"]},
+          "rationale": {"type": "string", "minLength": 1},
+          "evidence_quotes": {
+            "type": "array",
+            "minItems": 1,
+            "items": {"type": "string", "minLength": 1}
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

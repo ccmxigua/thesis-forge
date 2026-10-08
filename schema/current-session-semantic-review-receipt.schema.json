@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.local/thesis-forge/current-session-semantic-review-receipt.schema.json",
+  "title": "Code-generated current-session semantic review receipt",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "protocol",
+    "status",
+    "review_mode",
+    "review_origin_attestation",
+    "origin_identity_verified",
+    "provider_model_verified",
+    "native_invocation",
+    "external_model_request_made_by_pipeline",
+    "submission_ready",
+    "binding",
+    "response_file",
+    "results_sha256",
+    "verdict_counts"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "protocol": {"const": "current_session_semantic_review_receipt_v1"},
+    "status": {"const": "completed"},
+    "review_mode": {"const": "current_session"},
+    "review_origin_attestation": {"const": "current_session_declared"},
+    "origin_identity_verified": {"const": false},
+    "provider_model_verified": {"const": false},
+    "native_invocation": {"const": false},
+    "external_model_request_made_by_pipeline": {"const": false},
+    "submission_ready": {"const": false},
+    "binding": {
+      "type": "object",
+      "required": [
+        "case_id",
+        "run_id",
+        "source_sha256",
+        "format_spec_sha256",
+        "document_text_sha256",
+        "request_sha256",
+        "checks_sha256",
+        "check_ids",
+        "code_fingerprint_sha256"
+      ],
+      "properties": {
+        "case_id": {"type": "string", "minLength": 1},
+        "run_id": {"type": "string", "minLength": 1},
+        "source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "format_spec_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "document_text_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "request_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "checks_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "check_ids": {"type": "array", "items": {"type": "string", "minLength": 1}, "minItems": 1, "uniqueItems": true},
+        "code_fingerprint_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      },
+      "additionalProperties": false
+    },
+    "response_file": {
+      "type": "object",
+      "required": ["path", "bytes", "sha256"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "bytes": {"type": "integer", "minimum": 1},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      },
+      "additionalProperties": false
+    },
+    "results_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "verdict_counts": {
+      "type": "object",
+      "required": ["satisfied", "noncompliant", "uncertain"],
+      "properties": {
+        "satisfied": {"type": "integer", "minimum": 0},
+        "noncompliant": {"type": "integer", "minimum": 0},
+        "uncertain": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

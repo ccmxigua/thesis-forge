@@ -185,6 +185,25 @@ def validate_semantic_review_configuration(args: argparse.Namespace, parser: arg
             )
         if args.host_agent_audit or args.merge_receipt:
             parser.error("append-only offline parent lineage cannot be combined with native receipts")
+    current_session_response = getattr(args, "current_session_semantic_review_response", None)
+    if current_session_response and (
+        not args.llm_response
+        or not args.allow_offline_review
+        or not args.offline_merge_receipt
+        or args.prepare_host_review
+        or args.output_policy != "review_draft"
+        or args.require_submission_ready
+        or args.strict_release
+        or args.semantic_review_runtime
+        or args.semantic_review_model
+        or args.semantic_review_reasoning_effort is not None
+        or args.host_agent_audit
+        or args.merge_receipt
+    ):
+        parser.error(
+            "--current-session-semantic-review-response requires a non-release offline "
+            "--llm-response continuation and cannot be mixed with native review"
+        )
     profile_migration = getattr(args, "profile_confirmation_migration", None)
     if profile_migration:
         if (
@@ -2759,6 +2778,10 @@ def _main(argv: list[str]) -> int:
         "--llm-response", type=Path,
         help="offline complete host-review response produced by the native Host Agent",
     )
+    p.add_argument(
+        "--current-session-semantic-review-response", type=Path,
+        help="separate exact-input-bound current-session abstract review; review_draft only",
+    )
     p.add_argument("--host-agent-audit", type=Path,
                    help="immutable host-agent-run.json bound to --llm-response")
     p.add_argument("--merge-receipt", type=Path,
@@ -2828,6 +2851,9 @@ def _main(argv: list[str]) -> int:
         p.error("--semantic-review-runtime and --semantic-review-model must be supplied together")
     if args.semantic_review_reasoning_effort is not None and args.semantic_review_runtime != "codex":
         p.error("--semantic-review-reasoning-effort requires --semantic-review-runtime codex")
+    if (args.current_session_semantic_review_response
+            and not args.current_session_semantic_review_response.is_file()):
+        p.error("current-session semantic review response file does not exist")
     if args.case_id is not None:
         args.case_id = args.case_id.strip()
         if not args.case_id or not all(
@@ -3021,6 +3047,10 @@ def _main(argv: list[str]) -> int:
         "preview_bypassed_section_plan_findings": [],
         "preview_added_cover_fields": [],
     }
+    if args.current_session_semantic_review_response:
+        manifest["current_session_semantic_review_input"] = file_record(
+            args.current_session_semantic_review_response
+        )
     # Persist a parseable running marker before any external converter or
     # metadata extractor starts.  The outer wrapper can then close an
     # unexpected exception or KeyboardInterrupt as a truthful terminal state
@@ -3876,6 +3906,11 @@ def _main(argv: list[str]) -> int:
                  "--capability-report", str(capability_report_path),
                  "--pipeline-manifest", str(manifest_path)]
     apply_cmd += ["--case-id", args.case_id or "standalone"]
+    if args.current_session_semantic_review_response:
+        apply_cmd += [
+            "--current-session-semantic-review-response",
+            str(args.current_session_semantic_review_response.resolve()),
+        ]
     if not args.neutral_reference_docx:
         apply_cmd.append("--require-coverage")
     if args.neutral_reference_docx:
@@ -3917,6 +3952,23 @@ def _main(argv: list[str]) -> int:
     }
     if steps and steps[-1].get("name") == "apply_and_validate":
         steps[-1]["artifacts"] = dict(manifest["section_execution"])
+        if args.current_session_semantic_review_response:
+            response_path = args.current_session_semantic_review_response.resolve()
+            review_path = apply_dir / "current-session-semantic-content-review.json"
+            receipt_path = apply_dir / "current-session-semantic-review-receipt.json"
+            manifest["current_session_semantic_review"] = {
+                "status": "completed" if receipt_path.is_file() else "receipt_missing",
+                "response_file": file_record(response_path),
+                "review_file": file_record(review_path) if review_path.is_file() else None,
+                "receipt_file": file_record(receipt_path) if receipt_path.is_file() else None,
+                "provider_model_verified": False,
+                "native_invocation": False,
+                "external_model_request_made_by_pipeline": False,
+                "submission_ready": False,
+            }
+            steps[-1]["artifacts"]["current_session_semantic_content_review"] = str(review_path)
+            if receipt_path.is_file():
+                steps[-1]["artifacts"]["current_session_semantic_review_receipt"] = str(receipt_path)
     application_failed = bool(result.returncode or not report)
     if report:
         if args.output_policy == "review_draft":

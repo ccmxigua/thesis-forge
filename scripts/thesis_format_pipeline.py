@@ -4081,6 +4081,7 @@ def _main(argv: list[str]) -> int:
         template_audit_path = apply_dir / "template-audit.json"
         audit_cmd = [sys.executable, str(ROOT / "scripts" / "submission_audit.py"), str(args.output),
                      "--format-spec", str(requirements_dir / "format-spec.json"),
+                     "--source-docx", str(application_input),
                      "--template-profile", str(args.template_profile), "--out", str(template_audit_path)]
         if args.render_report:
             audit_cmd += ["--render-report", str(args.render_report)]

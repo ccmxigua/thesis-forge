@@ -20,6 +20,8 @@ from typing import Any
 from lxml import etree
 
 from format_spec_validation import load_and_validate
+from header_scope import compile_header_scope_rules
+from header_scope_audit import audit_scoped_headers
 from render_attestation import load_key, verify as verify_attestation
 from artifact_io import atomic_write_text, paths_alias
 from semantic_contract import strict_json_dumps, strict_json_read
@@ -541,23 +543,25 @@ def _render_policy_findings(pdf: dict[str, Any], spec: dict[str, Any]) -> tuple[
 
     roles = spec.get("roles") if isinstance(spec.get("roles"), dict) else {}
     header_rule = roles.get("header") if isinstance(roles.get("header"), dict) else {}
-    header_content = header_rule.get("header_content") if isinstance(header_rule.get("header_content"), dict) else {}
-    expected_left_header = str(header_content.get("left_text", "")).strip()
-    degree_level = spec.get("thesis_profile", {}).get("degree_level")
-    degree_text = {"doctor": "博士", "master": "硕士"}.get(degree_level)
-    if degree_text:
-        expected_left_header = re.sub(
-            r"博士\s*/\s*硕士|硕士\s*/\s*博士", degree_text, expected_left_header
-        )
-    if expected_left_header and pages and not any(
-        expected_left_header in str(page.get("top_text", "")) for page in pages
-    ):
-        failures.append({
-            "code": "rendered_pdf_fixed_header_text_missing",
-            "expected": expected_left_header,
-            "evidence": layout.get("top_text_runs", []),
-        })
-    if header_content.get("right_field") == "styleref_heading_1":
+    header_content = header_rule.get("header_content", {}) if isinstance(header_rule.get("header_content"), dict) else {}
+    scoped_header_rules, scoped_rule_findings = compile_header_scope_rules(spec)
+    if not scoped_header_rules and not scoped_rule_findings:
+        expected_left_header = str(header_content.get("left_text", "")).strip()
+        degree_level = spec.get("thesis_profile", {}).get("degree_level")
+        degree_text = {"doctor": "博士", "master": "硕士"}.get(degree_level)
+        if degree_text:
+            expected_left_header = re.sub(
+                r"博士\s*/\s*硕士|硕士\s*/\s*博士", degree_text, expected_left_header
+            )
+        if expected_left_header and pages and not any(
+            expected_left_header in str(page.get("top_text", "")) for page in pages
+        ):
+            failures.append({
+                "code": "rendered_pdf_fixed_header_text_missing",
+                "expected": expected_left_header,
+                "evidence": layout.get("top_text_runs", []),
+            })
+    if header_content.get("right_field") == "styleref_heading_1" and not scoped_header_rules:
         observations.append({
             "code": "rendered_pdf_dynamic_header_sequence",
             "top_text_runs": layout.get("top_text_runs", []),
@@ -681,7 +685,8 @@ def _render_summary(render_report: dict[str, Any] | None, docx_path: Path,
 def audit_docx(docx_path: Path, spec: dict[str, Any] | None = None,
                render_report: dict[str, Any] | None = None,
                template_profile_path: Path | None = None,
-               thesis_profile: dict[str, Any] | None = None) -> dict[str, Any]:
+               thesis_profile: dict[str, Any] | None = None,
+               source_docx: Path | None = None) -> dict[str, Any]:
     """Audit serialized evidence without relying on generator-side counters."""
     spec = spec or {}
     issues: list[dict[str, Any]] = []
@@ -1252,6 +1257,33 @@ def audit_docx(docx_path: Path, spec: dict[str, Any] | None = None,
     except (zipfile.BadZipFile, etree.XMLSyntaxError, ValueError) as exc:
         issues.append(_issue("docx_parse_failed", "critical", "Serialized DOCX could not be audited.", str(exc)))
 
+    scoped_header_rules, scoped_header_findings = compile_header_scope_rules(spec)
+    if scoped_header_rules or scoped_header_findings:
+        if source_docx is None:
+            issues.append(_issue(
+                "header_scope_source_required", "critical",
+                "The format specification contains source-scoped header rules, but no immutable source DOCX was supplied to the independent audit.",
+                {"compiler_findings": scoped_header_findings},
+            ))
+        elif not scoped_header_findings:
+            scoped_audit = audit_scoped_headers(source_docx, docx_path, spec)
+            for finding in scoped_audit.get("findings", []):
+                if finding.get("severity") == "error":
+                    issues.append(_issue(
+                        finding.get("code", "header_scope_audit_failed"), "critical",
+                        finding.get("message", "Source-scoped header verification failed."),
+                        finding.get("evidence", finding),
+                        stage="serialized_docx",
+                    ))
+        else:
+            for finding in scoped_header_findings:
+                if finding.get("severity") == "error":
+                    issues.append(_issue(
+                        finding.get("code", "header_scope_compile_failed"), "critical",
+                        finding.get("message", "Header scope compilation failed."),
+                        finding.get("evidence", finding), stage="format_spec",
+                    ))
+
     render = _render_summary(render_report, docx_path, spec)
     serialized_verified = package_valid and not issues
     template_validation: dict[str, Any] = {
@@ -1307,6 +1339,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("docx", type=Path)
     parser.add_argument("--format-spec", type=Path)
     parser.add_argument("--render-report", type=Path)
+    parser.add_argument("--source-docx", type=Path,
+                        help="immutable source DOCX required to independently resolve scoped header rules")
     parser.add_argument("--template-profile", type=Path,
                         help="official template profile; when supplied, submission readiness requires it to pass")
     parser.add_argument("--thesis-profile", type=Path,
@@ -1324,6 +1358,8 @@ def main(argv: list[str] | None = None) -> int:
         resolved.append(args.format_spec.expanduser().resolve())
     if args.render_report:
         resolved.append(args.render_report.expanduser().resolve())
+    if args.source_docx:
+        resolved.append(args.source_docx.expanduser().resolve())
     if args.template_profile:
         resolved.append(args.template_profile.expanduser().resolve())
     if args.thesis_profile:
@@ -1338,6 +1374,7 @@ def main(argv: list[str] | None = None) -> int:
         args.docx, spec, _json(args.render_report) if args.render_report else None,
         template_profile_path=args.template_profile.resolve() if args.template_profile else None,
         thesis_profile=_json(args.thesis_profile) if args.thesis_profile else None,
+        source_docx=args.source_docx.resolve() if args.source_docx else None,
     )
     payload = strict_json_dumps(result, ensure_ascii=False, indent=2) + "\n"
     if output:

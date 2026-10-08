@@ -33,6 +33,7 @@ from existing_requirement_contract import (
     project_authoritative_existing_payloads as _project_authoritative_existing_payloads,
 )
 from format_spec_validation import load_and_validate, validate_instance
+from header_scope import compile_header_scope_rules
 from format_contract_guards import (
     normalize_verification_checker_ids, registered_input_catalog,
     input_prerequisite_generation_schema, INPUT_CATALOG_VERSION,
@@ -3078,6 +3079,25 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
         spec["blocking_errors"] = copy.deepcopy(blocking_conflicts)
     if unresolved or missing or blocking_conflicts:
         spec["status"] = "needs_clarification"
+    # Keep conditional headers clause-scoped all the way through the accepted
+    # format-spec.  A role-wide left_text is a lossy projection when TOC and
+    # appendix clauses carry different applicability; only style properties
+    # remain in the shared role in that case.
+    compiled_header_rules, header_scope_findings = compile_header_scope_rules(spec)
+    if compiled_header_rules:
+        spec["header_scope_rules"] = compiled_header_rules
+        header_role = spec.get("roles", {}).get("header")
+        if isinstance(header_role, dict):
+            header_role.pop("header_content", None)
+            if not header_role:
+                spec["roles"].pop("header", None)
+    scope_errors = [item for item in header_scope_findings if item.get("severity") == "error"]
+    if scope_errors:
+        scope_blocker = {"type": "header_scope_compile", "findings": scope_errors}
+        spec.setdefault("blocking_errors", []).append(scope_blocker)
+        spec["status"] = "needs_clarification"
+        conflicts.append(scope_blocker)
+        blocking_conflicts.append(scope_blocker)
     audit.append({
         "type": "post_merge_gate",
         "status": "blocked" if (unresolved or missing or blocking_conflicts) else "accepted",

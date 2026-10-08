@@ -105,6 +105,11 @@
         "$ref": "#/$defs/roleSpec"
       }
     },
+    "header_scope_rules": {
+      "type": "array",
+      "description": "Source-applicability-preserving header requirements compiled from accepted header clauses and resolved against actual source section anchors before execution.",
+      "items": {"$ref": "#/$defs/headerScopeRule"}
+    },
     "page": {
       "$ref": "#/$defs/pageSpec"
     },
@@ -162,6 +167,34 @@
     }
   },
   "$defs": {
+    "headerScopeRule": {
+      "type": "object",
+      "required": ["scope", "selector", "content_mode", "header_content", "requirement_ids", "clause_ids", "evidence_ids"],
+      "properties": {
+        "scope": {"enum": ["toc", "chapter", "appendix", "source_heading"]},
+        "selector": {
+          "type": "object",
+          "required": ["kind"],
+          "properties": {
+            "kind": {"enum": ["toc_heading", "chapter_heading_1", "appendix_heading_1", "source_heading_1"]}
+          },
+          "additionalProperties": false
+        },
+        "content_mode": {"enum": ["fixed", "preserve_source"]},
+        "header_content": {
+          "type": "object",
+          "properties": {
+            "left_text": {"type": "string"},
+            "right_field": {"enum": ["styleref_heading_1"]}
+          },
+          "additionalProperties": false
+        },
+        "requirement_ids": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "clause_ids": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+        "evidence_ids": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+      },
+      "additionalProperties": false
+    },
     "fontSpec": {
       "type": "object",
       "properties": {

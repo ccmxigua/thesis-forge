@@ -334,7 +334,8 @@ def main(argv: list[str] | None = None) -> int:
     if render_step["returncode"] == 0:
         audit_cmd = [
             sys.executable, str(ROOT / "scripts" / "submission_audit.py"), str(final),
-            "--format-spec", str(format_spec), "--render-report", str(render_report),
+            "--format-spec", str(format_spec), "--source-docx", str(source),
+            "--render-report", str(render_report),
             "--out", str(submission_audit),
         ]
         if args.template_profile:

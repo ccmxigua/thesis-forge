@@ -43,6 +43,8 @@ from docx_semantics import (
     iter_document_nodes,
 )
 from format_spec_validation import load_and_validate
+from header_scope import compile_header_scope_plan, compile_header_scope_rules
+from header_scope_audit import audit_scoped_headers, build_header_scope_review_ledger
 from semantic_contract import evidence_payload, sha256_json, strict_json_loads, strict_json_read
 from source_literal_binding import (
     SourceFragmentBindingError,
@@ -1799,21 +1801,89 @@ def expected_page_locations(doc: Document, page: dict[str, Any], body_start: int
     return resolved
 
 
+def apply_scoped_headers(doc: Document, header_scope_plan: dict[str, Any],
+                         header_spec: dict[str, Any], mappings: dict[str, Any]) -> dict[str, int]:
+    counts = {"headers": 0}
+    variants = {"default": "header", "first": "first_page_header", "even": "even_page_header"}
+    planned_sections = header_scope_plan.get("sections", [])
+    if len(planned_sections) != len(doc.sections):
+        raise ValueError(
+            "source-scoped header topology changed during formatting: "
+            f"planned={len(planned_sections)}, actual={len(doc.sections)}"
+        )
+
+    # Materialize every source story before changing any text. If a later
+    # section is linked to the first, cloning it after the TOC header has been
+    # applied would copy that newly formatted value and destroy its original
+    # chapter/appendix header. The plan already checked the source topology;
+    # this first pass preserves those source-authored bytes in independent
+    # stories before any fixed scoped value is written.
+    for expected in planned_sections:
+        section_index = int(expected.get("section_index", 0))
+        if not 1 <= section_index <= len(doc.sections):
+            raise ValueError(
+                f"header scope section mapping is out of range: planned={section_index}, actual={len(doc.sections)}"
+            )
+        section = doc.sections[section_index - 1]
+        for variant, attribute in variants.items():
+            contract = expected.get("variants", {}).get(variant, {})
+            if not contract.get("active"):
+                continue
+            story = getattr(section, attribute)
+            unlink_story_preserving_content(
+                story,
+                force_clone=(section_index > 1 or variant != "default"),
+            )
+
+    for expected in planned_sections:
+        section_index = int(expected.get("section_index", 0))
+        section = doc.sections[section_index - 1]
+        for variant, attribute in variants.items():
+            contract = expected.get("variants", {}).get(variant, {})
+            if not contract.get("active"):
+                continue
+            story = getattr(section, attribute)
+            paragraph = story.paragraphs[0] if story.paragraphs else story.add_paragraph()
+            if "Header" in style_names(doc):
+                paragraph.style = "Header"
+            content_mode = contract.get("content_mode")
+            if content_mode == "fixed":
+                scoped_spec = copy.deepcopy(header_spec)
+                scoped_spec.pop("text", None)
+                scoped_spec["header_content"] = copy.deepcopy(contract.get("header_content", {}))
+                apply_header_content(paragraph, scoped_spec, mappings)
+            elif content_mode == "preserve_source":
+                style_only_spec = copy.deepcopy(header_spec)
+                style_only_spec.pop("header_content", None)
+                style_only_spec.pop("text", None)
+                apply_header_content(paragraph, style_only_spec, mappings)
+            else:
+                raise ValueError(
+                    f"unsupported header scope content mode at section {section_index}/{variant}: {content_mode!r}"
+                )
+            apply_direct_format(paragraph, header_spec)
+            counts["headers"] += 1
+    return counts
+
+
 def apply_headers_footers(doc: Document, roles: dict[str, Any], page: dict[str, Any],
-                          mappings: dict[str, Any], locations: dict[tuple[int, str], bool]) -> dict[str, int]:
+                          mappings: dict[str, Any], locations: dict[tuple[int, str], bool],
+                          header_scope_plan: dict[str, Any] | None = None) -> dict[str, int]:
     if page.get("page_number"):
         raise ValueError("pagination must be applied through execute_section_plan")
     counts = {"headers": 0, "footers": 0, "page_numbers": 0, "page_fields_removed": 0}
     header_spec, footer_spec = roles.get("header", {}), roles.get("footer", {})
     seen_headers = set(); seen_footers = set(); sections = list(doc.sections)
-    if header_spec:
+    if header_scope_plan and header_scope_plan.get("scoped"):
+        counts.update(apply_scoped_headers(doc, header_scope_plan, header_spec, mappings))
+    elif header_spec:
         for index, section in enumerate(sections):
             # Every later section gets an explicit independent story.  Object-id
             # based shared-part detection is not reliable across python-docx
             # relationship mutations, especially for the last shared section.
             _unlink_story_preserving_content(section.header, force_clone=index > 0)
     for index, section in enumerate(sections):
-        if header_spec and id(section.header._element) not in seen_headers:
+        if (not header_scope_plan or not header_scope_plan.get("scoped")) and header_spec and id(section.header._element) not in seen_headers:
             seen_headers.add(id(section.header._element))
             p = section.header.paragraphs[0]
             if "Header" in style_names(doc): p.style = "Header"
@@ -4442,6 +4512,19 @@ def main(argv: list[str]) -> int:
     doc = Document(args.input)
     original_source_paragraphs = _content_instance_paragraphs(doc)
     args.out_dir.mkdir(parents=True, exist_ok=True)
+    header_scope_plan = compile_header_scope_plan(args.input, spec, args.format_spec)
+    header_scope_schema = Path(__file__).resolve().parents[1] / "schema" / "header-scope-plan.schema.json"
+    header_scope_schema_errors = load_and_validate(header_scope_plan, header_scope_schema)
+    if header_scope_schema_errors:
+        raise SystemExit("invalid compiled header scope plan:\n" + "\n".join(header_scope_schema_errors))
+    atomic_write_text(
+        args.out_dir / "header-scope-plan.json",
+        json.dumps(header_scope_plan, ensure_ascii=False, indent=2) + "\n",
+    )
+    if not header_scope_plan.get("valid"):
+        raise SystemExit("header scope application blocked:\n" + json.dumps(
+            header_scope_plan.get("findings", []), ensure_ascii=False, indent=2,
+        ))
     if args.manual_review_items and isinstance(manual_review_ledger, dict):
         write_manual_review_ledger(args.manual_review_items, manual_review_ledger)
     if args.output_policy == "review_draft":
@@ -4616,7 +4699,7 @@ def main(argv: list[str]) -> int:
         story_roles = dict(effective_roles)
         story_roles.pop("footer", None)
         header_footer_changed = apply_headers_footers(
-            doc, story_roles, {}, mappings, {},
+            doc, story_roles, {}, mappings, {}, header_scope_plan=header_scope_plan,
         )
         # Stable report compatibility: these counters now come from the
         # SectionPlan execution evidence rather than a second pagination path.
@@ -4904,7 +4987,38 @@ def main(argv: list[str]) -> int:
             "required_value": next((e.get("value") for e in item.get("evidence", []) if e.get("kind") == "expected"), None),
             "section_plan_finding": item,
         })
-    findings.extend(audit_headers(args.output, spec.get("roles", {}), mappings))
+    header_audit_roles = copy.deepcopy(spec.get("roles", {}))
+    if header_scope_plan.get("scoped") and isinstance(header_audit_roles.get("header"), dict):
+        header_audit_roles["header"].pop("header_content", None)
+        if not header_audit_roles["header"]:
+            header_audit_roles.pop("header", None)
+    findings.extend(audit_headers(args.output, header_audit_roles, mappings))
+    if header_scope_plan.get("scoped"):
+        header_scope_audit = audit_scoped_headers(
+            args.input, args.output, spec, args.format_spec,
+        )
+        write("header-scope-audit.json", header_scope_audit)
+        header_scope_review_ledger = build_header_scope_review_ledger(header_scope_audit)
+        header_scope_review_schema = Path(__file__).resolve().parents[1] / "schema" / "header-scope-review-ledger.schema.json"
+        header_scope_review_errors = load_and_validate(
+            header_scope_review_ledger, header_scope_review_schema,
+        )
+        if header_scope_review_errors:
+            raise SystemExit("invalid source-scoped header review ledger:\n" + "\n".join(header_scope_review_errors))
+        write("header-scope-review-ledger.json", header_scope_review_ledger)
+        for item in header_scope_audit.get("findings", []):
+            if item.get("severity") != "error":
+                continue
+            findings.append({
+                "role": "header",
+                "property": item.get("code", "header_scope_audit"),
+                "failure_type": item.get("code", "header_scope_audit"),
+                "section_index": item.get("section_index"),
+                "template_value": item.get("evidence"),
+                "required_value": item.get("message"),
+                "reason": item.get("message"),
+                "source_scope_finding": item,
+            })
     findings.extend(audit_object_order_constraints(check, spec.get("objects", {}), mappings))
     findings.extend(audit_table_rules(check, spec.get("tables", {}), render_report))
     effective_content_constraints = resolve_profile_constraints(spec)
@@ -5290,7 +5404,9 @@ def main(argv: list[str]) -> int:
         source_clause_records, spec.get("requirements", []), role_results, finding_roles
     )
     compliance = compliance_report(verified_clause_records, compliance_mode, "validation")
-    submission_audit = audit_submission_docx(args.output, spec, render_report)
+    submission_audit = audit_submission_docx(
+        args.output, spec, render_report, source_docx=args.input,
+    )
     cover_pending_fields = cover_changes.get("metadata_pending_fields", [])
     metadata_pending = bool(cover_pending_fields)
     content_pending = bool(pending_content)

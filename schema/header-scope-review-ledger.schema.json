@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.invalid/thesis-forge/header-scope-review-ledger.schema.json",
+  "title": "Source-scoped header technical review ledger",
+  "type": "object",
+  "required": [
+    "schema_version", "protocol", "status", "submission_ready",
+    "source_sha256", "format_spec_sha256", "output_sha256",
+    "sections_checked", "summary", "items"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "protocol": {"const": "source_scoped_header_review_ledger_v1"},
+    "status": {"enum": ["passed", "blocked"]},
+    "submission_ready": {"const": false},
+    "source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "format_spec_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "output_sha256": {"type": ["string", "null"], "pattern": "^[0-9a-f]{64}$"},
+    "sections_checked": {"type": "integer", "minimum": 0},
+    "summary": {
+      "type": "object",
+      "required": ["total", "pending_resolution"],
+      "properties": {
+        "total": {"type": "integer", "minimum": 0},
+        "pending_resolution": {"type": "integer", "minimum": 0}
+      },
+      "additionalProperties": false
+    },
+    "items": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/item"}
+    }
+  },
+  "additionalProperties": false,
+  "$defs": {
+    "anchor": {
+      "type": ["object", "null"],
+      "properties": {
+        "kind": {"type": "string"},
+        "paragraph_index": {"type": "integer", "minimum": 0},
+        "style": {"type": "string"},
+        "text": {"type": "string"},
+        "text_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      },
+      "additionalProperties": false
+    },
+    "item": {
+      "type": "object",
+      "required": [
+        "finding_id", "status", "code", "severity", "message",
+        "section_index", "scope", "variant", "source_anchor",
+        "requirement_ids", "clause_ids", "evidence_ids", "expected_text",
+        "actual_text", "relationship_id", "relationship_target", "header_part",
+        "linked_to_previous", "finding", "action"
+      ],
+      "properties": {
+        "finding_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "status": {"const": "pending_resolution"},
+        "code": {"type": "string", "minLength": 1},
+        "severity": {"const": "error"},
+        "message": {"type": "string", "minLength": 1},
+        "section_index": {"type": ["integer", "null"], "minimum": 1},
+        "scope": {"type": ["string", "null"]},
+        "variant": {"type": ["string", "null"]},
+        "source_anchor": {"$ref": "#/$defs/anchor"},
+        "requirement_ids": {"type": "array", "items": {"type": "string"}},
+        "clause_ids": {"type": "array", "items": {"type": "string"}},
+        "evidence_ids": {"type": "array", "items": {"type": "string"}},
+        "expected_text": {"type": ["string", "null"]},
+        "actual_text": {"type": ["string", "null"]},
+        "relationship_id": {"type": ["string", "null"]},
+        "relationship_target": {"type": ["string", "null"]},
+        "header_part": {"type": ["string", "null"]},
+        "linked_to_previous": {"type": ["boolean", "null"]},
+        "finding": {"type": "object"},
+        "action": {"type": "string", "minLength": 1}
+      },
+      "additionalProperties": false
+    }
+  }
+}

@@ -425,11 +425,11 @@ class ConditionReassessmentTests(unittest.TestCase):
             self.assertEqual(applier.audit_cover(saved, cover, {}), [])
             requirements = [{"id": "cover-rule", "role": "cover", "properties": {"fields": cover["fields"]}}]
             spec = {"cover": cover, "requirements": requirements}
-            actual, _ = applier._receipt_semantic_actuals(saved, spec, {}, requirements, {}, [], contract)
+            actual, _, _, _ = applier._receipt_semantic_actuals(saved, spec, {}, requirements, {}, [], contract)
             self.assertEqual(actual["cover"]["fields"], cover["fields"])
             next(p for p in saved.paragraphs if p.text == "专业：").text = ""
             self.assertTrue(applier.audit_cover(saved, cover, {}))
-            actual, _ = applier._receipt_semantic_actuals(saved, spec, {}, requirements, {}, [], contract)
+            actual, _, _, _ = applier._receipt_semantic_actuals(saved, spec, {}, requirements, {}, [], contract)
             self.assertNotIn("fields", actual.get("cover", {}))
         # No declaration means exact legacy behavior, not a global rule.
         del cover["fields"][0]["label_display_policy"]

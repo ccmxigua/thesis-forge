@@ -18,7 +18,10 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from apply_format_spec import apply_headers_footers
 from format_spec_validation import load_and_validate
-from header_scope import compile_header_scope_plan, compile_header_scope_rules
+from header_scope import (
+    compile_header_scope_plan, compile_header_scope_rules,
+    prepare_header_scope_boundaries,
+)
 from header_scope_audit import audit_scoped_headers, build_header_scope_review_ledger
 
 
@@ -87,10 +90,13 @@ def make_two_section_source(path: Path, *, active_variants: bool = False,
 
 
 def generate_scoped(source: Path, output: Path, spec: dict) -> dict:
-    plan = compile_header_scope_plan(source, spec)
+    document = Document(source)
+    prepared_layout = prepare_header_scope_boundaries(document, spec)
+    plan = compile_header_scope_plan(
+        source, spec, document=document, prepared_layout=prepared_layout,
+    )
     if not plan["valid"]:
         raise AssertionError(json.dumps(plan["findings"], ensure_ascii=False))
-    document = Document(source)
     result = apply_headers_footers(
         document, spec.get("roles", {}), {}, {}, {}, header_scope_plan=plan,
     )
@@ -151,6 +157,108 @@ class HeaderScopeTest(unittest.TestCase):
             doc = Document(output)
             self.assertEqual(doc.sections[0].header.paragraphs[0].text, "目  录")
             self.assertEqual(doc.sections[1].header.paragraphs[0].text, "第1章 引言")
+
+    def test_mixed_front_matter_isolated_from_toc_header_and_audit_rejects_leak(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source, output, misplaced = root / "source.docx", root / "review.docx", root / "misplaced.docx"
+            document = Document()
+            document.add_paragraph("论文原创性声明")
+            document.add_paragraph("摘要正文")
+            toc = document.add_paragraph("目 录", style="TOC Heading")
+            toc.paragraph_format.page_break_before = True
+            chapter = document.add_section(WD_SECTION.NEW_PAGE)
+            document.add_paragraph("第1章 引言", style="Heading 1")
+            chapter.header.is_linked_to_previous = False
+            chapter.header.paragraphs[0].text = "第1章 引言"
+            document.save(source)
+            original_sha = __import__("hashlib").sha256(source.read_bytes()).hexdigest()
+
+            spec = header_spec(include_appendix=False)
+            generated = generate_scoped(source, output, spec)
+            plan = generated["plan"]
+            self.assertEqual([section["scope"] for section in plan["sections"]], ["unscoped", "toc", "chapter"])
+            self.assertEqual(len(plan["scope_transforms"]), 1)
+            self.assertEqual(plan["scope_transforms"][0]["scope"], "toc")
+            self.assertEqual(plan["scope_transforms"][0]["source_section_index"], 1)
+            self.assertEqual(plan["source_sha256"], original_sha)
+            self.assertEqual(
+                load_and_validate(plan, ROOT / "schema" / "header-scope-plan.schema.json"), [],
+            )
+            result = audit_scoped_headers(source, output, spec)
+            self.assertTrue(result["valid"], json.dumps(result["findings"], ensure_ascii=False))
+            self.assertEqual(len(result["scope_transforms"]), 1)
+            out = Document(output)
+            self.assertEqual(len(out.sections), 3)
+            self.assertEqual(out.sections[0].header.paragraphs[0].text, "")
+            self.assertEqual(out.sections[1].header.paragraphs[0].text, "目  录")
+            self.assertEqual(out.sections[2].header.paragraphs[0].text, "第1章 引言")
+            self.assertEqual(__import__("hashlib").sha256(source.read_bytes()).hexdigest(), original_sha)
+
+            def move_toc_boundary_after_title(xml):
+                ns = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
+                body = xml.find("w:body", namespaces=ns)
+                paragraphs = body.xpath("./w:p", namespaces=ns)
+                toc_paragraph = next(
+                    p for p in paragraphs
+                    if "".join(p.xpath(".//w:t/text()", namespaces=ns)) == "目 录"
+                )
+                boundary_parent = next(
+                    p for p in paragraphs if p.xpath("./w:pPr/w:sectPr", namespaces=ns)
+                )
+                boundary = boundary_parent.xpath("./w:pPr/w:sectPr", namespaces=ns)[0]
+                boundary.getparent().remove(boundary)
+                toc_ppr = toc_paragraph.find("w:pPr", namespaces=ns)
+                if toc_ppr is None:
+                    toc_ppr = OxmlElement("w:pPr")
+                    toc_paragraph.insert(0, toc_ppr)
+                toc_ppr.append(boundary)
+
+            rewrite_package(output, misplaced, move_toc_boundary_after_title)
+            failed = audit_scoped_headers(source, misplaced, spec)
+            self.assertFalse(failed["valid"])
+            codes = {item["code"] for item in failed["findings"]}
+            self.assertIn("header_scope_anchor_not_in_output_section", codes)
+            self.assertIn("header_scope_anchor_not_section_start", codes)
+
+    def test_mixed_chapter_and_appendix_scope_gets_source_anchored_boundary(self):
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source, output = root / "source.docx", root / "review.docx"
+            document = Document()
+            document.add_paragraph("第1章 引言", style="Heading 1")
+            document.add_paragraph("正文内容")
+            document.add_paragraph("附录A 实验环境", style="Heading 1")
+            document.add_paragraph("附录内容")
+            document.sections[0].header.paragraphs[0].text = "第1章 引言"
+            document.save(source)
+
+            spec = header_spec(include_toc=False)
+            generated = generate_scoped(source, output, spec)
+            self.assertEqual([section["scope"] for section in generated["plan"]["sections"]], ["chapter", "appendix"])
+            self.assertEqual([item["scope"] for item in generated["plan"]["scope_transforms"]], ["appendix"])
+            result = audit_scoped_headers(source, output, spec)
+            self.assertTrue(result["valid"], json.dumps(result["findings"], ensure_ascii=False))
+            doc = Document(output)
+            self.assertEqual(doc.sections[0].header.paragraphs[0].text, "第1章 引言")
+            self.assertEqual(doc.sections[1].header.paragraphs[0].text, "附  录")
+
+    def test_mixed_toc_anchor_inside_table_fails_closed(self):
+        with tempfile.TemporaryDirectory() as td:
+            source = Path(td) / "source.docx"
+            document = Document()
+            document.add_paragraph("声明和摘要内容")
+            cell = document.add_table(rows=1, cols=1).cell(0, 0)
+            cell.paragraphs[0].text = "目 录"
+            cell.paragraphs[0].style = "TOC Heading"
+            document.save(source)
+
+            plan = compile_header_scope_plan(source, header_spec(include_appendix=False))
+            self.assertFalse(plan["valid"])
+            self.assertIn(
+                "header_scope_boundary_unsupported_container",
+                {item["code"] for item in plan["findings"]},
+            )
 
     def test_source_anchor_inside_table_is_mapped_and_independently_audited(self):
         with tempfile.TemporaryDirectory() as td:

@@ -44,13 +44,67 @@ class DraftScorecardTests(unittest.TestCase):
         self.assertIsNone(card["score"])
         self.assertEqual(card["observed_checks_verified_percent"], 20)
         self.assertEqual(card["verified_count"], 1)
-        self.assertEqual(card["unmet_or_pending_count"], 4)
+        self.assertEqual(card["status_counts"], {
+            "failed": 2, "unverified": 1, "pending": 1, "verified": 1,
+        })
+        self.assertEqual(card["failed_count"], 2)
+        self.assertEqual(card["unverified_count"], 1)
+        self.assertEqual(card["pending_count"], 1)
+        self.assertEqual(card["diagnostic_item_count"], 5)
+        self.assertEqual(card["evaluation_unit_count"], 3)
+        self.assertIsNone(card["unique_source_obligation_count"])
         self.assertFalse(card["submission_ready"])
         self.assertFalse(card["coverage_complete"])
         self.assertTrue(card["human_check_required"])
         self.assertIn("semicolon", "\n".join(scorecard_lines(card)))
         self.assertIn("chinese_comma", "\n".join(scorecard_lines(card)))
         self.assertIn("来源存在歧义", "\n".join(scorecard_lines(card)))
+        lines = "\n".join(scorecard_lines(card))
+        self.assertIn("诊断条目5项（不是独立义务数）", lines)
+        self.assertIn("已证实未满足2项", lines)
+        self.assertIn("未核验1项", lines)
+        self.assertIn("待人工核验1项", lines)
+        by_id = {item["detail"].get("receipt_id"): item for item in card["entries"]
+                 if item["kind"] == "property"}
+        self.assertEqual(by_id["r1"]["score"], 100)
+        self.assertEqual(by_id["r2"]["score"], 0)
+        self.assertIsNone(by_id["r3"]["score"])
+        self.assertIn("未评分（未核验）", lines)
+        self.assertIn("未评分（待人工核验）", lines)
+        self.assertNotIn("0/100 未核验", lines)
+        self.assertNotIn("0/100 待人工核验", lines)
+
+    def test_unverified_receipt_reason_is_visible_in_review_text(self):
+        self.audit["receipts"][2]["status_reason"] = "来源封面实例尚未绑定"
+        lines = "\n".join(scorecard_lines(self.card()))
+        self.assertIn("来源封面实例尚未绑定", lines)
+
+    def test_unobservable_drawing_font_is_capability_unknown_not_failure(self):
+        finding = {"role": "all_text", "property": "font.latin.non_word_text",
+                   "failure_type": "document_font_not_observable",
+                   "reason": "Math/drawing Latin text needs a separate font executor and verifier."}
+        card = build_scorecard(self.binding, self.audit, [], [finding])
+        entry = next(item for item in card["entries"] if item["detail"].get("failure_type"))
+        self.assertEqual(entry["kind"], "capability")
+        self.assertEqual(entry["status"], "unverified")
+        self.assertIsNone(entry["score"])
+        self.assertEqual(card["failed_count"], 1)  # only the separate proven keyword mismatch
+        self.assertIn("Math/drawing", "\n".join(scorecard_lines(card)))
+
+    def test_audit_rejects_numeric_score_on_unknown_or_pending_items(self):
+        with tempfile.TemporaryDirectory() as td:
+            output = Path(td) / "draft.docx"
+            card = self.card()
+            doc = Document()
+            append_scorecard(doc, card)
+            doc.save(output)
+            self.assertTrue(audit_scorecard(output, card)["valid"])
+            for status in ("unverified", "pending"):
+                tampered = copy.deepcopy(card)
+                row = next(item for item in tampered["entries"] if item["status"] == status)
+                row["score"] = 0
+                with self.subTest(status=status):
+                    self.assertFalse(audit_scorecard(output, tampered)["valid"])
 
     def test_even_perfect_score_requires_final_human_review(self):
         for receipt in self.audit["receipts"]:

@@ -22,6 +22,7 @@ from lxml import etree
 from format_spec_validation import load_and_validate
 from header_scope import compile_header_scope_rules
 from header_scope_audit import audit_scoped_headers
+from obligation_submission_gate import audit_obligation_submission_gate
 from render_attestation import load_key, verify as verify_attestation
 from artifact_io import atomic_write_text, paths_alias
 from semantic_contract import strict_json_dumps, strict_json_read
@@ -686,7 +687,13 @@ def audit_docx(docx_path: Path, spec: dict[str, Any] | None = None,
                render_report: dict[str, Any] | None = None,
                template_profile_path: Path | None = None,
                thesis_profile: dict[str, Any] | None = None,
-               source_docx: Path | None = None) -> dict[str, Any]:
+               source_docx: Path | None = None,
+               *,
+               require_obligation_assessment: bool = False,
+               obligation_scope_inventory: dict[str, Any] | None = None,
+               evaluation_units_by_requirement: dict[str, list[dict[str, Any]]] | None = None,
+               property_receipt_audit: dict[str, Any] | None = None,
+               obligation_binding: dict[str, Any] | None = None) -> dict[str, Any]:
     """Audit serialized evidence without relying on generator-side counters."""
     spec = spec or {}
     issues: list[dict[str, Any]] = []
@@ -698,6 +705,28 @@ def audit_docx(docx_path: Path, spec: dict[str, Any] | None = None,
     field_counts: dict[str, int] = {}
     section_evidence: list[dict[str, Any]] = []
     all_text_parts: list[tuple[str, str]] = []
+    obligation_gate = audit_obligation_submission_gate(
+        required=require_obligation_assessment,
+        inventory=obligation_scope_inventory,
+        expected_binding=obligation_binding or {},
+        units_by_requirement=evaluation_units_by_requirement,
+        receipt_audit=property_receipt_audit or {},
+        serialized_docx_sha256=hashlib.sha256(docx_path.read_bytes()).hexdigest()
+        if docx_path.is_file() else "",
+    )
+    if require_obligation_assessment and not obligation_gate.get("valid"):
+        for blocker in obligation_gate.get("blockers", []):
+            submission_blockers.append(_issue(
+                blocker.split(":", 1)[0], "critical",
+                "Source obligation scope, applicability, or mandatory status is missing or unresolved.",
+                {"blocker": blocker}, stage="source_obligation_gate",
+            ))
+        for error in obligation_gate.get("errors", []):
+            issues.append(_issue(
+                error.split(":", 1)[0], "critical",
+                "The independent source obligation audit rejected its binding or evidence.",
+                {"error": error}, stage="source_obligation_gate",
+            ))
     effective_profile = thesis_profile if isinstance(thesis_profile, dict) else spec.get("thesis_profile")
     if isinstance(effective_profile, dict) and "metadata_status" in effective_profile:
         pending_fields = list(effective_profile.get("pending_fields") or [])
@@ -1314,6 +1343,7 @@ def audit_docx(docx_path: Path, spec: dict[str, Any] | None = None,
         "serialized_docx_valid": serialized_verified,
         "render_validation": render,
         "template_validation": template_validation,
+        "obligation_assessment_gate": obligation_gate,
         "submission_ready": submission_ready,
         "status": "submission_ready" if submission_ready else "not_submission_ready",
         "issues": issues,

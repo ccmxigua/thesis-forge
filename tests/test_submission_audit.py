@@ -120,6 +120,27 @@ def attest(report: dict[str, object]) -> dict[str, object]:
 
 
 class SubmissionAuditTest(unittest.TestCase):
+    def test_independent_source_obligation_gate_blocks_missing_scope_inventory(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            docx = Path(td) / "draft.docx"
+            make_docx(docx)
+            report = audit_docx(
+                docx, SPEC, require_obligation_assessment=True,
+                obligation_scope_inventory=None,
+                evaluation_units_by_requirement={},
+                property_receipt_audit={"receipts": []},
+                obligation_binding={
+                    "run_id": "current", "case_id": "case",
+                    "source_sha256": "a" * 64, "format_spec_sha256": "b" * 64,
+                },
+            )
+            self.assertFalse(report["submission_ready"])
+            self.assertFalse(report["obligation_assessment_gate"]["valid"])
+            self.assertIn(
+                "source_obligation_scope_inventory_missing",
+                report["obligation_assessment_gate"]["blockers"],
+            )
+
     def test_sidecar_loader_rejects_duplicate_json_keys(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             path = Path(td) / "sidecar.json"

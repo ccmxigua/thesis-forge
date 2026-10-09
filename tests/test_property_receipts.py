@@ -7,6 +7,7 @@ from scripts.property_receipts import (
     audit_property_receipts,
     build_property_receipts,
     expected_receipt_ids,
+    satisfies,
 )
 
 
@@ -155,6 +156,130 @@ class PropertyReceiptTests(unittest.TestCase):
         self.assertFalse(audit["valid"])
         self.assertEqual(audit["missing_count"], 1)
         self.assertEqual(audit["failures"][0]["status"], "missing")
+
+    def test_cover_field_requirement_is_an_ordered_source_bound_subset(self) -> None:
+        actual = [
+            {"id": "classification_number", "label": "分类号：",
+             "value_from": "thesis_profile.cover_metadata.classification_number",
+             "display_policy": "required"},
+            {"id": "title_zh", "label": "论文题目：",
+             "value_from": "thesis_profile.cover_metadata.title_zh",
+             "display_policy": "required"},
+            {"id": "title_en", "label": "English title",
+             "value_from": "thesis_profile.cover_metadata.title_en",
+             "display_policy": "required"},
+        ]
+        expected = [
+            {"id": "title_zh", "label": "论文题目",
+             "value_from": "thesis_profile.cover_metadata.title_zh",
+             "display_policy": "required"},
+            {"id": "title_en", "label": "English title",
+             "value_from": "thesis_profile.cover_metadata.title_en",
+             "display_policy": "required"},
+        ]
+        self.assertTrue(satisfies("fields", actual, expected))
+        wrong_source = copy.deepcopy(expected)
+        wrong_source[0]["value_from"] = "thesis_profile.cover_metadata.subtitle_zh"
+        self.assertFalse(satisfies("fields", actual, wrong_source))
+        wrong_order = list(reversed(expected))
+        self.assertFalse(satisfies("fields", actual, wrong_order))
+
+    def test_unbound_cover_variants_are_unverified_and_bound_instance_still_fails(self) -> None:
+        actual_fields = [{"id": "title_zh", "label": "论文题目：",
+                          "value_from": "thesis_profile.cover_metadata.title_zh",
+                          "display_policy": "required"}]
+        requirements = [
+            {"id": "R_MAIN", "role": "cover", "clause_ids": ["C1"],
+             "properties": {"fields": copy.deepcopy(actual_fields)}},
+            {"id": "R_VARIANT", "role": "cover", "clause_ids": ["C2"],
+             "properties": {"fields": [{"id": "title_zh", "label": "论文题目（中文）",
+                 "value_from": "thesis_profile.cover_metadata.title_zh",
+                 "display_policy": "required"}, {"id": "title_en", "label": "English title",
+                 "value_from": "thesis_profile.cover_metadata.title_en",
+                 "display_policy": "required"}]}},
+        ]
+        receipts = build_property_receipts(requirements, {}, {"cover": {"fields": actual_fields}},
+                                           serialized_docx_sha256="a" * 64)
+        by_requirement = {item["requirement_id"]: item for item in receipts}
+        self.assertEqual(by_requirement["R_MAIN"]["status"], "verified")
+        self.assertEqual(by_requirement["R_VARIANT"]["status"], "unverified")
+        self.assertIn("instance-specific binding", by_requirement["R_VARIANT"]["status_reason"])
+
+        scoped = copy.deepcopy(requirements[1])
+        scoped["cover_instance_id"] = "academic-master-cover"
+        scoped_receipt = build_property_receipts(
+            [requirements[0], scoped], {}, {"cover": {"fields": actual_fields}},
+            actual_by_requirement={"R_VARIANT": {"fields": actual_fields}},
+            serialized_docx_sha256="b" * 64,
+        )
+        scoped_variant = next(item for item in scoped_receipt if item["requirement_id"] == "R_VARIANT")
+        self.assertEqual(scoped_variant["status"], "failed")
+
+        explicitly_empty = build_property_receipts(
+            [requirements[0], scoped], {}, {"cover": {"fields": actual_fields}},
+            actual_by_requirement={"R_VARIANT": {}},
+            serialized_docx_sha256="e" * 64,
+        )
+        empty_variant = next(item for item in explicitly_empty
+                             if item["requirement_id"] == "R_VARIANT")
+        self.assertEqual(empty_variant["status"], "unverified")
+        self.assertIsNone(empty_variant["actual"])
+
+    def test_font_property_without_latin_content_is_unknown_not_failed(self) -> None:
+        requirement = [{"id": "R_FONT", "role": "bibliography_heading",
+                        "clause_ids": ["C_FONT"],
+                        "properties": {"font": {"latin": "Times New Roman"}}}]
+        receipt = build_property_receipts(
+            requirement, {"bibliography_heading": {"style_name": "Thesis Bibliography Heading"}},
+            {"bibliography_heading": {"font": {"latin": "Cambria"}}},
+            role_observability={"bibliography_heading": {"font.latin": {
+                "observed": False,
+                "reason": "no Latin letters occur in this role's serialized text",
+                "verification_method": "serialized_docx_role_text_inventory",
+            }}},
+            serialized_docx_sha256="c" * 64,
+        )[0]
+        self.assertEqual(receipt["actual"], "Cambria")
+        self.assertEqual(receipt["status"], "unverified")
+        self.assertIn("no Latin letters", receipt["status_reason"])
+        self.assertEqual(receipt["verification_method"], "serialized_docx_role_text_inventory")
+
+    def test_final_docx_hash_rebind_preserves_role_observability_status(self) -> None:
+        requirement = [{"id": "R_FONT", "role": "bibliography_heading",
+                        "clause_ids": ["C_FONT"],
+                        "properties": {"font": {"latin": "Times New Roman"}}}]
+        mappings = {"bibliography_heading": {"style_name": "References Heading"}}
+        actual = {"bibliography_heading": {"font": {"latin": "Cambria"}}}
+        observation = {"bibliography_heading": {"font.latin": {
+            "observed": False,
+            "reason": "no Latin letters occur in this role's serialized text",
+            "verification_method": "serialized_docx_role_text_inventory",
+        }}}
+        first = build_property_receipts(
+            requirement, mappings, actual, role_observability=observation,
+            serialized_docx_sha256="f" * 64,
+        )[0]
+        rebound = build_property_receipts(
+            requirement, mappings, actual, role_observability=observation,
+            serialized_docx_sha256="0" * 64,
+        )[0]
+        self.assertEqual(first["status"], "unverified")
+        self.assertEqual(rebound["status"], "unverified")
+        self.assertNotEqual(first["serialized_docx_sha256"], rebound["serialized_docx_sha256"])
+
+    def test_observed_latin_run_mismatch_remains_a_proven_failure(self) -> None:
+        requirement = [{"id": "R_FONT", "role": "bibliography_heading",
+                        "clause_ids": ["C_FONT"],
+                        "properties": {"font": {"latin": "Times New Roman"}}}]
+        receipt = build_property_receipts(
+            requirement, {}, {"bibliography_heading": {"font": {"latin": "Cambria"}}},
+            role_observability={"bibliography_heading": {"font.latin": {
+                "observed": True,
+                "verification_method": "serialized_docx_role_latin_runs",
+            }}},
+            serialized_docx_sha256="d" * 64,
+        )[0]
+        self.assertEqual(receipt["status"], "failed")
 
 
 if __name__ == "__main__":

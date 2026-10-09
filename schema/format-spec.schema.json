@@ -1513,8 +1513,52 @@
               "route": {"enum": ["automatic", "check_only", "human", "input", "unknown", "example"]},
               "source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
               "source_span_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
-              "semantic_basis": {"enum": ["typed_source_atom", "legacy_unknown_dimensions"]}
+              "semantic_basis": {"enum": ["typed_source_atom", "legacy_unknown_dimensions"]},
+              "source_context": {
+                "type": "object", "additionalProperties": false,
+                "required": ["source_sha256", "clause_id", "span", "evidence_ids"],
+                "properties": {
+                  "source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                  "clause_id": {"type": "string", "minLength": 1},
+                  "span": {
+                    "type": "object",
+                    "required": ["evidence_id", "start_offset", "end_offset", "text", "source_sha256", "location"],
+                    "properties": {
+                      "evidence_id": {"type": "string", "minLength": 1},
+                      "start_offset": {"type": "integer", "minimum": 0},
+                      "end_offset": {"type": "integer", "minimum": 0},
+                      "text": {"type": "string", "minLength": 1},
+                      "source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                      "location": {"type": "object"}
+                    },
+                    "additionalProperties": true
+                  },
+                  "evidence_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true}
+                }
+              },
+              "semantic_assertion": {
+                "type": "object", "additionalProperties": false,
+                "required": ["actor", "action", "target", "condition", "source_quote"],
+                "properties": {
+                  "actor": {"type": "string", "minLength": 1},
+                  "action": {"type": "string", "minLength": 1},
+                  "target": {"type": "string", "minLength": 1},
+                  "condition": {"type": ["string", "null"], "minLength": 1},
+                  "source_quote": {"type": "string", "minLength": 1}
+                }
+              }
             }
+            ,
+            "allOf": [
+              {
+                "if": {"properties": {"semantic_basis": {"const": "typed_source_atom"}}, "required": ["semantic_basis"]},
+                "then": {"required": ["source_context", "semantic_assertion"]}
+              },
+              {
+                "if": {"properties": {"semantic_basis": {"const": "legacy_unknown_dimensions"}}, "required": ["semantic_basis"]},
+                "then": {"not": {"anyOf": [{"required": ["source_context"]}, {"required": ["semantic_assertion"]}]}}
+              }
+            ]
           }
         }
       },

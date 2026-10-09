@@ -3976,7 +3976,13 @@ def _main(argv: list[str]) -> int:
             manifest["draft_scorecard_audit"] = str(apply_dir / "draft-scorecard-audit.json")
             manifest["draft_scoring_summary"] = {
                 key: (report.get("draft_scorecard") or {}).get(key)
-                for key in ("policy", "score", "item_count", "verified_count", "unmet_or_pending_count")
+                for key in (
+                    "policy", "score", "item_count", "diagnostic_item_count",
+                    "evaluation_unit_count", "typed_source_unit_count",
+                    "legacy_unknown_unit_count", "unique_source_obligation_count",
+                    "status_counts", "verified_count", "failed_count",
+                    "unverified_count", "pending_count",
+                )
             }
             application_failed = application_failed or report.get("review_draft_ready") is not True
         else:

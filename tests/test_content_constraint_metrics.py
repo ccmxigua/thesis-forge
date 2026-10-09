@@ -89,7 +89,7 @@ class ContentConstraintMetricTests(unittest.TestCase):
                          "verification": {"mode": "manual", "checks": ["核对建议数量，不作为强制范围。"]}}]
         mappings = {"abstract_body_zh": {"style_name": "AbstractBodyCN"},
                     "keywords_zh": {"style_name": "KeywordsFixture"}}
-        actuals, methods = _receipt_semantic_actuals(
+        actuals, methods, _, _ = _receipt_semantic_actuals(
             serialized, {"content_constraints": constraints}, mappings, requirements, {}, [], {},
         )
         receipts = build_property_receipts(requirements, mappings, actuals,
@@ -104,7 +104,7 @@ class ContentConstraintMetricTests(unittest.TestCase):
         # A real separator failure still produces failed technical receipts;
         # advice cannot excuse it or turn it into an author red marker.
         serialized.paragraphs[1].text = "关键词：甲，乙"
-        actuals, methods = _receipt_semantic_actuals(
+        actuals, methods, _, _ = _receipt_semantic_actuals(
             serialized, {"content_constraints": constraints}, mappings, requirements, {}, [], {},
         )
         receipts = build_property_receipts(requirements, mappings, actuals,

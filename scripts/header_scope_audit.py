@@ -192,6 +192,21 @@ def audit_scoped_headers(source_docx: str | Path, output_docx: str | Path,
                                  "section_index": index,
                                  "message": "The source anchor mapped to this section is missing or moved to another output section.",
                                  "evidence": {"source_anchor": anchor}})
+            if isinstance(anchor, Mapping) and expected_section.get("scope") not in {None, "unscoped", "unresolved"}:
+                first_content = next((
+                    item for item in output_paragraphs
+                    if int(item.get("section_index", 0)) == index
+                    and str(item.get("text", "")).strip()
+                ), None)
+                if first_content is None or _anchor_normal(str(first_content.get("text", ""))) != _anchor_normal(str(anchor.get("text", ""))):
+                    findings.append({
+                        "code": "header_scope_anchor_not_section_start", "severity": "error",
+                        "section_index": index,
+                        "message": "Serialized content precedes the source scope anchor in this section, so its header would appear outside the accepted scope.",
+                        "evidence": {"scope": expected_section.get("scope"),
+                                     "source_anchor": anchor,
+                                     "first_content": first_content},
+                    })
             if isinstance(anchor, Mapping):
                 matching_other_sections = [
                     other_index for other_index in range(1, len(output_document.sections) + 1)
@@ -353,6 +368,7 @@ def audit_scoped_headers(source_docx: str | Path, output_docx: str | Path,
         "format_spec_sha256": plan.get("format_spec_sha256"),
         "output_sha256": hashlib.sha256(output.read_bytes()).hexdigest(),
         "sections_checked": len(plan.get("sections", [])),
+        "scope_transforms": plan.get("scope_transforms", []),
         "sections": section_evidence,
         "findings": findings,
     }

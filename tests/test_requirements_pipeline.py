@@ -3069,7 +3069,10 @@ b&=2\notag
             self.assertTrue((td / "output.docx").is_file())
             self.assertTrue(report["review_draft_ready"])
             self.assertTrue(report["draft_scorecard_audit"]["valid"])
-            self.assertGreater(report["draft_scorecard"]["unmet_or_pending_count"], 0)
+            card = report["draft_scorecard"]
+            self.assertGreater(
+                card["failed_count"] + card["unverified_count"] + card["pending_count"], 0
+            )
             self.assertFalse(report["draft_scorecard"]["submission_ready"])
             self.assertTrue(any(item["kind"] == "capability" for item in report["draft_scorecard"]["entries"]))
             self.assertIn("自动核验评分", "\n".join(p.text for p in Document(td / "output.docx").paragraphs))

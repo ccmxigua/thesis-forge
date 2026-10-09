@@ -112,10 +112,10 @@ def test_discipline_serialization_and_receipt_detects_missing_or_swapped_values(
         "测试大学", "一级学科：交通运输工程", "二级学科：交通信息工程及控制"]
     spec = {"cover": definition}
     reqs = [{"role": "cover", "properties": {"fields": definition["fields"]}}]
-    actual, _ = apply_format_spec._receipt_semantic_actuals(serialized, spec, {}, reqs, {}, [], contract)
+    actual, _, _, _ = apply_format_spec._receipt_semantic_actuals(serialized, spec, {}, reqs, {}, [], contract)
     assert actual["cover"]["fields"] == definition["fields"]
     serialized.paragraphs[1].text = "一级学科：交通信息工程及控制"
-    actual, _ = apply_format_spec._receipt_semantic_actuals(serialized, spec, {}, reqs, {}, [], contract)
+    actual, _, _, _ = apply_format_spec._receipt_semantic_actuals(serialized, spec, {}, reqs, {}, [], contract)
     assert "fields" not in actual.get("cover", {})
 
 

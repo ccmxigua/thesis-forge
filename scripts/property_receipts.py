@@ -3,7 +3,9 @@ from __future__ import annotations
 
 from functools import lru_cache
 import copy
+import json
 from pathlib import Path
+import re
 from typing import Any, Callable
 
 try:
@@ -86,6 +88,43 @@ def equal(left: Any, right: Any) -> bool:
 
 def satisfies(property_path: str, actual: Any, expected: Any) -> bool:
     """Evaluate exact properties and monotone constraint properties."""
+    if property_path == "fields":
+        if not isinstance(actual, list) or not isinstance(expected, list):
+            return False
+
+        def label_key(value: Any) -> str | None:
+            if not isinstance(value, str):
+                return None
+            return re.sub(r"[\s:：]+$", "", value)
+
+        # A source requirement may define one field subset of a larger cover
+        # contract. Match by stable field identity, source binding and label;
+        # preserve source order and never accept a field by label alone.
+        cursor = 0
+        for required in expected:
+            if not isinstance(required, dict) or not isinstance(required.get("id"), str):
+                return False
+            match_index = None
+            for index in range(cursor, len(actual)):
+                observed = actual[index]
+                if not isinstance(observed, dict):
+                    continue
+                if (observed.get("id") != required.get("id")
+                        or observed.get("value_from") != required.get("value_from")
+                        or label_key(observed.get("label")) != label_key(required.get("label"))):
+                    continue
+                if (required.get("display_policy") is not None
+                        and observed.get("display_policy") != required.get("display_policy")):
+                    continue
+                if (required.get("label_display_policy") is not None
+                        and observed.get("label_display_policy") != required.get("label_display_policy")):
+                    continue
+                match_index = index
+                break
+            if match_index is None:
+                return False
+            cursor = match_index + 1
+        return True
     leaf = property_path.rsplit(".", 1)[-1]
     lower_bounds = {"min_count", "min_chars", "min_words"}
     upper_bounds = {"max_count", "max_chars", "max_words", "max_item_chars"}
@@ -133,6 +172,8 @@ def build_property_receipts(
     applicable_roles: set[str] | None = None,
     verification_methods: dict[str, str] | None = None,
     verification_method: str = "serialized_docx_style",
+    actual_by_requirement: dict[str, dict[str, Any]] | None = None,
+    role_observability: dict[str, dict[str, dict[str, Any]]] | None = None,
 ) -> list[dict[str, Any]]:
     """Create one receipt per declared requirement property.
 
@@ -143,6 +184,20 @@ def build_property_receipts(
     receipts: list[dict[str, Any]] = []
     role_results = role_results or {}
     verification_methods = verification_methods or {}
+    actual_by_requirement = actual_by_requirement or {}
+    role_observability = role_observability or {}
+    cover_field_requirements = [
+        item for item in requirements
+        if isinstance(item, dict) and item.get("role") == "cover"
+        and isinstance(item.get("properties"), dict)
+        and isinstance(item["properties"].get("fields"), list)
+    ]
+    cover_field_signatures = {
+        json.dumps(item["properties"]["fields"], ensure_ascii=False, sort_keys=True,
+                   separators=(",", ":"))
+        for item in cover_field_requirements
+    }
+    ambiguous_cover_scope = len(cover_field_signatures) > 1
     for requirement in requirements:
         requirement_id = str(requirement.get("id") or "")
         role = str(requirement.get("role") or "")
@@ -163,7 +218,13 @@ def build_property_receipts(
         # behavior when applicability is omitted.
         if applicable_roles is not None and role not in applicable_roles:
             continue
-        actual = flatten(actual_by_role.get(role, {}))
+        has_requirement_actual = requirement_id in actual_by_requirement
+        requirement_actual = actual_by_requirement.get(requirement_id)
+        selected_actual = (
+            requirement_actual if has_requirement_actual and isinstance(requirement_actual, dict)
+            else actual_by_role.get(role, {})
+        )
+        actual = flatten(selected_actual)
         mapping = mappings.get(role) or {}
         target_locator = (
             f"style:{mapping.get('style_name')}"
@@ -171,6 +232,7 @@ def build_property_receipts(
         )
         for index, property_path, expected_value in _execution_property_items(role, properties):
             actual_value = actual.get(property_path)
+            status_reason = None
             if property_path == "__requirement__":
                 actual_value = bool(role_results.get(role))
             if (role not in actual_by_role
@@ -181,6 +243,23 @@ def build_property_receipts(
                 status = "verified"
             else:
                 status = "failed"
+            # Multiple source cover field lists can describe distinct cover
+            # instances. A role-wide list without an instance binding cannot
+            # prove that a differing list is missing from the selected page.
+            # Keep the discrepancy visible as unknown until an exact instance
+            # map is supplied; a single unambiguous cover remains fail-closed.
+            if (role == "cover" and property_path == "fields"
+                    and ambiguous_cover_scope
+                    and not requirement.get("cover_instance_id")
+                    and not requirement.get("field_instance_ids")
+                    and not has_requirement_actual
+                    and status == "failed"):
+                status = "unverified"
+                status_reason = "source cover field set has no instance-specific binding"
+            observation = role_observability.get(role, {}).get(property_path)
+            if isinstance(observation, dict) and observation.get("observed") is False:
+                status = "unverified"
+                status_reason = str(observation.get("reason") or "property has no observed content")
             receipts.append({
                 "receipt_id": f"PR-{requirement_id}-{index:04d}",
                 "requirement_id": requirement_id,
@@ -191,7 +270,12 @@ def build_property_receipts(
                 "expected": expected_value,
                 "actual": actual_value,
                 "status": status,
-                "verification_method": verification_methods.get(role, verification_method),
+                **({"status_reason": status_reason} if status_reason else {}),
+                "verification_method": (
+                    observation.get("verification_method")
+                    if isinstance(observation, dict) and observation.get("verification_method")
+                    else verification_methods.get(role, verification_method)
+                ),
                 "serialized_docx_sha256": serialized_docx_sha256,
                 **({"evaluation_units": copy.deepcopy(requirement["evaluation_units"])}
                    if "evaluation_units" in requirement else {}),

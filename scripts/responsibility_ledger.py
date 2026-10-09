@@ -86,6 +86,20 @@ def requirement_evaluation_units(review_map: dict, clauses: dict, clause_ids: li
                     "route": route_for_obligation(review.get("classification"), atom.get("status")),
                     "source_sha256": source_sha256, "source_span_sha256": sha256_json(span),
                     "semantic_basis": "typed_source_atom" if explicit else "legacy_unknown_dimensions"}
+            if explicit:
+                # Keep the exact source and semantic projection available to
+                # downstream scope inventories. These fields are recomputed
+                # from the accepted ledger, never trusted from a scorecard.
+                unit["source_context"] = {
+                    "source_sha256": source_sha256,
+                    "clause_id": cid,
+                    "span": copy.deepcopy(span),
+                    "evidence_ids": sorted(clause.get("evidence_ids") or []),
+                }
+                unit["semantic_assertion"] = {
+                    key: copy.deepcopy(atom.get(key))
+                    for key in ("actor", "action", "target", "condition", "source_quote")
+                }
             key = unit["evaluation_unit_id"]
             if key in units and units[key] != unit:
                 raise ValueError("conflicting evaluation unit identity")

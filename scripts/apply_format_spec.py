@@ -20,7 +20,7 @@ from docx.table import Table, _Cell
 from docx.enum.section import WD_ORIENT
 from docx.enum.style import WD_STYLE_TYPE
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_BREAK, WD_LINE_SPACING
-from docx.oxml import OxmlElement
+from docx.oxml import OxmlElement, parse_xml
 from docx.oxml.ns import qn
 from docx.shared import Mm, Pt, RGBColor
 from docx.text.paragraph import Paragraph
@@ -43,7 +43,10 @@ from docx_semantics import (
     iter_document_nodes,
 )
 from format_spec_validation import load_and_validate
-from header_scope import compile_header_scope_plan, compile_header_scope_rules
+from header_scope import (
+    compile_header_scope_plan, compile_header_scope_rules,
+    prepare_header_scope_boundaries,
+)
 from header_scope_audit import audit_scoped_headers, build_header_scope_review_ledger
 from semantic_contract import evidence_payload, sha256_json, strict_json_loads, strict_json_read
 from source_literal_binding import (
@@ -1320,7 +1323,86 @@ def inherited_style_value(style, getter):
     return None
 
 
-def style_snapshot(style) -> dict[str, Any]:
+def _theme_latin_typeface(doc: Document | None, theme_reference: str) -> str | None:
+    """Resolve Word's ascii/hAnsi theme token against the package theme part."""
+    if doc is None or not isinstance(theme_reference, str):
+        return None
+    if theme_reference.startswith("major"):
+        scheme = "majorFont"
+    elif theme_reference.startswith("minor"):
+        scheme = "minorFont"
+    else:
+        return None
+    # python-docx and OOXML Transitional packages use the package relationship
+    # URI below. Match the relationship suffix so other supported OOXML
+    # namespaces are accepted without relying on a non-standard URI.
+    for relationship in doc.part.rels.values():
+        if not relationship.reltype.endswith("/theme"):
+            continue
+        try:
+            root = parse_xml(relationship.target_part.blob)
+            node = root.find(
+                ".//{http://schemas.openxmlformats.org/drawingml/2006/main}"
+                + scheme
+                + "/{http://schemas.openxmlformats.org/drawingml/2006/main}latin"
+            )
+        except (AttributeError, KeyError, TypeError):
+            return None
+        return node.get("typeface") if node is not None else None
+    return None
+
+
+def _rfonts_latin_slot(rfonts, slot: str, doc: Document | None) -> tuple[bool, str | None]:
+    if rfonts is None:
+        return False, None
+    direct_key = qn("w:" + slot)
+    theme_key = qn("w:" + slot + "Theme")
+    if theme_key in rfonts.attrib:
+        return True, _theme_latin_typeface(doc, rfonts.get(theme_key))
+    if direct_key in rfonts.attrib:
+        return True, rfonts.get(direct_key)
+    return False, None
+
+
+def effective_style_latin_font(style, doc: Document | None) -> str | None:
+    """Resolve ascii and hAnsi through style inheritance, docDefaults and theme.
+
+    A role style with no rFonts is not fontless: Word falls back to document
+    defaults and often a theme. Return a single Latin font only when both
+    script slots resolve to the same concrete typeface.
+    """
+    resolved: list[str | None] = []
+    for slot in ("ascii", "hAnsi"):
+        seen: set[str] = set()
+        current = style
+        found = False
+        while current is not None and current.style_id not in seen:
+            seen.add(current.style_id)
+            rpr = current.element.rPr
+            rfonts = rpr.rFonts if rpr is not None else None
+            declared, value = _rfonts_latin_slot(rfonts, slot, doc)
+            if declared:
+                resolved.append(value)
+                found = True
+                break
+            current = current.base_style
+        if found:
+            continue
+        defaults = None
+        if doc is not None:
+            style_root = doc.styles.element
+            doc_defaults = style_root.find(qn("w:docDefaults"))
+            default_rpr = doc_defaults.find(qn("w:rPrDefault")) if doc_defaults is not None else None
+            default_rpr = default_rpr.find(qn("w:rPr")) if default_rpr is not None else None
+            defaults = default_rpr.rFonts if default_rpr is not None else None
+        declared, value = _rfonts_latin_slot(defaults, slot, doc)
+        resolved.append(value if declared else None)
+    if len(resolved) == 2 and resolved[0] and resolved[0] == resolved[1]:
+        return resolved[0]
+    return None
+
+
+def style_snapshot(style, doc: Document | None = None) -> dict[str, Any]:
     reverse_align = {value: key for key, value in ALIGN.items()}
     reverse_line = {value: key for key, value in LINE.items()}
     def cjk(item):
@@ -1348,6 +1430,10 @@ def style_snapshot(style) -> dict[str, Any]:
             line_spacing = {"type": line_type, "value": float(spacing), "unit": "multiple"}
     points = lambda value: round(value.pt, 3) if value is not None else None
     return {
+        # A theme font is a conditional fallback for Latin glyphs, not a
+        # direct style property that can be compared against every role when
+        # its text contains no Latin characters. Concrete serialized Latin
+        # runs are resolved separately by _serialized_run_latin_font().
         "font": {"latin": inherited_style_value(style, lambda item: item.font.name),
                  "cjk": inherited_style_value(style, cjk),
                  "size_pt": round(size.pt, 3) if size else None,
@@ -1407,7 +1493,7 @@ def merge_role_style_defaults(defaults: dict[str, Any], requirement: dict[str, A
 def official_role_defaults(docx: Path, mappings: dict[str, str]) -> dict[str, dict[str, Any]]:
     doc = Document(docx)
     names = style_names(doc)
-    return {role: style_snapshot(doc.styles[name]) for role, name in mappings.items() if name in names}
+    return {role: style_snapshot(doc.styles[name], doc) for role, name in mappings.items() if name in names}
 
 
 def set_font(style, spec: dict[str, Any]) -> None:
@@ -3934,6 +4020,28 @@ def _receipt_keyword_separator(text: str, language: str, values: list[str]) -> s
     return None
 
 
+def _serialized_run_latin_font(run, paragraph: Paragraph, doc: Document) -> Any:
+    """Resolve a Latin run's concrete font from run/character/paragraph styles."""
+    run_rpr = run._r.rPr
+    run_fonts = run_rpr.rFonts if run_rpr is not None else None
+    character_style = run.style
+    character_fonts = None
+    if character_style is not None and character_style.type == WD_STYLE_TYPE.CHARACTER:
+        style_rpr = character_style.element.rPr
+        character_fonts = style_rpr.rFonts if style_rpr is not None else None
+    values = []
+    for slot in ("ascii", "hAnsi"):
+        declared, value = _rfonts_latin_slot(run_fonts, slot, doc)
+        if not declared:
+            declared, value = _rfonts_latin_slot(character_fonts, slot, doc)
+        if not declared:
+            value = effective_style_latin_font(paragraph.style, doc)
+        if not isinstance(value, str) or not value:
+            return None
+        values.append(value)
+    return values[0] if values[0] == values[1] else {"ascii": values[0], "hAnsi": values[1]}
+
+
 def _receipt_semantic_actuals(
     doc: Document,
     spec: dict[str, Any],
@@ -3942,7 +4050,7 @@ def _receipt_semantic_actuals(
     applied_section_plan: dict[str, Any],
     section_findings: list[dict[str, Any]],
     cover_contract: dict[str, Any],
-) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
+) -> tuple[dict[str, dict[str, Any]], dict[str, str], dict[str, dict[str, dict[str, Any]]], dict[str, Any]]:
     """Build post-serialization evidence for non-style requirement properties.
 
     The old receipt builder only had shared-style snapshots.  That was sound
@@ -3957,6 +4065,8 @@ def _receipt_semantic_actuals(
     requested = _receipt_requested_paths(requirements)
     actual: dict[str, dict[str, Any]] = {}
     methods: dict[str, str] = {}
+    role_observability: dict[str, dict[str, dict[str, Any]]] = {}
+    role_font_actuals: dict[str, Any] = {}
 
     def put(role: str, path: str, value: Any, method: str = "serialized_docx_semantic") -> None:
         if (role, path) not in requested:
@@ -4096,9 +4206,11 @@ def _receipt_semantic_actuals(
                 # The requirement may intentionally list a subset of the
                 # executable cover fields (for example, title_en is separately
                 # tracked as a structural role).  Validate that subset only.
-                field_expected = requested.get(("cover", "fields"))
-                if field_expected is not None:
-                    put("cover", "fields", field_expected)
+                # This is the exact generated cover field set just checked
+                # against serialized text. Do not reuse the first requirement's
+                # field list as an apparent actual for every source cover area.
+                if isinstance(cover.get("fields"), list):
+                    put("cover", "fields", copy.deepcopy(cover["fields"]))
             placeholder = cover.get("missing_value_placeholder")
             if placeholder == cover_contract.get("missing_value_placeholder", placeholder):
                 put("cover", "missing_value_placeholder", placeholder)
@@ -4148,7 +4260,57 @@ def _receipt_semantic_actuals(
         if profile.get("has_appendices") is True:
             put("appendices", "required_when_profile_has_appendices", True)
 
-    return actual, methods
+    font_roles = {
+        str(requirement.get("role"))
+        for requirement in requirements
+        if isinstance(requirement, dict)
+        and isinstance(requirement.get("properties"), dict)
+        and "font.latin" in flatten(requirement["properties"])
+        and requirement.get("role")
+    }
+    for role in font_roles:
+        paragraphs = _role_paragraphs(doc, role, mappings)
+        latin_runs = [
+            (paragraph, run) for paragraph in paragraphs for run in paragraph.runs
+            if re.search(r"[A-Za-z]", run.text or "")
+        ]
+        if not latin_runs:
+            style = paragraphs[0].style if paragraphs else None
+            if style is None:
+                style_name = (mappings.get(role) or {}).get("style_name")
+                try:
+                    style = doc.styles[style_name] if style_name else None
+                except KeyError:
+                    style = None
+            latent_fallback = effective_style_latin_font(style, doc) if style is not None else None
+            if latent_fallback is not None:
+                role_font_actuals[role] = latent_fallback
+            role_observability.setdefault(role, {})["font.latin"] = {
+                "observed": False,
+                "reason": (
+                    "no Latin letters occur in this role's serialized text; "
+                    + (f"latent inherited fallback is {latent_fallback}, " if latent_fallback else "inherited fallback is unresolved, ")
+                    + "so style fallback alone does not establish a current text mismatch"
+                ),
+                "verification_method": "serialized_docx_role_text_inventory",
+            }
+            continue
+        observed_fonts = [_serialized_run_latin_font(run, paragraph, doc)
+                          for paragraph, run in latin_runs]
+        if any(value is None for value in observed_fonts):
+            role_observability.setdefault(role, {})["font.latin"] = {
+                "observed": False,
+                "reason": "at least one Latin run has no resolvable serialized font",
+                "verification_method": "serialized_docx_role_latin_runs",
+            }
+            continue
+        distinct = {json.dumps(value, ensure_ascii=False, sort_keys=True) for value in observed_fonts}
+        role_font_actuals[role] = observed_fonts[0] if len(distinct) == 1 else observed_fonts
+        role_observability.setdefault(role, {})["font.latin"] = {
+            "observed": True,
+            "verification_method": "serialized_docx_role_latin_runs",
+        }
+    return actual, methods, role_observability, role_font_actuals
 
 
 def _set_equation_tabs(paragraph: Paragraph, center: int, right: int) -> None:
@@ -4244,6 +4406,8 @@ def main(argv: list[str]) -> int:
                    help="opt-in supported-subset preview: continue past unresolved requirement semantics while keeping submission_ready false")
     p.add_argument("--manual-review-items", type=Path,
                    help="run-bound manual-review ledger used to append red draft markers")
+    p.add_argument("--obligation-scope-inventory", type=Path,
+                   help="explicit source-bound object/condition inventory for scoped coverage; incomplete legacy scope stays unscored")
     p.add_argument("--pipeline-manifest", type=Path,
                    help="current pipeline invocation manifest binding the manual-review input ledger")
     p.add_argument("--source-clauses", type=Path,
@@ -4293,6 +4457,21 @@ def main(argv: list[str]) -> int:
         allow_missing_required_metadata=args.output_policy == "review_draft",
     )
     if validation_errors: raise SystemExit("invalid format spec:\n" + "\n".join(validation_errors))
+    obligation_scope_inventory = None
+    obligation_scope_inventory_sha256 = None
+    if args.obligation_scope_inventory:
+        try:
+            obligation_scope_inventory = load_json(args.obligation_scope_inventory)
+            obligation_scope_inventory_bytes = args.obligation_scope_inventory.read_bytes()
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            raise SystemExit(f"cannot read obligation scope inventory: {exc}") from exc
+        scope_schema_errors = load_and_validate(
+            obligation_scope_inventory,
+            Path(__file__).resolve().parents[1] / "schema" / "source-obligation-scope-inventory.schema.json",
+        )
+        if scope_schema_errors:
+            raise SystemExit("invalid obligation scope inventory schema:\n" + "\n".join(scope_schema_errors))
+        obligation_scope_inventory_sha256 = hashlib.sha256(obligation_scope_inventory_bytes).hexdigest()
     pipeline_manifest = None
     if args.pipeline_manifest:
         try:
@@ -4510,9 +4689,13 @@ def main(argv: list[str]) -> int:
             + "\n".join(evaluation_unit_errors)
     )
     doc = Document(args.input)
+    prepared_header_layout = prepare_header_scope_boundaries(doc, spec)
     original_source_paragraphs = _content_instance_paragraphs(doc)
     args.out_dir.mkdir(parents=True, exist_ok=True)
-    header_scope_plan = compile_header_scope_plan(args.input, spec, args.format_spec)
+    header_scope_plan = compile_header_scope_plan(
+        args.input, spec, args.format_spec,
+        document=doc, prepared_layout=prepared_header_layout,
+    )
     header_scope_schema = Path(__file__).resolve().parents[1] / "schema" / "header-scope-plan.schema.json"
     header_scope_schema_errors = load_and_validate(header_scope_plan, header_scope_schema)
     if header_scope_schema_errors:
@@ -4564,14 +4747,14 @@ def main(argv: list[str]) -> int:
                     scoped.base_style = doc.styles[source_name]
                     name = scoped_name; was_created = True
         claimed[name] = role; style = doc.styles[name]
-        before = style_snapshot(doc.styles[source_name]); expected = normalized_expected(style, role_spec)
+        before = style_snapshot(doc.styles[source_name], doc); expected = normalized_expected(style, role_spec)
         for item in diff_expected(before, expected): conflicts.append({"type": "template_requirement_conflict", "role": role, "style": source_name, **item})
         if role_spec.get("font"): set_font(style, role_spec["font"])
         if role_spec.get("paragraph"): set_paragraph(style, role_spec["paragraph"])
         mappings[role] = {"style_name": name, "source_style_name": source_name, "created": was_created,
                           "structural_fallback": structural_fallback,
                           "scope_start_section": preliminary_body_start if role == "body_text" else 0,
-                          "before": before, "after": style_snapshot(style)}
+                          "before": before, "after": style_snapshot(style, doc)}
         if was_created: created.append(name)
     applied_paragraphs = {}
     execution_receipts: list[dict[str, Any]] = []
@@ -4916,7 +5099,7 @@ def main(argv: list[str]) -> int:
           "valid": all(item["serialized"] for item in receipt_audit), "receipts": receipt_audit})
     for role, mapping in mappings.items():
         style = check.styles[mapping["style_name"]]
-        actual = style_snapshot(style); expected = normalized_expected(style, effective_roles[role])
+        actual = style_snapshot(style, check); expected = normalized_expected(style, effective_roles[role])
         for item in diff_expected(actual, expected):
             findings.append({"role": role, "style": mapping["style_name"], **item})
     coverage = role_coverage(check, spec.get("roles", {}), mappings)
@@ -5194,7 +5377,7 @@ def main(argv: list[str]) -> int:
     actual_by_role = {}
     for role, mapping in mappings.items():
         try:
-            actual_by_role[role] = style_snapshot(check.styles[mapping["style_name"]])
+            actual_by_role[role] = style_snapshot(check.styles[mapping["style_name"]], check)
         except KeyError:
             actual_by_role[role] = {}
     for requirement in spec.get("requirements", []):
@@ -5210,12 +5393,14 @@ def main(argv: list[str]) -> int:
             except KeyError:
                 pass
         receipt_requirements.append(item)
-    semantic_actuals, verification_methods = _receipt_semantic_actuals(
+    semantic_actuals, verification_methods, role_observability, role_font_actuals = _receipt_semantic_actuals(
         check, spec, mappings, receipt_requirements, applied_section_plan,
         section_findings, cover_contract,
     )
     for role, evidence in semantic_actuals.items():
         actual_by_role.setdefault(role, {}).update(evidence)
+    for role, observed_font in role_font_actuals.items():
+        actual_by_role.setdefault(role, {}).setdefault("font", {})["latin"] = observed_font
     # Role-level structural receipts are derived from the same post-serialization
     # findings used by clause finalization.  Compute the role result before
     # building receipts; otherwise ``__requirement__`` receipts default to
@@ -5249,6 +5434,7 @@ def main(argv: list[str]) -> int:
         serialized_docx_sha256=serialized_docx_sha256,
         role_results=role_results,
         verification_methods=verification_methods,
+        role_observability=role_observability,
         applicable_roles={
             item["role"] for item in coverage
             if item.get("status") == "present" or item.get("expectation") == "required"
@@ -5306,6 +5492,8 @@ def main(argv: list[str]) -> int:
             manual_review_document_ledger["binding"], property_receipt_audit,
             manual_review_document_ledger["items"], raw_validation_findings, scoring_capability_findings,
             evaluation_units_by_requirement=expected_evaluation_units_by_requirement,
+            obligation_scope_inventory=obligation_scope_inventory,
+            expected_docx_sha256=serialized_docx_sha256,
         )
         append_scorecard(check, draft_scorecard)
         staged_output = sibling_temp(args.output)
@@ -5346,6 +5534,7 @@ def main(argv: list[str]) -> int:
             serialized_docx_sha256=serialized_docx_sha256,
             role_results=role_results,
             verification_methods=verification_methods,
+            role_observability=role_observability,
             applicable_roles={
                 item["role"] for item in coverage
                 if item.get("status") == "present" or item.get("expectation") == "required"
@@ -5366,12 +5555,15 @@ def main(argv: list[str]) -> int:
             manual_review_document_ledger["binding"], property_receipt_audit,
             manual_review_document_ledger["items"], raw_validation_findings, scoring_capability_findings,
             evaluation_units_by_requirement=expected_evaluation_units_by_requirement,
+            obligation_scope_inventory=obligation_scope_inventory,
+            expected_docx_sha256=serialized_docx_sha256,
         )
         draft_scorecard_audit = audit_scorecard(args.output, draft_scorecard)
         if not draft_scorecard_audit["valid"]:
             raise SystemExit("final scorecard does not reproduce from current receipts")
         write("draft-scorecard.json", draft_scorecard)
         write("draft-scorecard-audit.json", draft_scorecard_audit)
+        write("obligation-assessment.json", draft_scorecard["obligation_assessment"])
         property_receipt_audit["review_draft_failed_or_unverified_ids"] = [
             str(item.get("receipt_id"))
             for item in property_receipts
@@ -5406,7 +5598,16 @@ def main(argv: list[str]) -> int:
     compliance = compliance_report(verified_clause_records, compliance_mode, "validation")
     submission_audit = audit_submission_docx(
         args.output, spec, render_report, source_docx=args.input,
+        require_obligation_assessment=bool(spec.get("semantic_review_provenance") or spec.get("clause_compliance")),
+        obligation_scope_inventory=obligation_scope_inventory,
+        evaluation_units_by_requirement=expected_evaluation_units_by_requirement,
+        property_receipt_audit=property_receipt_audit,
+        obligation_binding=(
+            manual_review_document_ledger.get("binding", {})
+            if isinstance(manual_review_document_ledger, dict) else {}
+        ),
     )
+    write("obligation-assessment-audit.json", submission_audit.get("obligation_assessment_gate", {}))
     cover_pending_fields = cover_changes.get("metadata_pending_fields", [])
     metadata_pending = bool(cover_pending_fields)
     content_pending = bool(pending_content)
@@ -5467,6 +5668,12 @@ def main(argv: list[str]) -> int:
               "review_draft_ready": review_draft_ready,
               "draft_scorecard": draft_scorecard if args.output_policy == "review_draft" else None,
               "draft_scorecard_audit": draft_scorecard_audit if args.output_policy == "review_draft" else None,
+              "obligation_assessment": (
+                  draft_scorecard.get("obligation_assessment")
+                  if args.output_policy == "review_draft" and isinstance(draft_scorecard, dict) else None
+              ),
+              "obligation_scope_inventory_sha256": obligation_scope_inventory_sha256,
+              "obligation_assessment_gate": submission_audit.get("obligation_assessment_gate"),
               "scoring_findings": raw_validation_findings if args.output_policy == "review_draft" else [],
               "review_draft_package_valid": bool(
                   submission_audit.get("evidence", {}).get("opc_package_valid") is True

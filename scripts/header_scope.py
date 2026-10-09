@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from docx import Document
+from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 
 
@@ -228,6 +229,156 @@ def _section_paragraphs(doc: Any) -> list[list[Any]]:
     return sections
 
 
+def prepare_header_scope_boundaries(doc: Any, spec: Mapping[str, Any]) -> dict[str, Any]:
+    """Isolate accepted fixed header scopes from preceding unrelated content.
+
+    A Word header applies to the whole section. When an accepted TOC or
+    appendix anchor starts inside a mixed source section, applying that header
+    would leak it onto earlier pages. Add a next-page section boundary at the
+    preceding paragraph, without changing source text. The caller keeps the
+    original source bytes and records this deterministic layout transform.
+    """
+    rules, _ = compile_header_scope_rules(spec)
+    rules_by_scope = {str(item["scope"]): item for item in rules}
+    original_section_count = len(doc.sections)
+    source_sections = _section_paragraphs(doc)
+    findings: list[dict[str, Any]] = []
+    if len(source_sections) != original_section_count:
+        findings.append({
+            "code": "header_scope_section_parse_failed", "severity": "error",
+            "message": "Could not map source paragraphs before isolating header scopes.",
+        })
+        source_sections = [[] for _ in range(original_section_count)]
+
+    candidates: list[tuple[int, int, Any, str, dict[str, Any]]] = []
+    toc_rule = rules_by_scope.get("toc")
+    appendix_rule = rules_by_scope.get("appendix")
+    toc_count = 0
+    for source_section_index, paragraphs in enumerate(source_sections, 1):
+        nonblank = [(i, p) for i, p in enumerate(paragraphs) if str(p.text).strip()]
+        toc_anchors = [(i, p) for i, p in nonblank if _toc_heading(p)]
+        appendix_anchors = [
+            (i, p) for i, p in nonblank
+            if _heading1(p) and _appendix_heading(str(p.text))
+        ]
+        if toc_rule:
+            toc_count += len(toc_anchors)
+            if len(toc_anchors) > 1:
+                findings.append({
+                    "code": "header_scope_toc_anchor_ambiguous", "severity": "error",
+                    "section_index": source_section_index,
+                    "message": "The source section contains more than one table-of-contents title anchor.",
+                    "evidence": {"paragraphs": [p.text for _, p in toc_anchors]},
+                })
+            elif toc_anchors:
+                anchor_index, anchor = toc_anchors[0]
+                if any(str(p.text).strip() for paragraph_index, p in nonblank if paragraph_index < anchor_index):
+                    candidates.append((source_section_index, anchor_index, anchor, "toc", toc_rule))
+        if appendix_rule and appendix_anchors:
+            anchor_index, anchor = appendix_anchors[0]
+            if any(str(p.text).strip() for paragraph_index, p in nonblank if paragraph_index < anchor_index):
+                candidates.append((source_section_index, anchor_index, anchor, "appendix", appendix_rule))
+    if toc_rule and toc_count > 1:
+        findings.append({
+            "code": "header_scope_toc_anchor_ambiguous", "severity": "error",
+            "message": "More than one source table-of-contents title matches the accepted TOC header rule.",
+            "evidence": {"matched_anchor_count": toc_count},
+        })
+
+    # Insert from the end so earlier paragraph and section indices remain stable.
+    candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
+    body = doc._body._element
+    inserted_by_source_section: dict[int, int] = {}
+    transforms: list[dict[str, Any]] = []
+    for source_section_index, anchor_index, anchor, scope, rule in candidates:
+        preceding = [
+            str(paragraph.text).strip()
+            for paragraph_index, paragraph in enumerate(source_sections[source_section_index - 1])
+            if paragraph_index < anchor_index and str(paragraph.text).strip()
+        ]
+        if not preceding:
+            continue
+        element = anchor._p
+        if element.getparent() is not body:
+            findings.append({
+                "code": "header_scope_boundary_unsupported_container", "severity": "error",
+                "section_index": source_section_index, "scope": scope,
+                "message": "A mixed-scope header anchor is inside a table and cannot be isolated with a safe body-level section boundary.",
+                "evidence": {"anchor": str(anchor.text), "paragraph_index": anchor_index},
+            })
+            continue
+        children = list(body)
+        try:
+            target_position = children.index(element)
+        except ValueError:
+            findings.append({
+                "code": "header_scope_boundary_anchor_unresolved", "severity": "error",
+                "section_index": source_section_index, "scope": scope,
+                "message": "The source scope anchor could not be resolved to a body-level location.",
+                "evidence": {"anchor": str(anchor.text), "paragraph_index": anchor_index},
+            })
+            continue
+        if target_position == 0 or children[target_position - 1].tag != qn("w:p"):
+            findings.append({
+                "code": "header_scope_boundary_predecessor_unsupported", "severity": "error",
+                "section_index": source_section_index, "scope": scope,
+                "message": "The source scope anchor is not preceded by a direct body paragraph that can safely carry a section boundary.",
+                "evidence": {"anchor": str(anchor.text), "paragraph_index": anchor_index},
+            })
+            continue
+        predecessor = children[target_position - 1]
+        ppr = predecessor.find(qn("w:pPr"))
+        if ppr is None:
+            ppr = OxmlElement("w:pPr")
+            predecessor.insert(0, ppr)
+        if ppr.find(qn("w:sectPr")) is not None:
+            findings.append({
+                "code": "header_scope_boundary_already_present", "severity": "error",
+                "section_index": source_section_index, "scope": scope,
+                "message": "A pre-existing section boundary conflicts with the expected source scope split.",
+                "evidence": {"anchor": str(anchor.text), "paragraph_index": anchor_index},
+            })
+            continue
+        source_section = doc.sections[source_section_index - 1]
+        sectpr = copy.deepcopy(source_section._sectPr)
+        section_type = sectpr.find(qn("w:type"))
+        if section_type is None:
+            section_type = OxmlElement("w:type")
+            page_size = sectpr.find(qn("w:pgSz"))
+            if page_size is None:
+                sectpr.append(section_type)
+            else:
+                sectpr.insert(list(sectpr).index(page_size), section_type)
+        section_type.set(qn("w:val"), "nextPage")
+        ppr.append(sectpr)
+        inserted_by_source_section[source_section_index] = inserted_by_source_section.get(source_section_index, 0) + 1
+        previous_index = max(0, anchor_index - 1)
+        previous_text = str(source_sections[source_section_index - 1][previous_index].text) if anchor_index else ""
+        transforms.append({
+            "kind": "insert_next_page_section_boundary_before_anchor",
+            "scope": scope,
+            "source_section_index": source_section_index,
+            "source_anchor": _source_anchor(anchor, anchor_index),
+            "predecessor_sha256": _sha256_text(previous_text),
+            "requirement_ids": list(rule.get("requirement_ids", [])),
+            "clause_ids": list(rule.get("clause_ids", [])),
+            "evidence_ids": list(rule.get("evidence_ids", [])),
+        })
+
+    source_section_indices: list[int] = []
+    for source_index in range(1, original_section_count + 1):
+        source_section_indices.extend([source_index] * (1 + inserted_by_source_section.get(source_index, 0)))
+    transforms.sort(key=lambda item: (
+        int(item["source_section_index"]),
+        int(item["source_anchor"]["paragraph_index"]),
+    ))
+    return {
+        "source_section_indices": source_section_indices,
+        "scope_transforms": transforms,
+        "findings": findings,
+    }
+
+
 def _story_details(story: Any) -> dict[str, Any]:
     text = "\n".join(paragraph.text for paragraph in story.paragraphs)
     instructions: list[str] = []
@@ -267,7 +418,9 @@ def _source_anchor(paragraph: Any, paragraph_index: int) -> dict[str, Any]:
 
 
 def compile_header_scope_plan(source_docx: str | Path, spec: Mapping[str, Any],
-                             format_spec_path: str | Path | None = None) -> dict[str, Any]:
+                             format_spec_path: str | Path | None = None,
+                             *, document: Any | None = None,
+                             prepared_layout: Mapping[str, Any] | None = None) -> dict[str, Any]:
     """Resolve compiled header scope rules against the actual input DOCX."""
     path = Path(source_docx)
     source_bytes = path.read_bytes()
@@ -277,13 +430,15 @@ def compile_header_scope_plan(source_docx: str | Path, spec: Mapping[str, Any],
         else json.dumps(dict(spec), ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     )
     rules, findings = compile_header_scope_rules(spec)
-    doc = Document(path)
+    doc = document if document is not None else Document(path)
+    layout = dict(prepared_layout) if prepared_layout is not None else prepare_header_scope_boundaries(doc, spec)
+    findings.extend(copy.deepcopy(layout.get("findings", [])))
     if not rules:
         return {
-            "schema_version": "1.0", "valid": not any(x.get("severity") == "error" for x in findings),
+            "schema_version": "1.1", "valid": not any(x.get("severity") == "error" for x in findings),
             "scoped": False, "source_sha256": source_sha,
             "format_spec_sha256": hashlib.sha256(spec_bytes).hexdigest(),
-            "scope_rules": [], "sections": [], "findings": findings,
+            "scope_rules": [], "sections": [], "scope_transforms": [], "findings": findings,
         }
 
     sections = _section_paragraphs(doc)
@@ -291,6 +446,11 @@ def compile_header_scope_plan(source_docx: str | Path, spec: Mapping[str, Any],
         findings.append({"code": "header_scope_section_parse_failed", "severity": "error",
                          "message": "Could not map source paragraphs to every DOCX section."})
         sections = [[] for _ in doc.sections]
+    source_section_indices = layout.get("source_section_indices", [])
+    if len(source_section_indices) != len(sections):
+        findings.append({"code": "header_scope_source_section_map_mismatch", "severity": "error",
+                         "message": "The deterministic source layout transform does not map every prepared section back to the immutable source."})
+        source_section_indices = list(range(1, len(sections) + 1))
     rules_by_scope = {str(item["scope"]): item for item in rules}
     toc_locations: list[tuple[int, Any, int]] = []
     appendix_locations: list[tuple[int, Any, int]] = []
@@ -433,6 +593,19 @@ def compile_header_scope_plan(source_docx: str | Path, spec: Mapping[str, Any],
             error = True
             scope = "unresolved"
 
+        if source_anchor is not None and scope in {"toc", "chapter", "appendix", "source_heading"}:
+            anchor_index = int(source_anchor.get("paragraph_index", 0))
+            if any(i < anchor_index and str(paragraph.text).strip() for i, paragraph in nonblank):
+                findings.append({
+                    "code": "header_scope_anchor_not_section_start", "severity": "error",
+                    "section_index": section_index, "scope": scope,
+                    "message": "A scoped header anchor is preceded by unrelated content in the same section, so that header would appear outside its source scope.",
+                    "evidence": {"source_anchor": source_anchor,
+                                 "preceding_paragraphs": [str(p.text) for i, p in nonblank if i < anchor_index]},
+                })
+                error = True
+                scope = "unresolved"
+
         variant_contracts: dict[str, dict[str, Any]] = {}
         for variant, is_active in active.items():
             source_story = _story_details(getattr(section, f"{variant}_page_header") if variant == "first" else
@@ -454,7 +627,7 @@ def compile_header_scope_plan(source_docx: str | Path, spec: Mapping[str, Any],
 
         plan_sections.append({
             "section_index": section_index,
-            "source_section_index": section_index,
+            "source_section_index": source_section_indices[section_index - 1],
             "scope": scope,
             "source_anchor": source_anchor,
             "content_mode": "fixed" if fixed_content is not None else "preserve_source",
@@ -489,11 +662,12 @@ def compile_header_scope_plan(source_docx: str | Path, spec: Mapping[str, Any],
 
     valid = not any(item.get("severity") == "error" for item in findings)
     return {
-        "schema_version": "1.0", "valid": valid, "scoped": True,
+        "schema_version": "1.1", "valid": valid, "scoped": True,
         "source_sha256": source_sha,
         "format_spec_sha256": hashlib.sha256(spec_bytes).hexdigest(),
         "scope_rules": rules,
         "sections": plan_sections,
+        "scope_transforms": layout.get("scope_transforms", []),
         "findings": findings,
     }
 

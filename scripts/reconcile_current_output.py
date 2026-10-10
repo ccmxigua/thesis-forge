@@ -18,7 +18,8 @@ from pathlib import Path
 from typing import Any
 
 from compliance import finalize_records, reconcile_rendered_output_records, summarize
-from draft_scorecard import attach_rendered_output_audit
+from draft_scorecard import (attach_rendered_output_audit, audit_external_scorecard,
+                             reconcile_external_scorecard)
 from semantic_contract import sha256_json, strict_json_read
 
 
@@ -53,12 +54,15 @@ def reconcile(
     output_path: Path,
     *,
     historical_docx_sha256: str | None = None,
+    external_scorecard_out: Path | None = None,
 ) -> tuple[dict[str, Any], int]:
     inputs = [historical_clause_report_path, format_spec_path, style_map_path,
               property_receipt_audit_path, rendered_report_path, final_docx_path,
               scorecard_path]
     resolved = [path.resolve() for path in inputs]
-    if len(set(resolved)) != len(resolved) or output_path.resolve() in set(resolved):
+    if (len(set(resolved)) != len(resolved) or output_path.resolve() in set(resolved)
+            or (external_scorecard_out is not None
+                and external_scorecard_out.resolve() in {*resolved, output_path.resolve()})):
         raise ValueError("current-output inputs and report output must be distinct files")
     for path in inputs:
         if not path.is_file():
@@ -182,48 +186,82 @@ def reconcile(
     }
 
     result_code = 0
-    try:
+    if external_scorecard_out is not None:
+        source_card = strict_json_read(scorecard_path)
+        if not isinstance(source_card, dict):
+            raise ValueError("external scorecard source must be an object")
         validated_finding_bindings = {
             sha256_json(item["finding"]): list(item["requirement_ids"])
             for item in rendered["bound_rendered_findings"]
             if isinstance(item.get("finding"), dict)
             and isinstance(item.get("requirement_ids"), list)
         }
-        card = attach_rendered_output_audit(
-            scorecard_path, rendered_report, final_docx_path, receipt_audit,
+        card = reconcile_external_scorecard(
+            source_card, rendered_report, final_docx_path,
+            property_receipt_audit=receipt_audit,
             historical_docx_sha256=historical_docx_sha256,
             rendered_requirement_bindings=validated_finding_bindings,
         )
+        external_scorecard_out.parent.mkdir(parents=True, exist_ok=True)
+        external_audit = audit_external_scorecard(card, final_docx_path, rendered_report)
+        if not external_audit["valid"]:
+            raise RuntimeError("external scorecard did not validate against the unchanged final DOCX")
+        _write_json(external_scorecard_out, card)
         report["scorecard_reconciliation"] = {
-            "status": "attached_and_visible",
+            "status": "external_ledger_only",
             "scorecard_sha256": sha256_json(card),
             "status_counts": card.get("status_counts"),
             "docx_sha256_after": sha256_file(final_docx_path),
+            "external_scorecard_path": str(external_scorecard_out.resolve()),
+            "external_scorecard_audit": external_audit,
+            "visible_display_required": False,
         }
         if report["scorecard_reconciliation"]["docx_sha256_after"] != current_docx_sha:
-            raise RuntimeError("scorecard changed the DOCX after final audit attachment")
+            raise RuntimeError("external scorecard did not validate against the unchanged final DOCX")
         report["status"] = "complete"
-    except ValueError as exc:
-        message = str(exc)
-        after_sha = sha256_file(final_docx_path)
-        if "rerender and re-audit" in message or after_sha != current_docx_sha:
-            report["status"] = "rerender_required"
-            report["scorecard_reconciliation"] = {
-                "status": "visible_scorecard_changed_docx",
-                "message": message,
-                "docx_sha256_before": current_docx_sha,
-                "docx_sha256_after": after_sha,
-                "rendered_report_is_stale": True,
-                "next_step": "refresh the TOC if needed, render this exact DOCX to PDF, rerun rendered-format audit, then rerun this reconciliation",
+    else:
+        try:
+            validated_finding_bindings = {
+                sha256_json(item["finding"]): list(item["requirement_ids"])
+                for item in rendered["bound_rendered_findings"]
+                if isinstance(item.get("finding"), dict)
+                and isinstance(item.get("requirement_ids"), list)
             }
-            result_code = 2
-        else:
-            report["status"] = "blocked"
+            card = attach_rendered_output_audit(
+                scorecard_path, rendered_report, final_docx_path, receipt_audit,
+                historical_docx_sha256=historical_docx_sha256,
+                rendered_requirement_bindings=validated_finding_bindings,
+            )
             report["scorecard_reconciliation"] = {
-                "status": "blocked", "message": message,
-                "docx_sha256_after": after_sha,
+                "status": "attached_and_visible",
+                "scorecard_sha256": sha256_json(card),
+                "status_counts": card.get("status_counts"),
+                "docx_sha256_after": sha256_file(final_docx_path),
             }
-            result_code = 3
+            if report["scorecard_reconciliation"]["docx_sha256_after"] != current_docx_sha:
+                raise RuntimeError("scorecard changed the DOCX after final audit attachment")
+            report["status"] = "complete"
+        except ValueError as exc:
+            message = str(exc)
+            after_sha = sha256_file(final_docx_path)
+            if "rerender and re-audit" in message or after_sha != current_docx_sha:
+                report["status"] = "rerender_required"
+                report["scorecard_reconciliation"] = {
+                    "status": "visible_scorecard_changed_docx",
+                    "message": message,
+                    "docx_sha256_before": current_docx_sha,
+                    "docx_sha256_after": after_sha,
+                    "rendered_report_is_stale": True,
+                    "next_step": "refresh the TOC if needed, render this exact DOCX to PDF, rerun rendered-format audit, then rerun this reconciliation",
+                }
+                result_code = 2
+            else:
+                report["status"] = "blocked"
+                report["scorecard_reconciliation"] = {
+                    "status": "blocked", "message": message,
+                    "docx_sha256_after": after_sha,
+                }
+                result_code = 3
     report["audit_sha256"] = sha256_json(report)
     _write_json(output_path, report)
     return report, result_code
@@ -240,12 +278,15 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("scorecard", type=Path)
     parser.add_argument("--out", type=Path, required=True)
     parser.add_argument("--historical-docx-sha256")
+    parser.add_argument("--external-scorecard-out", type=Path,
+                        help="write the reconciled scorecard separately; do not add it to the thesis DOCX")
     args = parser.parse_args(argv)
     report, code = reconcile(
         args.historical_clause_report, args.format_spec, args.style_map,
         args.property_receipt_audit, args.rendered_report, args.final_docx,
         args.scorecard, args.out,
         historical_docx_sha256=args.historical_docx_sha256,
+        external_scorecard_out=args.external_scorecard_out,
     )
     print(json.dumps({"status": report["status"], "current_output_status": report["current_output_status"],
                       "docx_sha256": report["current_output"]["docx_sha256"],

@@ -594,6 +594,110 @@ def attach_rendered_output_audit(scorecard_path: Path, report: dict[str, Any],
     return card
 
 
+def reconcile_external_scorecard(
+    card: dict[str, Any], report: dict[str, Any], docx_path: Path, *,
+    property_receipt_audit: dict[str, Any] | None = None,
+    historical_docx_sha256: str | None = None,
+    rendered_requirement_bindings: dict[str, list[str]] | None = None,
+) -> dict[str, Any]:
+    """Bind a current-output scorecard for a separate ledger artifact.
+
+    The thesis DOCX may intentionally omit the verbose scorecard display while
+    retaining its manual-review markers.  This path applies the same source,
+    exact-DOCX and rendered-PDF checks as ``attach_rendered_output_audit`` but
+    never inserts or rewrites scorecard paragraphs in the thesis.
+    """
+    docx_sha = hashlib.sha256(docx_path.read_bytes()).hexdigest()
+    report_digest = sha256_json(report)
+    report_audit_digest = sha256_json({key: copy.deepcopy(value) for key, value in report.items()
+                                       if key != "audit_sha256"})
+    if (report.get("protocol") != "rendered_format_audit_v1"
+            or report.get("docx_sha256") != docx_sha
+            or not isinstance(report.get("final_docx"), dict)
+            or report["final_docx"].get("sha256") != docx_sha
+            or not isinstance(report.get("pdf_sha256"), str)
+            or re.fullmatch(r"[0-9a-f]{64}", report["pdf_sha256"]) is None
+            or report.get("submission_ready") is not False
+            or report.get("field_refresh_claimed") is not False
+            or not isinstance(report.get("findings"), list)
+            or report.get("audit_sha256") != report_audit_digest):
+        raise ValueError("rendered-format report DOCX hash or audit binding is invalid")
+
+    result = reconcile_current_output_scorecard(
+        copy.deepcopy(card), report, docx_path,
+        property_receipt_audit=property_receipt_audit,
+        historical_docx_sha256=historical_docx_sha256,
+        rendered_requirement_bindings=rendered_requirement_bindings,
+    )
+    history = result["semantic_history"]
+    for audit_key in ("serialized_format_audit", "rendered_output_audit"):
+        old_audit = result.get(audit_key)
+        stale = isinstance(old_audit, dict) and (
+            old_audit.get("docx_sha256") != docx_sha
+            or (audit_key == "rendered_output_audit"
+                and old_audit.get("report_sha256") != report_digest)
+        )
+        if stale:
+            history.setdefault(audit_key + "_history", []).append(copy.deepcopy(old_audit))
+            result.pop(audit_key, None)
+
+    attachment: dict[str, Any] = {
+        "protocol": "rendered_output_audit_attachment_v1",
+        "docx_sha256": docx_sha,
+        "pdf_sha256": report["pdf_sha256"],
+        "parent_scorecard_sha256": history["source_scorecard_sha256"],
+        "report_sha256": report_digest,
+        "report": copy.deepcopy(report),
+        "submission_ready": False,
+    }
+    attachment["audit_sha256"] = sha256_json(attachment)
+    result["rendered_output_audit"] = attachment
+    audit = audit_external_scorecard(result, docx_path, report)
+    if not audit["valid"]:
+        raise ValueError("external current-output scorecard failed its hash-bound audit")
+    return result
+
+
+def audit_external_scorecard(card: dict[str, Any], docx_path: Path,
+                             report: dict[str, Any]) -> dict[str, Any]:
+    """Validate scorecard semantics and render binding without a DOCX display."""
+    docx_sha = hashlib.sha256(docx_path.read_bytes()).hexdigest()
+    attachment = card.get("rendered_output_audit")
+    assessment = card.get("current_output_assessment")
+    attachment_payload = ({key: copy.deepcopy(value) for key, value in attachment.items()
+                           if key != "audit_sha256"} if isinstance(attachment, dict) else {})
+    report_digest = sha256_json(report)
+    report_audit_digest = sha256_json({key: copy.deepcopy(value) for key, value in report.items()
+                                       if key != "audit_sha256"})
+    valid = bool(
+        _scorecard_semantics_valid(card)
+        and isinstance(assessment, dict)
+        and assessment.get("docx_sha256") == docx_sha
+        and assessment.get("pdf_sha256") == report.get("pdf_sha256")
+        and assessment.get("rendered_report_sha256") == report_digest
+        and assessment.get("submission_ready") is False
+        and assessment.get("field_refresh_claimed") is False
+        and report.get("audit_sha256") == report_audit_digest
+        and isinstance(attachment, dict)
+        and attachment.get("protocol") == "rendered_output_audit_attachment_v1"
+        and attachment.get("docx_sha256") == docx_sha
+        and attachment.get("pdf_sha256") == report.get("pdf_sha256")
+        and attachment.get("report_sha256") == report_digest
+        and attachment.get("report") == report
+        and attachment.get("submission_ready") is False
+        and attachment.get("audit_sha256") == sha256_json(attachment_payload)
+    )
+    return {
+        "valid": valid, "protocol": "external_scorecard_render_binding_audit_v1",
+        "docx_sha256": docx_sha, "pdf_sha256": report.get("pdf_sha256"),
+        "scorecard_sha256": sha256_json(card),
+        "item_count": card.get("item_count"),
+        "status_counts": copy.deepcopy(card.get("status_counts")),
+        "submission_ready": False,
+        "visible_scorecard_required": False,
+    }
+
+
 def _current_receipt_status(entry: dict[str, Any], docx_sha: str,
                              receipt_audit: dict[str, Any] | None) -> tuple[str, dict[str, Any]]:
     detail = entry.get("detail") if isinstance(entry.get("detail"), dict) else {}

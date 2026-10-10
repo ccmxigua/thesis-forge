@@ -730,6 +730,20 @@ The ten-school batch runner defaults to this policy. Use
 submission-mode run has been started fresh; that mode retains the full
 fail-closed capability, render, and final audit gates.
 
+When the complete source-bound scorecard is too verbose to keep in the paper
+DOCX, use the generic external-ledger path rather than deleting paragraphs by
+hand. `scripts/review_package_export.py strip` verifies that the visible
+scorecard block exactly matches its JSON and that every `MR-*` marker is
+present, then removes only that scorecard block from a new derived DOCX. After
+that byte change, rematerialize the TOC and rerender. Run
+`scripts/reconcile_current_output.py --external-scorecard-out <new-scorecard.json>`
+to bind current findings to the final DOCX/PDF without editing the paper; then
+run `review_package_export.py export` to write a separate editable full ledger,
+the machine-readable report, and a short issue summary. This preserves the
+complete current and inherited status history and source/evidence mappings,
+leaves the required human markers in the paper, does not create a new semantic
+review, and keeps `submission_ready=false`.
+
 `--allow-offline-review` is the host-neutral packet path for non-release
 review drafts and offline tests. It requires
 `--output-policy review_draft` and cannot be combined with

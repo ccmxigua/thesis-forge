@@ -1,0 +1,85 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.local/thesis-latex2docx/visual-page-review-response.schema.json",
+  "title": "One-page visual layout review",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "page_number",
+    "review_state",
+    "visual_summary",
+    "issues",
+    "uncertainty_notes"
+  ],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "page_number": {"type": "integer", "minimum": 1},
+    "review_state": {
+      "enum": ["visually_reviewed", "needs_human_review", "unable_to_assess"]
+    },
+    "visual_summary": {"type": "string", "minLength": 1, "maxLength": 280},
+    "issues": {
+      "type": "array",
+      "maxItems": 60,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "category",
+          "severity",
+          "finding",
+          "bbox_norm",
+          "confidence",
+          "basis",
+          "requirement_ids",
+          "source_clause_ids",
+          "needs_human_review"
+        ],
+        "properties": {
+          "category": {
+            "enum": [
+              "overlap",
+              "clipping",
+              "overflow",
+              "pagination",
+              "table_split",
+              "caption_or_figure",
+              "equation_layout",
+              "visible_font_anomaly",
+              "visible_requirement_mismatch",
+              "readability",
+              "other_layout"
+            ]
+          },
+          "severity": {"enum": ["critical", "high", "medium", "low"]},
+          "finding": {"type": "string", "minLength": 1, "maxLength": 400},
+          "bbox_norm": {
+            "type": "array",
+            "minItems": 4,
+            "maxItems": 4,
+            "items": {"type": "number", "minimum": 0, "maximum": 1}
+          },
+          "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+          "basis": {"enum": ["source_requirement", "generic_layout_diagnostic"]},
+          "requirement_ids": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {"type": "string", "minLength": 1}
+          },
+          "source_clause_ids": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {"type": "string", "minLength": 1}
+          },
+          "needs_human_review": {"type": "boolean"}
+        }
+      }
+    },
+    "uncertainty_notes": {
+      "type": "array",
+      "maxItems": 12,
+      "items": {"type": "string", "minLength": 1, "maxLength": 300}
+    }
+  }
+}

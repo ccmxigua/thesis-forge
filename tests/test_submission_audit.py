@@ -25,6 +25,7 @@ from submission_audit import audit_docx
 from render_attestation import sign
 
 TEST_ATTESTATION_KEY = bytes.fromhex("11" * 32)
+PASSING_VISUAL_REVIEW = {"valid": True, "status": "passed", "blockers": []}
 
 
 def add_field(paragraph, instruction: str, cached: str = "1") -> None:
@@ -260,6 +261,11 @@ class SubmissionAuditTest(unittest.TestCase):
             self.assertIn("unsupported_render_report_schema",
                           {x["code"] for x in spoofed["render_validation"]["failures"]})
             rendered = audit_docx(path, SPEC, render_report(path, pdf))
+            self.assertFalse(rendered["submission_ready"])
+            self.assertIn("visual_page_review_not_passed",
+                          {x["code"] for x in rendered["submission_blockers"]})
+            rendered = audit_docx(path, SPEC, render_report(path, pdf),
+                                  visual_review_validation=PASSING_VISUAL_REVIEW)
             self.assertTrue(rendered["submission_ready"])
 
     def test_pending_thesis_profile_blocks_submission_without_invalidating_serialization(self) -> None:
@@ -387,7 +393,7 @@ class SubmissionAuditTest(unittest.TestCase):
                     "text_sha256": hashlib.sha256(extracted.encode("utf-8")).hexdigest(),
                 },
             })
-            audit = audit_docx(path, SPEC, report)
+            audit = audit_docx(path, SPEC, report, visual_review_validation=PASSING_VISUAL_REVIEW)
             observations = {x["code"] for x in audit["render_validation"]["observations"]}
             self.assertIn("rendered_pdf_near_blank_page_candidates", observations)
             self.assertIn("rendered_pdf_duplicate_text_page_candidates", observations)

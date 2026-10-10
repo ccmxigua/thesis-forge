@@ -694,7 +694,8 @@ def audit_docx(docx_path: Path, spec: dict[str, Any] | None = None,
                obligation_scope_inventory: dict[str, Any] | None = None,
                evaluation_units_by_requirement: dict[str, list[dict[str, Any]]] | None = None,
                property_receipt_audit: dict[str, Any] | None = None,
-               obligation_binding: dict[str, Any] | None = None) -> dict[str, Any]:
+               obligation_binding: dict[str, Any] | None = None,
+               visual_review_validation: dict[str, Any] | None = None) -> dict[str, Any]:
     """Audit serialized evidence without relying on generator-side counters."""
     spec = spec or {}
     issues: list[dict[str, Any]] = []
@@ -756,6 +757,16 @@ def audit_docx(docx_path: Path, spec: dict[str, Any] | None = None,
                 "A separately hashed rendered-output audit was attached; it is not a Microsoft Word acceptance attestation.",
                 {"pdf_sha256": rendered_format_audit.get("pdf_sha256")}, stage="rendered_format_audit",
             ))
+    if (not isinstance(visual_review_validation, dict)
+            or visual_review_validation.get("valid") is not True
+            or visual_review_validation.get("status") != "passed"):
+        detail = (visual_review_validation.get("blockers")
+                  if isinstance(visual_review_validation, dict) else ["visual_page_review_missing"])
+        submission_blockers.append(_issue(
+            "visual_page_review_not_passed", "critical",
+            "A complete hash-bound native image review of every final PDF page is required before release.",
+            {"visual_review_validation": detail}, stage="visual_page_review",
+        ))
     names: set[str] = set()
     package_valid = False
     story_evidence: dict[str, Any] = {}
@@ -1389,6 +1400,9 @@ def audit_docx(docx_path: Path, spec: dict[str, Any] | None = None,
     submission_ready = (
         serialized_verified
         and render["rendered_verified"]
+        and isinstance(visual_review_validation, dict)
+        and visual_review_validation.get("valid") is True
+        and visual_review_validation.get("status") == "passed"
         and template_ok
         and not submission_blockers
     )
@@ -1402,6 +1416,7 @@ def audit_docx(docx_path: Path, spec: dict[str, Any] | None = None,
         "template_validation": template_validation,
         "obligation_assessment_gate": obligation_gate,
         "rendered_format_audit": rendered_format_audit,
+        "visual_review_validation": visual_review_validation,
         "submission_ready": submission_ready,
         "status": "submission_ready" if submission_ready else "not_submission_ready",
         "issues": issues,
@@ -1419,6 +1434,7 @@ def audit_docx(docx_path: Path, spec: dict[str, Any] | None = None,
             "render_evidence_required_for_submission_ready": True,
             "generator_counters_are_not_accepted_as_serialized_evidence": True,
             "rendered_format_audit_is_not_word_render_attestation": True,
+            "visual_page_review_is_additional_to_word_render_and_human_gates": True,
         },
     }
 
@@ -1428,6 +1444,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("docx", type=Path)
     parser.add_argument("--format-spec", type=Path)
     parser.add_argument("--render-report", type=Path)
+    parser.add_argument("--visual-review-report", type=Path,
+                        help="complete native image-based page review for the final rendered PDF")
+    parser.add_argument("--source-clauses", type=Path,
+                        help="source clauses used to validate visual requirement references")
     parser.add_argument("--rendered-format-audit", type=Path,
                         help="separate, hash-bound observational audit of the final rendered PDF; not a Word attestation")
     parser.add_argument("--source-docx", type=Path,
@@ -1449,6 +1469,10 @@ def main(argv: list[str] | None = None) -> int:
         resolved.append(args.format_spec.expanduser().resolve())
     if args.render_report:
         resolved.append(args.render_report.expanduser().resolve())
+    if args.visual_review_report:
+        resolved.append(args.visual_review_report.expanduser().resolve())
+    if args.source_clauses:
+        resolved.append(args.source_clauses.expanduser().resolve())
     if args.rendered_format_audit:
         resolved.append(args.rendered_format_audit.expanduser().resolve())
     if args.source_docx:
@@ -1463,12 +1487,44 @@ def main(argv: list[str] | None = None) -> int:
             parser.error("audit output must differ from all audit inputs")
     else:
         output = None
+    render_payload = _json(args.render_report) if args.render_report else None
+    visual_validation: dict[str, Any] = {
+        "valid": False, "status": "blocked", "blockers": ["visual_page_review_missing"],
+    }
+    if args.visual_review_report:
+        if not args.source_clauses:
+            visual_validation = {
+                "valid": False, "status": "blocked", "blockers": ["visual_source_clauses_missing"],
+            }
+        elif not args.format_spec:
+            visual_validation = {
+                "valid": False, "status": "blocked", "blockers": ["visual_format_spec_missing"],
+            }
+        elif not isinstance(render_payload, dict):
+            visual_validation = {
+                "valid": False, "status": "blocked", "blockers": ["visual_word_render_report_missing"],
+            }
+        else:
+            rendered_record = render_payload.get("rendered_pdf")
+            pdf_path = Path(str(rendered_record.get("path", ""))).expanduser() if isinstance(rendered_record, dict) else None
+            if not pdf_path or not pdf_path.is_file():
+                visual_validation = {
+                    "valid": False, "status": "blocked", "blockers": ["visual_rendered_pdf_missing"],
+                }
+            else:
+                from visual_page_review import verify_visual_review_report
+                visual_validation = verify_visual_review_report(
+                    args.visual_review_report, final_docx=args.docx, pdf=pdf_path,
+                    render_report=args.render_report, format_spec_path=args.format_spec,
+                    source_clauses_path=args.source_clauses,
+                )
     result = audit_docx(
-        args.docx, spec, _json(args.render_report) if args.render_report else None,
+        args.docx, spec, render_payload,
         template_profile_path=args.template_profile.resolve() if args.template_profile else None,
         thesis_profile=_json(args.thesis_profile) if args.thesis_profile else None,
         source_docx=args.source_docx.resolve() if args.source_docx else None,
         rendered_format_audit=_json(args.rendered_format_audit) if args.rendered_format_audit else None,
+        visual_review_validation=visual_validation,
     )
     payload = strict_json_dumps(result, ensure_ascii=False, indent=2) + "\n"
     if output:

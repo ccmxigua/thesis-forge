@@ -67,6 +67,7 @@ def build_command(
     model: str | None = None,
     reasoning_effort: str | None = None,
     output_schema_path: Path | None = None,
+    image_paths: tuple[Path, ...] | list[Path] = (),
 ) -> list[str]:
     """Build an isolated, read-only native Codex invocation.
 
@@ -79,10 +80,21 @@ def build_command(
     text without attempting to scrape human-facing logs.
     The caller must pass the exact UTF-8 prompt text on stdin; keeping it out
     of argv avoids the operating system's per-argument size limit.
+    ``image_paths`` are passed to Codex's native ``--image`` attachment option;
+    mentioning a local image path in prompt text is never treated as image input.
     """
     prompt = prompt_path.read_text(encoding="utf-8")
     if not prompt.strip():
         raise ValueError(f"Codex prompt is empty: {prompt_path}")
+    if not isinstance(image_paths, (tuple, list)):
+        raise ValueError("Codex image_paths must be a list or tuple")
+    resolved_images: list[Path] = []
+    for index, image_path in enumerate(image_paths, start=1):
+        path = Path(image_path).expanduser().resolve()
+        if not path.is_file() or not os.access(path, os.R_OK) or path.stat().st_size <= 0:
+            raise ValueError(f"Codex image attachment {index} is missing, unreadable, or empty: {path}")
+        resolved_images.append(path)
+
     command = [
         binary,
         "exec",
@@ -104,6 +116,12 @@ def build_command(
         command[command.index("-C"):command.index("-C")] = [
             "--output-schema", str(schema_path),
         ]
+    # The CLI documents --image as an initial-prompt attachment. Keep the
+    # option adjacent to that prompt and preserve caller order (one page per
+    # request in the visual-review protocol).
+    image_args = [arg for path in resolved_images for arg in ("--image", str(path))]
+    if image_args:
+        command[-1:-1] = image_args
     command[4:4] = ["--model", resolve_model(model)]
     effort = resolve_reasoning_effort(reasoning_effort)
     if effort is not None:
@@ -130,6 +148,9 @@ def probe_capabilities(binary: str, *, timeout: float = 10.0) -> dict[str, Any]:
     version_text = (version_result.stdout or version_result.stderr or "").strip()
     help_text = (help_result.stdout or "") + ("\n" + help_result.stderr if help_result.stderr else "")
     schema_supported = "--output-schema" in help_text
+    image_supported = bool(re.search(
+        r"(?m)^\s*(?:-i,\s*)?--image\s+<FILE>", help_text,
+    ))
     return {
         "binary": resolved,
         "version": version_text,
@@ -138,6 +159,10 @@ def probe_capabilities(binary: str, *, timeout: float = 10.0) -> dict[str, Any]:
         "exec_help_sha256": hashlib.sha256(help_text.encode("utf-8")).hexdigest(),
         "output_schema_supported": schema_supported,
         "structured_output_mode": "native_schema" if schema_supported else "prompt_only",
+        "image_input_supported": image_supported,
+        "image_input_mode": "native_cli_attachment" if image_supported else "unsupported",
+        "model_image_capability_verified": False,
+        "model_image_capability_status": "unverified_without_live_model_request",
         "probed_at": datetime.now(timezone.utc).isoformat(),
     }
 

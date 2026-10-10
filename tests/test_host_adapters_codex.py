@@ -104,18 +104,60 @@ class CodexAdapterTests(unittest.TestCase):
         self.assertEqual(command[command.index("--output-schema") + 1], str(schema.resolve()))
         self.assertLess(command.index("--output-schema"), command.index("-C"))
 
+    def test_build_command_attaches_actual_image_file_to_initial_prompt(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            prompt = root / "prompt.txt"
+            image = root / "page-0001.png"
+            prompt.write_text("Review the attached page image.", encoding="utf-8")
+            image.write_bytes(b"png test bytes")
+            command = codex.build_command(
+                binary="codex", prompt_path=prompt, last_message_path=root / "last.json",
+                cwd=root, image_paths=[image],
+            )
+        image_index = command.index("--image")
+        self.assertEqual(command[image_index + 1], str(image.resolve()))
+        self.assertLess(image_index, command.index("-"))
+        self.assertEqual(command[-1], "-")
+
+    def test_build_command_rejects_missing_or_empty_image_attachment(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            prompt = root / "prompt.txt"
+            prompt.write_text("Review image.", encoding="utf-8")
+            with self.assertRaisesRegex(ValueError, "missing, unreadable, or empty"):
+                codex.build_command(
+                    binary="codex", prompt_path=prompt, last_message_path=root / "last.json",
+                    cwd=root, image_paths=[root / "absent.png"],
+                )
+
     def test_probe_capabilities_records_native_schema_support(self) -> None:
         version = subprocess.CompletedProcess(["codex", "--version"], 0, "codex 0.149.0\n", "")
         help_text = subprocess.CompletedProcess(
             ["codex", "exec", "--help"], 0,
-            "Usage: codex exec [OPTIONS]\n--output-schema <FILE>\n", "",
+            "Usage: codex exec [OPTIONS]\n-i, --image <FILE>...\n--output-schema <FILE>\n", "",
         )
         with patch.object(codex.subprocess, "run", side_effect=[version, help_text]) as run:
             capabilities = codex.probe_capabilities(sys.executable)
         self.assertEqual(capabilities["version"], "codex 0.149.0")
         self.assertTrue(capabilities["output_schema_supported"])
         self.assertEqual(capabilities["structured_output_mode"], "native_schema")
+        self.assertTrue(capabilities["image_input_supported"])
+        self.assertEqual(capabilities["image_input_mode"], "native_cli_attachment")
+        self.assertFalse(capabilities["model_image_capability_verified"])
         self.assertEqual(run.call_count, 2)
+
+    def test_probe_capabilities_reports_missing_image_support_without_fallback(self) -> None:
+        version = subprocess.CompletedProcess(["codex", "--version"], 0, "codex test\n", "")
+        help_text = subprocess.CompletedProcess(
+            ["codex", "exec", "--help"], 0,
+            "Usage: codex exec [OPTIONS]\n--output-schema <FILE>\n", "",
+        )
+        with patch.object(codex.subprocess, "run", side_effect=[version, help_text]):
+            capabilities = codex.probe_capabilities(sys.executable)
+        self.assertFalse(capabilities["image_input_supported"])
+        self.assertEqual(capabilities["image_input_mode"], "unsupported")
+        self.assertFalse(capabilities["model_image_capability_verified"])
 
     def test_parse_result_requires_completed_turn_and_uses_final_message(self) -> None:
         response = {"contract_version": "2.1", "provenance": {}}

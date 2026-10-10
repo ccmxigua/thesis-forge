@@ -216,7 +216,7 @@ class PostRenderAcceptanceTests(unittest.TestCase):
             self.assertFalse(result["word_render_executed"])
             self.assertEqual(result["stopped_at"], "pre_render_validation")
 
-    def test_batch_acceptance_allows_distinct_post_word_hashes(self) -> None:
+    def test_batch_acceptance_requires_per_page_visual_review(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)
             case_result = self._batch_fixture(root)
@@ -281,6 +281,7 @@ class PostRenderAcceptanceTests(unittest.TestCase):
                 "rendered_pdf_sha256": _sha256(pdf),
                 "render_report": str(render_report),
                 "visual_audit": str(visual_audit),
+                "visual_page_review": None,
                 "submission_audit": str(submission_audit),
                 "format_comparison": str(comparison),
             }), encoding="utf-8")
@@ -294,6 +295,7 @@ class PostRenderAcceptanceTests(unittest.TestCase):
                     "pdf": str(pdf),
                     "render_report": str(render_report),
                     "visual_audit": str(visual_audit),
+                    "visual_page_review": str(final.parent / "visual-page-review" / "visual-review-manifest.json"),
                     "submission_audit": str(submission_audit),
                     "format_comparison": str(comparison),
                     "format_comparison_markdown": str(markdown),
@@ -304,7 +306,9 @@ class PostRenderAcceptanceTests(unittest.TestCase):
             })
             manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
             accepted = batch.case_acceptance(case_result, root=root)
-            self.assertTrue(accepted["accepted"], accepted)
+            self.assertFalse(accepted["accepted"], accepted)
+            self.assertIn("post_word_render_visual_page_review_missing", accepted["blockers"])
+            self.assertIn("independent_visual_page_review_not_passed", accepted["blockers"])
             self.assertNotEqual(_sha256(pre_render), final_digest)
 
     def test_batch_acceptance_rejects_final_hash_mismatch(self) -> None:

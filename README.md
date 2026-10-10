@@ -708,6 +708,47 @@ python3 scripts/postprocess_docx.py raw.docx final.docx
 
 ---
 
+# Native image-based page review
+
+The existing `pdf_visual_audit.py` is a deterministic raster sanity check; it
+does not interpret page layout. The optional `visual_page_review.py` workflow
+renders every physical page of the final PDF to PNG, binds the final DOCX, PDF,
+Word render report, format spec, extracted source clauses, prompts, images, and
+responses by SHA-256, and sends exactly one native image-attached Codex request
+per page. The CLI must expose `--image` and `--output-schema`; there is no
+text-only fallback, provider fallback, retry, or resume. The project default
+model remains `gpt-6-luna`. The requested model and effort are recorded; actual
+route identity and model-side image consumption are not observable from the
+local CLI and are not claimed as verified.
+
+Preparation is local and makes no model request:
+
+```sh
+python scripts/visual_page_review.py FINAL.docx FINAL.pdf \
+  --render-report word-render-report.json \
+  --format-spec format-spec.json \
+  --source-clauses requirement-clauses.json \
+  --work-dir build/visual-review-new
+```
+
+To deliberately invoke the existing native Codex route, add both
+`--auto-host-agent --host-runtime codex`. This permits at most one request per
+PDF page; the run stops at the first failed, invalid, or unassessable response
+and never retries or resumes. It can consume substantial model budget. Each
+response is checked against a strict page schema, normalized image-region bounds, and the current
+requirement-to-source-clause graph. A page issue, uncertainty, missing page,
+timeout, malformed response, stale input hash, or changed review code blocks
+the visual gate. Reports retain the attempted/completed distinction and an
+unreviewed-page ledger. The `--preflight-only` option only checks locally
+installed Codex CLI flags and never contacts a model.
+
+Full post-render acceptance requires this report in addition to the existing
+Word-render attestation, deterministic PDF checks, source/format audits, and
+other submission gates. Without a complete verified page report, submission
+readiness remains false. Visual-model output is low-trust review evidence; it
+cannot clear human obligations or authorize submission by itself. This flow
+does not replace inspection in Word or prove invisible DOCX properties.
+
 ## 许可证
 
 本项目仅供学术用途。各学校的排版规范版权归相应学校所有。

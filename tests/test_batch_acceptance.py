@@ -25,6 +25,41 @@ from manual_review_display import (  # noqa: E402
 
 
 class BatchAcceptanceTests(unittest.TestCase):
+    def test_visual_page_review_is_an_explicit_native_codex_opt_in(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            paths = {name: root / name for name in (
+                "source.docx", "final.docx", "final.pdf", "render.json", "visual.json",
+                "pre-validation.json", "format-spec.json", "official.docx", "official-map.json",
+                "generated-map.json", "submission.json", "comparison.json", "comparison.md",
+                "acceptance.json", "source-clauses.json",
+            )}
+            common = {
+                "source_docx": paths["source.docx"], "final_docx": paths["final.docx"],
+                "pdf": paths["final.pdf"], "render_report": paths["render.json"],
+                "visual_audit": paths["visual.json"], "pre_validation": paths["pre-validation.json"],
+                "format_spec": paths["format-spec.json"], "official_template": paths["official.docx"],
+                "official_style_map": paths["official-map.json"], "generated_style_map": paths["generated-map.json"],
+                "submission_audit": paths["submission.json"], "format_comparison": paths["comparison.json"],
+                "format_comparison_markdown": paths["comparison.md"], "acceptance_out": paths["acceptance.json"],
+                "source_clauses": paths["source-clauses.json"],
+            }
+            default = batch.post_render_command({"id": "fixture"}, **common)
+            self.assertIn("--source-clauses", default)
+            self.assertNotIn("--run-visual-model-review", default)
+            explicit = batch.post_render_command(
+                {"id": "fixture"}, **common, run_visual_page_review=True,
+                codex_bin="/opt/codex/bin/codex", codex_model="gpt-6-luna",
+                codex_reasoning_effort="xhigh",
+            )
+            self.assertIn("--run-visual-model-review", explicit)
+            self.assertIn("--codex-bin", explicit)
+            self.assertIn("/opt/codex/bin/codex", explicit)
+            self.assertIn("--codex-model", explicit)
+            self.assertIn("gpt-6-luna", explicit)
+            self.assertIn("--codex-reasoning-effort", explicit)
+            self.assertIn("xhigh", explicit)
+
     def test_codex_default_is_shared_by_primary_and_post_format_review(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             base = Path(td)

@@ -462,6 +462,11 @@ def post_render_command(
     thesis_profile: Path | None = None,
     case_id: str | None = None,
     run_id: str | None = None,
+    source_clauses: Path | None = None,
+    run_visual_page_review: bool = False,
+    codex_bin: str | None = None,
+    codex_model: str | None = None,
+    codex_reasoning_effort: str | None = None,
     word_open_timeout: int = 45, word_timeout: int = 180,
 ) -> list[str]:
     """Build the explicit post-Word release command for one case.
@@ -494,6 +499,19 @@ def post_render_command(
         command.extend(["--template-profile", str(case["template_profile"])])
     if thesis_profile:
         command.extend(["--thesis-profile", str(thesis_profile)])
+    if source_clauses:
+        command.extend(["--source-clauses", str(source_clauses)])
+    if run_visual_page_review:
+        command.extend([
+            "--run-visual-model-review",
+            "--visual-review-dir", str(acceptance_out.parent / "visual-page-review"),
+        ])
+        if codex_bin:
+            command.extend(["--codex-bin", codex_bin])
+        if codex_model:
+            command.extend(["--codex-model", codex_model])
+        if codex_reasoning_effort is not None:
+            command.extend(["--codex-reasoning-effort", codex_reasoning_effort])
     if case_id:
         command.extend(["--case-id", str(case_id)])
     if run_id:
@@ -504,7 +522,7 @@ def post_render_command(
 def attach_post_render_manifest(
     manifest_path: Path, *, pre_render_docx: Path, final_docx: Path, pdf: Path,
     render_report: Path, visual_audit: Path, submission_audit: Path, format_comparison: Path,
-    format_comparison_markdown: Path, acceptance_out: Path,
+    format_comparison_markdown: Path, acceptance_out: Path, visual_page_review: Path,
     accepted: bool, case_id: str | None = None, run_id: str | None = None,
 ) -> dict[str, Any]:
     """Record the two-stage artifact chain without rewriting pre-render receipts."""
@@ -520,6 +538,7 @@ def attach_post_render_manifest(
         "pdf": str(pdf.resolve()),
         "render_report": str(render_report.resolve()),
         "visual_audit": str(visual_audit.resolve()),
+        "visual_page_review": str(visual_page_review.resolve()),
         "submission_audit": str(submission_audit.resolve()),
         "format_comparison": str(format_comparison.resolve()),
         "format_comparison_markdown": str(format_comparison_markdown.resolve()),
@@ -1232,6 +1251,7 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT,
             ("post_render_docx", _artifact_path(post_acceptance.get("post_render_docx"), root=root)),
             ("rendered_pdf", _artifact_path(post_acceptance.get("rendered_pdf"), root=root)),
             ("render_report", _artifact_path(post_acceptance.get("render_report"), root=root)),
+            ("visual_page_review", _artifact_path(post_acceptance.get("visual_page_review"), root=root)),
             ("submission_audit", _artifact_path(post_acceptance.get("submission_audit"), root=root)),
             ("format_comparison", _artifact_path(post_acceptance.get("format_comparison"), root=root)),
         ):
@@ -1281,7 +1301,7 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT,
         else:
             required_post_keys = (
                 "pre_render_docx", "final_docx", "pdf", "render_report",
-                "visual_audit", "submission_audit", "format_comparison",
+                "visual_audit", "visual_page_review", "submission_audit", "format_comparison",
                 "format_comparison_markdown",
             )
             for key in required_post_keys:
@@ -1445,6 +1465,27 @@ def case_acceptance(result: dict[str, Any], *, root: Path = ROOT,
                                    if isinstance(manifest.get("requirements_extraction"), dict) else None):
                 if render.get("run_id") != expected_run_id:
                     blockers.append("post_render_report_run_id_mismatch")
+        visual_review_path = case_artifact("post_render_visual_review", post_manifest.get("visual_page_review"))
+        source_clauses_path = (format_spec_path.parent / "requirement-clauses.json") if format_spec_path else None
+        if (visual_review_path is None or not visual_review_path.is_file() or post_pdf is None
+                or not post_pdf.is_file() or not isinstance(render, dict) or not render_path or not render_path.is_file()
+                or format_spec_path is None or not format_spec_path.is_file()
+                or source_clauses_path is None or not source_clauses_path.is_file()):
+            visual_review = {"valid": False, "status": "blocked", "blockers": ["visual_review_inputs_missing"]}
+        else:
+            try:
+                from visual_page_review import verify_visual_review_report
+                visual_review = verify_visual_review_report(
+                    visual_review_path, final_docx=output_path, pdf=post_pdf,
+                    render_report=render_path, format_spec_path=format_spec_path,
+                    source_clauses_path=source_clauses_path,
+                )
+            except (OSError, ValueError, RuntimeError, TypeError, KeyError) as exc:
+                visual_review = {"valid": False, "status": "blocked",
+                                 "blockers": [f"visual_review_verifier_failed:{type(exc).__name__}"]}
+        checks["independent_visual_page_review"] = visual_review
+        if visual_review.get("valid") is not True:
+            blockers.append("independent_visual_page_review_not_passed")
         visual_path = case_artifact("post_render_visual_audit", post_manifest.get("visual_audit"))
         visual = None
         if visual_path and visual_path.is_file():
@@ -1595,10 +1636,11 @@ def run_case(base: Path, source: Path, case: dict[str, Any], *, prepare_host_rev
              semantic_review_model: str | None = None,
              allow_prompt_only: bool = False,
              neutral_reference_docx: Path | None = None,
+             run_visual_page_review: bool = False,
              word_open_timeout: int = 45,
              word_timeout: int = 180,
              stage_timeout: int = 1800) -> dict[str, Any]:
-    if host_adapter_id == "codex":
+    if host_adapter_id == "codex" or run_visual_page_review:
         codex_model = codex_adapter.resolve_model(codex_model)
         codex_reasoning_effort = codex_adapter.resolve_reasoning_effort(codex_reasoning_effort)
     elif codex_reasoning_effort is not None:
@@ -1773,9 +1815,15 @@ def run_case(base: Path, source: Path, case: dict[str, Any], *, prepare_host_rev
                 format_comparison=format_comparison,
                 format_comparison_markdown=format_comparison_markdown,
                 acceptance_out=acceptance_out,
+                visual_page_review=post_dir / "visual-page-review" / "visual-review-manifest.json",
                 thesis_profile=(work / "thesis-profile.json") if (work / "thesis-profile.json").is_file() else None,
                 case_id=case["id"],
                 run_id=case_run_id,
+                source_clauses=execution_requirements / "requirement-clauses.json",
+                run_visual_page_review=run_visual_page_review,
+                codex_bin=codex_bin,
+                codex_model=codex_model,
+                codex_reasoning_effort=codex_reasoning_effort,
                 word_open_timeout=word_open_timeout,
                 word_timeout=word_timeout,
             )
@@ -1926,7 +1974,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--codex-model",
                         help=f"native Codex model override (project default: {codex_adapter.DEFAULT_MODEL})")
     parser.add_argument("--codex-reasoning-effort",
-                        help="explicit Codex effort for primary, independent and post-format review")
+                        help="explicit Codex effort for primary, independent, post-format, and optional page review")
+    parser.add_argument(
+        "--run-visual-page-review", action="store_true",
+        help="explicitly add one native Codex image review per rendered PDF page; increases model calls",
+    )
     parser.add_argument("--semantic-review-model",
                         help="explicit model route for the post-format semantic review; defaults to the selected host model")
     parser.add_argument(
@@ -1941,8 +1993,8 @@ def main(argv: list[str] | None = None) -> int:
                         help="hard timeout for each pipeline/bridge/render subprocess")
     args = parser.parse_args(argv)
     if args.codex_reasoning_effort is not None:
-        if not args.auto_host_agent:
-            parser.error("--codex-reasoning-effort requires explicit --auto-host-agent")
+        if not args.auto_host_agent and not args.run_visual_page_review:
+            parser.error("--codex-reasoning-effort requires --auto-host-agent or --run-visual-page-review")
         try:
             args.codex_reasoning_effort = codex_adapter.resolve_reasoning_effort(args.codex_reasoning_effort)
         except ValueError as exc:
@@ -2093,6 +2145,7 @@ def main(argv: list[str] | None = None) -> int:
                 semantic_review_model=args.semantic_review_model,
                 allow_prompt_only=args.allow_prompt_only,
                 neutral_reference_docx=neutral_reference,
+                run_visual_page_review=args.run_visual_page_review,
                 word_open_timeout=args.word_open_timeout,
                 word_timeout=args.word_timeout,
                 stage_timeout=args.stage_timeout,

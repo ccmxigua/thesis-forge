@@ -1352,6 +1352,33 @@ when the post-render acceptance, final submission audit, and final format
 comparison all pass. A generated DOCX alone, or a self-authored render flag,
 is not sufficient evidence.
 
+The final release gate also requires `scripts/visual_page_review.py` to have
+reviewed every physical page of the exact final PDF with the native Codex
+`--image` attachment and strict output schema. `scripts/pdf_visual_audit.py`
+remains a deterministic raster sanity check and does not count as semantic
+page-image review. Post-render acceptance blocks when the page review report is
+missing, partial, stale, uncertain, or reports a visible issue. It verifies
+the final DOCX/PDF/Word-render-report hashes, format-spec and source-clause
+hashes, review-code fingerprint, each rendered image and prompt, native image
+command, response stream, and page coverage. It also replays source-clause
+references and page-region coordinates. This added check does not replace the
+Word attestation, format comparison, source obligation checks, or human-review
+items and cannot set submission readiness on its own.
+
+The normal page-review preparation step makes no model request. Running the
+native review requires the explicit `--run-visual-page-review` option on the
+batch runner or `--run-visual-model-review` on
+`scripts/post_render_acceptance.py`; the latter selects
+`--auto-host-agent --host-runtime codex` for at most one request per PDF page;
+the run stops at the first failed, invalid, or unassessable page and never
+retries or resumes. The default model remains `gpt-6-luna`, with no
+provider/model fallback. The report records requested model and effort; it also
+states when route identity and model-side image consumption cannot be observed.
+Use `scripts/visual_page_review.py --preflight-only` to inspect local CLI image
+and schema flags without sending a model request. This feature requires an
+already-installed `pdftoppm`; it does not install software or change system
+configuration.
+
 Word field repair is source-bound only. TOC hyperlinks and post-update
 `PAGEREF` fields may be repaired only from an explicit target map whose input
 DOCX hash matches the current run; entry order, bookmark names, or similar

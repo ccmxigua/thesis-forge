@@ -206,6 +206,19 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--visual-audit", type=Path, required=True,
                         help="independent raster visual-sanity report for the final PDF")
     parser.add_argument("--format-spec", type=Path, required=True)
+    parser.add_argument("--source-clauses", type=Path,
+                        help="current extracted requirement-clauses.json bound to the format spec")
+    parser.add_argument("--visual-review-report", type=Path,
+                        help="completed native image-based per-page visual review report")
+    parser.add_argument("--run-visual-model-review", action="store_true",
+                        help="explicitly invoke native Codex once for every rendered PDF page")
+    parser.add_argument("--visual-review-dir", type=Path,
+                        help="new empty case-local directory for page images, prompts, and receipts")
+    parser.add_argument("--codex-bin", help="native Codex binary; the model remains the project default")
+    parser.add_argument("--codex-model", help="explicit native Codex model override")
+    parser.add_argument("--codex-reasoning-effort",
+                        help="explicit Codex effort value; model support is not inferred")
+    parser.add_argument("--visual-page-timeout", type=int, default=180)
     parser.add_argument("--pre-validation", type=Path, required=True)
     parser.add_argument("--submission-audit", type=Path, required=True)
     parser.add_argument("--format-comparison", type=Path, required=True)
@@ -236,6 +249,9 @@ def main(argv: list[str] | None = None) -> int:
     comparison_markdown = _path(args.format_comparison_markdown) if args.format_comparison_markdown else None
     acceptance_out = _path(args.acceptance_out)
     format_spec = _path(args.format_spec)
+    source_clauses = _path(args.source_clauses) if args.source_clauses else None
+    visual_review_report = _path(args.visual_review_report) if args.visual_review_report else None
+    visual_review_dir = _path(args.visual_review_dir) if args.visual_review_dir else None
     official_template = _path(args.official_template)
     official_style_map = _path(args.official_style_map)
     generated_style_map = _path(args.generated_style_map)
@@ -270,9 +286,15 @@ def main(argv: list[str] | None = None) -> int:
             parser.error(f"{label} does not exist: {path}")
     output_paths = [source, final, pdf, render_report, visual_audit,
                     submission_audit, comparison, acceptance_out]
+    if visual_review_dir:
+        output_paths.append(visual_review_dir)
     if comparison_markdown:
         output_paths.append(comparison_markdown)
     input_paths = [pre_validation, format_spec, official_template, official_style_map, generated_style_map]
+    if source_clauses:
+        input_paths.append(source_clauses)
+    if visual_review_report:
+        input_paths.append(visual_review_report)
     if args.template_profile:
         input_paths.append(_path(args.template_profile))
     if args.thesis_profile:
@@ -283,6 +305,25 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("source DOCX, final DOCX, PDF, reports, and acceptance output must be distinct")
     if source == final:
         parser.error("final DOCX must differ from source DOCX")
+
+    if args.run_visual_model_review and visual_review_report:
+        parser.error("choose either --run-visual-model-review or --visual-review-report")
+    if args.run_visual_model_review and (source_clauses is None or visual_review_dir is None):
+        parser.error("--run-visual-model-review requires --source-clauses and --visual-review-dir")
+    if not args.run_visual_model_review and any((args.codex_bin, args.codex_model, args.codex_reasoning_effort)):
+        parser.error("Codex binary/model/effort options require --run-visual-model-review")
+    if visual_review_report and source_clauses is None:
+        parser.error("--visual-review-report requires --source-clauses for independent verification")
+    if source_clauses and (source_clauses == case_root or case_root not in source_clauses.parents):
+        parser.error(f"source clauses must remain inside the case output directory: {source_clauses}")
+    if visual_review_report and (visual_review_report == case_root or case_root not in visual_review_report.parents):
+        parser.error(f"visual review report must remain inside the case output directory: {visual_review_report}")
+    if visual_review_dir and (visual_review_dir == case_root or case_root not in visual_review_dir.parents):
+        parser.error(f"visual review directory must remain inside the case output directory: {visual_review_dir}")
+    if visual_review_dir and visual_review_dir.exists():
+        parser.error(f"visual review directory must be new and empty: {visual_review_dir}")
+    if args.visual_page_timeout <= 0:
+        parser.error("--visual-page-timeout must be a positive integer")
 
     checks, blockers = _pre_render_checks(source, pre_validation)
     if blockers:
@@ -331,6 +372,63 @@ def main(argv: list[str] | None = None) -> int:
         if visual_step["returncode"] != 0:
             blockers.append("pdf_visual_audit_failed")
 
+    if render_step["returncode"] == 0 and args.run_visual_model_review:
+        try:
+            from pypdf import PdfReader
+            page_count = len(PdfReader(str(pdf)).pages)
+        except (OSError, ValueError, TypeError) as exc:
+            page_count = 0
+            checks["visual_page_count_preflight"] = {"status": "blocked", "error": f"{type(exc).__name__}: {exc}"}
+        if page_count <= 0:
+            blockers.append("visual_page_count_preflight_failed")
+        visual_review_cmd = [
+            sys.executable, str(ROOT / "scripts" / "visual_page_review.py"),
+            str(final), str(pdf), "--render-report", str(render_report),
+            "--format-spec", str(format_spec), "--source-clauses", str(source_clauses),
+            "--work-dir", str(visual_review_dir), "--auto-host-agent", "--host-runtime", "codex",
+            "--page-timeout", str(args.visual_page_timeout),
+        ]
+        if args.codex_bin:
+            visual_review_cmd.extend(["--codex-bin", args.codex_bin])
+        if args.codex_model:
+            visual_review_cmd.extend(["--codex-model", args.codex_model])
+        if args.codex_reasoning_effort:
+            visual_review_cmd.extend(["--codex-reasoning-effort", args.codex_reasoning_effort])
+        if page_count > 0:
+            visual_review_step = run_step(
+                visual_review_cmd,
+                timeout=max(300, args.visual_page_timeout * page_count + 120),
+            )
+        else:
+            visual_review_step = {"returncode": 2, "error": "rendered PDF page count is unavailable"}
+        checks["visual_page_review_step"] = visual_review_step
+        visual_review_report = visual_review_dir / "visual-review-manifest.json"
+        if visual_review_step["returncode"] not in {0, 2}:
+            blockers.append("visual_page_review_execution_failed")
+
+    if render_step["returncode"] == 0:
+        if visual_review_report is None or source_clauses is None:
+            checks["visual_page_review"] = {
+                "status": "missing", "valid": False,
+                "blockers": ["visual_page_review_missing"],
+            }
+            blockers.append("visual_page_review_missing")
+        elif not visual_review_report.is_file() or not source_clauses.is_file():
+            checks["visual_page_review"] = {
+                "status": "blocked", "valid": False,
+                "blockers": ["visual_page_review_inputs_missing"],
+            }
+            blockers.append("visual_page_review_inputs_missing")
+        else:
+            from visual_page_review import verify_visual_review_report
+            visual_validation = verify_visual_review_report(
+                visual_review_report, final_docx=final, pdf=pdf, render_report=render_report,
+                format_spec_path=format_spec, source_clauses_path=source_clauses,
+            )
+            checks["visual_page_review"] = visual_validation
+            if visual_validation.get("valid") is not True:
+                blockers.append("visual_page_review_not_passed")
+
     if render_step["returncode"] == 0:
         audit_cmd = [
             sys.executable, str(ROOT / "scripts" / "submission_audit.py"), str(final),
@@ -338,6 +436,11 @@ def main(argv: list[str] | None = None) -> int:
             "--render-report", str(render_report),
             "--out", str(submission_audit),
         ]
+        if visual_review_report and source_clauses:
+            audit_cmd.extend([
+                "--visual-review-report", str(visual_review_report),
+                "--source-clauses", str(source_clauses),
+            ])
         if args.template_profile:
             audit_cmd += ["--template-profile", str(_path(args.template_profile))]
         if args.thesis_profile:
@@ -474,6 +577,7 @@ def main(argv: list[str] | None = None) -> int:
         "rendered_pdf_sha256": pdf_artifact.get("sha256"),
         "render_report": str(render_report),
         "visual_audit": str(visual_audit),
+        "visual_page_review": str(visual_review_report) if visual_review_report else None,
         "submission_audit": str(submission_audit),
         "format_comparison": str(comparison),
         "blockers": sorted(set(blockers)),
@@ -481,6 +585,8 @@ def main(argv: list[str] | None = None) -> int:
         "policy": {
             "pre_render_receipts_are_not_final_receipts": True,
             "final_docx_requires_independent_word_render_and_post_audit": True,
+            "final_acceptance_requires_hash_bound_full_page_visual_review": True,
+            "visual_model_review_cannot_authorize_submission_by_itself": True,
             "fail_closed": True,
         },
     }

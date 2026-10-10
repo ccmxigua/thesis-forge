@@ -11,8 +11,9 @@ from docx.shared import RGBColor
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
-from draft_scorecard import (append_scorecard, audit_scorecard, build_scorecard,
-                             scorecard_lines, validate_bound_scorecard)
+from draft_scorecard import (append_scorecard, attach_rendered_output_audit,
+                             audit_scorecard, build_scorecard, scorecard_lines,
+                             validate_bound_scorecard)
 from native_semantic_review import (NativeSemanticReviewError,
     validate_draft_dispute_envelope, validate_obligation_coverage_response)
 from thesis_format_pipeline import enforce_obligation_review_output_policy
@@ -105,6 +106,53 @@ class DraftScorecardTests(unittest.TestCase):
                 row["score"] = 0
                 with self.subTest(status=status):
                     self.assertFalse(audit_scorecard(output, tampered)["valid"])
+
+    def test_legacy_v3_scorecard_without_scope_assessment_remains_nonrelease_auditable(self):
+        with tempfile.TemporaryDirectory() as td:
+            output = Path(td) / "legacy-draft.docx"
+            card = self.card()
+            card.pop("obligation_assessment", None)
+            doc = Document()
+            append_scorecard(doc, card)
+            doc.save(output)
+            audit = audit_scorecard(output, card)
+            self.assertTrue(audit["valid"])
+            self.assertEqual(audit["obligation_assessment_status"], "legacy_not_recorded")
+            self.assertFalse(audit["submission_ready"])
+            self.assertNotIn("对象级来源义务：未评估。", "\n".join(scorecard_lines(card)))
+
+    def test_rendered_audit_attachment_is_hash_bound_without_changing_docx(self):
+        import hashlib
+        import json
+        from semantic_contract import sha256_json
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            output = root / "draft.docx"
+            scorecard_path = root / "scorecard.json"
+            card = self.card()
+            doc = Document()
+            append_scorecard(doc, card)
+            doc.save(output)
+            scorecard_path.write_text(json.dumps(card), encoding="utf-8")
+            before = hashlib.sha256(output.read_bytes()).hexdigest()
+            report = {
+                "protocol": "rendered_format_audit_v1",
+                "docx_sha256": before,
+                "pdf_sha256": "a" * 64,
+                "findings": [],
+                "submission_ready": False,
+                "field_refresh_claimed": False,
+            }
+            report["audit_sha256"] = sha256_json(report)
+            attached = attach_rendered_output_audit(scorecard_path, report, output)
+            self.assertEqual(hashlib.sha256(output.read_bytes()).hexdigest(), before)
+            self.assertTrue(audit_scorecard(output, attached)["valid"])
+
+            tampered_report = copy.deepcopy(attached)
+            tampered_report["rendered_output_audit"]["report"]["findings"].append(
+                {"code": "tampered_render_finding"})
+            self.assertFalse(audit_scorecard(output, tampered_report)["valid"])
 
     def test_even_perfect_score_requires_final_human_review(self):
         for receipt in self.audit["receipts"]:

@@ -25,7 +25,7 @@ from header_scope_audit import audit_scoped_headers
 from obligation_submission_gate import audit_obligation_submission_gate
 from render_attestation import load_key, verify as verify_attestation
 from artifact_io import atomic_write_text, paths_alias
-from semantic_contract import strict_json_dumps, strict_json_read
+from semantic_contract import sha256_json, strict_json_dumps, strict_json_read
 
 W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 R_NS = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
@@ -689,6 +689,7 @@ def audit_docx(docx_path: Path, spec: dict[str, Any] | None = None,
                thesis_profile: dict[str, Any] | None = None,
                source_docx: Path | None = None,
                *,
+               rendered_format_audit: dict[str, Any] | None = None,
                require_obligation_assessment: bool = False,
                obligation_scope_inventory: dict[str, Any] | None = None,
                evaluation_units_by_requirement: dict[str, list[dict[str, Any]]] | None = None,
@@ -699,6 +700,62 @@ def audit_docx(docx_path: Path, spec: dict[str, Any] | None = None,
     issues: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
     submission_blockers: list[dict[str, Any]] = []
+    if rendered_format_audit is not None:
+        actual_docx_sha = hashlib.sha256(docx_path.read_bytes()).hexdigest() if docx_path.is_file() else None
+        audit_errors = []
+        report_digest = rendered_format_audit.get("audit_sha256")
+        report_payload = {key: value for key, value in rendered_format_audit.items()
+                          if key != "audit_sha256"}
+        if (rendered_format_audit.get("protocol") != "rendered_format_audit_v1"
+                or not isinstance(report_digest, str)
+                or sha256_json(report_payload) != report_digest):
+            audit_errors.append("rendered_format_report_integrity_invalid")
+        if rendered_format_audit.get("docx_sha256") != actual_docx_sha:
+            audit_errors.append("rendered_format_docx_hash_mismatch")
+        final_record = rendered_format_audit.get("final_docx")
+        if not isinstance(final_record, dict) or final_record.get("sha256") != actual_docx_sha:
+            audit_errors.append("rendered_format_final_docx_binding_invalid")
+        if source_docx is not None and rendered_format_audit.get("source_docx_sha256") != hashlib.sha256(source_docx.read_bytes()).hexdigest():
+            audit_errors.append("rendered_format_source_hash_mismatch")
+        source_record = rendered_format_audit.get("source_docx")
+        if source_docx is not None and (not isinstance(source_record, dict)
+                                        or source_record.get("sha256") != hashlib.sha256(source_docx.read_bytes()).hexdigest()):
+            audit_errors.append("rendered_format_source_binding_invalid")
+        pdf_record = rendered_format_audit.get("pdf")
+        pdf_path = Path(pdf_record["path"]) if isinstance(pdf_record, dict) and isinstance(pdf_record.get("path"), str) else None
+        actual_pdf_sha = hashlib.sha256(pdf_path.read_bytes()).hexdigest() if pdf_path and pdf_path.is_file() else None
+        declared_pdf_sha = rendered_format_audit.get("pdf_sha256") or (pdf_record.get("sha256") if isinstance(pdf_record, dict) else None)
+        if (not re.fullmatch(r"[0-9a-f]{64}", str(declared_pdf_sha or ""))
+                or not isinstance(pdf_record, dict) or actual_pdf_sha != pdf_record.get("sha256")
+                or actual_pdf_sha != declared_pdf_sha):
+            audit_errors.append("rendered_format_pdf_hash_invalid")
+        if not isinstance(rendered_format_audit.get("findings"), list):
+            audit_errors.append("rendered_format_findings_invalid")
+        findings_value = rendered_format_audit.get("findings")
+        if (rendered_format_audit.get("status") not in {"passed", "issues_found"}
+                or (rendered_format_audit.get("status") == "passed" and findings_value)
+                or (rendered_format_audit.get("status") == "issues_found" and not findings_value)):
+            audit_errors.append("rendered_format_status_inconsistent")
+        if (rendered_format_audit.get("submission_ready") is not False
+                or rendered_format_audit.get("field_refresh_claimed") is not False):
+            audit_errors.append("rendered_format_scope_claim_invalid")
+        for error in audit_errors:
+            submission_blockers.append(_issue(
+                error, "critical", "Rendered-format audit is not bound to the current DOCX/source/PDF.",
+                {"error": error}, stage="rendered_format_audit",
+            ))
+        for finding in rendered_format_audit.get("findings", []) if isinstance(rendered_format_audit.get("findings"), list) else []:
+            code = finding.get("code", finding.get("failure_type", "rendered_format_finding")) if isinstance(finding, dict) else "rendered_format_finding"
+            submission_blockers.append(_issue(
+                str(code), "critical", "Rendered PDF contains an observable format mismatch or unresolved rendering check.",
+                finding, stage="rendered_format_audit",
+            ))
+        if not audit_errors and not rendered_format_audit.get("findings"):
+            warnings.append(_issue(
+                "rendered_format_audit_observed", "info",
+                "A separately hashed rendered-output audit was attached; it is not a Microsoft Word acceptance attestation.",
+                {"pdf_sha256": rendered_format_audit.get("pdf_sha256")}, stage="rendered_format_audit",
+            ))
     names: set[str] = set()
     package_valid = False
     story_evidence: dict[str, Any] = {}
@@ -1344,6 +1401,7 @@ def audit_docx(docx_path: Path, spec: dict[str, Any] | None = None,
         "render_validation": render,
         "template_validation": template_validation,
         "obligation_assessment_gate": obligation_gate,
+        "rendered_format_audit": rendered_format_audit,
         "submission_ready": submission_ready,
         "status": "submission_ready" if submission_ready else "not_submission_ready",
         "issues": issues,
@@ -1360,6 +1418,7 @@ def audit_docx(docx_path: Path, spec: dict[str, Any] | None = None,
             "fail_closed": True,
             "render_evidence_required_for_submission_ready": True,
             "generator_counters_are_not_accepted_as_serialized_evidence": True,
+            "rendered_format_audit_is_not_word_render_attestation": True,
         },
     }
 
@@ -1369,6 +1428,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("docx", type=Path)
     parser.add_argument("--format-spec", type=Path)
     parser.add_argument("--render-report", type=Path)
+    parser.add_argument("--rendered-format-audit", type=Path,
+                        help="separate, hash-bound observational audit of the final rendered PDF; not a Word attestation")
     parser.add_argument("--source-docx", type=Path,
                         help="immutable source DOCX required to independently resolve scoped header rules")
     parser.add_argument("--template-profile", type=Path,
@@ -1388,6 +1449,8 @@ def main(argv: list[str] | None = None) -> int:
         resolved.append(args.format_spec.expanduser().resolve())
     if args.render_report:
         resolved.append(args.render_report.expanduser().resolve())
+    if args.rendered_format_audit:
+        resolved.append(args.rendered_format_audit.expanduser().resolve())
     if args.source_docx:
         resolved.append(args.source_docx.expanduser().resolve())
     if args.template_profile:
@@ -1405,6 +1468,7 @@ def main(argv: list[str] | None = None) -> int:
         template_profile_path=args.template_profile.resolve() if args.template_profile else None,
         thesis_profile=_json(args.thesis_profile) if args.thesis_profile else None,
         source_docx=args.source_docx.resolve() if args.source_docx else None,
+        rendered_format_audit=_json(args.rendered_format_audit) if args.rendered_format_audit else None,
     )
     payload = strict_json_dumps(result, ensure_ascii=False, indent=2) + "\n"
     if output:

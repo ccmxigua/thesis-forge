@@ -848,6 +848,53 @@ class SubmissionAuditTest(unittest.TestCase):
             self.assertEqual(audit["render_validation"]["evidence"], {})
             self.assertFalse(audit["submission_ready"])
 
+    def test_rendered_format_audit_requires_bound_report_and_surfaces_findings(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            docx = root / "draft.docx"
+            pdf = root / "draft.pdf"
+            make_docx(docx)
+            make_pdf(pdf)
+            docx_sha = digest(docx)
+            pdf_sha = digest(pdf)
+            report = {
+                "protocol": "rendered_format_audit_v1",
+                "source_docx_sha256": docx_sha,
+                "docx_sha256": docx_sha,
+                "pdf_sha256": pdf_sha,
+                "source_docx": {"path": str(docx.resolve()), "sha256": docx_sha},
+                "final_docx": {"path": str(docx.resolve()), "sha256": docx_sha},
+                "pdf": {"path": str(pdf.resolve()), "sha256": pdf_sha, "page_count": 1},
+                "findings": [], "status": "passed",
+                "submission_ready": False, "field_refresh_claimed": False,
+            }
+            report["audit_sha256"] = submission_audit.sha256_json(report)
+            clean = audit_docx(docx, SPEC, source_docx=docx,
+                               rendered_format_audit=report)
+            self.assertNotIn("rendered_format_report_integrity_invalid",
+                             {item["code"] for item in clean["submission_blockers"]})
+            self.assertIn("rendered_format_audit_observed",
+                          {item["code"] for item in clean["warnings"]})
+
+            stale = dict(report)
+            stale["final_docx"] = dict(report["final_docx"], sha256="0" * 64)
+            stale["audit_sha256"] = submission_audit.sha256_json(
+                {key: value for key, value in stale.items() if key != "audit_sha256"})
+            rejected = audit_docx(docx, SPEC, source_docx=docx,
+                                  rendered_format_audit=stale)
+            self.assertIn("rendered_format_final_docx_binding_invalid",
+                          {item["code"] for item in rejected["submission_blockers"]})
+
+            finding_report = dict(report)
+            finding_report["findings"] = [{"code": "rendered_pdf_font_mismatch"}]
+            finding_report["status"] = "issues_found"
+            finding_report["audit_sha256"] = submission_audit.sha256_json(
+                {key: value for key, value in finding_report.items() if key != "audit_sha256"})
+            flagged = audit_docx(docx, SPEC, source_docx=docx,
+                                 rendered_format_audit=finding_report)
+            self.assertIn("rendered_pdf_font_mismatch",
+                          {item["code"] for item in flagged["submission_blockers"]})
+
     def test_cli_rejects_invalid_spec_and_output_alias_before_audit(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td); docx = root / "input.docx"; spec = root / "invalid.json"

@@ -14,7 +14,7 @@ from docx.text.paragraph import Paragraph
 from manual_review_display import (ensure_manual_review_styles, mark_manual_review_paragraph,
                                    MANUAL_REVIEW_STYLE, _effective_run_attribute)
 from docx_semantics import all_body_paragraphs
-from semantic_contract import sha256_json
+from semantic_contract import sha256_json, strict_json_read
 from pipeline_finding import integrity_findings
 from responsibility_ledger import WEIGHTS, FORCES, APPLICABILITIES, ROUTES
 from source_obligation_assessment import assessment_projection_valid, build_obligation_assessment
@@ -55,8 +55,18 @@ def _scorecard_semantics_valid(card: dict[str, Any]) -> bool:
             or card.get("unverified_count") != expected_counts["unverified"]
             or card.get("pending_count") != expected_counts["pending"]):
         return False
-    return (card.get("submission_ready") is False
-            and assessment_projection_valid(card.get("obligation_assessment")))
+    if "obligation_assessment" in card:
+        scope_assessment_valid = assessment_projection_valid(card.get("obligation_assessment"))
+    else:
+        # The original v3 scorecard contract predates object-scope assessment.
+        # Keep its display audit readable while explicitly leaving scope
+        # assessment absent; this compatibility path never grants release.
+        scope_assessment_valid = (
+            card.get("schema_version") in {"1.0", "3.0"}
+            and card.get("policy") == POLICY
+            and card.get("unique_source_obligation_count") is None
+        )
+    return card.get("submission_ready") is False and scope_assessment_valid
 
 
 def build_scorecard(binding: dict[str, Any], receipt_audit: dict[str, Any],
@@ -305,6 +315,8 @@ def build_scorecard(binding: dict[str, Any], receipt_audit: dict[str, Any],
 
 
 def scorecard_lines(card: dict[str, Any]) -> list[str]:
+    scope_line = (_obligation_assessment_line(card.get("obligation_assessment")) + "\n"
+                  if "obligation_assessment" in card else "")
     head = ("自动核验评分（审查草稿，不可提交）\n"
             f"得分：{card['score'] if card['score'] is not None else '未评分'}/100；"
             f"诊断条目{card['diagnostic_item_count']}项（不是独立义务数）；"
@@ -312,7 +324,7 @@ def scorecard_lines(card: dict[str, Any]) -> list[str]:
             f"未核验{card['unverified_count']}项，待人工核验{card['pending_count']}项。\n"
             f"来源评价单元{card['evaluation_unit_count']}个，其中可确认独立来源义务"
             f"{card['unique_source_obligation_count'] if card['unique_source_obligation_count'] is not None else '未知'}个。\n"
-            + _obligation_assessment_line(card.get("obligation_assessment")) + "\n"
+            + scope_line
             + "按已知适用的自动义务单元计分：强制/禁止5、建议2、已选择可选项1；这是产品策略，不是学校权重。"
             + "未知强制性/适用性不赋权，人工、待输入、未知问题单列；重复检查不重复加权。"
             + "所有未满足/待核验项须人工检查；高分不能抵消安全错误或授权提交。")
@@ -386,6 +398,41 @@ def audit_scorecard(path: Path, card: dict[str, Any]) -> dict[str, Any]:
     doc = Document(path)
     paragraphs = list(all_body_paragraphs(doc))
     semantic_valid = _scorecard_semantics_valid(card)
+    docx_sha = hashlib.sha256(path.read_bytes()).hexdigest()
+    serialized_audit = card.get("serialized_format_audit")
+    rendered_audit = card.get("rendered_output_audit")
+
+    def attached_audit_valid(value: Any, *, expected_protocol: str) -> bool:
+        if value is None:
+            return True
+        if not isinstance(value, dict) or value.get("protocol") != expected_protocol:
+            return False
+        digest = value.get("audit_sha256")
+        payload = {key: copy.deepcopy(child) for key, child in value.items() if key != "audit_sha256"}
+        return (value.get("docx_sha256") == docx_sha
+                and isinstance(digest, str) and sha256_json(payload) == digest)
+
+    if isinstance(serialized_audit, dict):
+        audit_digest = serialized_audit.get("audit_sha256")
+        audit_payload = {key: copy.deepcopy(value) for key, value in serialized_audit.items()
+                         if key != "audit_sha256"}
+        semantic_valid = semantic_valid and (
+            serialized_audit.get("protocol") == "serialized_format_repairs_audit_v1"
+            and serialized_audit.get("docx_sha256") == docx_sha
+            and isinstance(audit_digest, str)
+            and sha256_json(audit_payload) == audit_digest
+        )
+    if rendered_audit is not None:
+        semantic_valid = semantic_valid and attached_audit_valid(
+            rendered_audit, expected_protocol="rendered_output_audit_attachment_v1",
+        )
+        if isinstance(rendered_audit, dict):
+            semantic_valid = semantic_valid and (
+                rendered_audit.get("submission_ready") is False
+                and isinstance(rendered_audit.get("pdf_sha256"), str)
+                and isinstance(rendered_audit.get("report"), dict)
+                and sha256_json(rendered_audit["report"]) == rendered_audit.get("report_sha256")
+            )
     lines = scorecard_lines(card) if semantic_valid else []
     texts = [p.text for p in paragraphs]
     expected_ids = {item["item_id"] for item in card["entries"]}
@@ -400,8 +447,34 @@ def audit_scorecard(path: Path, card: dict[str, Any]) -> dict[str, Any]:
                      for p in paragraphs if p.text in lines))
     return {"valid": valid, "policy": POLICY, "submission_ready": False,
             "scorecard_sha256": sha256_json(card),
-            "docx_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
-            "item_count": len(actual_ids), "visual_verification": "required"}
+            "docx_sha256": docx_sha,
+            "item_count": len(actual_ids), "visual_verification": "required",
+            "obligation_assessment_status": (
+                "recorded" if isinstance(card.get("obligation_assessment"), dict)
+                else "legacy_not_recorded"
+            )}
+
+
+def attach_rendered_output_audit(scorecard_path: Path, report: dict[str, Any],
+                                 docx_path: Path) -> dict[str, Any]:
+    """Attach final PDF observations to the external scorecard without altering the DOCX."""
+    card = strict_json_read(scorecard_path)
+    docx_sha = hashlib.sha256(docx_path.read_bytes()).hexdigest()
+    if report.get("docx_sha256") != docx_sha:
+        raise ValueError("rendered-format report DOCX hash does not match scorecard document")
+    attachment: dict[str, Any] = {
+        "protocol": "rendered_output_audit_attachment_v1",
+        "docx_sha256": docx_sha,
+        "pdf_sha256": report.get("pdf_sha256"),
+        "parent_scorecard_sha256": sha256_json(card),
+        "report_sha256": sha256_json(report),
+        "report": copy.deepcopy(report),
+        "submission_ready": False,
+    }
+    attachment["audit_sha256"] = sha256_json(attachment)
+    card["rendered_output_audit"] = attachment
+    scorecard_path.write_text(json.dumps(card, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    return card
 
 
 def validate_bound_scorecard(card: dict[str, Any], *, binding: dict[str, Any],

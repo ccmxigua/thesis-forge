@@ -54,6 +54,10 @@ from source_literal_binding import (
     compose_source_fragments,
     normalize_clause_literal,
 )
+from source_table_contract import (
+    compile_source_table_contract,
+    resolve_bound_requirement_docx,
+)
 from manual_review import (
     add_manual_review_items,
     filter_manual_marker_ledger,
@@ -2847,6 +2851,256 @@ def _caption_number(text: str) -> str | None:
     return match.group(1).replace("．", ".").replace("-", ".") if match else None
 
 
+_CAPTION_PREFIX_SEPARATOR = re.compile(
+    r"^((?:图|表|Figure|Table)\s*[0-9]+(?:[.．-][0-9]+)*)([\t \u00a0\u3000]+)(?=\S)",
+    re.I,
+)
+
+
+def _replace_caption_separator_in_one_run(paragraph: Paragraph, start: int, end: int,
+                                         replacement: str) -> bool:
+    """Replace a caption separator only when its complete span belongs to one text run."""
+    runs = list(paragraph.runs)
+    if "".join(run.text or "" for run in runs) != paragraph.text:
+        return False
+    if any(node.tag not in {qn("w:pPr"), qn("w:r"), qn("w:bookmarkStart"),
+                            qn("w:bookmarkEnd"), qn("w:proofErr")} for node in paragraph._p):
+        return False
+    for run in runs:
+        if any(node.tag not in {qn("w:rPr"), qn("w:t")} for node in run._r):
+            return False
+    offset = 0
+    for run in runs:
+        value = run.text or ""
+        run_start, run_end = offset, offset + len(value)
+        if run_start <= start and end <= run_end:
+            local_start, local_end = start - run_start, end - run_start
+            run.text = value[:local_start] + replacement + value[local_end:]
+            return True
+        offset = run_end
+    return False
+
+
+def normalize_caption_separators(doc: Document, roles: dict[str, Any],
+                                 mappings: dict[str, Any]) -> list[dict[str, Any]]:
+    repairs: list[dict[str, Any]] = []
+    for role in ("figure_caption", "table_caption"):
+        role_spec = roles.get(role)
+        if not isinstance(role_spec, dict) or not isinstance(role_spec.get("separator"), str):
+            continue
+        expected = role_spec["separator"]
+        for paragraph in _role_paragraphs(doc, role, mappings):
+            text = paragraph.text
+            match = _CAPTION_PREFIX_SEPARATOR.match(text)
+            if not match:
+                continue
+            actual = match.group(2)
+            if actual == expected:
+                continue
+            if _replace_caption_separator_in_one_run(paragraph, match.start(2), match.end(2), expected):
+                repairs.append({"role": role, "caption_number": _caption_number(text),
+                                "before": text, "after": paragraph.text,
+                                "expected_separator": expected, "actual_separator_before": actual,
+                                "status": "normalized"})
+            else:
+                repairs.append({"role": role, "caption_number": _caption_number(text),
+                                "before": text, "after": text,
+                                "expected_separator": expected, "actual_separator_before": actual,
+                                "status": "not_materialized",
+                                "reason": "separator spans multiple runs or paragraph contains non-text XML"})
+    return repairs
+
+
+def audit_caption_separators(doc: Document, roles: dict[str, Any],
+                             mappings: dict[str, Any]) -> list[dict[str, Any]]:
+    findings: list[dict[str, Any]] = []
+    for role in ("figure_caption", "table_caption"):
+        role_spec = roles.get(role)
+        if not isinstance(role_spec, dict) or not isinstance(role_spec.get("separator"), str):
+            continue
+        expected = role_spec["separator"]
+        for index, paragraph in enumerate(_role_paragraphs(doc, role, mappings), 1):
+            text = paragraph.text
+            match = _CAPTION_PREFIX_SEPARATOR.match(text)
+            if match and match.group(2) == expected:
+                continue
+            actual = match.group(2) if match else None
+            findings.append({"role": role, "property": f"caption[{index}].separator",
+                             "caption_number": _caption_number(text),
+                             "template_value": actual, "required_value": expected,
+                             "failure_type": "caption_separator_not_materialized",
+                             "reason": ("caption label/title separator does not exactly match the source-bound role contract"
+                                        if match else "caption label and title boundary could not be uniquely parsed")})
+    return findings
+
+
+def caption_separator_observations(doc: Document, roles: dict[str, Any],
+                                   mappings: dict[str, Any]) -> list[dict[str, Any]]:
+    observations = []
+    for role in ("figure_caption", "table_caption"):
+        role_spec = roles.get(role)
+        if not isinstance(role_spec, dict) or not isinstance(role_spec.get("separator"), str):
+            continue
+        expected = role_spec["separator"]
+        for index, paragraph in enumerate(_role_paragraphs(doc, role, mappings), 1):
+            match = _CAPTION_PREFIX_SEPARATOR.match(paragraph.text)
+            actual = match.group(2) if match else None
+            observations.append({
+                "role": role, "index": index, "caption_number": _caption_number(paragraph.text),
+                "text": paragraph.text, "actual_separator": actual,
+                "expected_separator": expected,
+                "status": "passed" if actual == expected else "failed",
+            })
+    return observations
+
+
+def _paragraph_for_element(doc: Document, element: Any) -> Paragraph | None:
+    return next((paragraph for paragraph in doc.paragraphs
+                 if paragraph._p is element or paragraph._p == element), None)
+
+
+def _captioned_table_scope(doc: Document, mappings: dict[str, Any] | None,
+                           caption_position: str | None) -> tuple[list[Table], list[dict[str, Any]], list[dict[str, Any]]]:
+    """Select tables with one adjacent, structurally mapped table caption."""
+    caption_style = (mappings or {}).get("table_caption", {}).get("style_name")
+    if not caption_style or caption_position not in {"above", "below"}:
+        return [], [{"role": "table", "property": "tables.scope", "failure_type": "table_scope_unresolved",
+                     "reason": "captioned_tables scope requires a mapped style and source-resolved caption position"}], []
+    children = list(doc._body._element)
+    selected: list[Table] = []
+    findings: list[dict[str, Any]] = []
+    exclusions: list[dict[str, Any]] = []
+    for index, table in enumerate(doc.tables, 1):
+        try:
+            body_index = children.index(table._tbl)
+        except ValueError:
+            findings.append({"role": "table", "property": f"tables[{index}].scope",
+                             "failure_type": "table_scope_unresolved", "reason": "table is not a top-level body child"})
+            continue
+        captions: list[Paragraph] = []
+        for step in ((-1,) if caption_position == "above" else (1,)):
+            cursor = body_index + step
+            blanks = 0
+            while 0 <= cursor < len(children):
+                node = children[cursor]
+                if node.tag != qn("w:p"):
+                    break
+                paragraph = _paragraph_for_element(doc, node)
+                if paragraph is None:
+                    break
+                if not paragraph.text.strip() and not paragraph._p.xpath(".//w:drawing|.//m:oMath|.//w:br"):
+                    blanks += 1
+                    if blanks > 3:
+                        break
+                    cursor += step
+                    continue
+                if paragraph.style.name == caption_style and _caption_number(paragraph.text):
+                    captions.append(paragraph)
+                break
+        unique = {paragraph._p for paragraph in captions}
+        if len(unique) == 1:
+            selected.append(table)
+        elif len(unique) == 0:
+            exclusions.append({"table_index": index,
+                               "reason": "no mapped caption on the source-declared side"})
+        else:
+            findings.append({"role": "table", "property": f"tables[{index}].scope",
+                             "failure_type": "table_scope_unresolved",
+                             "template_value": len(unique), "required_value": "exactly one adjacent table caption",
+                             "reason": "the source-bound table contract cannot select this table uniquely"})
+    if not selected:
+        findings.append({"role": "table", "property": "tables.scope",
+                         "failure_type": "table_scope_unresolved",
+                         "template_value": 0, "required_value": ">=1 uniquely captioned table",
+                         "reason": "no table matches the compiled captioned_tables source scope"})
+    return selected, findings, exclusions
+
+
+def _drawing_extent_points(paragraph: Paragraph) -> list[float]:
+    values = []
+    for node in paragraph._p.xpath(".//wp:extent"):
+        raw = node.get("cy")
+        try:
+            height = int(raw) / 12700.0
+        except (TypeError, ValueError):
+            continue
+        if height > 0:
+            values.append(round(height, 3))
+    return values
+
+
+def _effective_line_spacing(paragraph: Paragraph) -> tuple[str | None, float | None]:
+    seen: set[str] = set()
+    fmt = paragraph.paragraph_format
+    rule, spacing = fmt.line_spacing_rule, fmt.line_spacing
+    if rule is not None or spacing is not None:
+        return _line_spacing_values(rule, spacing)
+    style = paragraph.style
+    while style is not None and style.style_id not in seen:
+        seen.add(style.style_id)
+        fmt = style.paragraph_format
+        rule, spacing = fmt.line_spacing_rule, fmt.line_spacing
+        if rule is not None or spacing is not None:
+            return _line_spacing_values(rule, spacing)
+        style = style.base_style
+    return None, None
+
+
+def _line_spacing_values(rule: Any, spacing: Any) -> tuple[str | None, float | None]:
+    name = str(rule).split(".")[-1].lower() if rule is not None else None
+    points = (round(float(spacing.pt), 3) if hasattr(spacing, "pt")
+              else round(float(spacing), 3) if isinstance(spacing, (int, float)) else None)
+    if name and "exactly" in name:
+        name = "exact"
+    elif name and "at_least" in name:
+        name = "at_least"
+    elif name and "single" in name:
+        name = "single"
+    return name, points
+
+
+def apply_drawing_line_box_safety(doc: Document) -> list[dict[str, Any]]:
+    """Give every inline drawing a direct, object-safe minimum paragraph line box."""
+    audit = []
+    for index, paragraph in enumerate(all_body_paragraphs(doc), 1):
+        if not has_drawing(paragraph):
+            continue
+        extents = _drawing_extent_points(paragraph)
+        before_rule, before_points = _effective_line_spacing(paragraph)
+        minimum = max(extents, default=0.0)
+        changed = (before_rule != "at_least" or before_points is None
+                   or before_points + .05 < minimum)
+        if changed:
+            target = max(before_points or 0.0, minimum)
+            paragraph.paragraph_format.line_spacing = Pt(target)
+            paragraph.paragraph_format.line_spacing_rule = WD_LINE_SPACING.AT_LEAST
+        audit.append({"paragraph_index": index, "drawing_extent_pt": extents,
+                      "effective_line_spacing_before": {"rule": before_rule, "value_pt": before_points},
+                      "changed": changed,
+                      "effective_line_spacing_after": dict(zip(("rule", "value_pt"), _effective_line_spacing(paragraph)))})
+    return audit
+
+
+def audit_drawing_line_boxes(doc: Document) -> list[dict[str, Any]]:
+    findings = []
+    for index, paragraph in enumerate(all_body_paragraphs(doc), 1):
+        if not has_drawing(paragraph):
+            continue
+        extents = _drawing_extent_points(paragraph)
+        rule, points = _effective_line_spacing(paragraph)
+        if not extents:
+            findings.append({"role": "objects", "property": f"drawings[{index}].line_box",
+                             "failure_type": "drawing_extent_unobservable",
+                             "reason": "inline drawing has no readable positive wp:extent height"})
+        elif rule != "at_least" or points is None or points + .05 < max(extents):
+            findings.append({"role": "objects", "property": f"drawings[{index}].line_box",
+                             "failure_type": "drawing_line_box_clips_object",
+                             "template_value": {"rule": rule, "value_pt": points, "drawing_extent_pt": extents},
+                             "required_value": {"rule": "at_least", "minimum_pt": max(extents)},
+                             "reason": "serialized paragraph line box is smaller than or fixed to an inline drawing"})
+    return findings
+
+
 def reposition_captions(doc: Document, role: str, style_name: str, position: str) -> tuple[int, list[dict[str, Any]], list[dict[str, Any]]]:
     """Bind and reposition captions using an explicit local object graph.
 
@@ -2939,18 +3193,26 @@ def _border_node(container, side: str, width_pt: float | None) -> None:
     container.append(node)
 
 
-def apply_table_rules(doc: Document, table_spec: dict[str, Any]) -> dict[str, int]:
+def apply_table_rules(doc: Document, table_spec: dict[str, Any],
+                      mappings: dict[str, Any] | None = None) -> dict[str, Any]:
     """Apply deterministic three-line-table and pagination controls."""
     counts = {"tables": 0, "rows_no_split": 0, "header_rows_repeated": 0,
               "explicit_borders_applied": 0, "continuation_contracts": 0}
     if not table_spec: return counts
+    scope_findings: list[dict[str, Any]] = []
+    scope_exclusions: list[dict[str, Any]] = []
+    tables = doc.tables
+    if table_spec.get("scope") == "captioned_tables":
+        tables, scope_findings, scope_exclusions = _captioned_table_scope(
+            doc, mappings, table_spec.get("caption_position"),
+        )
     explicit = table_spec.get("border_widths_pt") if isinstance(table_spec.get("border_widths_pt"), dict) else {}
     continuation = table_spec.get("continuation") if isinstance(table_spec.get("continuation"), dict) else {}
     border_map = {
         "top": "top", "bottom": "bottom", "left": "left", "right": "right",
         "inside_h": "insideH", "inside_v": "insideV",
     }
-    for table in doc.tables:
+    for table in tables:
         counts["tables"] += 1
         if table_spec.get("style") == "three_line" or explicit:
             tblpr = table._tbl.tblPr
@@ -2969,6 +3231,15 @@ def apply_table_rules(doc: Document, table_spec: dict[str, Any]) -> dict[str, in
                     counts["explicit_borders_applied"] += 1
             header_width = explicit.get("header", table_spec.get("header_border_pt", .75))
             if table.rows:
+                if table_spec.get("style") == "three_line":
+                    # Direct cell borders override table-level nil edges. Clear
+                    # those overrides, then add only the required header rule.
+                    for row in table.rows:
+                        for cell in row.cells:
+                            tcpr = cell._tc.get_or_add_tcPr()
+                            cell_borders = tcpr.find(qn("w:tcBorders"))
+                            if cell_borders is not None:
+                                tcpr.remove(cell_borders)
                 for cell in table.rows[0].cells:
                     tcpr = cell._tc.get_or_add_tcPr()
                     cell_borders = tcpr.find(qn("w:tcBorders"))
@@ -2997,6 +3268,9 @@ def apply_table_rules(doc: Document, table_spec: dict[str, Any]) -> dict[str, in
             # the repeat-header invariant but never fabricates a second
             # caption or a guessed page break.
             counts["continuation_contracts"] += 1
+    counts["scope_findings"] = scope_findings
+    counts["scope_exclusions"] = scope_exclusions
+    counts["selected_table_count"] = len(tables)
     return counts
 
 
@@ -3094,7 +3368,8 @@ def audit_object_order_constraints(doc: Document, object_spec: dict[str, Any],
 
 
 def audit_table_rules(doc: Document, table_spec: dict[str, Any],
-                      render_report: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+                      render_report: dict[str, Any] | None = None,
+                      mappings: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     findings = []
     if not table_spec: return findings
     explicit = table_spec.get("border_widths_pt") if isinstance(table_spec.get("border_widths_pt"), dict) else {}
@@ -3103,7 +3378,13 @@ def audit_table_rules(doc: Document, table_spec: dict[str, Any],
         "top": "top", "bottom": "bottom", "left": "left", "right": "right",
         "inside_h": "insideH", "inside_v": "insideV",
     }
-    for ti, table in enumerate(doc.tables, 1):
+    tables = doc.tables
+    if table_spec.get("scope") == "captioned_tables":
+        tables, scope_findings, _scope_exclusions = _captioned_table_scope(
+            doc, mappings, table_spec.get("caption_position"),
+        )
+        findings.extend(scope_findings)
+    for ti, table in enumerate(tables, 1):
         tblpr = table._tbl.tblPr; borders = tblpr.find(qn("w:tblBorders"))
         def border(side: str):
             return borders.find(qn(f"w:{side}")) if borders is not None else None
@@ -3154,6 +3435,29 @@ def audit_table_rules(doc: Document, table_spec: dict[str, Any],
                 if not border_matches(node, expected_header):
                     findings.append({"role": "table", "property": f"tables[{ti}].header_cells[{ci}].bottom_border_pt",
                                      "template_value": actual_width(node), "required_value": expected_header})
+        if table_spec.get("style") == "three_line":
+            expected_header = float(explicit.get("header", table_spec.get("header_border_pt", .75)))
+            for ri, row in enumerate(table.rows, 1):
+                for ci, cell in enumerate(row.cells, 1):
+                    tcpr = cell._tc.get_or_add_tcPr()
+                    cell_borders = tcpr.find(qn("w:tcBorders"))
+                    if cell_borders is None:
+                        continue
+                    for side in ("top", "bottom", "left", "right", "insideH", "insideV"):
+                        node = cell_borders.find(qn(f"w:{side}"))
+                        if node is None or actual_width(node) == 0:
+                            continue
+                        allowed_header_edge = (ri == 1 and side == "bottom"
+                                               and border_matches(node, expected_header))
+                        if not allowed_header_edge:
+                            findings.append({
+                                "role": "table",
+                                "property": f"tables[{ti}].rows[{ri}].cells[{ci}].{side}_border_override_pt",
+                                "template_value": actual_width(node),
+                                "required_value": 0,
+                                "failure_type": "three_line_table_cell_override",
+                                "reason": "a direct cell border overrides the source-bound three-line table topology",
+                            })
         for ri, row in enumerate(table.rows, 1):
             trpr = row._tr.get_or_add_trPr()
             if table_spec.get("allow_row_split") is False and trpr.find(qn("w:cantSplit")) is None:
@@ -3177,6 +3481,105 @@ def audit_table_rules(doc: Document, table_spec: dict[str, Any],
                 "reason": "cross-page continuation caption and page-span behavior cannot be proven from DOCX XML alone; accepted Word/PDF evidence is required",
             })
     return findings
+
+
+def table_border_observations(doc: Document, table_spec: dict[str, Any],
+                              mappings: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Return actual serialized edge widths per selected table, independently of counters."""
+    if not table_spec:
+        return {"status": "not_applicable", "tables": [], "scope_findings": [],
+                "scope_exclusions": []}
+    tables = doc.tables
+    scope_findings: list[dict[str, Any]] = []
+    scope_exclusions: list[dict[str, Any]] = []
+    if table_spec.get("scope") == "captioned_tables":
+        tables, scope_findings, scope_exclusions = _captioned_table_scope(
+            doc, mappings, table_spec.get("caption_position"),
+        )
+
+    def actual(node: Any) -> float | None:
+        if node is None:
+            return None
+        if node.get(qn("w:val")) in {"nil", "none"}:
+            return 0.0
+        raw = node.get(qn("w:sz"))
+        try:
+            return round(float(raw) / 8, 3) if raw else None
+        except (TypeError, ValueError):
+            return None
+
+    observations = []
+    children = list(doc._body._element)
+    caption_style = (mappings or {}).get("table_caption", {}).get("style_name")
+    for index, table in enumerate(tables, 1):
+        tblpr = table._tbl.tblPr
+        borders = tblpr.find(qn("w:tblBorders"))
+        edges = {}
+        for key, side in (("top", "top"), ("bottom", "bottom"), ("left", "left"),
+                          ("right", "right"), ("inside_h", "insideH"), ("inside_v", "insideV")):
+            node = borders.find(qn(f"w:{side}")) if borders is not None else None
+            edges[key] = actual(node)
+        header_widths = []
+        if table.rows:
+            for cell in table.rows[0].cells:
+                tcpr = cell._tc.get_or_add_tcPr()
+                cell_borders = tcpr.find(qn("w:tcBorders"))
+                node = cell_borders.find(qn("w:bottom")) if cell_borders is not None else None
+                header_widths.append(actual(node))
+        edges["header"] = (header_widths[0] if header_widths and len(set(header_widths)) == 1
+                            else header_widths if header_widths else None)
+        cell_overrides = []
+        for row_index, row in enumerate(table.rows, 1):
+            for cell_index, cell in enumerate(row.cells, 1):
+                tcpr = cell._tc.get_or_add_tcPr()
+                cell_borders = tcpr.find(qn("w:tcBorders"))
+                if cell_borders is None:
+                    continue
+                for side in ("top", "bottom", "left", "right", "insideH", "insideV"):
+                    node = cell_borders.find(qn(f"w:{side}"))
+                    width = actual(node)
+                    if width not in (None, 0.0):
+                        cell_overrides.append({"row": row_index, "cell": cell_index,
+                                               "side": side, "width_pt": width})
+        caption = None
+        try:
+            body_index = children.index(table._tbl)
+            for step in (-1, 1):
+                cursor = body_index + step
+                while 0 <= cursor < len(children):
+                    node = children[cursor]
+                    if node.tag != qn("w:p"):
+                        break
+                    paragraph = _paragraph_for_element(doc, node)
+                    if paragraph is None:
+                        break
+                    if not paragraph.text.strip():
+                        cursor += step
+                        continue
+                    if caption_style and paragraph.style.name == caption_style:
+                        caption = {"text": paragraph.text, "number": _caption_number(paragraph.text)}
+                    break
+        except ValueError:
+            pass
+        observations.append({"table_index_in_scope": index, "caption": caption,
+                             "row_count": len(table.rows), "column_count": len(table.columns),
+                             "border_widths_pt": edges,
+                             "nonzero_direct_cell_border_overrides": cell_overrides})
+    return {"status": "blocked" if scope_findings else "observed",
+            "scope": table_spec.get("scope", "all_tables"),
+            "table_count": len(observations), "tables": observations,
+            "scope_findings": scope_findings,
+            "scope_exclusions": scope_exclusions}
+
+
+def table_border_receipt_actuals(observations: dict[str, Any]) -> dict[str, Any]:
+    rows = observations.get("tables", []) if isinstance(observations, dict) else []
+    keys = sorted({key for row in rows for key in row.get("border_widths_pt", {})})
+    actual: dict[str, Any] = {}
+    for key in keys:
+        values = [row.get("border_widths_pt", {}).get(key) for row in rows]
+        actual[key] = values[0] if values and all(value == values[0] for value in values) else values
+    return {"border_widths_pt": actual} if actual else {}
 
 
 def _role_paragraphs(doc: Document, role: str, mappings: dict[str, Any]) -> list[Paragraph]:
@@ -4457,6 +4860,9 @@ def main(argv: list[str]) -> int:
         allow_missing_required_metadata=args.output_policy == "review_draft",
     )
     if validation_errors: raise SystemExit("invalid format spec:\n" + "\n".join(validation_errors))
+    source_clauses: list[dict[str, Any]] = []
+    source_table_contract: dict[str, Any] = {"status": "not_applicable", "contract": None, "findings": []}
+    source_table_contract_findings: list[dict[str, Any]] = []
     obligation_scope_inventory = None
     obligation_scope_inventory_sha256 = None
     if args.obligation_scope_inventory:
@@ -4593,6 +4999,66 @@ def main(argv: list[str]) -> int:
         }
     elif raw_content_instances not in ([], None):
         raise SystemExit("invalid content_instances container")
+    if args.source_clauses:
+        try:
+            clause_data = strict_json_read(args.source_clauses)
+            source_clauses = (
+                clause_data if isinstance(clause_data, list)
+                else clause_data.get("clauses", []) if isinstance(clause_data, dict)
+                else None
+            )
+            if not isinstance(source_clauses, list):
+                raise ValueError("source clauses must be a JSON array")
+            table_clause_present = any(
+                isinstance(clause, dict) and isinstance(clause.get("text"), str)
+                and re.search(r"三线表|外边框线|内边框线", clause["text"])
+                for clause in source_clauses
+            )
+            if table_clause_present:
+                if args.source_extraction_manifest is None:
+                    requirement_source = None
+                    source_binding = {
+                        "status": "blocked",
+                        "findings": [{
+                            "code": "requirements_extraction_manifest_missing",
+                            "reason": "source-derived table rules require the current extraction manifest",
+                        }],
+                    }
+                else:
+                    requirement_source, source_binding = resolve_bound_requirement_docx(
+                        args.source_extraction_manifest, args.source_clauses, args.format_spec,
+                    )
+                source_table_contract = compile_source_table_contract(
+                    requirement_source or args.input, source_clauses, spec,
+                    source_binding=source_binding,
+                )
+            else:
+                source_table_contract = compile_source_table_contract(args.input, source_clauses, spec)
+            source_table_contract_findings = [
+                {"role": "table", "property": item.get("code", "source_table_contract"),
+                 "failure_type": item.get("code", "source_table_contract"),
+                 "template_value": item, "required_value": "source-bound executable table contract",
+                 "reason": item.get("reason", "source table contract compilation failed")}
+                for item in source_table_contract.get("findings", [])
+            ]
+        except (OSError, ValueError, json.JSONDecodeError, TypeError) as exc:
+            source_table_contract = {"status": "blocked", "contract": None,
+                                     "findings": [{"code": "source_table_contract_input_invalid",
+                                                   "reason": f"{type(exc).__name__}: {exc}"}]}
+            source_table_contract_findings = [{
+                "role": "table", "property": "source_table_contract_input_invalid",
+                "failure_type": "source_table_contract_input_invalid",
+                "required_value": "source-bound executable table contract",
+                "reason": f"{type(exc).__name__}: {exc}",
+            }]
+        if source_table_contract.get("status") == "compiled":
+            effective_errors = load_and_validate(
+                spec,
+                Path(__file__).resolve().parents[1] / "schema" / "format-spec.schema.json",
+                allow_missing_required_metadata=args.output_policy == "review_draft",
+            )
+            if effective_errors:
+                raise SystemExit("compiled source table contract is invalid:\n" + "\n".join(effective_errors))
     explicit_raw = load_json(args.style_map) if args.style_map else {}
     source_mappings = explicit_raw.get("mappings", explicit_raw)
     explicit = {role: value.get("style_name") if isinstance(value, dict) else value
@@ -4688,6 +5154,7 @@ def main(argv: list[str]) -> int:
             "evaluation-unit source integrity validation failed:\n"
             + "\n".join(evaluation_unit_errors)
     )
+    source_drawing_baseline = audit_drawing_line_boxes(Document(args.input))
     doc = Document(args.input)
     prepared_header_layout = prepare_header_scope_boundaries(doc, spec)
     original_source_paragraphs = _content_instance_paragraphs(doc)
@@ -4710,6 +5177,9 @@ def main(argv: list[str]) -> int:
         ))
     if args.manual_review_items and isinstance(manual_review_ledger, dict):
         write_manual_review_ledger(args.manual_review_items, manual_review_ledger)
+    # Keep the report field explicit for non-review-draft output policies too;
+    # the serialized diagnostics below are shared by both paths.
+    draft_scorecard: dict[str, Any] | None = None
     if args.output_policy == "review_draft":
         ensure_manual_review_styles(doc)
     mappings = {}; conflicts = []; created = []; claimed = {}
@@ -4903,7 +5373,8 @@ def main(argv: list[str]) -> int:
                 doc, role, mappings[role]["style_name"], pos)
             numbering_issues.extend(position_issues)
             caption_graph.extend(role_graph)
-    table_changes = apply_table_rules(doc, spec.get("tables", {}))
+    caption_separator_repairs = normalize_caption_separators(doc, spec.get("roles", {}), mappings)
+    table_changes = apply_table_rules(doc, spec.get("tables", {}), mappings)
     pagination_changes = apply_object_pagination(doc, mappings, spec.get("objects", {}), spec.get("tables", {}))
     toc_fields_updated = set_toc_depth(doc, spec.get("document_structure", {}).get("toc_depth"))
     appendix_changes = apply_appendix_rules(doc, spec.get("appendices", {}))
@@ -4924,6 +5395,7 @@ def main(argv: list[str]) -> int:
     keyword_separator_repairs = normalize_keyword_separators(
         doc, resolve_profile_constraints(spec), mappings,
     )
+    drawing_line_box_changes = apply_drawing_line_box_safety(doc)
     manual_review_document_ledger = manual_review_ledger
     if args.output_policy == "review_draft":
         pending_cover_fields = cover_changes.get("metadata_pending_fields", [])
@@ -5063,13 +5535,18 @@ def main(argv: list[str]) -> int:
     })
     write("cover-contract.json", cover_contract)
     write("deterministic-content-repairs.json", {
-        "schema_version": "1.0",
-        "policy": "punctuation_only_preserve_keyword_text",
+        "schema_version": "1.1",
+        "policy": "contract-bound_caption_and_keyword_separator_normalization_and_object-safe_line_boxes",
         "keyword_separator_repairs": keyword_separator_repairs,
+        "caption_separator_repairs": caption_separator_repairs,
+        "drawing_line_box_changes": drawing_line_box_changes,
     })
+    if source_table_contract.get("status") != "not_applicable":
+        write("source-table-contract.json", source_table_contract)
     write("execution-receipts.json", {"schema_version": "1.0", "receipts": execution_receipts})
     # Re-open the serialized file before validation to catch OOXML round-trip errors.
     check = Document(args.output); findings = []; coverage_warnings = []
+    findings.extend(source_table_contract_findings)
     document_font_findings = audit_document_font(args.output, spec)
     findings.extend(document_font_findings)
     write("document-font-audit.json", {
@@ -5203,7 +5680,9 @@ def main(argv: list[str]) -> int:
                 "source_scope_finding": item,
             })
     findings.extend(audit_object_order_constraints(check, spec.get("objects", {}), mappings))
-    findings.extend(audit_table_rules(check, spec.get("tables", {}), render_report))
+    findings.extend(audit_table_rules(check, spec.get("tables", {}), render_report, mappings))
+    findings.extend(audit_drawing_line_boxes(check))
+    findings.extend(audit_caption_separators(check, spec.get("roles", {}), mappings))
     effective_content_constraints = resolve_profile_constraints(spec)
     findings.extend(audit_content_constraints(check, effective_content_constraints, mappings))
     guidance_advisories = audit_nonblocking_guidance(
@@ -5380,6 +5859,9 @@ def main(argv: list[str]) -> int:
             actual_by_role[role] = style_snapshot(check.styles[mapping["style_name"]], check)
         except KeyError:
             actual_by_role[role] = {}
+    if spec.get("tables"):
+        table_observations = table_border_observations(check, spec.get("tables", {}), mappings)
+        actual_by_role["table"] = table_border_receipt_actuals(table_observations)
     for requirement in spec.get("requirements", []):
         if not isinstance(requirement, dict):
             continue
@@ -5558,6 +6040,25 @@ def main(argv: list[str]) -> int:
             obligation_scope_inventory=obligation_scope_inventory,
             expected_docx_sha256=serialized_docx_sha256,
         )
+        final_check = Document(args.output)
+        serialized_format_audit = {
+            "protocol": "serialized_format_repairs_audit_v1",
+            "docx_sha256": serialized_docx_sha256,
+            "source_docx_sha256": hashlib.sha256(args.input.read_bytes()).hexdigest(),
+            "source_drawing_line_box_findings": source_drawing_baseline,
+            "drawing_line_box_changes": drawing_line_box_changes,
+            "drawing_line_box_findings": audit_drawing_line_boxes(final_check),
+            "table_source_contract": source_table_contract,
+            "table_border_observations": table_border_observations(
+                final_check, spec.get("tables", {}), mappings,
+            ),
+            "caption_separator_repairs": caption_separator_repairs,
+            "caption_separator_observations": caption_separator_observations(
+                final_check, spec.get("roles", {}), mappings,
+            ),
+        }
+        serialized_format_audit["audit_sha256"] = sha256_json(serialized_format_audit)
+        draft_scorecard["serialized_format_audit"] = serialized_format_audit
         draft_scorecard_audit = audit_scorecard(args.output, draft_scorecard)
         if not draft_scorecard_audit["valid"]:
             raise SystemExit("final scorecard does not reproduce from current receipts")
@@ -5729,7 +6230,13 @@ def main(argv: list[str]) -> int:
               "content_instance_source_binding": content_instance_source_binding_record,
               "deterministic_content_repairs": {
                   "keyword_separator_repairs": keyword_separator_repairs,
+            "caption_separator_repairs": caption_separator_repairs,
+            "drawing_line_box_changes": drawing_line_box_changes,
               },
+        "source_table_contract": source_table_contract,
+        "source_drawing_line_box_findings": source_drawing_baseline,
+        "serialized_format_audit": draft_scorecard.get("serialized_format_audit")
+        if isinstance(draft_scorecard, dict) else None,
               "cover_metadata": {"status": cover_changes.get("metadata_status", "not_applicable"),
                                    "pending_fields": cover_pending_fields},
               "declaration_changes": declaration_changes,

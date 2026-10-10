@@ -612,6 +612,20 @@
     "tableSpec": {
       "type": "object",
       "properties": {
+        "scope": {
+          "enum": [
+            "all_tables",
+            "captioned_tables"
+          ],
+          "description": "Limits an executable table rule to the source-bound table population. captioned_tables selects only tables with one adjacent mapped table caption."
+        },
+        "caption_position": {
+          "enum": [
+            "above",
+            "below"
+          ],
+          "description": "Required for captioned_tables scope; inherited from the source-bound table_caption role and selects only the declared side of each table."
+        },
         "style": {
           "enum": [
             "three_line"

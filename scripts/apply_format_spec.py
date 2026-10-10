@@ -6089,12 +6089,22 @@ def main(argv: list[str]) -> int:
                     "required_value": receipt.get("expected"),
                     "reason": "every executable property requires a serialized DOCX receipt",
                 })
+        # Receipt findings are added after the original role snapshot above.
+        # Reconcile them before clause finalization so a role cannot remain
+        # successful merely because its failed/unverified receipt arrived late.
+        finding_roles = {item.get("role") for item in findings if item.get("role")}
+        for role in list(role_results):
+            if role in finding_roles:
+                role_results[role] = False
     source_clause_records = spec.get("clause_compliance", [])
     if capability_report:
         source_clause_records = annotate_satisfied_inputs(
             source_clause_records, capability_report.get("clauses", []))
     verified_clause_records = finalize_records(
-        source_clause_records, spec.get("requirements", []), role_results, finding_roles
+        source_clause_records, spec.get("requirements", []), role_results, finding_roles,
+        current_docx_sha256=serialized_docx_sha256,
+        property_receipt_audit=property_receipt_audit,
+        role_mappings=mappings,
     )
     compliance = compliance_report(verified_clause_records, compliance_mode, "validation")
     submission_audit = audit_submission_docx(

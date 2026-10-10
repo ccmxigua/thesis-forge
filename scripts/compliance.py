@@ -10,6 +10,10 @@ behind role-only coverage.
 from __future__ import annotations
 
 from collections import Counter
+import copy
+import hashlib
+import json
+import re
 from typing import Any, Iterable
 
 COMPLIANCE_MODES = {"full", "supported_subset"}
@@ -233,39 +237,318 @@ def finalize_records(
     requirements: list[dict[str, Any]],
     role_results: dict[str, bool],
     finding_roles: set[str],
+    *,
+    current_docx_sha256: str | None = None,
+    property_receipt_audit: dict[str, Any] | None = None,
+    role_mappings: dict[str, dict[str, Any]] | None = None,
+    promote_pending: bool = True,
 ) -> list[dict[str, Any]]:
     """Promote pending clauses after serialized-DOCX validation.
 
     A clause passes only when every normalized requirement produced from it has
-    a backend result and no validation finding.  Unknown/non-executable roles
-    therefore fail instead of being reported as not applicable.
+    a backend result and no validation finding. Unknown/non-executable roles
+    therefore fail instead of being reported as not applicable. Callers that
+    audit a new DOCX instance against an earlier semantic report set
+    ``promote_pending=False`` so historical pending states are not rewritten
+    by an absent backend snapshot.
     """
     by_id = {r.get("id"): r for r in requirements}
+    receipt_rows = (property_receipt_audit.get("receipts", [])
+                    if isinstance(property_receipt_audit, dict) else [])
+    expected_receipt_ids = (property_receipt_audit.get("expected_receipt_ids")
+                            if isinstance(property_receipt_audit, dict) else None)
+    role_mappings = role_mappings or {}
+    if not isinstance(receipt_rows, list):
+        receipt_rows = []
+    receipt_rows_by_id: dict[str, list[dict[str, Any]]] = {}
+    for item in receipt_rows:
+        if isinstance(item, dict) and isinstance(item.get("receipt_id"), str):
+            receipt_rows_by_id.setdefault(item["receipt_id"], []).append(item)
+
+    def same_value(left: Any, right: Any) -> bool:
+        if (isinstance(left, (int, float)) and not isinstance(left, bool)
+                and isinstance(right, (int, float)) and not isinstance(right, bool)):
+            return abs(float(left) - float(right)) <= .05
+        return left == right
+
+    def flatten(value: Any, prefix: str = "") -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        if isinstance(value, dict):
+            for key, child in value.items():
+                path = f"{prefix}.{key}" if prefix else str(key)
+                result.update(flatten(child, path))
+        else:
+            result[prefix] = value
+        return result
+
+    def current_instance(record: dict[str, Any], reqs: list[dict[str, Any]]) -> dict[str, Any]:
+        evidence: list[dict[str, Any]] = []
+        failed: list[dict[str, Any]] = []
+        unknown: list[dict[str, Any]] = []
+        hash_valid = (isinstance(current_docx_sha256, str)
+                      and re.fullmatch(r"[0-9a-f]{64}", current_docx_sha256) is not None)
+        expected_ids_valid = (isinstance(expected_receipt_ids, list)
+                              and all(isinstance(value, str) for value in expected_receipt_ids)
+                              and len(set(expected_receipt_ids)) == len(expected_receipt_ids))
+        expected_set = set(expected_receipt_ids) if expected_ids_valid else set()
+        if not hash_valid or not expected_ids_valid:
+            return {
+                "protocol": "current_docx_instance_validation_v1",
+                "docx_sha256": current_docx_sha256 if hash_valid else None,
+                "status": "unverified",
+                "reason": "current DOCX hash or complete expected receipt inventory is missing",
+                "requirement_results": [],
+            }
+        if not reqs:
+            return {
+                "protocol": "current_docx_instance_validation_v1",
+                "docx_sha256": current_docx_sha256,
+                "status": "unverified",
+                "reason": "the historical record has no currently accepted requirement binding",
+                "requirement_results": [],
+            }
+        for requirement in reqs:
+            rid = requirement.get("id")
+            role = requirement.get("role")
+            props = requirement.get("properties")
+            if not isinstance(rid, str) or not isinstance(role, str) or not isinstance(props, dict):
+                unknown.append({"requirement_id": rid, "reason": "requirement identity or properties are incomplete"})
+                continue
+            paths = flatten(props)
+            ids = sorted(x for x in expected_set if x.startswith(f"PR-{rid}-"))
+            if not ids:
+                unknown.append({"requirement_id": rid, "reason": "no expected property receipts bind this requirement"})
+                continue
+            requirement_evidence: list[dict[str, Any]] = []
+            for receipt_id in ids:
+                candidates = receipt_rows_by_id.get(receipt_id, [])
+                if len(candidates) != 1:
+                    unknown.append({"requirement_id": rid, "receipt_id": receipt_id,
+                                    "reason": "current receipt is missing or duplicated"})
+                    continue
+                receipt = candidates[0]
+                path = receipt.get("property_path")
+                identity_matches = (
+                    receipt.get("requirement_id") == rid
+                    and receipt.get("role") == role
+                    and isinstance(path, str)
+                    and path in paths
+                    and same_value(receipt.get("expected"), paths.get(path))
+                    and isinstance(receipt.get("target_locator"), str)
+                    and bool(receipt.get("target_locator"))
+                )
+                mapping = role_mappings.get(role) if isinstance(role, str) else None
+                mapped_target = (f"style:{mapping.get('style_name')}"
+                                 if isinstance(mapping, dict) and mapping.get("style_name")
+                                 else f"role:{role}")
+                identity_matches = identity_matches and receipt.get("target_locator") == mapped_target
+                if not identity_matches:
+                    unknown.append({"requirement_id": rid, "receipt_id": receipt_id,
+                                    "reason": "receipt requirement, role, property, expected value, or target locator does not match"})
+                    continue
+                if receipt.get("serialized_docx_sha256") != current_docx_sha256:
+                    unknown.append({"requirement_id": rid, "receipt_id": receipt_id,
+                                    "reason": "receipt is bound to different DOCX bytes"})
+                    continue
+                result = {"requirement_id": rid, "receipt_id": receipt_id,
+                          "role": role, "property_path": path,
+                          "target_locator": receipt["target_locator"],
+                          "docx_sha256": current_docx_sha256,
+                          "receipt_status": receipt.get("status")}
+                requirement_evidence.append(result)
+                evidence.append(result)
+                if receipt.get("status") == "failed":
+                    failed.append(result)
+                elif receipt.get("status") != "verified":
+                    unknown.append({**result, "reason": "receipt is not verified"})
+            if len(requirement_evidence) != len(ids):
+                unknown.append({"requirement_id": rid,
+                                "reason": "not every expected property has a unique current DOCX-bound receipt"})
+        status = "failed" if failed else "unverified" if unknown else "verified"
+        return {
+            "protocol": "current_docx_instance_validation_v1",
+            "docx_sha256": current_docx_sha256,
+            "status": status,
+            "requirement_results": evidence,
+            "findings": failed,
+            "unverified_reasons": unknown,
+        }
+
     output: list[dict[str, Any]] = []
     for original in records:
         record = dict(original)
-        if record.get("status") != "pending_execution":
-            output.append(record)
-            continue
-        reqs = [by_id.get(rid) for rid in record.get("requirement_ids", [])]
-        reqs = [r for r in reqs if r]
-        roles = sorted({r.get("role") for r in reqs if r.get("role")})
-        missing_roles = [role for role in roles if not role_results.get(role, False)]
-        failed_roles = [role for role in roles if role in finding_roles]
-        if not reqs:
-            record["status"] = "failed"
-            record["verification_reason"] = "No accepted executable requirement backs this clause."
-        elif missing_roles:
-            record["status"] = "unsupported_backend"
-            record["verification_reason"] = f"No executable/verified backend result for roles: {', '.join(missing_roles)}"
-        elif failed_roles:
-            record["status"] = "failed"
-            record["verification_reason"] = f"Validation findings remain for roles: {', '.join(failed_roles)}"
-        else:
-            record["status"] = "verified_existing" if record.get("enforcement") == "verify_existing" else "generated_and_verified"
-            record["verification_reason"] = "All normalized requirements were applied or confirmed and passed serialized-DOCX validation."
+        initial_status = record.get("status")
+        if initial_status == "pending_execution" and promote_pending:
+            reqs = [by_id.get(rid) for rid in record.get("requirement_ids", [])]
+            reqs = [r for r in reqs if r]
+            roles = sorted({r.get("role") for r in reqs if r.get("role")})
+            missing_roles = [role for role in roles if not role_results.get(role, False)]
+            failed_roles = [role for role in roles if role in finding_roles]
+            if not reqs:
+                record["status"] = "failed"
+                record["verification_reason"] = "No accepted executable requirement backs this clause."
+            elif missing_roles:
+                record["status"] = "unsupported_backend"
+                record["verification_reason"] = f"No executable/verified backend result for roles: {', '.join(missing_roles)}"
+            elif failed_roles:
+                record["status"] = "failed"
+                record["verification_reason"] = f"Validation findings remain for roles: {', '.join(failed_roles)}"
+            else:
+                record["status"] = "verified_existing" if record.get("enforcement") == "verify_existing" else "generated_and_verified"
+                record["verification_reason"] = "All normalized requirements were applied or confirmed and passed serialized-DOCX validation."
+        if (current_docx_sha256 is not None
+                and record.get("status") in {"generated_and_verified", "verified_existing"}):
+            record.setdefault("historical_status", initial_status)
+            reqs = [by_id.get(rid) for rid in record.get("requirement_ids", [])]
+            reqs = [r for r in reqs if isinstance(r, dict)]
+            assessment = current_instance(record, reqs)
+            record["current_output_instance"] = assessment
+            if assessment["status"] == "failed":
+                record["status"] = "failed"
+                record["verification_reason"] = "A current DOCX-bound property receipt failed for this exact source obligation."
+            elif assessment["status"] == "unverified":
+                record["status"] = "unverifiable"
+                record["verification_reason"] = "The prior status is historical; current DOCX-bound property evidence is missing or unverified."
+            else:
+                record["verification_reason"] = "Current DOCX-bound property receipts for every linked requirement passed."
         output.append(record)
     return output
+
+
+def reconcile_rendered_output_records(
+    records: list[dict[str, Any]], requirements: list[dict[str, Any]],
+    role_mappings: dict[str, dict[str, Any]], report: dict[str, Any],
+    current_docx_sha256: str,
+) -> dict[str, Any]:
+    """Apply exact rendered findings without rewriting source-review history.
+
+    A style/font finding can affect a clause only when its requirement ID,
+    role, source property, mapped style, and expected font all agree. Findings
+    without that unique semantic edge remain current-output diagnostics and do
+    not get attributed to unrelated clauses.
+    """
+    report_payload = {key: value for key, value in report.items() if key != "audit_sha256"}
+    digest = report.get("audit_sha256")
+    final_docx = report.get("final_docx")
+    if (report.get("protocol") != "rendered_format_audit_v1"
+            or report.get("docx_sha256") != current_docx_sha256
+            or not isinstance(final_docx, dict)
+            or final_docx.get("sha256") != current_docx_sha256
+            or not isinstance(report.get("pdf_sha256"), str)
+            or re.fullmatch(r"[0-9a-f]{64}", report.get("pdf_sha256", "")) is None
+            or report.get("submission_ready") is not False
+            or report.get("field_refresh_claimed") is not False
+            or not isinstance(report.get("findings"), list)
+            or not isinstance(digest, str)):
+        raise ValueError("rendered output findings are not bound to the current DOCX")
+    try:
+        from semantic_contract import sha256_json
+    except ImportError:
+        from .semantic_contract import sha256_json
+    if sha256_json(report_payload) != digest:
+        raise ValueError("rendered output report integrity hash is invalid")
+
+    by_id = {item.get("id"): item for item in requirements if isinstance(item, dict)}
+    requirement_ids_by_font: dict[tuple[str, str, str, str], set[str]] = {}
+    for requirement in requirements:
+        if not isinstance(requirement, dict):
+            continue
+        rid, role = requirement.get("id"), requirement.get("role")
+        props = requirement.get("properties")
+        mapping = role_mappings.get(role) if isinstance(role, str) else None
+        style = mapping.get("style_name") if isinstance(mapping, dict) else None
+        if not isinstance(rid, str) or not isinstance(role, str) or not isinstance(style, str):
+            continue
+        flattened: dict[str, Any] = {}
+
+        def visit(value: Any, prefix: str = "") -> None:
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    visit(child, f"{prefix}.{key}" if prefix else str(key))
+            else:
+                flattened[prefix] = value
+
+        visit(props)
+        for path, value in flattened.items():
+            if path in {"font.cjk", "font.latin"} and isinstance(value, str):
+                script = "cjk" if path.endswith(".cjk") else "latin"
+                requirement_ids_by_font.setdefault((role, style, script, value), set()).add(rid)
+
+    output = copy.deepcopy(records)
+    clause_by_requirement: dict[str, list[dict[str, Any]]] = {}
+    for record in output:
+        for rid in record.get("requirement_ids", []):
+            if isinstance(rid, str):
+                clause_by_requirement.setdefault(rid, []).append(record)
+        if record.get("status") in {"generated_and_verified", "verified_existing"}:
+            record.setdefault("historical_status", record.get("status"))
+            instance = record.get("current_output_instance")
+            if (not isinstance(instance, dict)
+                    or instance.get("docx_sha256") != current_docx_sha256):
+                record["status"] = "unverifiable"
+                record["verification_reason"] = "Current DOCX instance lacks a matching property receipt."
+                record["current_output_instance"] = {
+                    "protocol": "current_docx_instance_validation_v1",
+                    "docx_sha256": current_docx_sha256,
+                    "status": "unverified",
+                    "reason": "no current-hash serialized property evidence was supplied",
+                }
+
+    unbound_findings: list[dict[str, Any]] = []
+    bound_findings: list[dict[str, Any]] = []
+    for finding in report.get("findings", []):
+        if not isinstance(finding, dict):
+            continue
+        code = finding.get("code")
+        targets: set[str] = set()
+        severity = "unverified"
+        expected = finding.get("expected") if isinstance(finding.get("expected"), dict) else {}
+        if code == "rendered_pdf_font_mismatch":
+            role, style, script = expected.get("role"), expected.get("style_name"), expected.get("script")
+            font = expected.get("name")
+            code_owned_ids = requirement_ids_by_font.get((role, style, script, font), set())
+            reported_ids = expected.get("requirement_ids")
+            if (isinstance(reported_ids, list)
+                    and all(isinstance(item, str) for item in reported_ids)
+                    and sorted(set(reported_ids)) == sorted(code_owned_ids)):
+                targets = code_owned_ids
+            severity = "failed"
+        elif code in {"rendered_drawing_clipped_by_page", "rendered_drawing_extent_mismatch"}:
+            severity = "failed"
+        elif code in {"drawing_not_found_in_rendered_pdf", "drawing_match_ambiguous"}:
+            severity = "unverified"
+        matching_records = {
+            id(record): record for rid in targets for record in clause_by_requirement.get(rid, [])
+        }
+        if matching_records:
+            for record in matching_records.values():
+                record["status"] = "failed" if severity == "failed" else "unverifiable"
+                record["verification_reason"] = (
+                    "A current, source-bound rendered output finding applies to this requirement."
+                    if severity == "failed" else
+                    "Rendered output could not uniquely verify this bound requirement."
+                )
+                record["current_output_instance"] = {
+                    "protocol": "current_docx_instance_validation_v1",
+                    "docx_sha256": current_docx_sha256,
+                    "pdf_sha256": report.get("pdf_sha256"),
+                    "status": "failed" if severity == "failed" else "unverified",
+                    "finding": copy.deepcopy(finding),
+                }
+            bound_findings.append({"finding": copy.deepcopy(finding),
+                                   "requirement_ids": sorted(targets),
+                                   "status": severity})
+        else:
+            unbound_findings.append({"finding": copy.deepcopy(finding),
+                                     "status": severity,
+                                     "reason": "no exact requirement/role/property/style binding was established"})
+    return {
+        "schema_version": "1.0", "protocol": "rendered_output_compliance_reconciliation_v1",
+        "docx_sha256": current_docx_sha256, "pdf_sha256": report.get("pdf_sha256"),
+        "records": output, "bound_rendered_findings": bound_findings,
+        "unbound_rendered_findings": unbound_findings,
+        "submission_ready": False,
+    }
 
 
 def annotate_satisfied_inputs(

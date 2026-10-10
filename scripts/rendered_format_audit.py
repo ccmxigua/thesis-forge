@@ -214,8 +214,19 @@ def _font_expectations(spec: dict[str, Any], style_map_path: Path | None,
         for script in ("latin", "cjk"):
             name = font.get(script)
             if isinstance(name, str) and name.strip():
+                requirement_ids = sorted({
+                    requirement.get("id")
+                    for requirement in spec.get("requirements", [])
+                    if isinstance(requirement, dict)
+                    and requirement.get("role") == role
+                    and isinstance(requirement.get("id"), str)
+                    and isinstance(requirement.get("properties"), dict)
+                    and isinstance(requirement["properties"].get("font"), dict)
+                    and requirement["properties"]["font"].get(script) == name
+                })
                 expectations.append({"role": role, "style_name": style_name,
-                                     "script": script, "name": name})
+                                     "script": script, "name": name,
+                                     "requirement_ids": requirement_ids})
     # A missing mapping for a used spec role is only detectable if the style
     # map explicitly declares it. Do not infer a role from a similar style name.
     return expectations, findings, {

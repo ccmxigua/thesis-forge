@@ -58,7 +58,10 @@ class RenderedFormatAuditTests(unittest.TestCase):
         make_pdf(pdf, clip_image=clip_image)
         spec.write_text(json.dumps({"roles": {"body_text": {
             "font": {"latin": expected_font},
-        }}}), encoding="utf-8")
+        }}, "requirements": [
+            {"id": "R1", "role": "body_text", "properties": {"font": {"latin": expected_font}}},
+            {"id": "R2", "role": "body_text", "properties": {"font": {"latin": "Different Font"}}},
+        ]}), encoding="utf-8")
         style_map.write_text(json.dumps({"body_text": {"style_name": "Normal"}}), encoding="utf-8")
         renderer_report = None
         if renderer_pdf_hash:
@@ -74,6 +77,7 @@ class RenderedFormatAuditTests(unittest.TestCase):
             self.assertGreater(report["pdf"]["page_count"], 0)
             self.assertTrue(report["actual_pdf_font_resources"])
             self.assertEqual(report["expected_pdf_fonts"][0]["name"], "Helvetica")
+            self.assertEqual(report["expected_pdf_fonts"][0]["requirement_ids"], ["R1"])
             self.assertFalse(report["submission_ready"])
             self.assertFalse(report["field_refresh_claimed"])
             self.assertEqual(len(report["audit_sha256"]), 64)

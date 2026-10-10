@@ -121,7 +121,7 @@ class DraftScorecardTests(unittest.TestCase):
             self.assertFalse(audit["submission_ready"])
             self.assertNotIn("对象级来源义务：未评估。", "\n".join(scorecard_lines(card)))
 
-    def test_rendered_audit_attachment_is_hash_bound_without_changing_docx(self):
+    def test_rendered_audit_reconciles_visible_scorecard_then_requires_final_rerender(self):
         import hashlib
         import json
         from semantic_contract import sha256_json
@@ -131,28 +131,137 @@ class DraftScorecardTests(unittest.TestCase):
             output = root / "draft.docx"
             scorecard_path = root / "scorecard.json"
             card = self.card()
+            property_entry = next(item for item in card["entries"]
+                                  if item["kind"] == "property" and item["detail"].get("receipt_id") == "r1")
+            property_entry["detail"].update({
+                "requirement_id": "R1", "role": "body", "property_path": "font.cjk",
+                "target_locator": "style:Body", "expected": "SimSun",
+            })
             doc = Document()
             append_scorecard(doc, card)
             doc.save(output)
             scorecard_path.write_text(json.dumps(card), encoding="utf-8")
             before = hashlib.sha256(output.read_bytes()).hexdigest()
-            report = {
-                "protocol": "rendered_format_audit_v1",
-                "docx_sha256": before,
-                "pdf_sha256": "a" * 64,
-                "findings": [],
-                "submission_ready": False,
-                "field_refresh_claimed": False,
-            }
-            report["audit_sha256"] = sha256_json(report)
-            attached = attach_rendered_output_audit(scorecard_path, report, output)
-            self.assertEqual(hashlib.sha256(output.read_bytes()).hexdigest(), before)
+            property_receipts = {"expected_receipt_ids": ["r1"], "receipts": [{
+                "receipt_id": "r1", "requirement_id": "R1", "role": "body",
+                "property_path": "font.cjk", "target_locator": "style:Body",
+                "expected": "SimSun", "actual": "SimSun", "status": "verified",
+                "serialized_docx_sha256": before,
+            }]}
+
+            def report_for_current_docx():
+                digest = hashlib.sha256(output.read_bytes()).hexdigest()
+                report = {
+                    "protocol": "rendered_format_audit_v1", "docx_sha256": digest,
+                    "final_docx": {"sha256": digest}, "pdf_sha256": "a" * 64,
+                    "findings": [
+                        {"code": "rendered_pdf_font_mismatch", "expected": {
+                            "role": "body", "style_name": "Body", "script": "cjk",
+                            "name": "SimSun", "requirement_ids": ["R1"],
+                        }},
+                        {"code": "drawing_not_found_in_rendered_pdf", "drawing_index": 1,
+                         "candidate_count": 0, "media_sha256": "b" * 64},
+                    ],
+                    "submission_ready": False, "field_refresh_claimed": False,
+                }
+                report["audit_sha256"] = sha256_json(report)
+                return report
+
+            def report_bindings(report):
+                finding = report["findings"][0]
+                return {sha256_json(finding): ["R1"]}
+
+            first_report = report_for_current_docx()
+            with self.assertRaisesRegex(ValueError, "rerender and re-audit"):
+                attach_rendered_output_audit(
+                    scorecard_path, first_report, output, property_receipts,
+                    rendered_requirement_bindings=report_bindings(first_report),
+                )
+            self.assertNotEqual(hashlib.sha256(output.read_bytes()).hexdigest(), before)
+            intermediate = json.loads(scorecard_path.read_text())
+            self.assertNotIn("rendered_output_audit", intermediate)
+            self.assertTrue(any(p.text.startswith("当前生成稿实例核验（")
+                                for p in Document(output).paragraphs))
+
+            # The visible status block changes the serialized DOCX; a new
+            # property pass must bind receipts to those exact new bytes.
+            property_receipts["receipts"][0]["serialized_docx_sha256"] = hashlib.sha256(
+                output.read_bytes()).hexdigest()
+            final_report = report_for_current_docx()
+            attached = attach_rendered_output_audit(
+                scorecard_path, final_report, output, property_receipts,
+                rendered_requirement_bindings=report_bindings(final_report),
+            )
+            current_property = next(item for item in attached["entries"]
+                                    if item["kind"] == "property" and item["detail"].get("receipt_id") == "r1")
+            self.assertEqual(current_property["historical_status"], "verified")
+            self.assertEqual(current_property["status"], "failed")
+            output_only = [item for item in attached["entries"]
+                           if item["kind"] == "rendered_output_instance"]
+            self.assertEqual(len(output_only), 1)
+            self.assertEqual(output_only[0]["status"], "unverified")
             self.assertTrue(audit_scorecard(output, attached)["valid"])
 
             tampered_report = copy.deepcopy(attached)
             tampered_report["rendered_output_audit"]["report"]["findings"].append(
                 {"code": "tampered_render_finding"})
             self.assertFalse(audit_scorecard(output, tampered_report)["valid"])
+
+    def test_rendered_audit_does_not_bind_wrong_requirement_or_stale_docx(self):
+        import hashlib
+        import json
+        from semantic_contract import sha256_json
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            output = root / "draft.docx"
+            scorecard_path = root / "scorecard.json"
+            card = self.card()
+            entry = next(item for item in card["entries"]
+                         if item["kind"] == "property" and item["detail"].get("receipt_id") == "r1")
+            entry["detail"].update({"requirement_id": "R1", "role": "body",
+                                    "property_path": "font.cjk", "target_locator": "style:Body",
+                                    "expected": "SimSun"})
+            doc = Document()
+            append_scorecard(doc, card)
+            doc.save(output)
+            scorecard_path.write_text(json.dumps(card), encoding="utf-8")
+            digest = hashlib.sha256(output.read_bytes()).hexdigest()
+            report = {
+                "protocol": "rendered_format_audit_v1", "docx_sha256": digest,
+                "final_docx": {"sha256": digest}, "pdf_sha256": "a" * 64,
+                "findings": [{"code": "rendered_pdf_font_mismatch", "expected": {
+                    "role": "body", "style_name": "Body", "script": "cjk",
+                    "name": "SimSun", "requirement_ids": ["R-other"],
+                }}],
+                "submission_ready": False, "field_refresh_claimed": False,
+            }
+            report["audit_sha256"] = sha256_json(report)
+            receipt_audit = {"expected_receipt_ids": ["r1"], "receipts": [{
+                "receipt_id": "r1", "requirement_id": "R1", "role": "body",
+                "property_path": "font.cjk", "target_locator": "style:Body",
+                "expected": "SimSun", "actual": "SimSun", "status": "verified",
+                "serialized_docx_sha256": digest,
+            }]}
+            with self.assertRaisesRegex(ValueError, "rerender and re-audit"):
+                attach_rendered_output_audit(
+                    scorecard_path, report, output, receipt_audit,
+                    rendered_requirement_bindings={sha256_json(report["findings"][0]): ["R1"]},
+                )
+            updated = json.loads(scorecard_path.read_text())
+            row = next(item for item in updated["entries"]
+                       if item["kind"] == "property" and item["detail"].get("receipt_id") == "r1")
+            self.assertEqual(row["status"], "verified")
+            self.assertTrue(any(item["kind"] == "rendered_output_instance"
+                                and item["status"] == "failed" for item in updated["entries"]))
+            stale = copy.deepcopy(report)
+            stale["final_docx"]["sha256"] = "c" * 64
+            stale["audit_sha256"] = sha256_json({k: v for k, v in stale.items() if k != "audit_sha256"})
+            with self.assertRaisesRegex(ValueError, "DOCX hash"):
+                attach_rendered_output_audit(
+                    scorecard_path, stale, output, receipt_audit,
+                    rendered_requirement_bindings={sha256_json(stale["findings"][0]): ["R1"]},
+                )
 
     def test_even_perfect_score_requires_final_human_review(self):
         for receipt in self.audit["receipts"]:

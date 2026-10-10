@@ -27,8 +27,9 @@ from docx.oxml.ns import qn
 from lxml import etree
 
 from docx_semantics import all_body_paragraphs
-from draft_scorecard import (PREFIX, _scorecard_semantics_valid, scorecard_lines,
+from draft_scorecard import (PREFIX, STATUSES, _scorecard_semantics_valid, scorecard_lines,
                              audit_external_scorecard)
+from manual_review_display import _text as _full_manual_marker_text
 from semantic_contract import sha256_json, strict_json_read
 
 NS = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
@@ -85,6 +86,31 @@ def _human_marker_ids(card: dict[str, Any]) -> list[str]:
     return result
 
 
+def _manual_marker_projections(card: dict[str, Any]) -> dict[str, dict[str, str]]:
+    """Return exact ledger-bound source marker text and its concise paper form."""
+    result: dict[str, dict[str, str]] = {}
+    for entry in card.get("entries", []):
+        if entry.get("kind") != "human_review":
+            continue
+        detail = entry.get("detail")
+        if not isinstance(detail, dict):
+            raise ValueError("human-review scorecard entry lacks its full source detail")
+        marker_id = detail.get("marker_id")
+        if not isinstance(marker_id, str) or not MR_START.match(f"【{marker_id}｜人工待审】"):
+            raise ValueError("human-review scorecard entry lacks a valid marker_id")
+        if marker_id in result:
+            raise ValueError("duplicate human-review marker ids in scorecard")
+        try:
+            full_text = _full_manual_marker_text(detail)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"human-review marker {marker_id} cannot be reconstructed from its ledger") from exc
+        result[marker_id] = {
+            "full_text": full_text,
+            "paper_text": f"【{marker_id}｜人工待审】详见同编号独立审查台账。",
+        }
+    return result
+
+
 def _package_part_hashes(path: Path) -> dict[str, str]:
     with ZipFile(path) as archive:
         return {info.filename: hashlib.sha256(archive.read(info.filename)).hexdigest()
@@ -103,10 +129,32 @@ def _xml_paragraph_text(node: etree._Element) -> str:
     return "".join(parts)
 
 
+def _replace_marker_paragraph_text(node: etree._Element, value: str) -> None:
+    """Replace visible marker text while retaining its paragraph/run formatting."""
+    allowed_paragraph_children = {f"{{{NS['w']}}}pPr", f"{{{NS['w']}}}r"}
+    if any(child.tag not in allowed_paragraph_children for child in node):
+        raise ValueError("manual-review marker paragraph has unsupported non-run content")
+    text_nodes = node.xpath(".//w:t", namespaces=NS)
+    if not text_nodes:
+        raise ValueError("manual-review marker paragraph has no text run")
+    for run in node.xpath(".//w:r", namespaces=NS):
+        if any(child.tag not in {f"{{{NS['w']}}}rPr", f"{{{NS['w']}}}t", f"{{{NS['w']}}}br"}
+               for child in run):
+            raise ValueError("manual-review marker run has unsupported content")
+    for line_break in node.xpath(".//w:br", namespaces=NS):
+        line_break.getparent().remove(line_break)
+    text_nodes = node.xpath(".//w:t", namespaces=NS)
+    text_nodes[0].text = value
+    if value[:1].isspace() or value[-1:].isspace():
+        text_nodes[0].set("{http://www.w3.org/XML/1998/namespace}space", "preserve")
+    for text_node in text_nodes[1:]:
+        text_node.text = ""
+
+
 def strip_scorecard_display(source_docx: Path, baseline_docx: Path,
                             scorecard_path: Path, output_docx: Path,
                             report_path: Path) -> dict[str, Any]:
-    """Remove the exact front scorecard block while retaining MR markers."""
+    """Remove the exact scorecard block and compact exact ledger-bound MR markers."""
     paths = [source_docx.resolve(), baseline_docx.resolve(), scorecard_path.resolve(),
              output_docx.resolve(), report_path.resolve()]
     if len(set(paths)) != len(paths):
@@ -137,11 +185,21 @@ def strip_scorecard_display(source_docx: Path, baseline_docx: Path,
         raise ValueError("baseline scorecard ID order differs from scorecard JSON")
 
     expected_mr_ids = _human_marker_ids(card)
+    marker_projections = _manual_marker_projections(card)
     actual_sc_ids, actual_mr_ids = _ids_in_docx(baseline_docx)
     if actual_sc_ids != expected_sc_ids:
         raise ValueError("scorecard item IDs occur outside or differ from the declared display block")
     if len(actual_mr_ids) != len(set(actual_mr_ids)) or set(actual_mr_ids) != set(expected_mr_ids):
         raise ValueError("baseline manual-review markers do not exactly match scorecard marker IDs")
+    baseline_doc = Document(baseline_docx)
+    baseline_marker_texts = {
+        match.group(1): paragraph.text
+        for paragraph in all_body_paragraphs(baseline_doc)
+        if (match := MR_START.match(paragraph.text))
+    }
+    if any(baseline_marker_texts.get(marker_id) != marker["full_text"]
+           for marker_id, marker in marker_projections.items()):
+        raise ValueError("baseline manual-review marker text is not an exact projection of the bound ledger")
 
     before_signature = sha256_json([p.text for p in paragraphs])
     # All scorecard paragraphs are the leading document-body block. Remove
@@ -154,6 +212,21 @@ def strip_scorecard_display(source_docx: Path, baseline_docx: Path,
         xml_texts = [_xml_paragraph_text(node) for node in body_paragraphs[:len(expected_lines)]]
         if xml_texts != expected_lines:
             raise ValueError("OOXML scorecard block differs from its parsed DOCX text")
+        compacted_ids: list[str] = []
+        for node in document_root.xpath(".//w:p", namespaces=NS):
+            text = _xml_paragraph_text(node)
+            match = MR_START.match(text)
+            if not match:
+                continue
+            marker_id = match.group(1)
+            expected = marker_projections.get(marker_id)
+            if expected is None or text != expected["full_text"]:
+                raise ValueError("serialized manual-review marker differs from exact bound ledger text")
+            _replace_marker_paragraph_text(node, expected["paper_text"])
+            compacted_ids.append(marker_id)
+        if (len(compacted_ids) != len(set(compacted_ids))
+                or set(compacted_ids) != set(expected_mr_ids)):
+            raise ValueError("serialized marker projection inventory differs from the scorecard")
         body = document_root.find("w:body", namespaces=NS)
         if body is None:
             raise ValueError("baseline DOCX has no body")
@@ -173,11 +246,15 @@ def strip_scorecard_display(source_docx: Path, baseline_docx: Path,
     if output_sc_ids:
         raise ValueError("scorecard item paragraphs remain in the thesis DOCX")
     if output_mr_ids != actual_mr_ids:
-        raise ValueError("manual-review markers changed while removing the scorecard block")
+        raise ValueError("manual-review markers changed while compacting the scorecard block")
     output_paragraphs = list(Document(output_docx).paragraphs)
     expected_remaining = [paragraph.text for paragraph in paragraphs[len(expected_lines):]]
+    expected_remaining = [
+        marker_projections[match.group(1)]["paper_text"] if (match := MR_START.match(text)) else text
+        for text in expected_remaining
+    ]
     if [paragraph.text for paragraph in output_paragraphs] != expected_remaining:
-        raise ValueError("non-scorecard document paragraph text changed during package split")
+        raise ValueError("document text differs from exact scorecard removal and marker compaction")
     after_parts = _package_part_hashes(output_docx)
     before_parts = _package_part_hashes(baseline_docx)
     changed_parts = sorted(name for name in before_parts
@@ -203,6 +280,13 @@ def strip_scorecard_display(source_docx: Path, baseline_docx: Path,
         "removed_scorecard_item_ids": expected_sc_ids,
         "retained_manual_review_marker_count": len(output_mr_ids),
         "retained_manual_review_marker_ids": output_mr_ids,
+        "compacted_manual_review_marker_count": len(compacted_ids),
+        "compacted_manual_review_marker_ids": compacted_ids,
+        "manual_review_marker_projection_sha256": sha256_json({
+            marker_id: {"full_text_sha256": hashlib.sha256(marker["full_text"].encode("utf-8")).hexdigest(),
+                        "paper_text": marker["paper_text"]}
+            for marker_id, marker in marker_projections.items()
+        }),
         "body_paragraph_text_sha256_before_and_after_removal": sha256_json(expected_remaining),
         "baseline_all_paragraph_text_sha256": before_signature,
         "changed_ooxml_parts": changed_parts,
@@ -371,6 +455,29 @@ def _issue_summary(card: dict[str, Any], reconciliation: dict[str, Any],
             detail = entry.get("detail", {})
             lines.append(f"- `{entry['item_id']}` — {detail.get('code')}，图形序号 {detail.get('drawing_index')}，状态 {entry.get('status')}。")
         lines.append("")
+    font_rows = [
+        entry for entry in card["entries"]
+        if ("font" in str(entry.get("label", "")).lower()
+            or "font" in str((entry.get("detail") or {}).get("property_path", "")).lower()
+            or "font" in str((entry.get("detail") or {}).get("failure_type", "")).lower()
+            or "font" in str((entry.get("detail") or {}).get("code", "")).lower())
+    ]
+    if font_rows:
+        font_counts = {status: sum(entry.get("status") == status for entry in font_rows)
+                       for status in STATUSES}
+        lines.extend([
+            "### 字体相关项仍未全部核验",
+            "",
+            (f"- {len(font_rows)} 项：失败 {font_counts['failed']}、未核验 {font_counts['unverified']}、"
+             f"待人工 {font_counts['pending']}、已验证 {font_counts['verified']}；未核验/待人工项不计为通过。"),
+        ])
+        pdf_font_rows = [entry for entry in font_rows
+                         if "rendered_pdf_font" in str((entry.get("detail") or {}).get("code", ""))]
+        if pdf_font_rows:
+            lines.append("- PDF 字体渲染检查仍有问题：" + ", ".join(
+                f"`{entry['item_id']}` ({entry.get('status')})" for entry in pdf_font_rows
+            ) + "。")
+        lines.append("")
     unit_code = next((entry for entry in card["entries"]
                       if entry.get("kind") == "human_review"
                       and "unit_code" in str(entry.get("label", ""))), None)
@@ -435,6 +542,15 @@ def export_review_package(source_docx: Path, paper_docx: Path,
         raise ValueError("paper DOCX still contains verbose SC scorecard rows")
     if set(actual_mr) != set(_human_marker_ids(card)) or len(actual_mr) != len(set(actual_mr)):
         raise ValueError("paper DOCX manual-review markers do not match the external scorecard")
+    projections = _manual_marker_projections(card)
+    paper_marker_texts = {
+        match.group(1): paragraph.text
+        for paragraph in all_body_paragraphs(Document(paper_docx))
+        if (match := MR_START.match(paragraph.text))
+    }
+    if any(paper_marker_texts.get(marker_id) != marker["paper_text"]
+           for marker_id, marker in projections.items()):
+        raise ValueError("paper DOCX manual-review marker is not the exact compact ledger projection")
 
     code_identity_sha = digest(code_identity_path) if code_identity_path else None
     _write_editable_ledger(ledger_docx_path, card, source_sha=source_sha, paper_sha=paper_sha,

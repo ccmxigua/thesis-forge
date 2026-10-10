@@ -32,7 +32,7 @@ python3 scripts/audit_toc_materialization.py /absolute/source.docx /absolute/new
 
 该入口只从来源 DOCX 的目录域深度和语义标题读取条目，要求输出标题唯一匹配；使用 LibreOffice 实际 PDF 书签页码填入动态 `PAGEREF` 字段缓存，并重渲染直到缓存与最终分页一致。它不会调用或声称 Word/LibreOffice 更新了字段；分节重启、非十进制页码、重复或缺失书签、缓存不收敛以及不可见目录行均失败关闭。新 DOCX、渲染及审计报告必须放在新路径。该结果仍是 `submission_ready=false` 的可编辑审查草稿，不能代替 Word 发布验收或人工格式审查。
 
-需要把长篇机器评分明细从论文草稿中分离时，使用 `scripts/review_package_export.py` 的 source-bound 导出协议：`strip` 只接受与当前 scorecard JSON 逐字匹配的前置评分块，保留所有 `MR-*` 人工待审标记，并只改写 `word/document.xml`；随后必须对新 DOCX 重新物化目录、渲染并审计。用 `scripts/reconcile_current_output.py --external-scorecard-out <new-scorecard.json>` 将新 PDF/DOCX 的当前状态写入外部 scorecard，不把评分段落插回论文；最后运行 `review_package_export.py export` 生成可编辑审查台账 DOCX、完整机器 JSON 和简短问题摘要。外置台账保留完整当前/历史条目、来源映射和哈希绑定；任何一步均不提高 `submission_ready`，也不表示完成新的语义审查。
+需要把长篇机器评分明细从论文草稿中分离时，使用 `scripts/review_package_export.py` 的 source-bound 导出协议：`strip` 只接受与当前 scorecard JSON 逐字匹配的前置评分块和人工标记原文，将每个 `MR-*` 缩为带唯一编号的简短待审提示，并只改写 `word/document.xml`；完整理由、来源映射和处理要求保留在外置台账。随后必须对新 DOCX 重新物化目录、渲染并审计。用 `scripts/reconcile_current_output.py --external-scorecard-out <new-scorecard.json>` 将新 PDF/DOCX 的当前状态写入外部 scorecard，不把评分段落插回论文；最后运行 `review_package_export.py export` 生成可编辑审查台账 DOCX、完整机器 JSON 和简短问题摘要。外置台账保留完整当前/历史条目、来源映射和哈希绑定；任何一步均不提高 `submission_ready`，也不表示完成新的语义审查。
 
 以下 V2 overlay、`convert.sh` 和 API 说明属于旧版兼容工具，不是新文档的来源审查入口，也不能证明学校要求已满足。
 

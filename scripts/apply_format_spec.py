@@ -58,6 +58,7 @@ from source_table_contract import (
     compile_source_table_contract,
     resolve_bound_requirement_docx,
 )
+from source_obligation_inventory_input import load_bound_scope_inventory
 from manual_review import (
     add_manual_review_items,
     filter_manual_marker_ledger,
@@ -478,7 +479,7 @@ def _current_manual_review_binding(
         "case_id": case_id,
         "run_id": run_id,
         "source_sha256": semantic_provenance.get(
-            "source_sha256", extraction_manifest.get("source_sha256")
+            "source_sha256", source_input_sha
         ),
         "clause_sha256": semantic_provenance.get("clause_sha256", source_clause_sha),
         "evidence_sha256": semantic_provenance.get("evidence_sha256", source_context_sha),
@@ -4840,6 +4841,10 @@ def main(argv: list[str]) -> int:
     args = p.parse_args(argv)
     if args.manual_review_items and not args.pipeline_manifest:
         p.error("--manual-review-items requires --pipeline-manifest")
+    if args.obligation_scope_inventory and (
+        args.output_policy != "review_draft" or not args.manual_review_items or not args.pipeline_manifest
+    ):
+        p.error("--obligation-scope-inventory requires review_draft, a current manual-review ledger and pipeline manifest")
     if bool(args.semantic_review_runtime) != bool(args.semantic_review_model):
         p.error("--semantic-review-runtime and --semantic-review-model must be supplied together")
     if args.current_session_semantic_review_response:
@@ -4884,6 +4889,26 @@ def main(argv: list[str]) -> int:
             pipeline_manifest = load_json(args.pipeline_manifest)
         except (OSError, ValueError, json.JSONDecodeError) as exc:
             raise SystemExit(f"invalid pipeline manifest: {exc}") from exc
+    pipeline_scope_record = (
+        pipeline_manifest.get("inputs", {}).get("obligation_scope_inventory")
+        if isinstance(pipeline_manifest, dict)
+        and isinstance(pipeline_manifest.get("inputs"), dict) else None
+    )
+    if args.obligation_scope_inventory:
+        if not isinstance(pipeline_scope_record, dict):
+            raise SystemExit("pipeline manifest does not record the supplied obligation scope inventory")
+        try:
+            recorded_scope_path = Path(str(pipeline_scope_record.get("path") or "")).resolve()
+            supplied_scope_path = args.obligation_scope_inventory.resolve()
+            supplied_scope_bytes = supplied_scope_path.read_bytes()
+        except OSError as exc:
+            raise SystemExit(f"cannot verify obligation scope inventory file record: {exc}") from exc
+        if (recorded_scope_path != supplied_scope_path
+                or pipeline_scope_record.get("bytes") != len(supplied_scope_bytes)
+                or pipeline_scope_record.get("sha256") != hashlib.sha256(supplied_scope_bytes).hexdigest()):
+            raise SystemExit("pipeline manifest obligation scope inventory file record is stale or mismatched")
+    elif pipeline_scope_record is not None:
+        raise SystemExit("pipeline manifest records an obligation scope inventory that apply did not receive")
     if args.current_session_semantic_review_response:
         code_record = pipeline_manifest.get("code_fingerprint") if isinstance(pipeline_manifest, dict) else None
         if (not isinstance(code_record, dict)
@@ -4911,6 +4936,24 @@ def main(argv: list[str]) -> int:
         expected_binding, current_binding_errors = _current_manual_review_binding(
             args, spec, pipeline_manifest,
         )
+        if args.obligation_scope_inventory:
+            if current_binding_errors or not isinstance(expected_binding, dict):
+                raise SystemExit(
+                    "cannot bind obligation scope inventory to current extraction artifacts: "
+                    + ";".join(current_binding_errors)
+                )
+            try:
+                obligation_scope_inventory, scope_file_record = load_bound_scope_inventory(
+                    args.obligation_scope_inventory,
+                    expected_binding=expected_binding,
+                    schema_path=(Path(__file__).resolve().parents[1]
+                                 / "schema" / "source-obligation-scope-inventory.schema.json"),
+                    expected_file_record=pipeline_scope_record,
+                )
+            except (OSError, ValueError, json.JSONDecodeError, TypeError) as exc:
+                raise SystemExit(f"invalid bound obligation scope inventory: {exc}") from exc
+            if scope_file_record["sha256"] != obligation_scope_inventory_sha256:
+                raise SystemExit("obligation scope inventory changed between reads")
         input_sha256 = hashlib.sha256(ledger_bytes).hexdigest()
         host_receipts = pipeline_manifest.get("host_review_receipts")
         semantic_ledger_receipt = (

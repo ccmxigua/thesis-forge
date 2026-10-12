@@ -716,10 +716,12 @@ def plan_capabilities(spec: dict[str, Any], registry: dict[str, Any], compliance
             "capability.missing_clause_compliance", "capability_preflight",
             "error" if blocking else "warning", blocking,
             f"{len(missing_clause_ids)} extracted clauses have no compliance record.",
-            [evidence("expected_clause_count", len(expected_clause_ids)),
+            [evidence("category", "runtime_manual_unverifiable"),
+             evidence("expected_clause_count", len(expected_clause_ids)),
              evidence("reviewed_clause_count", len(reviewed_clause_ids & expected_clause_ids)),
              evidence("missing_clause_count", len(missing_clause_ids)),
-             evidence("missing_clause_ids_sample", missing_clause_ids[:50])],
+             evidence("missing_clause_ids_sample", missing_clause_ids[:50]),
+             *[evidence("clause_id", clause_id) for clause_id in missing_clause_ids]],
         )
         findings.append(issue)
         finding_categories.append("runtime_manual_unverifiable")

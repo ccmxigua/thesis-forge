@@ -141,6 +141,11 @@ class TemplateReconciliationTest(unittest.TestCase):
         self.assertEqual(len(conflicts), 1)
         self.assertEqual(conflicts[0]["type"], "official_template_conflict")
         self.assertEqual(len(questions), 1)
+        self.assertEqual(questions[0]["source_type"], "template_reconciliation_conflict")
+        self.assertEqual(questions[0]["clause_id"], "C1")
+        self.assertEqual(questions[0]["source_text"], "正文小四号")
+        self.assertEqual(questions[0]["evidence_ids"], ["E1"])
+        self.assertEqual(questions[0]["template_evidence_ids"], ["TE1"])
         self.assertEqual(report["summary"]["genuine_conflicts"], 1)
 
     def test_absence_is_insufficient_not_a_prohibition_or_conflict(self) -> None:
@@ -322,6 +327,11 @@ class TemplateReconciliationTest(unittest.TestCase):
         )
         self.assertEqual(len(conflicts), 1)
         self.assertEqual(questions[0]["clause_id"], "C2")
+        self.assertEqual(questions[0]["source_type"], "template_reconciliation_conflict")
+        self.assertEqual(questions[0]["source_text"], "授权书")
+        self.assertEqual(questions[0]["evidence_ids"], ["E2"])
+        self.assertEqual(questions[0]["written_evidence_ids"], ["E2"])
+        self.assertEqual(questions[0]["template_evidence_ids"], ["TE-auth"])
         c0 = next(item for item in reconciled["clause_compliance"] if item["clause_id"] == "C0")
         self.assertEqual(c0["status"], "pending_execution")
 

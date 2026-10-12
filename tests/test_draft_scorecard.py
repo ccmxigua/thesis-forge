@@ -43,6 +43,8 @@ class DraftScorecardTests(unittest.TestCase):
     def test_equal_observed_check_scores_not_confidence_or_release(self):
         card = self.card()
         self.assertIsNone(card["score"])
+        self.assertEqual(card["score_status"], "unscored")
+        self.assertEqual(card["score_reason"], "source_scope_inventory_missing")
         self.assertEqual(card["observed_checks_verified_percent"], 20)
         self.assertEqual(card["verified_count"], 1)
         self.assertEqual(card["status_counts"], {
@@ -61,10 +63,16 @@ class DraftScorecardTests(unittest.TestCase):
         self.assertIn("chinese_comma", "\n".join(scorecard_lines(card)))
         self.assertIn("来源存在歧义", "\n".join(scorecard_lines(card)))
         lines = "\n".join(scorecard_lines(card))
+        self.assertIn("来源义务加权总分：未评分（缺少来源义务范围清单）", lines)
+        self.assertIn("单项诊断检查已验证比例：20.00%", lines)
         self.assertIn("诊断条目5项（不是独立义务数）", lines)
         self.assertIn("已证实未满足2项", lines)
         self.assertIn("未核验1项", lines)
         self.assertIn("待人工核验1项", lines)
+        self.assertIn("旧式未知来源评价单元3个", lines)
+        self.assertNotIn("旧式未知来源评价单元0个", lines)
+        self.assertIn("计分权重政策：强制/禁止5", lines)
+        self.assertNotIn("按已知适用的自动义务单元计分", lines)
         by_id = {item["detail"].get("receipt_id"): item for item in card["entries"]
                  if item["kind"] == "property"}
         self.assertEqual(by_id["r1"]["score"], 100)
@@ -112,6 +120,9 @@ class DraftScorecardTests(unittest.TestCase):
             output = Path(td) / "legacy-draft.docx"
             card = self.card()
             card.pop("obligation_assessment", None)
+            card.pop("scoring_contract_version", None)
+            card.pop("score_status", None)
+            card.pop("score_reason", None)
             doc = Document()
             append_scorecard(doc, card)
             doc.save(output)
@@ -268,6 +279,7 @@ class DraftScorecardTests(unittest.TestCase):
             receipt["status"] = "verified"
         card = build_scorecard(self.binding, self.audit, [], [])
         self.assertIsNone(card["score"])
+        self.assertEqual(card["score_reason"], "source_scope_inventory_missing")
         self.assertEqual(card["observed_checks_verified_percent"], 100)
         self.assertTrue(card["human_check_required"])
         self.assertFalse(card["submission_ready"])

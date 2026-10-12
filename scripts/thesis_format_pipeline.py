@@ -48,6 +48,7 @@ from manual_review import (
     review_draft_unresolved_clauses_have_markers,
     write_manual_review_ledger,
 )
+from question_contract import bind_question_records
 from native_semantic_review import (
     OBLIGATION_COVERAGE_SCHEMA,
     EmptyInventoryVerdictError,
@@ -81,6 +82,7 @@ from requirements_engine import (
 from artifact_io import atomic_write_text, paths_alias
 from process_runner import run_process
 from source_obligation_compiler import compile_source_content_verification_codes
+from source_obligation_inventory_input import load_bound_scope_inventory
 from table_source_context import TABLE_CONTEXT_RETRY_CODE, table_retry_feedback_is_source_bound
 from pending_source_work import compile_pending_source_work, pending_work_action
 
@@ -300,6 +302,38 @@ def file_record(path: Path) -> dict[str, Any]:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return {"path": str(resolved), "bytes": resolved.stat().st_size, "sha256": digest.hexdigest()}
+
+
+def bind_scope_inventory_for_apply(
+    path: Path | None,
+    *,
+    manifest: dict[str, Any],
+    apply_cmd: list[str],
+    expected_binding: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Record and pass a source-first scope inventory to the scoring stage."""
+    if path is None:
+        manifest["obligation_scope_inventory"] = {
+            "status": "not_supplied",
+            "reason": "source_obligation_scope_inventory_missing",
+            "submission_ready": False,
+        }
+        return None
+    inventory, record = load_bound_scope_inventory(
+        path,
+        expected_binding=expected_binding,
+        schema_path=ROOT / "schema" / "source-obligation-scope-inventory.schema.json",
+    )
+    manifest.setdefault("inputs", {})["obligation_scope_inventory"] = record
+    manifest["obligation_scope_inventory"] = {
+        "status": "bound",
+        "input": copy.deepcopy(record),
+        "inventory_complete": inventory.get("inventory_complete") is True,
+        "scope_count": len(inventory.get("scopes", [])),
+        "submission_ready": False,
+    }
+    apply_cmd.extend(["--obligation-scope-inventory", record["path"]])
+    return inventory
 
 
 def validate_explicit_thesis_profile(
@@ -2542,6 +2576,196 @@ def _reported_conflict_release_gates(
     return gates
 
 
+def _template_conflict_release_gates(
+    questions: Any, *, clauses: list[dict[str, Any]], evidence_doc: dict[str, Any],
+    template_evidence: Any, official_template_record: dict[str, Any] | None,
+    template_evidence_artifact_record: dict[str, Any] | None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split typed cross-source template questions into auditable draft gates.
+
+    Written-source evidence remains in ``evidence_ids``; official-template
+    evidence remains separately typed and bound to the exact extracted
+    template artifact.  The two evidence namespaces must never be unioned and
+    then rebound to one clause.
+    """
+    if not isinstance(questions, list):
+        raise ValueError("template conflict question source must be an array")
+    typed = [item for item in questions if isinstance(item, dict) and (
+        item.get("source_type") == "template_reconciliation_conflict"
+        or "template_evidence_ids" in item
+    )]
+    if not typed:
+        return copy.deepcopy(questions), []
+    if not isinstance(template_evidence, dict):
+        raise ValueError("template conflict has no current template-evidence artifact")
+    if not isinstance(official_template_record, dict):
+        raise ValueError("template conflict has no bound official-template source")
+    if not isinstance(template_evidence_artifact_record, dict):
+        raise ValueError("template conflict has no bound template-evidence artifact file")
+    template_source = template_evidence.get("source")
+    if not isinstance(template_source, dict):
+        raise ValueError("template-evidence artifact has no source record")
+    expected_source_sha = official_template_record.get("sha256")
+    expected_template_path = official_template_record.get("path")
+    if (
+        template_source.get("kind") != "official_template_docx"
+        or template_source.get("sha256") != expected_source_sha
+        or template_source.get("path") != expected_template_path
+        or template_source.get("bytes") != official_template_record.get("bytes")
+    ):
+        raise ValueError("template-evidence source does not match the current official template bytes")
+    artifact_sha = template_evidence_artifact_record.get("sha256")
+    if not isinstance(artifact_sha, str) or re.fullmatch(r"[0-9a-f]{64}", artifact_sha) is None:
+        raise ValueError("template-evidence artifact hash is invalid")
+    raw_template_items = template_evidence.get("items")
+    if not isinstance(raw_template_items, list):
+        raise ValueError("template-evidence artifact items must be an array")
+    template_by_id: dict[str, dict[str, Any]] = {}
+    for item in raw_template_items:
+        if not isinstance(item, dict):
+            raise ValueError("template-evidence item must be an object")
+        item_id = item.get("id")
+        if not isinstance(item_id, str) or not item_id or item_id in template_by_id:
+            raise ValueError("template-evidence IDs must be unique non-empty strings")
+        provenance = item.get("provenance")
+        if (
+            not isinstance(provenance, dict)
+            or provenance.get("source_kind") != "official_template_docx"
+            or provenance.get("source_sha256") != expected_source_sha
+            or provenance.get("source_path") != expected_template_path
+        ):
+            raise ValueError(f"template evidence {item_id} has stale or foreign provenance")
+        template_by_id[item_id] = item
+
+    remaining: list[dict[str, Any]] = []
+    gates: list[dict[str, Any]] = []
+    clause_map = {
+        item["id"]: item for item in clauses
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    }
+    for question_index, raw in enumerate(questions):
+        if not isinstance(raw, dict):
+            raise ValueError(f"template conflict question {question_index} must be an object")
+        if raw.get("source_type") != "template_reconciliation_conflict":
+            if "template_evidence_ids" in raw:
+                raise ValueError("untyped question cannot cite template evidence IDs")
+            remaining.append(copy.deepcopy(raw))
+            continue
+
+        qid = raw.get("question_id") or raw.get("id")
+        clause_id = raw.get("clause_id")
+        if not isinstance(qid, str) or not qid.strip():
+            raise ValueError(f"template conflict question {question_index} has no ID")
+        if not isinstance(clause_id, str) or clause_id not in clause_map:
+            raise ValueError(f"template conflict question {qid} has no known written clause")
+        written_ids = raw.get("written_evidence_ids")
+        evidence_ids = raw.get("evidence_ids")
+        template_ids = raw.get("template_evidence_ids")
+        if (
+            not isinstance(written_ids, list) or not written_ids
+            or not all(isinstance(value, str) and value for value in written_ids)
+            or len(written_ids) != len(set(written_ids))
+            or evidence_ids != written_ids
+        ):
+            raise ValueError(f"template conflict question {qid} has invalid written evidence IDs")
+        if (
+            not isinstance(template_ids, list) or not template_ids
+            or not all(isinstance(value, str) and value for value in template_ids)
+            or len(template_ids) != len(set(template_ids))
+        ):
+            raise ValueError(f"template conflict question {qid} has invalid template evidence IDs")
+        bound_question = bind_question_records([raw], clauses, evidence_doc)[0]
+        if bound_question.get("question_id") != qid:
+            raise ValueError(f"template conflict question {qid} changed identity during source binding")
+
+        roles = raw.get("candidate_roles")
+        property_path = raw.get("property")
+        expected_values = raw.get("official_template_values")
+        if (
+            not isinstance(roles, list) or not roles
+            or not all(isinstance(value, str) and value for value in roles)
+            or not isinstance(property_path, str) or not property_path
+            or not isinstance(expected_values, list) or not expected_values
+        ):
+            raise ValueError(f"template conflict question {qid} has incomplete semantic comparison")
+        selected_items = [template_by_id.get(value) for value in template_ids]
+        if any(item is None for item in selected_items):
+            raise ValueError(f"template conflict question {qid} cites missing template evidence")
+
+        observed_values: list[Any] = []
+        for item in selected_items:
+            assert isinstance(item, dict)
+            role = item.get("semantic_role")
+            category = item.get("category")
+            value = item.get("value")
+            observed: Any = None
+            found = False
+            if role not in roles:
+                raise ValueError(f"template evidence for {qid} does not match a candidate role")
+            if category == "semantic_style" and item.get("direct_semantic") is True:
+                current: Any = value
+                found = True
+                for part in property_path.split("."):
+                    if not isinstance(current, dict) or part not in current:
+                        found = False
+                        break
+                    current = current[part]
+                if found:
+                    observed = current
+            elif category in {"page_setting", "page_field", "structure"}:
+                if item.get("property") == property_path:
+                    found, observed = True, value
+            elif category == "fixed_body" and isinstance(value, dict):
+                if property_path == "before_role" and "before_role" in value:
+                    found, observed = True, value["before_role"]
+                elif property_path.startswith("items.") and property_path.endswith(".body_parts"):
+                    found, observed = True, value
+            if not found:
+                raise ValueError(
+                    f"template evidence for {qid} does not materialize property {property_path!r}"
+                )
+            observed_values.append(observed)
+        canonical = lambda value: json.dumps(
+            value, ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        )
+        if {canonical(value) for value in observed_values} != {
+            canonical(value) for value in expected_values
+        }:
+            raise ValueError(f"template conflict question {qid} values do not match cited template evidence")
+
+        clause = clause_map[clause_id]
+        reason = str(raw.get("question") or "书面来源与官方模板证据冲突，须人工确认。")
+        gates.append({
+            "source_code": f"template_reconciliation_conflict:{qid}",
+            "category": "semantic_content_review",
+            "clause_ids": [clause_id],
+            "requirement_ids": ([raw["requirement_id"]]
+                                 if isinstance(raw.get("requirement_id"), str) else []),
+            "question_ids": [qid],
+            "evidence_ids": list(written_ids),
+            "template_evidence_ids": list(template_ids),
+            "template_source_sha256": expected_source_sha,
+            "template_evidence_artifact_sha256": artifact_sha,
+            "template_evidence_artifact_path": template_evidence_artifact_record.get("path"),
+            "source_text": clause.get("text"),
+            "reason": reason,
+            "action": "分别对照书面条款和官方模板原始证据作出人工决定；未确认前保持冲突未解决。",
+            "placeholder_text": f"【待人工处理：{qid}】",
+            "original_blocking": True,
+            "producer_records": [
+                {"producer": "template_reconciliation_conflict_question", "record": copy.deepcopy(raw)},
+                {"producer": "official_template_evidence_projection", "record": {
+                    "artifact_path": template_evidence_artifact_record.get("path"),
+                    "artifact_sha256": artifact_sha,
+                    "source_path": expected_template_path,
+                    "source_sha256": expected_source_sha,
+                    "evidence_items": copy.deepcopy(selected_items),
+                }},
+            ],
+        })
+    return remaining, gates
+
+
 PREVIEW_PLACEHOLDER_BLOCKERS = {
     "status_needs_clarification",
     "unresolved_clauses",
@@ -2805,6 +3029,8 @@ def _main(argv: list[str]) -> int:
                    help="optional backend capability registry (defaults to the bundled python-docx/OOXML registry)")
     p.add_argument("--source-inventory", type=Path,
                    help="optional JSON source inventory used by conditional backend capabilities")
+    p.add_argument("--obligation-scope-inventory", type=Path,
+                   help="source-first human-reviewed obligation scopes for separate review-draft coverage assessment")
     p.add_argument("--allow-unresolved", action="store_true",
                    help="unsafe expert override: continue despite unresolved style-map questions; requirement questions still block")
     p.add_argument("--allow-offline-review", action="store_true",
@@ -2879,6 +3105,13 @@ def _main(argv: list[str]) -> int:
         p.error(f"neutral reference DOCX does not exist: {args.neutral_reference_docx}")
     if args.style_template and not args.style_template.is_file():
         p.error(f"style/official template DOCX does not exist: {args.style_template}")
+    if args.obligation_scope_inventory:
+        if args.output_policy != "review_draft":
+            p.error("--obligation-scope-inventory is limited to review_draft scoring")
+        if args.prepare_host_review:
+            p.error("--obligation-scope-inventory is used only during review_draft generation, not review preparation")
+        if not args.obligation_scope_inventory.is_file():
+            p.error(f"obligation scope inventory does not exist: {args.obligation_scope_inventory}")
 
     work = args.work_dir.resolve()
     current_code_fingerprint = runtime_code_fingerprint()
@@ -3036,6 +3269,11 @@ def _main(argv: list[str]) -> int:
         "case_id": args.case_id,
         "output_policy": args.output_policy,
         "submission_ready": False,
+        "obligation_scope_inventory": {
+            "status": "not_supplied" if args.obligation_scope_inventory is None else "pending_binding_validation",
+            "reason": "source_obligation_scope_inventory_missing" if args.obligation_scope_inventory is None else None,
+            "submission_ready": False,
+        },
         "requested_compliance_mode": args.compliance_mode,
         "execution_compliance_mode": execution_compliance_mode,
         "work_reuse_policy": (
@@ -3451,6 +3689,45 @@ def _main(argv: list[str]) -> int:
     spec["compliance_mode"] = execution_compliance_mode
     write_json(requirements_dir / "format-spec.json", spec)
     questions = read_json(requirements_dir / "questions.json")
+    template_conflict_release_gates: list[dict[str, Any]] = []
+    if args.output_policy == "review_draft":
+        template_evidence_path = requirements_dir / "template-evidence.json"
+        try:
+            template_evidence = (
+                read_json(template_evidence_path) if template_evidence_path.is_file() else None
+            )
+            template_artifact_record = (
+                file_record(template_evidence_path) if template_evidence_path.is_file() else None
+            )
+            official_template_record = (
+                file_record(official_template_evidence)
+                if official_template_evidence is not None else None
+            )
+            questions, template_conflict_release_gates = _template_conflict_release_gates(
+                questions,
+                clauses=clauses,
+                evidence_doc=read_json(requirements_dir / "document-evidence.json"),
+                template_evidence=template_evidence,
+                official_template_record=official_template_record,
+                template_evidence_artifact_record=template_artifact_record,
+            )
+            manifest["template_conflict_binding"] = {
+                "status": "bound" if template_conflict_release_gates else "not_applicable",
+                "questions_as_release_gates": len(template_conflict_release_gates),
+                "questions": [
+                    gate["question_ids"][0] for gate in template_conflict_release_gates
+                ],
+                "template_evidence_artifact": template_artifact_record,
+            }
+        except (OSError, ValueError, json.JSONDecodeError) as exc:
+            manifest.update(
+                status="failed",
+                reason="template reconciliation question binding failed",
+                template_conflict_binding_error=str(exc),
+            )
+            write_json(manifest_path, manifest)
+            print(json.dumps(manifest, ensure_ascii=False))
+            return 3
     semantic_issue_ledger: dict[str, Any] | None = None
     confirmed_semantic_issue_ids: set[str] = set()
     if args.semantic_issue_confirmations:
@@ -3552,6 +3829,7 @@ def _main(argv: list[str]) -> int:
     if not capability_report or capability_result.returncode not in {0, 3}:
         manifest.update(status="failed", reason="capability preflight failed")
         write_json(manifest_path, manifest); print(json.dumps(manifest, ensure_ascii=False)); return capability_result.returncode or 2
+    manual_review_ledger: dict[str, Any] | None = None
     if args.output_policy == "review_draft":
         semantic_provenance = spec.get("semantic_review_provenance")
         if not isinstance(semantic_provenance, dict):
@@ -3561,6 +3839,38 @@ def _main(argv: list[str]) -> int:
         evidence_context_path = requirements_dir / "evidence-context.json"
         evidence_file_record = file_record(evidence_context_path) if evidence_context_path.is_file() else {}
         manual_review_release_gates: list[dict[str, Any]] = []
+        manual_review_release_gates.extend(template_conflict_release_gates)
+        if canonical_profile is None:
+            official_record = manifest["inputs"].get("official_template_evidence")
+            profile_scope = {
+                "status": "unresolved",
+                "target_template_sha256": (
+                    official_record.get("sha256") if isinstance(official_record, dict) else None
+                ),
+                "actual_thesis_degree_level": None,
+                "reason": (
+                    "The current source has no thesis-bound metadata profile. A selected doctoral "
+                    "template defines a target layout, but its title does not establish the source "
+                    "thesis degree level or degree category."
+                ),
+                "conditional_scope_policy": (
+                    "Retain conditional 2025 requirements as unresolved until a profile bound to "
+                    "the real thesis source or explicit user-confirmed metadata is supplied."
+                ),
+            }
+            manifest["test_profile_scope"] = profile_scope
+            manual_review_release_gates.append({
+                "source_code": "thesis_profile_unresolved_for_synthetic_body_test",
+                "category": "input_prerequisite",
+                "source_text": "当前来源没有论文来源绑定的学位层级和学位类别 profile。",
+                "reason": profile_scope["reason"],
+                "action": (
+                    "评审前，为论文源文件提供绑定或经用户确认的 thesis profile；"
+                    "系统不会从所选模板名称推断论文身份或学位层级。"
+                ),
+                "placeholder_text": "【待人工处理：论文 Profile 未确认】",
+                "original_blocking": True,
+            })
         manual_review_release_gates.extend(
             _reported_conflict_release_gates(
                 spec.get("semantic_conflicts"), clauses=clauses, evidence_doc=evidence_doc,
@@ -3605,7 +3915,7 @@ def _main(argv: list[str]) -> int:
                     "clause_ids": [cid], "evidence_ids": source_clause.get("evidence_ids", []),
                     "source_text": source_clause.get("source_span", {}).get("text", source_clause["text"]),
                     "reason": dispute["rationale"],
-                    "action": "自动核验得分0/100（语义覆盖未确认）。逐项核对来源义务和主审记录；未确认前不可提交。",
+                    "action": "来源义务范围尚未完整确认，当前总分未评分。逐项核对来源义务和主审记录；未确认前不可提交。",
                     "producer_records": [{"producer": "independent_coverage_dispute", "record": {
                         "review": copy.deepcopy(independent_review), "original_result": copy.deepcopy(dispute),
                         "execution_authorized": False,
@@ -3940,6 +4250,26 @@ def _main(argv: list[str]) -> int:
         apply_cmd += ["--semantic-issue-ledger", str(semantic_issue_ledger_path)]
     if args.require_submission_ready:
         apply_cmd.append("--require-submission-ready")
+    try:
+        bind_scope_inventory_for_apply(
+            args.obligation_scope_inventory,
+            manifest=manifest,
+            apply_cmd=apply_cmd,
+            expected_binding=(
+                manual_review_ledger.get("binding", {})
+                if isinstance(manual_review_ledger, dict) else {}
+            ),
+        )
+    except (OSError, ValueError, json.JSONDecodeError, TypeError) as exc:
+        manifest.update(
+            status="failed",
+            reason="source obligation scope inventory binding failed",
+            obligation_scope_inventory_error=str(exc),
+        )
+        write_json(manifest_path, manifest)
+        print(json.dumps(manifest, ensure_ascii=False))
+        return 14
+    write_json(manifest_path, manifest)
     result = run_step("apply_and_validate", apply_cmd, steps)
     report = read_json(apply_dir / "validation-report.json") if (apply_dir / "validation-report.json").exists() else None
     applied_section_plan_path = apply_dir / "section-plan-applied.json"
@@ -3974,14 +4304,26 @@ def _main(argv: list[str]) -> int:
         if args.output_policy == "review_draft":
             manifest["draft_scorecard"] = str(apply_dir / "draft-scorecard.json")
             manifest["draft_scorecard_audit"] = str(apply_dir / "draft-scorecard-audit.json")
+            scorecard = report.get("draft_scorecard") or {}
+            obligation_assessment = scorecard.get("obligation_assessment") or {}
             manifest["draft_scoring_summary"] = {
-                key: (report.get("draft_scorecard") or {}).get(key)
+                key: scorecard.get(key)
                 for key in (
-                    "policy", "score", "item_count", "diagnostic_item_count",
-                    "evaluation_unit_count", "typed_source_unit_count",
-                    "legacy_unknown_unit_count", "unique_source_obligation_count",
-                    "status_counts", "verified_count", "failed_count",
-                    "unverified_count", "pending_count",
+                    "policy", "scoring_contract_version", "score", "score_status", "score_reason",
+                    "earned_weight", "total_weight", "observed_checks_verified_percent",
+                    "item_count", "diagnostic_item_count", "evaluation_unit_count",
+                    "typed_source_unit_count", "legacy_unknown_unit_count",
+                    "unique_source_obligation_count", "status_counts", "verified_count",
+                    "failed_count", "unverified_count", "pending_count",
+                )
+            }
+            manifest["draft_scoring_summary"]["obligation_assessment"] = {
+                key: obligation_assessment.get(key)
+                for key in (
+                    "status", "inventory_complete", "scope_count", "typed_source_unit_count",
+                    "scoped_source_unit_count", "unscoped_typed_source_unit_count",
+                    "assessment_coverage", "satisfaction_ratio",
+                    "importance_assessment_complete", "blockers",
                 )
             }
             application_failed = application_failed or report.get("review_draft_ready") is not True

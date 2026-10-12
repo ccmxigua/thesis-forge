@@ -42,6 +42,7 @@ _GENERATED_ITEM_FIELDS = frozenset({
 })
 _SET_LIKE_ITEM_FIELDS = (
     "clause_ids", "requirement_ids", "question_ids", "evidence_ids",
+    "template_evidence_ids",
     "source_codes", "scope_dependency_codes", "scope_dependency_dimensions",
 )
 
@@ -80,16 +81,31 @@ def _is_current_run_review_draft_ledger(
 def review_draft_conflicts_have_exact_markers(
     spec: dict[str, Any], ledger: dict[str, Any] | None,
 ) -> bool:
-    """Check that only the spec's current-run reported conflicts are marker-backed."""
+    """Check that every supported conflict family has an exact current marker."""
     conflicts = spec.get("semantic_conflicts")
     errors = spec.get("blocking_errors")
-    if not isinstance(conflicts, list) or not conflicts or not isinstance(errors, list) or not errors:
+    if not isinstance(errors, list) or not errors:
         return False
     if not _is_current_run_review_draft_ledger(spec, ledger):
         return False
     assert isinstance(ledger, dict)
     ledger_items = ledger.get("items")
     if not isinstance(ledger_items, list):
+        return False
+
+    supported_error_types = {"llm_reported_conflict", "official_template_conflict"}
+    if any(not isinstance(error, dict) or error.get("type") not in supported_error_types
+           for error in errors):
+        return False
+    template_errors = [error for error in errors if error.get("type") == "official_template_conflict"]
+    if template_errors and not _template_conflict_errors_have_exact_markers(
+        spec, ledger, ledger_items, template_errors,
+    ):
+        return False
+    semantic_errors = [error for error in errors if error.get("type") == "llm_reported_conflict"]
+    if not semantic_errors:
+        return bool(template_errors)
+    if not isinstance(conflicts, list) or not conflicts:
         return False
 
     unresolved: list[tuple[int, dict[str, Any]]] = []
@@ -104,7 +120,7 @@ def review_draft_conflicts_have_exact_markers(
                         or len(values) != len(set(values))):
                     return False
             unresolved.append((index, conflict))
-    if not unresolved or len(errors) != len(unresolved):
+    if not unresolved or len(semantic_errors) != len(unresolved):
         return False
 
     expected_errors = [{
@@ -116,7 +132,7 @@ def review_draft_conflicts_have_exact_markers(
         "clause_ids": copy.deepcopy(conflict.get("clause_ids") or []),
         "evidence_ids": copy.deepcopy(conflict.get("evidence_ids") or []),
     } for index, conflict in unresolved]
-    if errors != expected_errors:
+    if semantic_errors != expected_errors:
         return False
 
     markers_by_code: dict[str, list[dict[str, Any]]] = {}
@@ -145,6 +161,98 @@ def review_draft_conflicts_have_exact_markers(
                 or set(marker.get("evidence_ids") or []) != set(conflict.get("evidence_ids") or [])):
             return False
     return True
+
+
+def _template_conflict_errors_have_exact_markers(
+    spec: dict[str, Any], ledger: dict[str, Any], ledger_items: list[Any],
+    errors: list[dict[str, Any]],
+) -> bool:
+    """Require one source-typed question marker for every template conflict."""
+    binding = ledger.get("binding")
+    if not isinstance(binding, dict):
+        return False
+    template_sha = binding.get("official_template_sha256")
+    if not isinstance(template_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", template_sha):
+        return False
+    template_items = [item for item in ledger_items if isinstance(item, dict)
+                      and item.get("source_type") == "release_gate"
+                      and isinstance(item.get("template_evidence_ids"), list)]
+    if len(template_items) != len(errors):
+        return False
+    used: set[int] = set()
+    for error in errors:
+        clause_ids = error.get("clause_ids")
+        requirement_id = error.get("requirement_id")
+        template_ids = error.get("official_template_evidence_ids")
+        if (
+            not isinstance(clause_ids, list) or not clause_ids
+            or not all(isinstance(value, str) and value for value in clause_ids)
+            or not isinstance(requirement_id, str) or not requirement_id
+            or not isinstance(template_ids, list) or not template_ids
+            or not all(isinstance(value, str) and value for value in template_ids)
+        ):
+            return False
+        matches: list[tuple[int, dict[str, Any], dict[str, Any], dict[str, Any]]] = []
+        for index, item in enumerate(template_items):
+            if index in used:
+                continue
+            producers = item.get("producer_records")
+            if not isinstance(producers, list):
+                continue
+            question_records = [record.get("record") for record in producers
+                                if isinstance(record, dict)
+                                and record.get("producer") == "template_reconciliation_conflict_question"
+                                and isinstance(record.get("record"), dict)]
+            projection_records = [record.get("record") for record in producers
+                                  if isinstance(record, dict)
+                                  and record.get("producer") == "official_template_evidence_projection"
+                                  and isinstance(record.get("record"), dict)]
+            if len(question_records) != 1 or len(projection_records) != 1:
+                continue
+            question = question_records[0]
+            projection = projection_records[0]
+            question_id = question.get("question_id") or question.get("id")
+            if (
+                item.get("category") != "semantic_content_review"
+                or item.get("clause_ids") != clause_ids
+                or item.get("requirement_ids") != [requirement_id]
+                or item.get("template_evidence_ids") != template_ids
+                or item.get("template_source_sha256") != template_sha
+                or item.get("question_ids") != [question_id]
+                or item.get("evidence_ids") != question.get("written_evidence_ids")
+                or question.get("evidence_ids") != question.get("written_evidence_ids")
+                or question.get("template_evidence_ids") != template_ids
+                or question.get("clause_id") not in clause_ids
+                or question.get("requirement_id") != requirement_id
+                or question.get("property") != error.get("property")
+                or question.get("written_value") != error.get("written_value")
+                or question.get("official_template_values") != error.get("official_template_values")
+                or error.get("role") not in (question.get("candidate_roles") or [])
+                or projection.get("source_sha256") != template_sha
+                or projection.get("artifact_sha256") != item.get("template_evidence_artifact_sha256")
+            ):
+                continue
+            artifact_sha = item.get("template_evidence_artifact_sha256")
+            artifact_path = item.get("template_evidence_artifact_path")
+            evidence_items = projection.get("evidence_items")
+            if (
+                not isinstance(artifact_sha, str)
+                or re.fullmatch(r"[0-9a-f]{64}", artifact_sha) is None
+                or not isinstance(artifact_path, str) or not artifact_path
+                or not isinstance(evidence_items, list)
+                or {record.get("id") for record in evidence_items if isinstance(record, dict)} != set(template_ids)
+                or any(
+                    not isinstance(record, dict)
+                    or record.get("provenance", {}).get("source_sha256") != template_sha
+                    for record in evidence_items
+                )
+            ):
+                continue
+            matches.append((index, item, question, projection))
+        if len(matches) != 1:
+            return False
+        used.add(matches[0][0])
+    return len(used) == len(template_items)
 
 
 def review_draft_unresolved_clauses_have_markers(
@@ -450,6 +558,12 @@ def build_manual_review_crosswalk(
             "requirement_ids": _crosswalk_refs(item, "requirement_ids"),
             "question_ids": _crosswalk_refs(item, "question_ids"),
             "evidence_ids": _crosswalk_refs(item, "evidence_ids"),
+            **({"template_evidence_ids": _crosswalk_refs(item, "template_evidence_ids")}
+               if "template_evidence_ids" in item else {}),
+            **({"template_source_sha256": item["template_source_sha256"]}
+               if "template_source_sha256" in item else {}),
+            **({"template_evidence_artifact_sha256": item["template_evidence_artifact_sha256"]}
+               if "template_evidence_artifact_sha256" in item else {}),
             "item_sha256": hashlib.sha256(_canonical_json(item).encode("utf-8")).hexdigest(),
             "link_basis": "explicit_identifiers_from_same_ledger_item",
             "status": "pending_manual_review",

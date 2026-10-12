@@ -1,85 +1,58 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://example.local/thesis-latex2docx/visual-page-review-response.schema.json",
-  "title": "One-page visual layout review",
+  "title": "One-page visual observation receipt v2",
   "type": "object",
   "additionalProperties": false,
-  "required": [
-    "schema_version",
-    "page_number",
-    "review_state",
-    "visual_summary",
-    "issues",
-    "uncertainty_notes"
-  ],
+  "required": ["schema_version", "page_number", "review_state", "visual_summary", "checklist", "issues", "uncertainty_notes"],
   "properties": {
-    "schema_version": {"const": "1.0"},
+    "schema_version": {"const": "2.0"},
     "page_number": {"type": "integer", "minimum": 1},
-    "review_state": {
-      "enum": ["visually_reviewed", "needs_human_review", "unable_to_assess"]
-    },
-    "visual_summary": {"type": "string", "minLength": 1, "maxLength": 280},
-    "issues": {
-      "type": "array",
-      "maxItems": 60,
+    "review_state": {"enum": ["observations_recorded", "needs_human_review", "unable_to_assess"]},
+    "visual_summary": {"type": "string", "minLength": 1, "maxLength": 500},
+    "checklist": {
+      "type": "array", "minItems": 10, "maxItems": 10,
       "items": {
-        "type": "object",
-        "additionalProperties": false,
-        "required": [
-          "category",
-          "severity",
-          "finding",
-          "bbox_norm",
-          "confidence",
-          "basis",
-          "requirement_ids",
-          "source_clause_ids",
-          "needs_human_review"
-        ],
+        "type": "object", "additionalProperties": false,
+        "required": ["item_id", "status", "observation", "reason", "evidence_image_ids"],
         "properties": {
-          "category": {
-            "enum": [
-              "overlap",
-              "clipping",
-              "overflow",
-              "pagination",
-              "table_split",
-              "caption_or_figure",
-              "equation_layout",
-              "visible_font_anomaly",
-              "visible_requirement_mismatch",
-              "readability",
-              "other_layout"
-            ]
-          },
+          "item_id": {"enum": [
+            "headers_footers_and_parity", "visible_folio_and_page_mapping",
+            "body_readability_and_glyphs", "whitespace_and_page_breaks",
+            "figures_and_captions", "tables_and_splits", "equations_and_symbols",
+            "cross_page_continuity", "source_rule_and_section_mapping",
+            "contents_entries_and_targets"
+          ]},
+          "status": {"enum": ["pass", "issue", "not_applicable", "unable_to_assess"]},
+          "observation": {"type": "string", "minLength": 1, "maxLength": 500},
+          "reason": {"type": ["string", "null"], "maxLength": 500},
+          "evidence_image_ids": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+        }
+      }
+    },
+    "issues": {
+      "type": "array", "maxItems": 100,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["category", "severity", "finding", "bbox_norm", "confidence", "basis", "requirement_ids", "source_clause_ids", "evidence_image_ids", "needs_human_review"],
+        "properties": {
+          "category": {"enum": [
+            "overlap", "clipping", "overflow", "pagination", "table_split",
+            "caption_or_figure", "equation_layout", "visible_font_anomaly",
+            "visible_requirement_mismatch", "readability", "other_layout"
+          ]},
           "severity": {"enum": ["critical", "high", "medium", "low"]},
-          "finding": {"type": "string", "minLength": 1, "maxLength": 400},
-          "bbox_norm": {
-            "type": "array",
-            "minItems": 4,
-            "maxItems": 4,
-            "items": {"type": "number", "minimum": 0, "maximum": 1}
-          },
+          "finding": {"type": "string", "minLength": 1, "maxLength": 500},
+          "bbox_norm": {"type": "array", "minItems": 4, "maxItems": 4, "items": {"type": "number", "minimum": 0, "maximum": 1}},
           "confidence": {"type": "number", "minimum": 0, "maximum": 1},
           "basis": {"enum": ["source_requirement", "generic_layout_diagnostic"]},
-          "requirement_ids": {
-            "type": "array",
-            "uniqueItems": true,
-            "items": {"type": "string", "minLength": 1}
-          },
-          "source_clause_ids": {
-            "type": "array",
-            "uniqueItems": true,
-            "items": {"type": "string", "minLength": 1}
-          },
+          "requirement_ids": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+          "source_clause_ids": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+          "evidence_image_ids": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
           "needs_human_review": {"type": "boolean"}
         }
       }
     },
-    "uncertainty_notes": {
-      "type": "array",
-      "maxItems": 12,
-      "items": {"type": "string", "minLength": 1, "maxLength": 300}
-    }
+    "uncertainty_notes": {"type": "array", "maxItems": 30, "items": {"type": "string", "minLength": 1, "maxLength": 500}}
   }
 }

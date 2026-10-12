@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.local/thesis-latex2docx/visual-review-issue-ledger.schema.json",
+  "title": "Visual review findings and dispositions",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "run_id", "reviewed_pdf_sha256", "findings"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "run_id": {"type": "string", "minLength": 1},
+    "reviewed_pdf_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["finding_id", "physical_pdf_page", "evidence_image_ids", "status", "finding", "severity"],
+        "properties": {
+          "finding_id": {"type": "string", "minLength": 1},
+          "physical_pdf_page": {"type": "integer", "minimum": 1},
+          "evidence_image_ids": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+          "status": {"enum": ["open", "needs_human_review", "intentional_with_source_basis", "fixed_pending_rerender", "closed_after_rerender", "unknown"]},
+          "finding": {"type": "string", "minLength": 1},
+          "severity": {"enum": ["critical", "high", "medium", "low"]},
+          "reviewer_claim": {"type": ["string", "null"]},
+          "disposition_reason": {"type": ["string", "null"]},
+          "source_clause_ids": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+          "closure": {
+            "type": ["object", "null"], "additionalProperties": false,
+            "required": ["prior_pdf_sha256", "rerender_pdf_sha256", "new_review_run_id", "new_full_page_coverage", "source_finding_id", "source_report"],
+            "properties": {
+              "prior_pdf_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "rerender_pdf_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+              "new_review_run_id": {"type": "string", "minLength": 1},
+              "new_full_page_coverage": {"const": true},
+              "source_finding_id": {"type": "string", "minLength": 1},
+              "source_report": {
+                "type": "object", "additionalProperties": false,
+                "required": ["path", "bytes", "sha256"],
+                "properties": {
+                  "path": {"type": "string", "minLength": 1},
+                  "bytes": {"type": "integer", "minimum": 0},
+                  "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  }
+}

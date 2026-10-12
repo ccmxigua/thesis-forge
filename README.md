@@ -32,7 +32,7 @@ python3 scripts/audit_toc_materialization.py /absolute/source.docx /absolute/new
 
 该入口只从来源 DOCX 的目录域深度和语义标题读取条目，要求输出标题唯一匹配；使用 LibreOffice 实际 PDF 书签页码填入动态 `PAGEREF` 字段缓存，并重渲染直到缓存与最终分页一致。它不会调用或声称 Word/LibreOffice 更新了字段；分节重启、非十进制页码、重复或缺失书签、缓存不收敛以及不可见目录行均失败关闭。新 DOCX、渲染及审计报告必须放在新路径。该结果仍是 `submission_ready=false` 的可编辑审查草稿，不能代替 Word 发布验收或人工格式审查。
 
-需要把长篇机器评分明细从论文草稿中分离时，使用 `scripts/review_package_export.py` 的 source-bound 导出协议：`strip` 只接受与当前 scorecard JSON 逐字匹配的前置评分块和人工标记原文，将每个 `MR-*` 缩为带唯一编号的简短待审提示，并只改写 `word/document.xml`；完整理由、来源映射和处理要求保留在外置台账。随后必须对新 DOCX 重新物化目录、渲染并审计。用 `scripts/reconcile_current_output.py --external-scorecard-out <new-scorecard.json>` 将新 PDF/DOCX 的当前状态写入外部 scorecard，不把评分段落插回论文；最后运行 `review_package_export.py export` 生成可编辑审查台账 DOCX、完整机器 JSON 和简短问题摘要。外置台账保留完整当前/历史条目、来源映射和哈希绑定；任何一步均不提高 `submission_ready`，也不表示完成新的语义审查。
+需要把长篇机器评分明细从论文草稿中分离时，使用 `scripts/review_package_export.py` 的 source-bound 导出协议：`strip` 只接受与当前 scorecard JSON 逐字匹配的前置评分块和人工标记原文，将每个 `MR-*` 缩为带唯一编号的简短待审提示，并只改写 `word/document.xml`；完整理由、来源映射和处理要求保留在外置台账。随后必须对新 DOCX 重新物化目录、渲染并审计。用 `scripts/reconcile_current_output.py --external-scorecard-out <new-scorecard.json>` 将新 PDF/DOCX 的当前状态写入外部 scorecard，不把评分段落插回论文；最后运行 `review_package_export.py export` 生成可编辑审查台账 DOCX、完整机器 JSON 和中文人工复核指引。指引将明确区分失败、未核验和待人工，列出来源原文、下一步和缺失的论文定位，不把内部代码或未知状态解释成通过；逐项编号和完整机器映射写入独立技术 JSON。`review_draft` 的单项属性检查状态不是论文总分；只有完整、来源绑定且人工确认的义务范围以及适用的评分权重都已明确时才允许显示总体分数。当前来源范围合同仍将重要性标为未评估，因此总体分数保持未评分；有完整证据时，范围覆盖率和满足率作为单独的无权重指标显示。主流程可用 `--obligation-scope-inventory <source-first-scope.json>` 接入该范围清单，并将源文件哈希与当前 run/source 绑定后转交应用层。未知、待人工、范围缺失或不完整不会折算成 0。若需从格式契约回查原始条款，可传入 `--source-requirements-dir <review/requirements>`、`--requirements-docx <exact-requirements.docx>` 和 `--technical-json <report-technical.json>`。该入口核验要求 DOCX 与抽取清单、条款目录、格式契约的字节绑定，并确认引述能在 DOCX 原文中找到；缺失、冲突或不可信映射保持未决。外置台账保留完整当前/历史条目和哈希绑定；任何一步均不提高 `submission_ready`，也不表示完成新的语义审查。
 
 以下 V2 overlay、`convert.sh` 和 API 说明属于旧版兼容工具，不是新文档的来源审查入口，也不能证明学校要求已满足。
 
@@ -748,6 +748,33 @@ other submission gates. Without a complete verified page report, submission
 readiness remains false. Visual-model output is low-trust review evidence; it
 cannot clear human obligations or authorize submission by itself. This flow
 does not replace inspection in Word or prove invisible DOCX properties.
+
+If the exact final DOCX, PDF, and signed Word render report already exist and
+have been reviewed in a separate v2 visual-review session, the acceptance
+coordinator can continue without rerunning Word:
+
+```sh
+python scripts/post_render_acceptance.py PRE_RENDER.docx FINAL_WORD.docx FINAL.pdf \
+  --render-report word-render-report.json \
+  --visual-audit pdf-visual-audit.json \
+  --format-spec format-spec.json \
+  --pre-validation pre-render-validation.json \
+  --submission-audit final-submission-audit.json \
+  --format-comparison final-format-comparison.json \
+  --acceptance-out post-render-acceptance.json \
+  --official-template official-template.docx \
+  --official-style-map official-style-map.json \
+  --generated-style-map generated-style-map.json \
+  --visual-review-report visual-review-human-manifest.json \
+  --reuse-existing-word-render \
+  --source-clauses requirement-clauses.json
+```
+
+This mode requires an exact path/hash match and a Word-scoped render report;
+it does not render or update fields. The normal visual verifier, submission
+audit (including signed Word attestation), and format comparison still run.
+LibreOffice reports cannot satisfy this Word-only continuation. Without the
+reuse flag, the normal path starts a fresh Word render.
 
 ## 许可证
 

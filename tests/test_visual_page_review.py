@@ -4,6 +4,10 @@ import json
 import subprocess
 import sys
 import tempfile
+import threading
+import urllib.request
+import urllib.parse
+import http.cookiejar
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -14,14 +18,27 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
 
 import visual_page_review as visual  # noqa: E402
+import visual_review_protocol as visual_protocol  # noqa: E402
+from visual_page_review_human import HumanVisualReviewSession  # noqa: E402
 
 
 def _response(page_number: int, *, issues: list[dict] | None = None) -> dict:
+    full_page_id = f"p{page_number:04d}-full"
     return {
-        "schema_version": "1.0",
+        "schema_version": "2.0",
         "page_number": page_number,
-        "review_state": "visually_reviewed",
+        "review_state": "observations_recorded",
         "visual_summary": f"Page {page_number} is legible with no visible layout defect.",
+        "checklist": [
+            {
+                "item_id": item_id,
+                "status": "not_applicable" if item_id == "contents_entries_and_targets" else "pass",
+                "observation": f"Checked {item_id} on physical page {page_number}.",
+                "reason": "The source-bound page map says this is not a contents page." if item_id == "contents_entries_and_targets" else None,
+                "evidence_image_ids": [full_page_id],
+            }
+            for item_id in visual.CHECKLIST_ITEMS
+        ],
         "issues": issues or [],
         "uncertainty_notes": [],
     }
@@ -37,12 +54,33 @@ def _issue(**changes) -> dict:
         "basis": "source_requirement",
         "requirement_ids": ["R1"],
         "source_clause_ids": ["C1"],
+        "evidence_image_ids": ["p0001-full"],
         "needs_human_review": False,
         **changes,
     }
 
 
 class VisualPageReviewTests(unittest.TestCase):
+    def test_text_dense_page_uses_full_page_plus_bounded_focused_crops(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            pdf = root / "dense.pdf"
+            document = fitz.open()
+            page = document.new_page(width=300, height=400)
+            for number in range(40):
+                page.insert_text((20, 20 + number * 9), f"Ordinary paragraph line {number + 1}", fontsize=12)
+            document.save(pdf)
+            document.close()
+            with fitz.open(pdf) as rendered:
+                full_page = root / "page-0001.png"
+                rendered[0].get_pixmap(matrix=fitz.Matrix(300 / 72, 300 / 72), alpha=False).save(full_page)
+            crop_dir = root / "crops"
+            crop_dir.mkdir()
+            crops = visual.create_region_crops(pdf, 1, full_page, crop_dir)
+            self.assertEqual({crop["kind"] for crop in crops}, {"header_band", "footer_band"})
+            self.assertLessEqual(len(crops), visual_protocol.MAX_REGION_CROPS_PER_PAGE)
+            self.assertTrue(all(crop["parent_page_image_sha256"] == visual.sha256_file(full_page) for crop in crops))
+
     def _fixture(self, root: Path, *, page_count: int = 2) -> tuple[Path, Path, Path, Path, Path]:
         docx = root / "final.docx"
         docx.write_bytes(b"test DOCX bytes; these are only hash-bound fixture bytes")
@@ -79,18 +117,36 @@ class VisualPageReviewTests(unittest.TestCase):
         }), encoding="utf-8")
         render_path = root / "word-render-report.json"
         render_path.write_text(json.dumps({
+            "renderer": {"name": "Microsoft Word", "version": "fixture-1"},
+            "operating_system": "fixture-os",
+            "font_environment": "fixture-fonts",
             "source_docx": {"path": str(docx.resolve()), "sha256": visual.sha256_file(docx)},
             "rendered_pdf": {"path": str(pdf.resolve()), "sha256": visual.sha256_file(pdf)},
+            "attestation": {"algorithm": "HMAC-SHA256", "signature": "0" * 64},
         }), encoding="utf-8")
         return docx, pdf, render_path, spec_path, clauses_path
 
     def _prepare(self, root: Path, *, page_count: int = 2):
         docx, pdf, render_path, spec_path, clauses_path = self._fixture(root, page_count=page_count)
+        page_map_path = root / "page-map.json"
+        page_map_path.write_text(json.dumps({
+            "schema_version": "1.0",
+            "source_docx_sha256": visual.sha256_file(docx),
+            "pdf_sha256": visual.sha256_file(pdf),
+            "pages": [{
+                "physical_pdf_page": number,
+                "section_id": "fixture-body-section",
+                "chapter_or_appendix_anchor": "fixture-body-start",
+                "page_type": "body",
+                "source_clause_ids": ["C1"],
+                "applicability": {"contents_entries_and_targets": False},
+            } for number in range(1, page_count + 1)],
+        }), encoding="utf-8")
         work = root / "visual-review"
         manifest = visual.prepare_review(
             final_docx=docx, pdf=pdf, render_report=render_path,
             format_spec_path=spec_path, source_clauses_path=clauses_path,
-            work_dir=work,
+            work_dir=work, page_map_path=page_map_path,
         )
         return manifest, work, docx, pdf, render_path, spec_path, clauses_path
 
@@ -138,6 +194,10 @@ class VisualPageReviewTests(unittest.TestCase):
                 prompt = Path(page["prompt"]["path"]).read_text(encoding="utf-8")
                 self.assertIn('"id":"R1"', prompt)
                 self.assertIn('"id":"C1"', prompt)
+                self.assertIn('"required_checklist_items"', prompt)
+                self.assertEqual(page["dpi"], 300)
+                self.assertGreaterEqual(len(page["region_crops"]), 2)
+                self.assertEqual(page["page_map"]["source_mapping_status"], "resolved")
             self.assertEqual(manifest["final_docx"]["sha256"], visual.sha256_file(docx))
             self.assertEqual(manifest["pdf"]["sha256"], visual.sha256_file(pdf))
             self.assertEqual(manifest["render_report"]["sha256"], visual.sha256_file(render))
@@ -145,25 +205,94 @@ class VisualPageReviewTests(unittest.TestCase):
             self.assertEqual(manifest["source_clauses"]["sha256"], visual.sha256_file(clauses))
             self.assertTrue((work / "page-images" / "page-0002.png").is_file())
 
-    def test_valid_native_image_calls_cover_every_page_and_verify(self) -> None:
+    def test_native_image_calls_bind_full_page_and_crops_but_unconfirmed_delivery_blocks(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             manifest, work, docx, pdf, render, spec, clauses = self._prepare(Path(td))
             result, invocations = self._execute_valid(manifest, work)
-            self.assertEqual(result["status"], "passed")
+            self.assertEqual(result["status"], "unknown")
             self.assertEqual(len(invocations), 2)
-            self.assertTrue(all(command.count("--image") == 1 for command in invocations))
+            self.assertTrue(all(command.count("--image") >= 3 for command in invocations))
             self.assertTrue(all(command[-1] == "-" for command in invocations))
             self.assertEqual(result["requested_model"], "gpt-6-luna")
             self.assertEqual(result["host_runtime"], "codex")
             self.assertFalse(result["model_image_capability_verified"])
             self.assertTrue(result["model_request_made"])
+            self.assertTrue(any("request_image_delivery_unobservable" in item for item in result["visual_review_blockers"]))
             self.assertFalse(result["submission_ready"])
             report = work / "visual-review-manifest.json"
             verified = visual.verify_visual_review_report(
                 report, final_docx=docx, pdf=pdf, render_report=render,
                 format_spec_path=spec, source_clauses_path=clauses,
             )
-            self.assertTrue(verified["valid"], verified["blockers"])
+            self.assertFalse(verified["valid"])
+            self.assertEqual(verified["status"], "unknown")
+            self.assertTrue(any("request_image_delivery_unobservable" in item for item in verified["blockers"]))
+
+    def test_loopback_human_session_records_exact_images_and_keeps_identity_unverified(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            manifest, work, docx, pdf, render, spec, clauses = self._prepare(Path(td), page_count=1)
+            session = HumanVisualReviewSession(
+                work / "visual-review-manifest.json", reviewer_claim="test reviewer",
+                output_dir=work / "human-session",
+            )
+            from http.server import ThreadingHTTPServer
+            server = ThreadingHTTPServer(("127.0.0.1", 0), session.handler())
+            session.server = server
+            worker = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.02}, daemon=True)
+            worker.start()
+            opener = urllib.request.build_opener(urllib.request.HTTPCookieProcessor(http.cookiejar.CookieJar()))
+            root_url = f"http://127.0.0.1:{server.server_address[1]}"
+            try:
+                opener.open(root_url + "/?t=" + session.token, timeout=5).read()
+                page_data = json.loads(opener.open(root_url + "/session", timeout=5).read())
+                page = page_data["pages"][0]
+                for image in page["images"]:
+                    image_url = root_url + "/image?page=1&id=" + urllib.parse.quote(image["image_id"])
+                    image_bytes = opener.open(image_url, timeout=5).read()
+                    self.assertGreater(len(image_bytes), 0)
+                    body = json.dumps({
+                        "page_number": 1, "image_id": image["image_id"],
+                        "width_px": image["width_px"], "height_px": image["height_px"],
+                    }).encode()
+                    opener.open(urllib.request.Request(root_url + "/image-loaded", data=body,
+                        headers={"Content-Type": "application/json"}), timeout=5).read()
+                checklist = [{
+                    "item_id": item_id,
+                    "status": "not_applicable" if item_id == "contents_entries_and_targets" else "pass",
+                    "observation": f"Checked {item_id}.",
+                    "reason": "Mapped as a body page without contents applicability." if item_id == "contents_entries_and_targets" else None,
+                    "evidence_image_ids": ["p0001-full"],
+                } for item_id in visual.CHECKLIST_ITEMS]
+                submission = {
+                    "page_number": 1, "checklist": checklist, "issues": [],
+                    "uncertainty_notes": [], "visual_summary": "One-page session fixture.",
+                    "loaded_image_ids": sorted(row["image_id"] for row in page["images"]),
+                }
+                response = opener.open(urllib.request.Request(
+                    root_url + "/submit-page", data=json.dumps(submission).encode(),
+                    headers={"Content-Type": "application/json"},
+                ), timeout=5)
+                result = json.loads(response.read())
+                self.assertTrue(result["complete"])
+                self.assertEqual(result["status"], "passed")
+            finally:
+                server.shutdown()
+                server.server_close()
+                worker.join(timeout=5)
+            human_report = work / "visual-review-human-manifest.json"
+            self.assertTrue(human_report.is_file())
+            saved = json.loads(human_report.read_text(encoding="utf-8"))
+            self.assertFalse(saved["model_request_made"])
+            self.assertFalse(saved["submission_ready"])
+            self.assertEqual(saved["renderer_scoped_status"]["word_delivery_visual_status"], "passed")
+            self.assertEqual(saved["human_review_receipt"]["path"].split("/")[-1], "human-review-receipt.json")
+            receipt = json.loads(Path(saved["human_review_receipt"]["path"]).read_text(encoding="utf-8"))
+            self.assertEqual(receipt["reviewer_identity_status"], "self_declared_not_verified")
+            verification = visual.verify_visual_review_report(
+                human_report, final_docx=docx, pdf=pdf, render_report=render,
+                format_spec_path=spec, source_clauses_path=clauses,
+            )
+            self.assertTrue(verification["valid"], verification["blockers"])
 
     def test_human_review_state_cannot_pass_visual_release_gate(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -188,13 +317,13 @@ class VisualPageReviewTests(unittest.TestCase):
             }), patch.object(visual, "run_process", side_effect=runner):
                 result = visual.execute_review(manifest, work_dir=work, codex_binary="/usr/bin/codex",
                                                host_runtime="codex")
-            self.assertEqual(result["status"], "human_review_required")
+            self.assertEqual(result["status"], "unknown")
             verification = visual.verify_visual_review_report(
                 work / "visual-review-manifest.json", final_docx=docx, pdf=pdf,
                 render_report=render, format_spec_path=spec, source_clauses_path=clauses,
             )
             self.assertFalse(verification["valid"])
-            self.assertIn("visual_review_has_findings_or_uncertainty", verification["blockers"])
+            self.assertIn("visual_review_not_passed_for_required_scope", verification["blockers"])
 
     def test_source_clause_edges_and_region_contract_fail_closed(self) -> None:
         catalog = visual.build_source_catalog(
@@ -207,7 +336,12 @@ class VisualPageReviewTests(unittest.TestCase):
             [{"id": "C1", "text": "First source."}, {"id": "C2", "text": "Second source."}],
         )
         good = _response(1, issues=[_issue()])
-        visual.validate_page_response(good, page_number=1, catalog=catalog)
+        visual.validate_page_response(
+            good, page_number=1, catalog=catalog,
+            allowed_image_ids={"p0001-full"},
+            page_map={"source_mapping_status": "resolved",
+                      "applicability": {"contents_entries_and_targets": False}},
+        )
         invalid = [
             {**good, "page_number": True},
             {**good, "review_state": "unknown"},
@@ -222,7 +356,12 @@ class VisualPageReviewTests(unittest.TestCase):
         for response in invalid:
             with self.subTest(response=response):
                 with self.assertRaises(ValueError):
-                    visual.validate_page_response(response, page_number=1, catalog=catalog)
+                    visual.validate_page_response(
+                        response, page_number=1, catalog=catalog,
+                        allowed_image_ids={"p0001-full"},
+                        page_map={"source_mapping_status": "resolved",
+                                  "applicability": {"contents_entries_and_targets": False}},
+                    )
 
     def test_model_runner_failure_is_a_durable_no_retry_stop(self) -> None:
         with tempfile.TemporaryDirectory() as td:

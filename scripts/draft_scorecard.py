@@ -24,6 +24,40 @@ from source_obligation_assessment import assessment_projection_valid, build_obli
 POLICY = "source_obligation_draft_scorecard_v3"
 PREFIX = "【SC-"
 STATUSES = ("failed", "unverified", "pending", "verified")
+SCORING_CONTRACT_VERSION = "source_scope_eligibility_v1"
+
+
+def _score_reason(assessment: dict[str, Any] | None, total_weight: int) -> str | None:
+    """Explain why no scalar score is available without a complete denominator."""
+    if not isinstance(assessment, dict):
+        return "source_scope_assessment_missing"
+    if assessment.get("status") == "scope_inventory_missing":
+        return "source_scope_inventory_missing"
+    if assessment.get("status") != "complete" or assessment.get("inventory_complete") is not True:
+        return "source_scope_inventory_incomplete"
+    if assessment.get("satisfaction_ratio") is None:
+        outcomes = [scope.get("outcome") for scope in assessment.get("scopes", [])
+                    if isinstance(scope, dict)]
+        if outcomes and all(outcome == "not_assessable" for outcome in outcomes):
+            return "no_applicable_source_obligations"
+        return "source_obligations_unresolved"
+    if assessment.get("importance_assessment_complete") is not True:
+        return "importance_not_assessed"
+    if total_weight <= 0:
+        return "no_weighted_automatic_obligations"
+    return None
+
+
+_SCORE_REASON_TEXT = {
+    "source_scope_assessment_missing": "缺少来源义务范围评估",
+    "source_scope_inventory_missing": "缺少来源义务范围清单",
+    "source_scope_inventory_incomplete": "来源义务范围清单尚未完整确认",
+    "source_obligations_unresolved": "仍有未核验、待人工或规范维度未知的来源义务",
+    "no_applicable_source_obligations": "没有已确认适用的来源义务分母",
+    "importance_not_assessed": "来源义务重要性尚未评估",
+    "no_weighted_automatic_obligations": "没有可计权的自动来源义务",
+    "current_output_instance_only_no_semantic_score": "当前仅核验文档实例，不含来源语义总分",
+}
 
 
 def _entry_score(status: str) -> int | None:
@@ -100,6 +134,25 @@ def _scorecard_semantics_valid(card: dict[str, Any]) -> bool:
             and card.get("policy") == POLICY
             and card.get("unique_source_obligation_count") is None
         )
+    if card.get("scoring_contract_version") == SCORING_CONTRACT_VERSION:
+        if isinstance(card.get("current_output_assessment"), dict):
+            expected_reason = "current_output_instance_only_no_semantic_score"
+        else:
+            total_weight = card.get("total_weight")
+            if not isinstance(total_weight, int) or isinstance(total_weight, bool) or total_weight < 0:
+                return False
+            expected_reason = _score_reason(card.get("obligation_assessment"), total_weight)
+        expected_status = "scored" if expected_reason is None else "unscored"
+        if (card.get("score_status") != expected_status
+                or card.get("score_reason") != expected_reason
+                or (expected_status == "unscored" and card.get("score") is not None)
+                or (expected_status == "scored"
+                    and card.get("score") != round(
+                        card.get("earned_weight", 0) * 100 / total_weight, 2
+                    ))):
+            return False
+    elif "score_status" in card or "score_reason" in card:
+        return False
     return card.get("submission_ready") is False and scope_assessment_valid
 
 
@@ -114,9 +167,11 @@ def build_scorecard(binding: dict[str, Any], receipt_audit: dict[str, Any],
     """Known automatic source units count once; unknown semantics stay unweighted.
 
     Legacy check percent remains a separately named diagnostic, never silently
-    upgraded to a normative score. A shared source unit requires explicit,
-    code-generated identity; wording, role, confidence and array position do
-    not establish equivalence. Every raw check remains independently visible.
+    upgraded to an overall score. A scalar score additionally requires a
+    complete source-bound scope inventory, terminal evidence for every
+    applicable atom, and assessed importance. A shared source unit requires
+    explicit, code-generated identity; wording, role, confidence and array
+    position do not establish equivalence. Every raw check remains visible.
     """
     if not isinstance(binding, dict) or not binding.get("run_id") or not binding.get("case_id"):
         raise ValueError("scorecard requires current run/case binding")
@@ -225,6 +280,18 @@ def build_scorecard(binding: dict[str, Any], receipt_audit: dict[str, Any],
             attach_unit(entry, {"evaluation_unit_id": "EU-" + key[:32], "canonical_obligation_key": key,
                                "force": "unknown", "applicability": "unknown", "route": "unknown",
                                "semantic_basis": "legacy_unknown_dimensions"})
+    obligation_assessment = build_obligation_assessment(
+        binding, evaluation_units_by_requirement, receipt_audit, obligation_scope_inventory,
+        expected_docx_sha256,
+    )
+    not_applicable_unit_ids = {
+        atom["evaluation_unit_id"]
+        for scope in obligation_assessment.get("scopes", [])
+        if isinstance(scope, dict)
+        for atom in scope.get("atoms", [])
+        if isinstance(atom, dict) and atom.get("status") == "not_applicable"
+    }
+
     if evaluation_units_by_requirement is not None:
         for uid, row in units.items():
             if row["identity"].get("route") == "human":
@@ -233,6 +300,9 @@ def build_scorecard(binding: dict[str, Any], receipt_audit: dict[str, Any],
                 # pending and visible even if an associated property receipt
                 # says "verified"; only a separate human-verification receipt
                 # may eventually resolve that obligation.
+                if uid in not_applicable_unit_ids:
+                    row["statuses"].append("not_applicable")
+                    continue
                 diagnostic = add(
                     "human_review", uid,
                     "来源或适用性需要人工核验", "pending",
@@ -241,6 +311,9 @@ def build_scorecard(binding: dict[str, Any], receipt_audit: dict[str, Any],
                 if diagnostic is not None:
                     row["item_ids"].append(diagnostic["item_id"])
                 row["statuses"].append("pending")
+                continue
+            if uid in not_applicable_unit_ids:
+                row["statuses"].append("not_applicable")
                 continue
             if row["statuses"]:
                 continue
@@ -291,7 +364,8 @@ def build_scorecard(binding: dict[str, Any], receipt_audit: dict[str, Any],
     for uid in sorted(units):
         row = units[uid]
         identity, statuses = row["identity"], row.pop("statuses")
-        status = ("pending" if identity["route"] == "human" else
+        status = ("not_applicable" if uid in not_applicable_unit_ids else
+                  "pending" if identity["route"] == "human" else
                   "failed" if "failed" in statuses else "unverified" if "unverified" in statuses else "verified")
         bucket = ("H" if identity["route"] == "human" else "I" if identity["route"] == "input" else
                   "F" if identity["route"] in {"automatic", "check_only"} and identity["force"] != "unknown"
@@ -305,18 +379,18 @@ def build_scorecard(binding: dict[str, Any], receipt_audit: dict[str, Any],
     ledgers["H"].extend(e["item_id"] for e in entries if e["kind"] == "human_review")
     # Findings without a proved unit reference are diagnostics, not new duties.
     ledgers["U"].extend(e["item_id"] for e in entries if e["kind"] in {"finding", "capability"})
-    obligation_assessment = build_obligation_assessment(
-        binding, evaluation_units_by_requirement, receipt_audit, obligation_scope_inventory,
-        expected_docx_sha256,
-    )
+    score_reason = _score_reason(obligation_assessment, total_weight)
+    score_status = "scored" if score_reason is None else "unscored"
+    score_value = round(earned_weight * 100 / total_weight, 2) if score_status == "scored" else None
     return {
         "schema_version": "3.0", "policy": POLICY, "output_policy": "review_draft",
+        "scoring_contract_version": SCORING_CONTRACT_VERSION,
         "binding": copy.deepcopy(binding), "submission_ready": False,
         "human_check_required": True, "coverage_complete": False,
-        "score_meaning": "verified_weight_of_known_applicable_automatic_source_units_not_release",
+        "score_meaning": "verified_weight_of_complete_source_scopes_under_product_policy_not_release",
         "weighting": "product_policy_required_prohibited_5_recommended_2_optional_1_unknown_unweighted",
         "weight_policy": copy.deepcopy(WEIGHTS), "weight_policy_is_school_rule": False,
-        "score": round(earned_weight * 100 / total_weight, 2) if total_weight else None,
+        "score": score_value, "score_status": score_status, "score_reason": score_reason,
         "earned_weight": earned_weight, "total_weight": total_weight,
         "observed_checks_verified_percent": round(earned * 100 / len(entries), 2) if entries else None,
         "evaluation_units": source_units, "ledgers": ledgers,
@@ -349,7 +423,11 @@ def build_scorecard(binding: dict[str, Any], receipt_audit: dict[str, Any],
 
 
 def scorecard_lines(card: dict[str, Any]) -> list[str]:
-    scope_line = (_obligation_assessment_line(card.get("obligation_assessment")) + "\n"
+    scope_line = (_obligation_assessment_line(
+        card.get("obligation_assessment"),
+        legacy_unknown_unit_count=card.get("legacy_unknown_unit_count"),
+        typed_source_unit_count=card.get("typed_source_unit_count"),
+    ) + "\n"
                   if "obligation_assessment" in card else "")
     current = card.get("current_output_assessment")
     if isinstance(current, dict):
@@ -368,15 +446,28 @@ def scorecard_lines(card: dict[str, Any]) -> list[str]:
             + "当前实例核验不计算来源义务加权分；未知或缺少精确绑定的项目保持未核验，submission_ready=false。"
         )
     else:
+        score_reason = card.get("score_reason")
+        if score_reason is None and card.get("score") is None:
+            score_reason = _score_reason(card.get("obligation_assessment"), card.get("total_weight", 0))
+        score_label = (
+            f"来源义务加权总分：{card['score']}/100"
+            if card.get("score_status") == "scored" and card.get("score") is not None
+            else "来源义务加权总分：未评分（" + _SCORE_REASON_TEXT.get(
+                score_reason, "缺少已确认的来源义务计分条件",
+            ) + "）"
+        )
+        observed = card.get("observed_checks_verified_percent")
+        observed_text = "未形成可统计的单项检查百分比" if observed is None else f"{observed:.2f}%"
         head = ("自动核验评分（审查草稿，不可提交）\n"
-                f"得分：{card['score'] if card['score'] is not None else '未评分'}/100；"
+                f"{score_label}；"
                 f"诊断条目{card['diagnostic_item_count']}项（不是独立义务数）；"
                 f"已验证{card['verified_count']}项，已证实未满足{card['failed_count']}项，"
                 f"未核验{card['unverified_count']}项，待人工核验{card['pending_count']}项。\n"
+                f"单项诊断检查已验证比例：{observed_text}（不是来源义务满足率或学校评分）。\n"
                 f"来源评价单元{card['evaluation_unit_count']}个，其中可确认独立来源义务"
                 f"{card['unique_source_obligation_count'] if card['unique_source_obligation_count'] is not None else '未知'}个。\n"
                 + scope_line
-                + "按已知适用的自动义务单元计分：强制/禁止5、建议2、已选择可选项1；这是产品策略，不是学校权重。"
+                + "计分权重政策：强制/禁止5、建议2、已选择可选项1；这是产品策略，不是学校权重。"
                 + "未知强制性/适用性不赋权，人工、待输入、未知问题单列；重复检查不重复加权。"
                 + "所有未满足/待核验项须人工检查；高分不能抵消安全错误或授权提交。")
     statuses = {"verified": "已验证满足", "failed": "未满足", "unverified": "未核验", "pending": "待人工核验"}
@@ -405,9 +496,9 @@ def scorecard_lines(card: dict[str, Any]) -> list[str]:
         return json.dumps(fields, ensure_ascii=False, sort_keys=True)
     def score_text(item: dict[str, Any]) -> str:
         if item["status"] == "verified":
-            return "100/100 已验证满足"
+            return "单项检查100/100：已验证满足"
         if item["status"] == "failed":
-            return "0/100 已证实未满足"
+            return "单项检查0/100：已证实未满足"
         if item["status"] == "unverified":
             return "未评分（未核验）"
         return "未评分（待人工核验）"
@@ -419,20 +510,33 @@ def scorecard_lines(card: dict[str, Any]) -> list[str]:
     ]
 
 
-def _obligation_assessment_line(assessment: dict[str, Any] | None) -> str:
+def _obligation_assessment_line(
+    assessment: dict[str, Any] | None,
+    *,
+    legacy_unknown_unit_count: int | None = None,
+    typed_source_unit_count: int | None = None,
+) -> str:
     if not isinstance(assessment, dict):
         return "对象级来源义务：未评估。"
+    legacy_count = (
+        legacy_unknown_unit_count if isinstance(legacy_unknown_unit_count, int)
+        else assessment.get("legacy_unknown_unit_count", 0)
+    )
+    typed_count = (
+        typed_source_unit_count if isinstance(typed_source_unit_count, int)
+        else assessment.get("typed_source_unit_count", 0)
+    )
     if assessment.get("status") == "scope_inventory_missing":
         return (
             "对象级来源义务：范围清单缺失，不计算覆盖率或满足率；"
-            f"旧式未知来源单元{assessment.get('legacy_unknown_unit_count', 0)}个，"
-            f"结构化来源单元{assessment.get('typed_source_unit_count', 0)}个。"
+            f"旧式未知来源评价单元{legacy_count}个，"
+            f"结构化来源评价单元{typed_count}个。"
         )
     if assessment.get("assessment_coverage") is None:
         return (
             "对象级来源义务：范围或适用性未完整确认，不计算覆盖率或满足率；"
             f"清单完整={assessment.get('inventory_complete') is True}，"
-            f"旧式未知来源单元{assessment.get('legacy_unknown_unit_count', 0)}个。"
+            f"旧式未知来源评价单元{legacy_count}个。"
         )
     coverage = f"{assessment['assessment_coverage'] * 100:.1f}%"
     satisfaction = assessment.get("satisfaction_ratio")
@@ -763,6 +867,8 @@ def reconcile_current_output_scorecard(
             "historical_docx_sha256": historical_docx_sha256,
             "status_counts": history_counts,
             "score": card.get("score"),
+            "score_status": card.get("score_status"),
+            "score_reason": card.get("score_reason"),
             "earned_weight": card.get("earned_weight"),
             "total_weight": card.get("total_weight"),
             "coverage_complete": card.get("coverage_complete"),
@@ -876,6 +982,9 @@ def reconcile_current_output_scorecard(
     card["diagnostic_item_count"] = len(card["entries"])
     card["score"] = None
     card["score_meaning"] = "current_output_instance_validation_only_no_semantic_or_release_score"
+    if card.get("scoring_contract_version") == SCORING_CONTRACT_VERSION:
+        card["score_status"] = "unscored"
+        card["score_reason"] = "current_output_instance_only_no_semantic_score"
     card["earned_weight"] = 0
     card["total_weight"] = 0
     card["coverage_complete"] = False

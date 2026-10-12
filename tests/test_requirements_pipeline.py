@@ -3070,6 +3070,8 @@ b&=2\notag
             self.assertTrue(report["review_draft_ready"])
             self.assertTrue(report["draft_scorecard_audit"]["valid"])
             card = report["draft_scorecard"]
+            self.assertEqual(card["score_status"], "unscored")
+            self.assertEqual(card["score_reason"], "source_scope_inventory_missing")
             self.assertGreater(
                 card["failed_count"] + card["unverified_count"] + card["pending_count"], 0
             )
@@ -3077,6 +3079,14 @@ b&=2\notag
             self.assertTrue(any(item["kind"] == "capability" for item in report["draft_scorecard"]["entries"]))
             self.assertIn("自动核验评分", "\n".join(p.text for p in Document(td / "output.docx").paragraphs))
             self.assertEqual(json.loads(Path(manifest["draft_scorecard"]).read_text()), report["draft_scorecard"])
+            self.assertEqual(manifest["obligation_scope_inventory"]["status"], "not_supplied")
+            scoring_summary = manifest["draft_scoring_summary"]
+            self.assertEqual(scoring_summary["score_reason"], "source_scope_inventory_missing")
+            self.assertEqual(
+                scoring_summary["obligation_assessment"]["status"],
+                "scope_inventory_missing",
+            )
+            self.assertIsNone(scoring_summary["obligation_assessment"]["satisfaction_ratio"])
             current_spec = json.loads(Path(manifest["format_spec"]).read_text())
             current_map = json.loads(Path(manifest["style_map"]).read_text())
             self.assertEqual(set(report["property_receipt_audit"]["expected_receipt_ids"]),
@@ -4331,7 +4341,9 @@ b&=2\notag
             requirements_sha = file_hash(requirements_source)
             manual_binding = {
                 "case_id": "test-case", "run_id": run_id,
-                "source_sha256": requirements_sha,
+                # Rule-only source identity is the input thesis DOCX; the
+                # separate rule document is bound by requirements_sha256.
+                "source_sha256": source_sha,
                 "clause_sha256": file_hash(clauses_path),
                 "evidence_sha256": file_hash(evidence_context_path),
                 "request_sha256": None,

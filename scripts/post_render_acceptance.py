@@ -197,6 +197,76 @@ def _pre_render_checks(source: Path, validation_path: Path) -> tuple[dict[str, A
     return checks, blockers
 
 
+def _existing_word_render_check(
+    final_docx: Path, pdf: Path, render_report: Path, *,
+    case_id: str | None = None, run_id: str | None = None,
+) -> dict[str, Any]:
+    """Verify a completed Word render set before allowing audit-only reuse.
+
+    This does not replace the signed render validation performed by
+    submission_audit.py. It prevents an audit-only continuation from silently
+    consuming a missing, stale, differently scoped, or path/hash-mismatched
+    render set.
+    """
+    from visual_review_protocol import renderer_scope
+
+    final_docx = _path(final_docx)
+    pdf = _path(pdf)
+    render_report = _path(render_report)
+    blockers: list[str] = []
+    docx_record = inspect_docx(final_docx) if final_docx.is_file() else {
+        "path": str(final_docx), "bytes": 0, "sha256": None, "opc_package_valid": False,
+    }
+    pdf_record = file_record(pdf) if pdf.is_file() and pdf.stat().st_size > 0 else {
+        "path": str(pdf), "bytes": pdf.stat().st_size if pdf.is_file() else 0,
+        "sha256": sha256(pdf) if pdf.is_file() else None,
+    }
+    report = read_object(render_report)
+    if not docx_record.get("opc_package_valid"):
+        blockers.append("existing_word_render_docx_invalid")
+    if not pdf.is_file() or pdf.stat().st_size <= 0:
+        blockers.append("existing_word_render_pdf_missing")
+    if report is None:
+        blockers.append("existing_word_render_report_missing_or_invalid")
+        report = {}
+    source_record = report.get("source_docx") if isinstance(report.get("source_docx"), dict) else {}
+    rendered_record = report.get("rendered_pdf") if isinstance(report.get("rendered_pdf"), dict) else {}
+    if _reported_path(source_record.get("path")) != final_docx:
+        blockers.append("existing_word_render_docx_path_mismatch")
+    if source_record.get("sha256") != docx_record.get("sha256"):
+        blockers.append("existing_word_render_docx_hash_mismatch")
+    if _reported_path(rendered_record.get("path")) != pdf:
+        blockers.append("existing_word_render_pdf_path_mismatch")
+    if rendered_record.get("sha256") != pdf_record.get("sha256"):
+        blockers.append("existing_word_render_pdf_hash_mismatch")
+    scope = renderer_scope(report, str(pdf_record.get("sha256")))
+    if scope.get("scope") != "word_delivery":
+        blockers.append("existing_word_render_renderer_scope_not_word")
+    if scope.get("word_attestation_present") is not True:
+        blockers.append("existing_word_render_attestation_missing")
+    attestation = report.get("attestation") if isinstance(report.get("attestation"), dict) else {}
+    if attestation.get("algorithm") != "HMAC-SHA256" or not isinstance(attestation.get("signature"), str):
+        blockers.append("existing_word_render_attestation_malformed")
+    if case_id and report.get("case_id") != case_id:
+        blockers.append("existing_word_render_case_id_mismatch")
+    if run_id and report.get("run_id") != run_id:
+        blockers.append("existing_word_render_run_id_mismatch")
+    if not render_report.is_file():
+        blockers.append("existing_word_render_report_missing")
+    return {
+        "valid": not blockers,
+        "blockers": sorted(set(blockers)),
+        "final_docx": docx_record,
+        "pdf": pdf_record,
+        "render_report": file_record(render_report) if render_report.is_file() else {
+            "path": str(render_report), "bytes": 0, "sha256": None,
+        },
+        "renderer_scope": scope,
+        "reuse_means_no_word_or_pdf_render_was_started": True,
+        "signed_attestation_is_independently_verified_by_submission_audit": True,
+    }
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("source_docx", type=Path, help="pre-Word DOCX produced by the deterministic pipeline")
@@ -210,6 +280,9 @@ def main(argv: list[str] | None = None) -> int:
                         help="current extracted requirement-clauses.json bound to the format spec")
     parser.add_argument("--visual-review-report", type=Path,
                         help="completed native image-based per-page visual review report")
+    parser.add_argument("--reuse-existing-word-render", action="store_true",
+                        help=("reuse the exact existing final DOCX/PDF/Word render report; "
+                              "requires a completed --visual-review-report and never starts Word"))
     parser.add_argument("--run-visual-model-review", action="store_true",
                         help="explicitly invoke native Codex once for every rendered PDF page")
     parser.add_argument("--visual-review-dir", type=Path,
@@ -308,6 +381,10 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.run_visual_model_review and visual_review_report:
         parser.error("choose either --run-visual-model-review or --visual-review-report")
+    if args.reuse_existing_word_render and args.run_visual_model_review:
+        parser.error("--reuse-existing-word-render requires a completed --visual-review-report; it cannot start model review")
+    if args.reuse_existing_word_render and visual_review_report is None:
+        parser.error("--reuse-existing-word-render requires --visual-review-report")
     if args.run_visual_model_review and (source_clauses is None or visual_review_dir is None):
         parser.error("--run-visual-model-review requires --source-clauses and --visual-review-dir")
     if not args.run_visual_model_review and any((args.codex_bin, args.codex_model, args.codex_reasoning_effort)):
@@ -346,18 +423,52 @@ def main(argv: list[str] | None = None) -> int:
         print(json.dumps(payload, ensure_ascii=False))
         return 2
 
-    render_cmd = [
-        sys.executable, str(ROOT / "scripts" / "word_render_export.py"),
-        str(source), str(final), str(pdf), "--report", str(render_report),
-        "--open-timeout", str(args.word_open_timeout), "--word-timeout", str(args.word_timeout),
-    ]
-    if args.case_id:
-        render_cmd += ["--case-id", args.case_id]
-    if args.run_id:
-        render_cmd += ["--run-id", args.run_id]
-    if toc_target_map:
-        render_cmd += ["--toc-target-map", str(toc_target_map)]
-    render_step = run_step(render_cmd)
+    if args.reuse_existing_word_render:
+        reuse_check = _existing_word_render_check(final, pdf, render_report, case_id=args.case_id, run_id=args.run_id)
+        checks["existing_word_render"] = reuse_check
+        if reuse_check.get("valid") is not True:
+            payload = {
+                "schema_version": "1.0",
+                "status": "blocked",
+                "artifact_stage": "post_word_render",
+                "submission_ready": False,
+                "stopped_at": "existing_word_render_binding",
+                "word_render_executed": False,
+                "render_reused": False,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "pre_render_docx": str(source),
+                "pre_render_docx_sha256": checks.get("pre_render_artifact", {}).get("sha256"),
+                "case_id": args.case_id,
+                "run_id": args.run_id,
+                "blockers": reuse_check.get("blockers", ["existing_word_render_invalid"]),
+                "checks": checks,
+            }
+            _write(acceptance_out, payload)
+            print(json.dumps(payload, ensure_ascii=False))
+            return 2
+
+    if args.reuse_existing_word_render:
+        render_step = {
+            "returncode": 0,
+            "reused": True,
+            "command": None,
+            "stdout_tail": "",
+            "stderr_tail": "",
+            "existing_render_binding": checks["existing_word_render"],
+        }
+    else:
+        render_cmd = [
+            sys.executable, str(ROOT / "scripts" / "word_render_export.py"),
+            str(source), str(final), str(pdf), "--report", str(render_report),
+            "--open-timeout", str(args.word_open_timeout), "--word-timeout", str(args.word_timeout),
+        ]
+        if args.case_id:
+            render_cmd += ["--case-id", args.case_id]
+        if args.run_id:
+            render_cmd += ["--run-id", args.run_id]
+        if toc_target_map:
+            render_cmd += ["--toc-target-map", str(toc_target_map)]
+        render_step = run_step(render_cmd)
     checks["word_render"] = render_step
     if render_step["returncode"] != 0:
         blockers.append("word_render_failed")
@@ -565,7 +676,8 @@ def main(argv: list[str] | None = None) -> int:
         "artifact_stage": "post_word_render",
         "submission_ready": not blockers,
         "stopped_at": None if not blockers else "post_render_validation",
-        "word_render_executed": True,
+        "word_render_executed": not args.reuse_existing_word_render,
+        "render_reused": args.reuse_existing_word_render,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "pre_render_docx": str(source),
         "pre_render_docx_sha256": checks.get("pre_render_artifact", {}).get("sha256"),
@@ -585,6 +697,7 @@ def main(argv: list[str] | None = None) -> int:
         "policy": {
             "pre_render_receipts_are_not_final_receipts": True,
             "final_docx_requires_independent_word_render_and_post_audit": True,
+            "reused_word_render_requires_exact_existing_hash_bound_word_receipt": True,
             "final_acceptance_requires_hash_bound_full_page_visual_review": True,
             "visual_model_review_cannot_authorize_submission_by_itself": True,
             "fail_closed": True,

@@ -216,6 +216,150 @@ class PostRenderAcceptanceTests(unittest.TestCase):
             self.assertFalse(result["word_render_executed"])
             self.assertEqual(result["stopped_at"], "pre_render_validation")
 
+    def test_existing_word_render_reuse_binds_exact_pair_and_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            final = root / "final.docx"
+            Document().save(final)
+            pdf = root / "final.pdf"
+            _write_valid_pdf(pdf)
+            render_report = root / "render.json"
+            render_report.write_text(json.dumps({
+                "source_docx": {"path": str(final), "sha256": _sha256(final)},
+                "rendered_pdf": {"path": str(pdf), "sha256": _sha256(pdf)},
+                "renderer": {"name": "Microsoft Word", "version": "16.105"},
+                "attestation": {"algorithm": "HMAC-SHA256", "signature": "opaque-test-signature"},
+                "case_id": "case-1", "run_id": "run-1",
+            }), encoding="utf-8")
+            valid = post_render._existing_word_render_check(
+                final, pdf, render_report, case_id="case-1", run_id="run-1",
+            )
+            self.assertTrue(valid["valid"], valid)
+            self.assertEqual(valid["renderer_scope"]["scope"], "word_delivery")
+            self.assertTrue(valid["reuse_means_no_word_or_pdf_render_was_started"])
+
+            changed_pdf = root / "changed.pdf"
+            _write_valid_pdf(changed_pdf, "changed")
+            mismatch = post_render._existing_word_render_check(
+                final, changed_pdf, render_report, case_id="case-1", run_id="run-1",
+            )
+            self.assertFalse(mismatch["valid"])
+            self.assertIn("existing_word_render_pdf_path_mismatch", mismatch["blockers"])
+            self.assertIn("existing_word_render_pdf_hash_mismatch", mismatch["blockers"])
+
+            lo_report = root / "lo-render.json"
+            lo_report.write_text(json.dumps({
+                "source_docx": {"path": str(final), "sha256": _sha256(final)},
+                "rendered_pdf": {"path": str(pdf), "sha256": _sha256(pdf)},
+                "renderer": {"name": "LibreOffice", "version": "26.8"},
+            }), encoding="utf-8")
+            wrong_scope = post_render._existing_word_render_check(final, pdf, lo_report)
+            self.assertFalse(wrong_scope["valid"])
+            self.assertIn("existing_word_render_renderer_scope_not_word", wrong_scope["blockers"])
+            self.assertIn("existing_word_render_attestation_missing", wrong_scope["blockers"])
+
+    def test_human_review_report_can_resume_acceptance_without_rerendering(self) -> None:
+        import visual_page_review  # noqa: PLC0415
+
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            case = root / "case"
+            case.mkdir()
+            source, pre_validation, _ = self._pre_render_fixture(case)
+            final = case / "final.docx"
+            final_document = Document()
+            final_document.add_paragraph("final word output")
+            final_document.save(final)
+            pdf = case / "final.pdf"
+            _write_valid_pdf(pdf)
+            render_report = case / "word-render-report.json"
+            render_report.write_text(json.dumps({
+                "source_docx": {"path": str(final), "sha256": _sha256(final)},
+                "rendered_pdf": {"path": str(pdf), "sha256": _sha256(pdf)},
+                "renderer": {"name": "Microsoft Word", "version": "16.105"},
+                "operating_system": "Darwin",
+                "attestation": {"algorithm": "HMAC-SHA256", "signature": "test-only"},
+                "case_id": "case-1", "run_id": "run-1",
+            }), encoding="utf-8")
+            format_spec = case / "format-spec.json"
+            official_template = case / "official-template.docx"
+            official_style_map = case / "official-style.json"
+            generated_style_map = case / "generated-style.json"
+            source_clauses = case / "source-clauses.json"
+            visual_report = case / "visual-review.json"
+            for path, body in (
+                (format_spec, "{}\n"), (official_template, "template"),
+                (official_style_map, "{}\n"), (generated_style_map, "{}\n"),
+                (source_clauses, "{\"clauses\": []}\n"), (visual_report, "{}\n"),
+            ):
+                path.write_text(body, encoding="utf-8")
+            outputs = {
+                "visual_audit": case / "visual-audit.json",
+                "submission_audit": case / "submission-audit.json",
+                "comparison": case / "format-comparison.json",
+            }
+
+            def fake_run_step(command: list[str], *, timeout: int = 900) -> dict:
+                command_text = " ".join(command)
+                if "pdf_visual_audit.py" in command_text:
+                    out = Path(command[command.index("--out") + 1])
+                    out.write_text(json.dumps({
+                        "status": "passed", "pdf": {"path": str(pdf), "sha256": _sha256(pdf)},
+                    }), encoding="utf-8")
+                    outputs["visual_audit"] = out
+                elif "submission_audit.py" in command_text:
+                    out = Path(command[command.index("--out") + 1])
+                    out.write_text(json.dumps({
+                        "submission_ready": True, "artifact": str(final),
+                        "render_validation": {"rendered_verified": True, "evidence": {
+                            "source_docx_sha256": _sha256(final),
+                            "rendered_pdf": {"sha256": _sha256(pdf)},
+                        }},
+                    }), encoding="utf-8")
+                    outputs["submission_audit"] = out
+                elif "post_generation_format_audit.py" in command_text:
+                    out = Path(command[command.index("--out") + 1])
+                    out.write_text(json.dumps({
+                        "status": "passed", "inputs": {
+                            "generated_docx": str(final), "generated_docx_sha256": _sha256(final),
+                            "format_spec": str(format_spec),
+                            "official_template": str(official_template),
+                            "official_template_sha256": _sha256(official_template),
+                            "official_style_map": str(official_style_map),
+                            "generated_style_map": str(generated_style_map),
+                        },
+                    }), encoding="utf-8")
+                    outputs["comparison"] = out
+                else:
+                    self.fail(f"unexpected command in reuse-only flow: {command_text}")
+                return {"returncode": 0, "command": command, "stdout_tail": "", "stderr_tail": ""}
+
+            acceptance = case / "acceptance.json"
+            args = [
+                str(source), str(final), str(pdf), "--render-report", str(render_report),
+                "--visual-audit", str(outputs["visual_audit"]), "--format-spec", str(format_spec),
+                "--source-clauses", str(source_clauses), "--visual-review-report", str(visual_report),
+                "--reuse-existing-word-render", "--pre-validation", str(pre_validation),
+                "--submission-audit", str(outputs["submission_audit"]),
+                "--format-comparison", str(outputs["comparison"]), "--acceptance-out", str(acceptance),
+                "--official-template", str(official_template),
+                "--official-style-map", str(official_style_map),
+                "--generated-style-map", str(generated_style_map),
+                "--case-id", "case-1", "--run-id", "run-1",
+            ]
+            with patch.object(post_render, "run_step", side_effect=fake_run_step) as run_step, \
+                    patch.object(visual_page_review, "verify_visual_review_report", return_value={
+                        "valid": True, "status": "passed", "blockers": [],
+                    }):
+                self.assertEqual(post_render.main(args), 0)
+            called_commands = [call.args[0] for call in run_step.call_args_list]
+            self.assertEqual(len(called_commands), 3)
+            self.assertFalse(any("word_render_export.py" in " ".join(command) for command in called_commands))
+            result = json.loads(acceptance.read_text(encoding="utf-8"))
+            self.assertTrue(result["submission_ready"])
+            self.assertFalse(result["word_render_executed"])
+            self.assertTrue(result["render_reused"])
+
     def test_batch_acceptance_requires_per_page_visual_review(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             root = Path(td)

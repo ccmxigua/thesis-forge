@@ -64,7 +64,12 @@ class CapabilityPlannerTest(unittest.TestCase):
         self.assertEqual(full["summary"]["reviewed_extracted_clauses"], 1)
         self.assertEqual(full["summary"]["missing_clause_records"], 1)
         evidence_by_kind = {item["kind"]: item["value"] for item in full["findings"][0]["evidence"]}
+        self.assertEqual(evidence_by_kind["category"], "runtime_manual_unverifiable")
         self.assertEqual(evidence_by_kind["missing_clause_ids_sample"], ["C2"])
+        self.assertEqual(
+            [item["value"] for item in full["findings"][0]["evidence"] if item["kind"] == "clause_id"],
+            ["C2"],
+        )
         self.assertEqual(load_and_validate(full["findings"][0],
                                            ROOT / "schema" / "pipeline-finding.schema.json"), [])
 

@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.local/thesis-latex2docx/visual-review-dispositions.schema.json",
+  "title": "Human visual finding dispositions",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "run_id", "pdf_sha256", "dispositions"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "run_id": {"type": "string", "minLength": 1},
+    "pdf_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "dispositions": {
+      "type": "array",
+      "items": {
+        "oneOf": [
+          {
+            "type": "object", "additionalProperties": false,
+            "required": ["finding_id", "status", "reviewer_claim", "reason", "source_clause_ids"],
+            "properties": {
+              "finding_id": {"type": "string", "minLength": 1},
+              "status": {"const": "intentional_with_source_basis"},
+              "reviewer_claim": {"type": "string", "minLength": 1},
+              "reason": {"type": "string", "minLength": 1},
+              "source_clause_ids": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+            }
+          },
+          {
+            "type": "object", "additionalProperties": false,
+            "required": ["finding_id", "status", "reviewer_claim", "reason", "source_report"],
+            "properties": {
+              "finding_id": {"type": "string", "minLength": 1},
+              "status": {"const": "closed_after_rerender"},
+              "reviewer_claim": {"type": "string", "minLength": 1},
+              "reason": {"type": "string", "minLength": 1},
+              "source_report": {
+                "type": "object", "additionalProperties": false,
+                "required": ["path", "bytes", "sha256"],
+                "properties": {
+                  "path": {"type": "string", "minLength": 1},
+                  "bytes": {"type": "integer", "minimum": 0},
+                  "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+                }
+              }
+            }
+          }
+        ]
+      }
+    }
+  }
+}

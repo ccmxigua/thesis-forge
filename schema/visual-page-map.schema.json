@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.local/thesis-latex2docx/visual-page-map.schema.json",
+  "title": "Source-bound visual page map",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "source_docx_sha256", "pdf_sha256", "pages"],
+  "properties": {
+    "schema_version": {"const": "1.0"},
+    "source_docx_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "pdf_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "pages": {
+      "type": "array", "minItems": 1,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["physical_pdf_page", "section_id", "chapter_or_appendix_anchor", "page_type", "source_clause_ids", "applicability"],
+        "properties": {
+          "physical_pdf_page": {"type": "integer", "minimum": 1},
+          "section_id": {"type": "string", "minLength": 1},
+          "chapter_or_appendix_anchor": {"type": ["string", "null"]},
+          "page_type": {"enum": ["cover", "front_matter", "contents", "body", "chapter_start", "appendix", "afterword", "separator", "blank_verso", "ledger", "other"]},
+          "source_clause_ids": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+          "applicability": {
+            "type": "object", "additionalProperties": false,
+            "required": ["contents_entries_and_targets"],
+            "properties": {"contents_entries_and_targets": {"type": "boolean"}}
+          }
+        }
+      }
+    }
+  }
+}

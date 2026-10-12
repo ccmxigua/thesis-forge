@@ -741,7 +741,16 @@ change, rematerialize the TOC and rerender. Run
 `scripts/reconcile_current_output.py --external-scorecard-out <new-scorecard.json>`
 to bind current findings to the final DOCX/PDF without editing the paper; then
 run `review_package_export.py export` to write a separate editable full ledger,
-the machine-readable report, and a short issue summary. This preserves the
+the machine-readable report, and a Chinese human-review guide with a separate
+technical JSON appendix. The guide distinguishes failed, unverified, and
+human-pending states; it gives plain-language review actions and names missing
+source or paper-location evidence. It does not translate internal codes into
+pass/fail claims. When the bound requirement artifacts are available, pass
+`--source-requirements-dir <review/requirements> --requirements-docx
+<exact-requirements.docx> --technical-json <report-technical.json>`. The exporter
+checks the DOCX and artifact hashes and verifies quoted source text against the
+exact DOCX. Missing or conflicting crosswalks stay unresolved; a false semantic
+provenance flag is preserved and disclosed, not repaired. This preserves the
 complete current and inherited status history and source/evidence mappings,
 leaves concise, uniquely numbered human-pending markers in the paper, does not
 create a new semantic review, and keeps `submission_ready=false`.
@@ -825,16 +834,27 @@ hash. This is a work-queue score only: unresolved/unreviewed items come first,
 informational items last. It is **not** a school's normative importance score,
 does not assert source-obligation completeness, and has no effect on
 requirement coverage, capability, human-review, or submission gates.
-Separately, explicit `review_draft` runs use
-`evidence_based_draft_scorecard_v1` for **score-first draft triage**. Code grades
-each recorded property/check: verified = 100 verified points; failed,
-unverified and human-pending = 0 verified points. The equal-weight average is
-only the percentage of *observed checks verified*, not normative importance,
-model confidence, complete source coverage, or permission to submit. Every
-item retains its expected/actual values, sources and original result in
-`draft-scorecard.json`; the DOCX contains a readable numbered score section
-and asks for human review of unmet/pending items. Counts and scores are
-recomputed at batch acceptance against the current ledger and serialized DOCX.
+Separately, explicit `review_draft` runs use the source-obligation scorecard
+for diagnostic triage. A single observed property check can be shown as
+verified, failed, unverified, or pending; its 100/0 diagnostic points are not
+an overall thesis score. The aggregate score stays null unless a complete,
+source-bound, source-first human scope inventory covers every typed obligation,
+all applicable atoms have terminal evidence, and importance is assessed under
+an explicit policy. The current inventory contract deliberately leaves
+importance `not_assessed`, so it does not produce a scalar overall score.
+Object-scope coverage and satisfaction ratios are separate unweighted measures:
+partial satisfaction is shown only for a complete attested scope with resolved
+applicability and terminal evidence; unknown, unverified, pending, incomplete,
+or missing scopes retain a null satisfaction ratio. A source-bound N/A finding
+is excluded from the applicable denominator; missing N/A evidence is rejected.
+The optional `--obligation-scope-inventory` pipeline input passes the exact
+file, hash, and run/source binding to the application stage. If no complete
+scope inventory is available, the DOCX and JSON show `score_status=unscored`
+with the exact reason, while observed-check counts remain separately named.
+Every item retains expected/actual values, sources and result in
+`draft-scorecard.json`; the DOCX contains a readable numbered diagnostic
+section and asks for human review of unmet/pending items. Counts and states are
+recomputed against the current ledger and serialized DOCX.
 Known capability shortfalls and actual formatting failures may remain in this
 non-release draft only when accounted for by its bound scorecard. Source-bound
 independent coverage disputes stay `incomplete` in the raw response and AO
@@ -843,7 +863,8 @@ successful coverage. Such disputes are human-review items, never invented
 requirements or semantic reclassifications. Missing/duplicate references,
 invalid schema, stale provenance, incomplete receipt inventories, invisible
 markers, corrupt packages and failed native invocation still fail closed.
-Submission/full gates remain unchanged; even 100/100 cannot promote a draft.
+Submission/full gates remain unchanged; even a fully verified 100/100 single
+check or complete review-draft scope cannot promote a draft.
 Always keep `submission_ready=false` and perform real Word visual acceptance
 before describing the scored artifact as visually verified.
 The graph is validated against `obligation-shadow-graph.schema.json` before it
@@ -1352,18 +1373,45 @@ when the post-render acceptance, final submission audit, and final format
 comparison all pass. A generated DOCX alone, or a self-authored render flag,
 is not sufficient evidence.
 
-The final release gate also requires `scripts/visual_page_review.py` to have
-reviewed every physical page of the exact final PDF with the native Codex
-`--image` attachment and strict output schema. `scripts/pdf_visual_audit.py`
+The final release gate requires a v2 visual receipt for every physical page of
+the exact final PDF. Each page is rendered at 300 DPI or higher and carries
+hash-bound full-page and region-crop evidence, a source-bound page/section map,
+and all required checklist observations. The verifier independently
+re-rasterizes the exact PDF and compares the full-page and crop hashes,
+coordinates, source map, and issue evidence. `scripts/pdf_visual_audit.py`
 remains a deterministic raster sanity check and does not count as semantic
-page-image review. Post-render acceptance blocks when the page review report is
-missing, partial, stale, uncertain, or reports a visible issue. It verifies
-the final DOCX/PDF/Word-render-report hashes, format-spec and source-clause
-hashes, review-code fingerprint, each rendered image and prompt, native image
-command, response stream, and page coverage. It also replays source-clause
-references and page-region coordinates. This added check does not replace the
-Word attestation, format comparison, source obligation checks, or human-review
+page-image review. A report is scoped to the exact renderer and PDF hash;
+LibreOffice preview and Word delivery states are recorded separately, and an
+LO result never satisfies Word delivery. This does not replace Word
+attestation, format comparison, source obligation checks, or human-review
 items and cannot set submission readiness on its own.
+
+The native Codex route records the requested `--image` paths and response, but
+the current adapter cannot observe a structured provider acknowledgement of
+the exact image hashes. Therefore a completed text response or a local
+`--image` argument is not proof of image receipt or understanding and cannot
+make the visual state pass while attachment delivery remains unobservable.
+Use `scripts/visual_page_review_human.py` on a fresh prepared v2 run for actual
+local review: it serves the exact full-page/crop images from a loopback-only
+browser session, records image delivery/load events and page observations in
+a chained event log, and creates a separate human review receipt. The reviewer
+label is self-declared and not identity-verified; the log does not prove human
+attention. Every page and crop must be inspected and submitted, with
+unresolved items left blocked. `submission_ready` remains false.
+
+When a completed human report exists for an exact final DOCX/PDF pair, resume
+the post-render gates without rerendering by passing
+`--reuse-existing-word-render --visual-review-report REPORT` to
+`scripts/post_render_acceptance.py`. This requires the matching signed Word
+render report and exact artifact paths/hashes; the normal visual verifier,
+submission audit, and format comparison still run. It never refreshes fields
+or converts an LO preview into Word evidence.
+
+Medium/low findings can be disposed as intentional only through
+`scripts/visual_review_disposition.py` with a cited source clause, reviewer
+claim, and reason. Critical/high items cannot be cleared this way. Any claimed
+repair must use a new derived DOCX/PDF and fresh full-page review; an old page
+receipt cannot close a finding on a changed PDF.
 
 The normal page-review preparation step makes no model request. Running the
 native review requires the explicit `--run-visual-page-review` option on the
@@ -1373,7 +1421,10 @@ batch runner or `--run-visual-model-review` on
 the run stops at the first failed, invalid, or unassessable page and never
 retries or resumes. The default model remains `gpt-6-luna`, with no
 provider/model fallback. The report records requested model and effort; it also
-states when route identity and model-side image consumption cannot be observed.
+states when route identity, actual effort, and model-side image consumption
+cannot be observed. The visual gate remains blocked/unknown unless a supported
+image receipt or a completed real human browser session supplies the required
+evidence.
 Use `scripts/visual_page_review.py --preflight-only` to inspect local CLI image
 and schema flags without sending a model request. This feature requires an
 already-installed `pdftoppm`; it does not install software or change system

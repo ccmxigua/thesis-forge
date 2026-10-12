@@ -209,7 +209,7 @@ def _scope_result(scope: dict[str, Any], units: dict[str, dict[str, Any]],
                 raise ValueError("not_applicable requires source-bound applicability evidence")
             state, counts, receipt_ids, stale_ids = "not_applicable", {
                 k: 0 for k in ("verified", "failed", "unverified", "pending", "unknown")
-            }, []
+            }, [], []
         else:
             state, counts, receipt_ids, stale_ids = _atom_observations(
                 atom, receipts, unit, expected_docx_sha256,

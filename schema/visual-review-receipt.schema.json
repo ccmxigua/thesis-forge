@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://example.local/thesis-latex2docx/visual-review-receipt.schema.json",
+  "title": "Hash-bound visual review receipt v2",
+  "type": "object",
+  "required": ["schema_version", "protocol", "run_id", "renderer_scope", "renderer_scoped_status", "final_docx", "pdf", "render_report", "format_spec", "source_clauses", "page_count", "page_map_status", "rasterizer", "pages", "review_method", "visual_review_status", "review_gate_status", "submission_ready"],
+  "properties": {
+    "schema_version": {"const": "2.0"},
+    "protocol": {"const": "native_visual_page_review_v2"},
+    "run_id": {"type": "string", "minLength": 1},
+    "renderer_scope": {"type": "object", "required": ["scope", "renderer_name", "renderer_version", "pdf_sha256"]},
+    "renderer_scoped_status": {
+      "type": "object", "additionalProperties": false,
+      "required": ["lo_preview_visual_status", "word_delivery_visual_status"],
+      "properties": {
+        "lo_preview_visual_status": {"enum": ["not_run", "unknown", "blocked", "needs_human_review", "passed"]},
+        "word_delivery_visual_status": {"enum": ["not_run", "unknown", "blocked", "needs_human_review", "passed"]}
+      }
+    },
+    "final_docx": {"$ref": "#/$defs/file"},
+    "pdf": {"$ref": "#/$defs/file"},
+    "render_report": {"$ref": "#/$defs/file"},
+    "format_spec": {"$ref": "#/$defs/file"},
+    "source_clauses": {"$ref": "#/$defs/file"},
+    "source_page_map": {"oneOf": [{"$ref": "#/$defs/file"}, {"type": "null"}]},
+    "page_count": {"type": "integer", "minimum": 1},
+    "page_map_status": {"enum": ["resolved", "unknown"]},
+    "rasterizer": {"type": "object", "required": ["renderer", "version", "dpi", "page_count", "all_pages_rasterized", "all_region_candidates_cropped"]},
+    "pages": {"type": "array", "minItems": 1, "items": {"type": "object", "required": ["page_number", "page_image_id", "page_map", "image", "image_map", "region_crops"]}},
+    "review_method": {"enum": ["not_started", "model_response_with_unverified_image_delivery", "human_browser_session"]},
+    "visual_review_status": {"enum": ["prepared_not_reviewed", "passed", "unknown", "blocked"]},
+    "review_gate_status": {"enum": ["unverified", "passed", "blocked", "needs_human_review"]},
+    "submission_ready": {"const": false}
+  },
+  "additionalProperties": true,
+  "$defs": {
+    "file": {
+      "type": "object", "additionalProperties": false,
+      "required": ["path", "bytes", "sha256"],
+      "properties": {
+        "path": {"type": "string", "minLength": 1},
+        "bytes": {"type": "integer", "minimum": 0},
+        "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    }
+  }
+}

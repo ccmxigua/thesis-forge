@@ -152,6 +152,21 @@ class ManualReviewTests(unittest.TestCase):
         self.assertEqual([item["source_code"] for item in ledger["items"]], ["runtime_unknown"])
         self.assertEqual(ledger["summary"]["total"], 1)
 
+    def test_missing_clause_compliance_is_an_explicit_manual_gate_with_all_clause_ids(self) -> None:
+        report = {"findings": [{
+            "code": "capability.missing_clause_compliance", "blocking": False,
+            "message": "2 extracted clauses have no compliance record.",
+            "evidence": [
+                {"kind": "category", "value": "runtime_manual_unverifiable"},
+                {"kind": "clause_id", "value": "C1"},
+                {"kind": "clause_id", "value": "C2"},
+            ],
+        }]}
+        ledger = build_manual_review_ledger(report, [], binding=self._binding())
+        self.assertEqual(len(ledger["items"]), 1)
+        self.assertEqual(ledger["items"][0]["source_code"], "capability.missing_clause_compliance")
+        self.assertEqual(ledger["items"][0]["clause_ids"], ["C1", "C2"])
+
     def test_current_ledger_drops_technical_items_but_keeps_human_decisions(self) -> None:
         ledger = self._current_ledger({
             "items": [

@@ -1,0 +1,18 @@
+{
+  "fixture_version": "1.0",
+  "purpose": "Synthetic protocol test data; not derived from a real document or run.",
+  "page_count": 3,
+  "renderer": "synthetic fixture",
+  "renderer_scope": "lo_preview_only",
+  "render_validation": "not_run",
+  "observed_candidates": [
+    {"physical_page": 1, "category": "header_mapping", "observation": "Synthetic example only.", "certainty": "synthetic"},
+    {"physical_page": 2, "category": "density", "observation": "Synthetic example only.", "certainty": "synthetic"},
+    {"physical_page": 3, "category": "sparse_page", "observation": "Synthetic example only.", "certainty": "cause_unknown"}
+  ],
+  "non_defect_or_unproven_candidates": [
+    {"physical_pages": "any", "rule": "A visual variation is not automatically a defect without a bound rule."},
+    {"physical_pages": "any", "rule": "Whitespace alone is not automatically a defect."}
+  ],
+  "coverage_limit": "This synthetic fixture provides no evidence about any real document or renderer output."
+}

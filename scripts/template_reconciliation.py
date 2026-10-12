@@ -575,6 +575,50 @@ def _next_requirement_id(spec: dict[str, Any]) -> str:
     return f"R{number:05d}"
 
 
+def _conflict_question_source(
+    clause_ids: list[str], requirement: dict[str, Any],
+    clauses_by_id: dict[str, dict[str, Any]], *,
+    preferred_evidence_ids: list[str] | None = None,
+) -> tuple[str, str, list[str]]:
+    """Bind a template conflict question to the exact written clause occurrence.
+
+    Requirement-level evidence can span several clauses.  A question must cite
+    only written-source evidence owned by its one clause; template evidence is
+    recorded separately and never mixed into ``evidence_ids``.
+    """
+    raw_ids = preferred_evidence_ids if preferred_evidence_ids is not None else requirement.get("evidence_ids", [])
+    if not isinstance(raw_ids, list) or any(not isinstance(value, str) or not value for value in raw_ids):
+        raise ValueError("template conflict lacks valid written-source evidence IDs")
+    source_ids = set(raw_ids)
+    candidates: list[tuple[dict[str, Any], list[str]]] = []
+    for clause_id in clause_ids:
+        clause = clauses_by_id.get(str(clause_id))
+        if not isinstance(clause, dict):
+            continue
+        clause_evidence = clause.get("evidence_ids")
+        if not isinstance(clause_evidence, list):
+            continue
+        bound = sorted(source_ids.intersection(
+            value for value in clause_evidence if isinstance(value, str)
+        ))
+        if bound:
+            candidates.append((clause, bound))
+    source_text = requirement.get("source_text")
+    exact = [item for item in candidates if item[0].get("text") == source_text]
+    selected = exact if exact else candidates
+    if len(selected) != 1:
+        raise ValueError("template conflict cannot be uniquely bound to one written clause occurrence")
+    clause, evidence_ids = selected[0]
+    text = clause.get("text")
+    if not isinstance(text, str) or not text.strip():
+        raise ValueError("template conflict source clause has no exact text")
+    if isinstance(source_text, str) and source_text and source_text != text:
+        # Retain the broader parser text for audit, but bind the question itself
+        # to the source clause string consumed by the question validator.
+        pass
+    return str(clause["id"]), text, evidence_ids
+
+
 def _evidence_index(evidence: dict[str, Any]) -> dict[tuple[str, str], list[dict[str, Any]]]:
     result: dict[tuple[str, str], list[dict[str, Any]]] = {}
     for item in evidence.get("items", []):
@@ -845,9 +889,6 @@ def reconcile_template(
                         str(value) for value in (clause_map.get(str(clause_id), {}).get("evidence_ids") or [])
                     })
                 ]
-                item_question_clause_id = (
-                    item_clause_ids[0] if item_clause_ids else (clause_ids[0] if clause_ids else None)
-                )
                 heading_matches = [item for item in blocks
                                    if _values_equal((item.get("value") or {}).get("heading"), heading)]
                 exact_matches = [item for item in heading_matches
@@ -888,16 +929,27 @@ def reconcile_template(
                         "reason": reason,
                     }
                     genuine_conflicts.append(conflict)
+                    question_clause_id, question_source_text, written_evidence_ids = _conflict_question_source(
+                        item_clause_ids or clause_ids,
+                        requirement,
+                        clause_map,
+                        preferred_evidence_ids=sorted(item_evidence_ids) if item_evidence_ids else None,
+                    )
                     remaining_questions.append({
                         "id": f"TQ{len(genuine_conflicts):04d}",
-                        "clause_id": item_question_clause_id,
+                        "source_type": "template_reconciliation_conflict",
+                        "clause_id": question_clause_id,
+                        "requirement_id": requirement.get("id"),
                         "requires_clarification": True,
                         "question": "书面声明正文与官方模板的精确正文冲突，请确认采用哪一版。",
-                        "source_text": requirement.get("source_text", ""),
+                        "source_text": question_source_text,
+                        "requirement_source_text": requirement.get("source_text", ""),
                         "candidate_roles": [role], "property": result["property"],
                         "written_value": result["written"]["value"],
                         "official_template_values": result["official_template"]["values"],
-                        "evidence_ids": result["official_template"]["evidence_ids"],
+                        "evidence_ids": written_evidence_ids,
+                        "written_evidence_ids": written_evidence_ids,
+                        "template_evidence_ids": result["official_template"]["evidence_ids"],
                     })
             if "before_role" in properties:
                 before_observations = [item for item in blocks
@@ -941,16 +993,24 @@ def reconcile_template(
                         "reason": before_reason,
                     }
                     genuine_conflicts.append(conflict)
+                    question_clause_id, question_source_text, written_evidence_ids = _conflict_question_source(
+                        clause_ids, requirement, clause_map,
+                    )
                     remaining_questions.append({
                         "id": f"TQ{len(genuine_conflicts):04d}",
-                        "clause_id": clause_ids[0] if clause_ids else None,
+                        "source_type": "template_reconciliation_conflict",
+                        "clause_id": question_clause_id,
+                        "requirement_id": requirement.get("id"),
                         "requires_clarification": True,
                         "question": "书面声明插入位置与官方模板冲突，请确认采用哪一项。",
-                        "source_text": requirement.get("source_text", ""),
+                        "source_text": question_source_text,
+                        "requirement_source_text": requirement.get("source_text", ""),
                         "candidate_roles": [role], "property": "before_role",
                         "written_value": properties.get("before_role"),
                         "official_template_values": before_values,
-                        "evidence_ids": before_result["official_template"]["evidence_ids"],
+                        "evidence_ids": written_evidence_ids,
+                        "written_evidence_ids": written_evidence_ids,
+                        "template_evidence_ids": before_result["official_template"]["evidence_ids"],
                     })
             continue
         for path, written_value in _flatten(properties).items():
@@ -978,16 +1038,24 @@ def reconcile_template(
                     "reason": result["reason"],
                 }
                 genuine_conflicts.append(conflict)
+                question_clause_id, question_source_text, written_evidence_ids = _conflict_question_source(
+                    clause_ids, requirement, clause_map,
+                )
                 remaining_questions.append({
                     "id": f"TQ{len(genuine_conflicts):04d}",
-                    "clause_id": clause_ids[0] if clause_ids else None,
+                    "source_type": "template_reconciliation_conflict",
+                    "clause_id": question_clause_id,
+                    "requirement_id": requirement.get("id"),
                     "requires_clarification": True,
                     "question": "书面要求与官方 Word 模板的直接证据冲突，请确认应采用哪一项。",
-                    "source_text": requirement.get("source_text", ""),
+                    "source_text": question_source_text,
+                    "requirement_source_text": requirement.get("source_text", ""),
                     "candidate_roles": [role], "property": path,
                     "written_value": written_value,
                     "official_template_values": conflict["official_template_values"],
-                    "evidence_ids": conflict["official_template_evidence_ids"],
+                    "evidence_ids": written_evidence_ids,
+                    "written_evidence_ids": written_evidence_ids,
+                    "template_evidence_ids": conflict["official_template_evidence_ids"],
                 })
 
     # Manual-only semantic reviews have no executable requirement by design.

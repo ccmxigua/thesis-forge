@@ -2311,20 +2311,117 @@ def validate_content_instance_source_bindings(
     raw_evidence = evidence_doc.get("evidence", [])
     if not isinstance(raw_evidence, list):
         return errors + ["source_evidence_must_be_array"], {}
+    structure_projection = evidence_doc.get("structure_source_document_evidence")
+    manifest_sources = extraction_manifest.get("sources")
+    manifest_structure_source = (
+        manifest_sources.get("structure_source")
+        if isinstance(manifest_sources, dict) else None
+    )
+    structure_clauses: list[dict[str, Any]] = []
+    structure_evidence: list[dict[str, Any]] = []
+    if structure_projection is not None:
+        if not isinstance(structure_projection, dict):
+            errors.append("structure_source_projection_malformed")
+        else:
+            projection_source = structure_projection.get("source")
+            structure_clauses_raw = structure_projection.get("clauses")
+            structure_evidence_raw = structure_projection.get("evidence")
+            if not isinstance(manifest_structure_source, dict):
+                errors.append("structure_source_manifest_record_missing")
+            elif projection_source != manifest_structure_source:
+                errors.append("structure_source_projection_manifest_mismatch")
+            if not isinstance(structure_clauses_raw, list):
+                errors.append("structure_source_clauses_malformed")
+            else:
+                structure_clauses = structure_clauses_raw
+            if not isinstance(structure_evidence_raw, list):
+                errors.append("structure_source_evidence_malformed")
+            else:
+                structure_evidence = structure_evidence_raw
+            if isinstance(manifest_structure_source, dict):
+                structure_path = manifest_structure_source.get("path")
+                structure_size = manifest_structure_source.get("bytes")
+                structure_sha = manifest_structure_source.get("sha256")
+                if (manifest_structure_source.get("kind") != "target_thesis_structure_docx"
+                        or manifest_structure_source.get("same_artifact_as_requirements_source") is not False
+                        or not isinstance(structure_path, str)
+                        or not isinstance(structure_size, int)
+                        or not isinstance(structure_sha, str)
+                        or not re.fullmatch(r"[0-9a-f]{64}", structure_sha)):
+                    errors.append("structure_source_manifest_record_invalid")
+                else:
+                    try:
+                        structure_file = Path(structure_path).expanduser().resolve()
+                        requirements_file = Path(str(manifest_source_document)).expanduser().resolve()
+                        structure_bytes = structure_file.read_bytes()
+                    except OSError:
+                        structure_file = None
+                        requirements_file = None
+                        structure_bytes = None
+                    if structure_bytes is None:
+                        errors.append("structure_source_file_missing")
+                    elif (len(structure_bytes) != structure_size
+                          or hashlib.sha256(structure_bytes).hexdigest() != structure_sha):
+                        errors.append("structure_source_file_hash_mismatch")
+                    if structure_file is not None and structure_file == requirements_file:
+                        errors.append("structure_source_must_be_distinct_from_requirements_source")
+                projected_sha = sha256_json({
+                    "evidence": structure_evidence,
+                    "clauses": structure_clauses,
+                })
+                if manifest_structure_source.get("projection_sha256") != projected_sha:
+                    errors.append("structure_source_projection_hash_mismatch")
+    elif (isinstance(manifest_structure_source, dict)
+          and manifest_structure_source.get("same_artifact_as_requirements_source") is not True):
+        errors.append("structure_source_projection_missing")
+    combined_clauses = [*clauses, *structure_clauses]
+    combined_evidence = [*raw_evidence, *structure_evidence]
+    structure_locator_source_record: dict[str, Any] | None = None
+    if isinstance(manifest_structure_source, dict):
+        try:
+            structure_locator_path = str(Path(
+                str(manifest_structure_source.get("path") or "")
+            ).expanduser().resolve())
+        except (OSError, RuntimeError, ValueError):
+            structure_locator_path = None
+        structure_locator_source_record = {
+            "source_document": structure_locator_path,
+            "source_document_sha256": manifest_structure_source.get("sha256"),
+        }
     clauses_by_id = {
-        str(item.get("id")): item for item in clauses
+        str(item.get("id")): item for item in combined_clauses
         if isinstance(item, dict) and isinstance(item.get("id"), str)
     }
     evidence_by_id = {
-        str(item.get("id")): item for item in raw_evidence
+        str(item.get("id")): item for item in combined_evidence
         if isinstance(item, dict) and isinstance(item.get("id"), str)
     }
+    def locator_for_clause(clause: dict[str, Any]) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
+        source_path = clause.get("source_document")
+        source_sha = clause.get("source_document_sha256")
+        if source_path is None and source_sha is None:
+            return locator_source_record, raw_evidence
+        if not isinstance(source_path, str) or not source_path or not isinstance(source_sha, str):
+            return None, []
+        if structure_locator_source_record is None:
+            return None, []
+        try:
+            same_path = Path(source_path).expanduser().resolve() == Path(
+                str(structure_locator_source_record.get("source_document") or "")
+            ).expanduser().resolve()
+        except (OSError, RuntimeError, ValueError):
+            same_path = False
+        if (not same_path
+                or source_sha != structure_locator_source_record.get("source_document_sha256")):
+            return None, []
+        return structure_locator_source_record, structure_evidence
+
     requirements = spec.get("requirements", [])
     if not isinstance(requirements, list):
         requirements = []
-    if len(clauses_by_id) != len(clauses):
+    if len(clauses_by_id) != len(combined_clauses):
         errors.append("source_clause_ids_must_be_unique_objects")
-    if len(evidence_by_id) != len(raw_evidence):
+    if len(evidence_by_id) != len(combined_evidence):
         errors.append("source_evidence_ids_must_be_unique_objects")
     instance_ids = [
         item.get("id") for item in instances if isinstance(item, dict) and item.get("id")
@@ -2378,20 +2475,33 @@ def validate_content_instance_source_bindings(
                 if stored_source_fragments != expected_fragment_binding["source_fragments"]:
                     errors.append(f"{label}:source_fragment_receipt_mismatch")
                 text_is_source_backed = True
-                instance_bindings.extend({
-                    "clause_id": item["clause_id"],
-                    "evidence_id": item["evidence_id"],
-                    "start_offset": item["start_offset"],
-                    "end_offset": item["end_offset"],
-                    "source_sha256": item["source_sha256"],
-                    "text": item["text"],
-                    "source_kind": item["source_kind"],
-                    "location": copy.deepcopy(item["location"]),
-                    "separator_before": item["separator_before"],
-                    **locator_source_record,
-                } for item in expected_fragment_binding["source_fragments"])
+                for item in expected_fragment_binding["source_fragments"]:
+                    fragment_clause = clauses_by_id.get(str(item["clause_id"]))
+                    source_record, _fragment_evidence = (
+                        locator_for_clause(fragment_clause)
+                        if isinstance(fragment_clause, dict) else (None, [])
+                    )
+                    if source_record is None:
+                        errors.append(f"{label}:source_fragment_document_binding_invalid:{item['clause_id']}")
+                        continue
+                    instance_bindings.append({
+                        "clause_id": item["clause_id"],
+                        "evidence_id": item["evidence_id"],
+                        "start_offset": item["start_offset"],
+                        "end_offset": item["end_offset"],
+                        "source_sha256": item["source_sha256"],
+                        "text": item["text"],
+                        "source_kind": item["source_kind"],
+                        "location": copy.deepcopy(item["location"]),
+                        "separator_before": item["separator_before"],
+                        **source_record,
+                    })
         for clause_id in clause_ids:
             clause = clauses_by_id.get(clause_id)
+            clause_locator_source_record, clause_source_evidence = (
+                locator_for_clause(clause)
+                if isinstance(clause, dict) else (None, [])
+            )
             span = clause.get("source_span") if isinstance(clause, dict) else None
             span_evidence_id = span.get("evidence_id") if isinstance(span, dict) else None
             evidence = evidence_by_id.get(span_evidence_id) if isinstance(span_evidence_id, str) else None
@@ -2403,6 +2513,7 @@ def validate_content_instance_source_bindings(
             clause_text = clause.get("text") if isinstance(clause, dict) else None
             if (
                 not isinstance(clause, dict)
+                or clause_locator_source_record is None
                 or not isinstance(span, dict)
                 or not isinstance(span_evidence_id, str)
                 or not isinstance(raw_source, str)
@@ -2443,7 +2554,12 @@ def validate_content_instance_source_bindings(
             )
             if literal_matches_span and span_evidence_id in evidence_ids:
                 text_is_source_backed = True
-                instance_bindings.append({
+                binding_location = copy.deepcopy(
+                    span.get("location")
+                    or (evidence.get("location") if isinstance(evidence, dict) else None)
+                    or clause.get("location")
+                )
+                binding_record = {
                     "clause_id": clause_id,
                     "evidence_id": span_evidence_id,
                     "start_offset": start,
@@ -2451,12 +2567,17 @@ def validate_content_instance_source_bindings(
                     "source_sha256": span["source_sha256"],
                     "text": span_text,
                     "source_kind": evidence.get("kind") if isinstance(evidence, dict) else clause.get("source_kind"),
-                    "location": copy.deepcopy(
-                        span.get("location")
-                        or (evidence.get("location") if isinstance(evidence, dict) else None)
-                        or clause.get("location")
-                    ),
-                    **locator_source_record,
+                    "location": binding_location,
+                    **clause_locator_source_record,
+                }
+                table_index = binding_location.get("table_child_index") if isinstance(binding_location, dict) else None
+                if (type(table_index) is int
+                        and binding_record.get("source_kind") == "table_cell"):
+                    binding_record["table_context_sha256"] = _source_table_context_sha256(
+                        clause_source_evidence, table_index,
+                    )
+                instance_bindings.append({
+                    **binding_record,
                 })
         if not set(evidence_ids) <= expected_evidence_ids:
             errors.append(f"{label}:evidence_ids_not_supported_by_clause_sources")
@@ -2542,6 +2663,12 @@ def validate_content_instance_source_bindings(
             "clause_artifact_sha256": clause_artifact_sha256,
             "document_evidence_artifact_sha256": document_evidence_artifact_sha256,
             "evidence_context_artifact_sha256": evidence_context_artifact_sha256,
+            "target_source_document": (
+                copy.deepcopy(manifest_structure_source)
+                if any(str(value).startswith("STRUCT-")
+                       for value in scope_projection["target_clause_ids"])
+                else None
+            ),
         }
         scope_receipt = {
             "source_scope_requirement_id": requirement_id,
@@ -2549,6 +2676,12 @@ def validate_content_instance_source_bindings(
             "source_scope_kind": scope_projection["kind"],
             "source_scope_target_clause_ids": list(scope_projection["target_clause_ids"]),
             "source_scope_source_document_sha256": manifest_source_sha256,
+            "source_scope_target_document": (
+                copy.deepcopy(manifest_structure_source)
+                if any(str(value).startswith("STRUCT-")
+                       for value in scope_projection["target_clause_ids"])
+                else None
+            ),
         }
         for instance_id in selected_ids:
             for binding in bindings.get(instance_id, []):
@@ -2578,6 +2711,30 @@ def _content_instance_paragraphs(doc: Document) -> list[Paragraph]:
             seen.add(marker)
             paragraphs.append(paragraph)
     return paragraphs
+
+
+def _source_table_context_sha256(evidence: list[dict[str, Any]], table_index: int) -> str | None:
+    """Hash the complete extracted text/coordinate projection of one table."""
+    projection = []
+    for item in evidence:
+        if not isinstance(item, dict):
+            continue
+        location = item.get("location") if isinstance(item.get("location"), dict) else {}
+        if location.get("table_child_index") != table_index:
+            continue
+        row, column, paragraph = (
+            location.get("row"), location.get("column"), location.get("paragraph"),
+        )
+        if not all(type(value) is int for value in (row, column, paragraph)):
+            return None
+        projection.append({
+            "row": row, "column": column, "paragraph": paragraph,
+            "text": str(item.get("text") or ""),
+        })
+    if not projection:
+        return None
+    projection.sort(key=lambda item: (item["row"], item["column"], item["paragraph"]))
+    return sha256_json(projection)
 
 
 def _paragraph_at_source_location(doc: Document, binding: dict[str, Any]) -> Paragraph | None:
@@ -2765,6 +2922,7 @@ def apply_content_instance_overrides(
         bindings = source_bindings.get(instance_id, [])
         matches: list[Paragraph] = []
         seen_paragraphs: set[Any] = set()
+        binding_by_paragraph: dict[Any, dict[str, Any]] = {}
         for binding in bindings:
             if not isinstance(binding, dict):
                 raise ValueError(f"content instance {instance_id!r} has malformed source binding")
@@ -2794,6 +2952,7 @@ def apply_content_instance_overrides(
             if paragraph is not None and paragraph._p not in seen_paragraphs:
                 seen_paragraphs.add(paragraph._p)
                 matches.append(paragraph)
+                binding_by_paragraph[paragraph._p] = binding
         if not bindings:
             candidates = [paragraph for paragraph in paragraphs if paragraph.text == text]
             if len(candidates) > 1:
@@ -2805,11 +2964,19 @@ def apply_content_instance_overrides(
             target_index = next((index for index, candidate in enumerate(paragraphs)
                                  if candidate._p is paragraph._p or candidate._p == paragraph._p), None)
             if target_index is not None:
-                target_locators.append({
+                locator = {
                     "inventory_index": target_index,
                     "text": paragraph.text,
                     "text_sha256": hashlib.sha256(paragraph.text.encode("utf-8")).hexdigest(),
-                })
+                }
+                binding = binding_by_paragraph.get(paragraph._p)
+                if isinstance(binding, dict) and isinstance(binding.get("location"), dict):
+                    locator.update({
+                        "source_location": copy.deepcopy(binding["location"]),
+                        "source_kind": binding.get("source_kind"),
+                        "table_context_sha256": binding.get("table_context_sha256"),
+                    })
+                target_locators.append(locator)
             if mapping and mapping.get("style_name") and paragraph.style.name != mapping["style_name"]:
                 paragraph.style = mapping["style_name"]
             if style_properties:
@@ -2915,6 +3082,55 @@ def _serialized_paragraph_instance_snapshot(
     return result, None
 
 
+def _serialized_table_context_sha256(table: Any) -> str:
+    """Hash table cell text and coordinates without depending on its body index."""
+    projection: list[dict[str, Any]] = []
+    for row_index, row in enumerate(table._tbl.findall(qn("w:tr"))):
+        for column_index, cell in enumerate(row.findall(qn("w:tc"))):
+            for paragraph_index, paragraph in enumerate(cell.findall(qn("w:p"))):
+                text = "".join(node.text or "" for node in paragraph.iter(qn("w:t"))).strip()
+                if not text:
+                    continue
+                projection.append({
+                    "row": row_index, "column": column_index,
+                    "paragraph": paragraph_index, "text": text,
+                })
+    projection.sort(key=lambda item: (item["row"], item["column"], item["paragraph"]))
+    return sha256_json(projection)
+
+
+def _paragraph_at_table_context_locator(
+    doc: Document, location: dict[str, Any], expected_table_sha256: str,
+) -> tuple[Paragraph | None, str | None]:
+    """Resolve one cell by its full table text projection after serialization."""
+    coordinates = tuple(location.get(key) for key in ("row", "column", "paragraph"))
+    if any(type(value) is not int or value < 0 for value in coordinates):
+        return None, "serialized_target_table_coordinates_invalid"
+    candidates: list[Table] = []
+    for child in list(doc._body._element.iterchildren()):
+        if child.tag != qn("w:tbl"):
+            continue
+        table = Table(child, doc._body)
+        if _serialized_table_context_sha256(table) == expected_table_sha256:
+            candidates.append(table)
+    if len(candidates) != 1:
+        return None, (
+            "serialized_target_table_missing" if not candidates
+            else "serialized_target_table_ambiguous"
+        )
+    row_index, column_index, paragraph_index = coordinates
+    rows = candidates[0]._tbl.findall(qn("w:tr"))
+    if row_index >= len(rows):
+        return None, "serialized_target_table_row_missing"
+    cells = rows[row_index].findall(qn("w:tc"))
+    if column_index >= len(cells):
+        return None, "serialized_target_table_cell_missing"
+    paragraphs = cells[column_index].findall(qn("w:p"))
+    if paragraph_index >= len(paragraphs):
+        return None, "serialized_target_table_paragraph_missing"
+    return Paragraph(paragraphs[paragraph_index], _Cell(cells[column_index], candidates[0])), None
+
+
 def audit_serialized_content_instance_targets(
     doc: Document, instance_audit: list[dict[str, Any]],
 ) -> dict[str, dict[str, Any]]:
@@ -2922,6 +3138,7 @@ def audit_serialized_content_instance_targets(
     paragraphs = _content_instance_paragraphs(doc)
     actual_by_instance: dict[str, dict[str, Any]] = {}
     locator_groups: dict[tuple[str, str], list[tuple[int, int, int]]] = {}
+    stable_locator_keys: set[tuple[int, int]] = set()
     for record_index, record in enumerate(instance_audit):
         if not isinstance(record, dict):
             continue
@@ -2939,13 +3156,43 @@ def audit_serialized_content_instance_targets(
                 locator_groups.setdefault((text, text_sha), []).append(
                     (record_index, locator_index, inventory_index)
                 )
+                source_location = locator.get("source_location")
+                table_sha256 = locator.get("table_context_sha256")
+                if (isinstance(source_location, dict)
+                        and type(source_location.get("table_child_index")) is int
+                        and isinstance(table_sha256, str)
+                        and re.fullmatch(r"[0-9a-f]{64}", table_sha256)):
+                    stable_locator_keys.add((record_index, locator_index))
     # Review markers and scorecards may add paragraphs before source text. If
     # identical literals occur more than once, preserve their source order only
     # when every serialized occurrence is accounted for by one unique original
     # locator. An extra unbound duplicate makes the mapping ambiguous.
     resolved_locator_indexes: dict[tuple[int, int], int] = {}
     unresolved_locator_keys: dict[tuple[int, int], str] = {}
+    for record_index, record in enumerate(instance_audit):
+        if not isinstance(record, dict):
+            continue
+        locators = record.get("target_locators") if isinstance(record.get("target_locators"), list) else []
+        for locator_index, locator in enumerate(locators):
+            key = (record_index, locator_index)
+            if key not in stable_locator_keys:
+                continue
+            selected, error = _paragraph_at_table_context_locator(
+                doc, locator["source_location"], locator["table_context_sha256"],
+            )
+            if error or selected is None:
+                unresolved_locator_keys[key] = error or "serialized_target_table_unresolved"
+                continue
+            serialized_index = next((index for index, paragraph in enumerate(paragraphs)
+                                     if paragraph._p is selected._p or paragraph._p == selected._p), None)
+            if serialized_index is None:
+                unresolved_locator_keys[key] = "serialized_target_table_paragraph_not_in_inventory"
+                continue
+            resolved_locator_indexes[key] = serialized_index
     for key, locator_rows in locator_groups.items():
+        locator_rows = [row for row in locator_rows if (row[0], row[1]) not in stable_locator_keys]
+        if not locator_rows:
+            continue
         candidate_indexes = [
             index for index, paragraph in enumerate(paragraphs)
             if paragraph.text == key[0]
@@ -4019,6 +4266,20 @@ def manual_review_constraint_items(constraints: dict[str, Any]) -> list[dict[str
     return items
 
 
+def _source_scoped_receipt_roles(requirements: list[Any]) -> set[str]:
+    """Include roles backed by explicit source-bound content instances in receipts."""
+    result: set[str] = set()
+    for item in requirements:
+        if (isinstance(item, dict)
+                and isinstance(item.get("source_scope"), dict)
+                and isinstance(item.get("field_instance_ids"), list)
+                and item["field_instance_ids"]
+                and isinstance(item.get("role"), str)
+                and item["role"]):
+            result.add(item["role"])
+    return result
+
+
 def current_expected_property_receipt_ids(doc: Any, spec: dict[str, Any], mappings: dict[str, Any]) -> set[str]:
     """Reconstruct receipt identities from current requirements, not a report."""
     coverage = role_coverage(doc, spec.get("roles", {}), mappings)
@@ -4040,6 +4301,7 @@ def current_expected_property_receipt_ids(doc: Any, spec: dict[str, Any], mappin
         if mapping and isinstance(item.get("properties"), dict):
             item["properties"] = normalized_expected(doc.styles[mapping["style_name"]], item["properties"])
         requirements.append(item)
+    applicable.update(_source_scoped_receipt_roles(requirements))
     return expected_receipt_ids(requirements, applicable_roles=applicable)
 
 
@@ -5119,6 +5381,59 @@ def main(argv: list[str]) -> int:
         allow_missing_required_metadata=args.output_policy == "review_draft",
     )
     if validation_errors: raise SystemExit("invalid format spec:\n" + "\n".join(validation_errors))
+    source_projection_validation_record: dict[str, Any] = {
+        "status": "not_required",
+        "reason": "the format spec has no deterministic source projection",
+    }
+    source_projection = spec.get("source_projection")
+    deterministic_mode = spec.get("analysis_mode") in {"rule_only", "known_template"}
+    if source_projection is not None and args.output_policy != "review_draft":
+        raise SystemExit(
+            "deterministic source-projection specs are review_draft-only and cannot be used for submission"
+        )
+    manifest_binds_deterministic_spec = False
+    if deterministic_mode and args.source_extraction_manifest is not None:
+        try:
+            manifest_probe = load_json(args.source_extraction_manifest)
+        except (OSError, ValueError, json.JSONDecodeError):
+            manifest_probe = None
+        manifest_binds_deterministic_spec = (
+            isinstance(manifest_probe, dict)
+            and isinstance(manifest_probe.get("format_spec_sha256"), str)
+        )
+    validate_deterministic_lineage = (
+        source_projection is not None
+        or (deterministic_mode and manifest_binds_deterministic_spec
+            and args.source_extraction_manifest is not None and args.source_clauses is not None)
+    )
+    if validate_deterministic_lineage:
+        if args.source_extraction_manifest is None or args.source_clauses is None:
+            raise SystemExit(
+                "deterministic source lineage requires the current extraction manifest and requirement clauses"
+            )
+        bound_source, lineage_record = resolve_bound_requirement_docx(
+            args.source_extraction_manifest, args.source_clauses, args.format_spec,
+            pipeline_manifest_path=args.pipeline_manifest,
+        )
+        if bound_source is None or lineage_record.get("status") != "verified":
+            lineage_findings = lineage_record.get("findings", [])
+            raise SystemExit(
+                "deterministic source projection lineage failed: "
+                + "; ".join(
+                    (
+                        f"{item.get('code')}: {item.get('reason')}"
+                        if item.get("code") and item.get("reason")
+                        else str(item.get("code") or item.get("reason") or "invalid lineage")
+                    )
+                    for item in lineage_findings if isinstance(item, dict)
+                )
+            )
+        source_projection_validation_record = {
+            **lineage_record,
+            "source_document": str(bound_source.resolve()),
+            "projection_sha256": hashlib.sha256(args.format_spec.read_bytes()).hexdigest(),
+            "format_spec_artifact": str(args.format_spec.resolve()),
+        }
     source_clauses: list[dict[str, Any]] = []
     source_table_contract: dict[str, Any] = {"status": "not_applicable", "contract": None, "findings": []}
     source_table_contract_findings: list[dict[str, Any]] = []
@@ -5324,6 +5639,7 @@ def main(argv: list[str]) -> int:
                 else:
                     requirement_source, source_binding = resolve_bound_requirement_docx(
                         args.source_extraction_manifest, args.source_clauses, args.format_spec,
+                        pipeline_manifest_path=args.pipeline_manifest,
                     )
                 source_table_contract = compile_source_table_contract(
                     requirement_source or args.input, source_clauses, spec,
@@ -6258,7 +6574,7 @@ def main(argv: list[str]) -> int:
         applicable_roles={
             item["role"] for item in coverage
             if item.get("status") == "present" or item.get("expectation") == "required"
-        } | set(role_results),
+        } | set(role_results) | _source_scoped_receipt_roles(receipt_requirements),
     )
     property_receipt_audit = audit_property_receipts(
         property_receipts,
@@ -6267,7 +6583,7 @@ def main(argv: list[str]) -> int:
             applicable_roles={
                 item["role"] for item in coverage
                 if item.get("status") == "present" or item.get("expectation") == "required"
-            } | set(role_results),
+        } | set(role_results) | _source_scoped_receipt_roles(receipt_requirements),
         ),
     )
     if args.output_policy == "review_draft":
@@ -6399,7 +6715,7 @@ def main(argv: list[str]) -> int:
             applicable_roles={
                 item["role"] for item in coverage
                 if item.get("status") == "present" or item.get("expectation") == "required"
-            } | set(role_results),
+            } | set(role_results) | _source_scoped_receipt_roles(receipt_requirements),
         )
         property_receipt_audit = audit_property_receipts(
             property_receipts,
@@ -6408,7 +6724,7 @@ def main(argv: list[str]) -> int:
                 applicable_roles={
                     item["role"] for item in coverage
                     if item.get("status") == "present" or item.get("expectation") == "required"
-                } | set(role_results),
+            } | set(role_results) | _source_scoped_receipt_roles(receipt_requirements),
             ),
         )
         property_receipt_audit["review_draft_diagnostic_only"] = True
@@ -6616,6 +6932,7 @@ def main(argv: list[str]) -> int:
               "cover_changes": cover_changes,
               "content_instance_audit": content_instance_audit,
               "content_instance_source_binding": content_instance_source_binding_record,
+              "format_spec_source_projection_validation": source_projection_validation_record,
               "deterministic_content_repairs": {
                   "keyword_separator_repairs": keyword_separator_repairs,
             "caption_separator_repairs": caption_separator_repairs,

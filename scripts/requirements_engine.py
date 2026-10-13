@@ -88,6 +88,7 @@ from source_obligation_compiler import (
 )
 from source_scope_binding import (
     diagnose_source_scope_reference,
+    resolve_ordered_field_targets,
     validate_source_scope_binding,
 )
 from requirements_input import RequirementsInputError, normalize_requirements_input
@@ -163,7 +164,8 @@ ROLE_PATTERNS = [
     ("thesis_author", r"中文作者|作者姓名"),
     ("thesis_affiliation_date", r"单位.*?日期|培养单位.*?日期|论文定稿时间"),
     ("thesis_classified_index", r"分类号|中图分类号"),
-    ("cover_field_label", r"作\s*者\s*[：:]|学\s*号\s*[：:]|导师姓名|学科专业|培养单位|提交日期|密\s*级|加密论文编号"),
+    ("cover_field_label", r"专业名称\s*至\s*指导教师标题|(?:专业名称|作者学号|论文作者|指导教师)\s*[：:]|作\s*者\s*[：:]|学\s*号\s*[：:]|导师姓名|学科专业|培养单位|密\s*级\s*[：:]|加密论文编号"),
+    ("cover_field_value", r"对应填写(?:的)?内容"),
 ]
 AMBIGUOUS_ROLES = {
     "标题": ["thesis_title_zh", "heading_1"],
@@ -588,6 +590,7 @@ def _paragraph_evidence(p: ET.Element, eid: str, kind: str, location: dict[str, 
 
 def extract_document_evidence(docx: Path) -> dict[str, Any]:
     evidence: list[dict[str, Any]] = []
+    active_source_section: str | None = None
     with zipfile.ZipFile(docx) as zf:
         names = set(zf.namelist())
         doc = ET.fromstring(zf.read("word/document.xml"))
@@ -598,6 +601,24 @@ def extract_document_evidence(docx: Path) -> dict[str, Any]:
                 if child.tag == Q("p"):
                     item = _paragraph_evidence(child, f"E{len(evidence)+1:05d}", "paragraph", {"part": "document", "child_index": child_index, "order": order})
                     if item:
+                        heading = re.sub(r"\s+", "", str(item.get("text") or ""))
+                        numbered_heading = re.match(
+                            r"^(?:第[一二三四五六七八九十百零〇两\d]+章|"
+                            r"[（(][一二三四五六七八九十\d]+[）)])(.*)$",
+                            heading,
+                        )
+                        heading_tail = numbered_heading.group(1) if numbered_heading else heading
+                        if re.fullmatch(r"封面(?:信息)?", heading_tail):
+                            active_source_section = "cover"
+                        elif re.fullmatch(r"(?:扉页|题名页)", heading_tail):
+                            active_source_section = "title_page"
+                        elif numbered_heading:
+                            # A new numbered section ends a preceding cover or
+                            # title-page scope. Unknown sections never inherit
+                            # either marker by proximity.
+                            active_source_section = None
+                        if active_source_section:
+                            item["source_section_marker"] = active_source_section
                         evidence.append(item); order += 1
                 elif child.tag == Q("tbl"):
                     grid_columns = len(child.findall("w:tblGrid/w:gridCol", NS))
@@ -618,6 +639,8 @@ def extract_document_evidence(docx: Path) -> dict[str, Any]:
                                                    "text_sha256": text_sha256(text),
                                                    "evidence_id": item["id"] if item else None})
                                 if item:
+                                    if active_source_section:
+                                        item["source_section_marker"] = active_source_section
                                     evidence.append(item); order += 1
                                     row_items.append(item)
                             def merge_value(path):
@@ -892,6 +915,8 @@ def split_clauses(evidence_doc: dict[str, Any]) -> list[dict[str, Any]]:
                 },
                 "evidence_ids": [ev["id"]], "source_kind": ev["kind"],
                 "context_before": ev["context_before"], "context_after": ev["context_after"],
+                **({"source_section_marker": ev["source_section_marker"]}
+                   if ev.get("source_section_marker") else {}),
                 "location": ev["location"], "part_index": part_i,
                 "evidence_context": {
                     "id": ev["id"], "kind": ev["kind"], "style_id": ev.get("style_id"),
@@ -911,6 +936,64 @@ def split_clauses(evidence_doc: dict[str, Any]) -> list[dict[str, Any]]:
             f"text={first['text']!r}"
         )
     return clauses
+
+
+def build_structure_target_evidence(
+    structure_evidence: dict[str, Any], source_record: dict[str, Any],
+) -> dict[str, Any]:
+    """Build a separately hashed target-evidence projection for source scopes.
+
+    Target clauses stay outside the requirement review queue. Their IDs and
+    evidence IDs are namespaced, and every clause carries the exact target
+    file path/hash from the extraction manifest.
+    """
+    target_evidence = copy.deepcopy(structure_evidence.get("evidence", []))
+    if not isinstance(target_evidence, list):
+        raise ValueError("structure target evidence must be an array")
+    evidence_id_map = {
+        str(item.get("id")): f"STRUCT-{item.get('id')}"
+        for item in target_evidence if isinstance(item, dict) and item.get("id")
+    }
+    for item in target_evidence:
+        if not isinstance(item, dict) or not isinstance(item.get("id"), str):
+            raise ValueError("structure target evidence IDs must be strings")
+        item["id"] = evidence_id_map[item["id"]]
+        row_context = item.get("table_row_context")
+        if isinstance(row_context, dict):
+            for cell in row_context.get("cells", []):
+                evidence_id = cell.get("evidence_id") if isinstance(cell, dict) else None
+                if evidence_id in evidence_id_map:
+                    cell["evidence_id"] = evidence_id_map[evidence_id]
+            row_context.pop("row_sha256", None)
+            row_context["row_sha256"] = sha256_json(row_context)
+    target_doc = {"evidence": target_evidence}
+    target_clauses = split_clauses(target_doc)
+    for clause in target_clauses:
+        old_id = str(clause.get("id") or "")
+        if not old_id.startswith("C"):
+            raise ValueError("structure target clause ID has an unsupported form")
+        clause["id"] = f"STRUCT-{old_id}"
+        span = clause.get("source_span")
+        if isinstance(span, dict):
+            span["evidence_id"] = evidence_id_map.get(
+                str(span.get("evidence_id")), str(span.get("evidence_id")),
+            )
+        clause["evidence_ids"] = [
+            evidence_id_map.get(str(value), str(value))
+            for value in clause.get("evidence_ids", [])
+        ]
+        evidence_context = clause.get("evidence_context")
+        if isinstance(evidence_context, dict):
+            evidence_context["id"] = evidence_id_map.get(
+                str(evidence_context.get("id")), str(evidence_context.get("id")),
+            )
+        clause["source_document"] = source_record["path"]
+        clause["source_document_sha256"] = source_record["sha256"]
+    return {
+        "source": copy.deepcopy(source_record),
+        "evidence": target_evidence,
+        "clauses": target_clauses,
+    }
 
 
 def audit_clause_source_coverage(
@@ -1173,6 +1256,9 @@ def parse_properties(text: str) -> dict[str, Any]:
     if m: _set_nested(out, ("paragraph", "first_line_indent_chars"), float(m.group(1)))
     m = re.search(r"首行缩进\s*(\d+(?:\.\d+)?)\s*(?:磅|pt)", text, re.I)
     if m: _set_nested(out, ("paragraph", "first_line_indent_pt"), float(m.group(1)))
+    if re.search(r"无缩进|不缩进|取消缩进", text):
+        for indent_key in ("first_line_indent_pt", "left_indent_pt", "right_indent_pt"):
+            _set_nested(out, ("paragraph", indent_key), 0.0)
     cn_num = {"一": 1.0, "二": 2.0, "半": .5}
 
     def line_count(token: str) -> float:
@@ -1766,10 +1852,17 @@ def _merge_role_group(roles: dict[str, Any], target_roles: tuple[str, ...],
     return conflicts
 
 
-def build_rule_result(source: Path, clauses: list[dict[str, Any]]) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
+def build_rule_result(
+    source: Path, clauses: list[dict[str, Any]], *,
+    target_clauses: list[dict[str, Any]] | None = None,
+) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
     roles: dict[str, Any] = {}; page: dict[str, Any] = {}; requirements = []; questions = []; conflicts = []
     content_instances: list[dict[str, Any]] = []
-    clause_map = {clause.get("id"): clause for clause in clauses if isinstance(clause, dict) and clause.get("id")}
+    scope_clauses = [*clauses, *(target_clauses or [])]
+    clause_map = {
+        clause.get("id"): clause for clause in scope_clauses
+        if isinstance(clause, dict) and clause.get("id")
+    }
     for clause in clauses:
         page_props = parse_page_properties(clause["text"])
         role_text = _non_page_text(clause["text"]) if page_props else clause["text"]
@@ -1795,7 +1888,7 @@ def build_rule_result(source: Path, clauses: list[dict[str, Any]]) -> tuple[dict
             if role is not None:
                 candidates = [role]
         if role is None:
-            scope_diagnosis = diagnose_source_scope_reference(clause, clauses)
+            scope_diagnosis = diagnose_source_scope_reference(clause, scope_clauses)
             questions.append({
                 "question_id": f"Q{len(questions)+1:04d}", "clause_id": clause["id"],
                 "question": (
@@ -1807,18 +1900,116 @@ def build_rule_result(source: Path, clauses: list[dict[str, Any]]) -> tuple[dict
                 **({"source_scope_diagnosis": scope_diagnosis} if scope_diagnosis else {}),
             })
             continue
-        scope_diagnosis = diagnose_source_scope_reference(clause, clauses)
+        scope_diagnosis = diagnose_source_scope_reference(clause, scope_clauses)
         if role in CONTENT_INSTANCE_ROLES and scope_diagnosis:
+            ordered_targets = resolve_ordered_field_targets(clause, scope_clauses, role)
+            if ordered_targets.get("status") == "resolved":
+                target_clause_ids = [
+                    str(value) for value in ordered_targets.get("target_clause_ids", [])
+                ]
+                target_clauses = [clause_map.get(value) for value in target_clause_ids]
+                if (not target_clause_ids or any(not isinstance(item, dict)
+                                                 for item in target_clauses)):
+                    ordered_targets = {
+                        **ordered_targets,
+                        "status": "parser_capability_gap",
+                        "reason": "resolved_target_clause_missing_from_current_source",
+                    }
+                else:
+                    source_rule_clause_ids = [str(clause["id"])]
+                    field_list_clause_ids = [
+                        str(value) for value in ordered_targets.get("field_list_clause_ids", [])
+                    ]
+                    cited_clause_ids = set(
+                        source_rule_clause_ids + field_list_clause_ids + target_clause_ids
+                    )
+                    cited_evidence_ids = {
+                        str(value)
+                        for clause_id in cited_clause_ids
+                        for value in (clause_map[clause_id].get("evidence_ids") or [])
+                    }
+                    field_instance_ids: list[str] = []
+                    instance_errors: list[dict[str, Any]] = []
+                    for target_clause in target_clauses:
+                        target_id = str(target_clause["id"])
+                        target_evidence = {
+                            str(value) for value in target_clause.get("evidence_ids", [])
+                        }
+                        instance_id, instance_error = _register_content_instance(
+                            content_instances,
+                            {"field_key": f"{role}:{target_id}"},
+                            role,
+                            {"text": str(target_clause.get("text") or ""), **props},
+                            {target_id}, target_evidence, clause_map,
+                            "deterministic ordered source-range binding",
+                        )
+                        if instance_error or not instance_id:
+                            instance_errors.append({
+                                "clause_id": target_id,
+                                "error": instance_error or {"reason": "content_instance_not_registered"},
+                            })
+                        else:
+                            field_instance_ids.append(instance_id)
+                    if instance_errors:
+                        conflicts.append({
+                            "type": "source_scope_binding",
+                            "role": role,
+                            "property": "field_instance",
+                            "errors": instance_errors,
+                            "source_clause_id": str(clause["id"]),
+                            "target_clause_ids": target_clause_ids,
+                        })
+                        continue
+
+                    normalized_props = _style_properties_for_role(role, props)
+                    requirement = {
+                        "id": f"R{len(requirements)+1:05d}",
+                        "role": role,
+                        "properties": copy.deepcopy(normalized_props),
+                        "evidence_ids": sorted(cited_evidence_ids),
+                        "clause_ids": sorted(cited_clause_ids),
+                        "resolved_by": "rule",
+                        "confidence": .98,
+                        "source_text": clause["text"],
+                        "field_instance_ids": field_instance_ids,
+                        "source_scope": {
+                            "kind": "explicit_clause_set",
+                            "anchor_clause_ids": [],
+                            "target_clause_ids": target_clause_ids,
+                        },
+                    }
+                    requirements.append(requirement)
+                    continue
+
             questions.append({
                 "question_id": f"Q{len(questions)+1:04d}",
                 "clause_id": clause["id"],
-                "question": "该格式要求所指的来源范围未能唯一绑定；请指定确切章节、段落或表格条目。",
+                "question": (
+                    "格式规则及字段顺序已解析，但当前输入中没有可唯一绑定的目标字段；"
+                    "请提供与该规则同源的目标表格或明确绑定其来源。"
+                    if ordered_targets.get("status") == "target_absent"
+                    else "该格式要求所指的来源范围未能唯一绑定；请指定确切章节、段落或表格条目。"
+                ),
                 "source_text": clause["text"],
                 "candidate_roles": [role],
                 "evidence_ids": clause["evidence_ids"],
                 "context_before": clause["context_before"],
                 "context_after": clause["context_after"],
                 "source_scope_diagnosis": scope_diagnosis,
+                "source_scope_resolution": {
+                    "rule_interpretation_status": (
+                        "resolved" if ordered_targets.get("status") == "target_absent"
+                        else "unresolved"
+                    ),
+                    "target_status": ordered_targets.get("status"),
+                    "verification_status": "unverified",
+                    "reason": ordered_targets.get("reason"),
+                    "field_labels": ordered_targets.get("field_labels", []),
+                    "field_list_clause_ids": ordered_targets.get("field_list_clause_ids", []),
+                    "candidate_table_child_indexes": ordered_targets.get(
+                        "candidate_table_child_indexes", []
+                    ),
+                },
             })
             continue
         if role == "figure_table_title":
@@ -4505,17 +4696,45 @@ def _analyse(args: argparse.Namespace) -> int:
         return 2
     clauses = split_clauses(evidence)
     structure_source_record: dict[str, Any] | None = None
+    structure_target_projection: dict[str, Any] | None = None
     runtime_anchor_inventory: dict[str, Any] | None = None
     if args.structure_docx:
         structure_source = args.structure_docx.resolve()
+        structure_stat = structure_source.stat()
+        structure_sha256_before = _sha256(structure_source)
         structure_evidence = extract_document_evidence(structure_source)
         evidence["structure_source_document"] = str(structure_source)
         evidence["structure_evidence"] = structure_evidence.get("structure_evidence", {})
         evidence["structure_page_evidence"] = structure_evidence.get("page_evidence", {})
         structure_source_record = {
             "kind": "target_thesis_structure_docx", "path": str(structure_source),
-            "bytes": structure_source.stat().st_size, "sha256": _sha256(structure_source),
+            "bytes": structure_stat.st_size, "sha256": structure_sha256_before,
         }
+        same_requirements_artifact = (
+            structure_source == source.resolve()
+            and structure_sha256_before == extraction_manifest["source_sha256"]
+        )
+        structure_source_record["same_artifact_as_requirements_source"] = same_requirements_artifact
+        if not same_requirements_artifact:
+            structure_target_projection = build_structure_target_evidence(
+                structure_evidence, structure_source_record,
+            )
+            structure_source_record["projection_sha256"] = sha256_json({
+                "evidence": structure_target_projection["evidence"],
+                "clauses": structure_target_projection["clauses"],
+            })
+            structure_target_projection["source"] = copy.deepcopy(structure_source_record)
+            evidence["structure_source_document_evidence"] = structure_target_projection
+        if (structure_source.stat().st_size != structure_stat.st_size
+                or _sha256(structure_source) != structure_sha256_before):
+            message = "target structure DOCX changed during evidence extraction; the run was rejected"
+            extraction_manifest.update({
+                "status": "failed", "completed_at": datetime.now(timezone.utc).isoformat(),
+                "failure_stage": "structure_source_provenance", "error": message,
+            })
+            write_json(out / "extraction-manifest.json", extraction_manifest)
+            print(message, file=sys.stderr)
+            return 2
         runtime_anchor_inventory = build_runtime_anchor_inventory(structure_source, structure_evidence)
     official_template_evidence: dict[str, Any] | None = None
     if args.official_template_evidence_docx:
@@ -4536,7 +4755,12 @@ def _analyse(args: argparse.Namespace) -> int:
             write_json(out / "extraction-manifest.json", extraction_manifest)
             print(f"official template evidence extraction failed: {exc}", file=sys.stderr)
             return 2
-    rule_spec, rule_questions, rule_conflicts = build_rule_result(source, clauses)
+    target_clauses = (
+        structure_target_projection["clauses"] if structure_target_projection else None
+    )
+    rule_spec, rule_questions, rule_conflicts = build_rule_result(
+        source, clauses, target_clauses=target_clauses,
+    )
     spec, questions, conflicts = rule_spec, rule_questions, rule_conflicts
     spec["analysis_mode"] = args.analysis_mode
     audit = []
@@ -4741,6 +4965,11 @@ def _analyse(args: argparse.Namespace) -> int:
         })
     normalize_role_line_spacing_units(spec)
     accepted_evidence_ids = {e["id"] for e in evidence["evidence"]}
+    if structure_target_projection is not None:
+        accepted_evidence_ids.update(
+            str(item["id"]) for item in structure_target_projection["evidence"]
+            if isinstance(item, dict) and item.get("id")
+        )
     if official_template_evidence is not None:
         accepted_evidence_ids.update(
             str(item["id"]) for item in official_template_evidence.get("items", [])

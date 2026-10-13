@@ -41,6 +41,9 @@
         "known_template"
       ]
     },
+    "source_projection": {
+      "$ref": "#/$defs/deterministicRequirementSubsetProjection"
+    },
     "thesis_profile": {
       "$ref": "#/$defs/thesisProfile"
     },
@@ -167,6 +170,41 @@
     }
   },
   "$defs": {
+    "deterministicRequirementSubsetProjection": {
+      "type": "object",
+      "description": "Lineage declaration for a deterministic child format spec. Consumers must replay the selected-role projection from the manifest-bound parent format spec before accepting source-dependent execution.",
+      "required": [
+        "protocol", "parent_format_spec", "selected_roles",
+        "projected_payload_sha256", "projection_code_sha256"
+      ],
+      "properties": {
+        "protocol": {"const": "deterministic_requirement_subset_v1"},
+        "parent_format_spec": {
+          "type": "object",
+          "required": ["path", "sha256"],
+          "properties": {
+            "path": {"type": "string", "minLength": 1},
+            "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          },
+          "additionalProperties": false
+        },
+        "selected_roles": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "projected_payload_sha256": {
+          "type": "string", "pattern": "^[0-9a-f]{64}$",
+          "description": "SHA-256 of canonical replay output containing the projected requirements and content instances."
+        },
+        "projection_code_sha256": {
+          "type": "string", "pattern": "^[0-9a-f]{64}$",
+          "description": "SHA-256 of the deterministic projection implementation used to create the child."
+        }
+      },
+      "additionalProperties": false
+    },
     "headerScopeRule": {
       "type": "object",
       "required": ["scope", "selector", "content_mode", "header_content", "requirement_ids", "clause_ids", "evidence_ids"],

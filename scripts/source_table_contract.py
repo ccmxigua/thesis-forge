@@ -22,6 +22,30 @@ from semantic_contract import strict_json_read
 NUMBER = r"([0-9]+(?:\.[0-9]+)?)"
 
 
+def deterministic_requirement_subset(
+    parent_spec: dict[str, Any], selected_roles: list[str],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Replay the supported child-spec projection from a fixed parent."""
+    requirements = [
+        copy.deepcopy(item)
+        for item in parent_spec.get("requirements", [])
+        if isinstance(item, dict)
+        and item.get("role") in selected_roles
+        and isinstance(item.get("source_scope"), dict)
+    ]
+    selected_instance_ids = {
+        str(value)
+        for item in requirements
+        for value in item.get("field_instance_ids", [])
+    }
+    instances = [
+        copy.deepcopy(item)
+        for item in parent_spec.get("content_instances", [])
+        if isinstance(item, dict) and item.get("id") in selected_instance_ids
+    ]
+    return requirements, instances
+
+
 def sha256_file(path: Path) -> str:
     h = hashlib.sha256()
     with path.open("rb") as stream:
@@ -30,10 +54,55 @@ def sha256_file(path: Path) -> str:
     return h.hexdigest()
 
 
+def _pipeline_manifest_binds_current_spec(
+    pipeline_manifest_path: Path | None,
+    *,
+    extraction_run_id: str,
+    original_source_path: Path,
+    original_source_sha256: str,
+    clauses_path: Path,
+    format_spec_path: Path,
+) -> bool:
+    """Accept pipeline-owned spec enrichment only with exact current records."""
+    if pipeline_manifest_path is None:
+        return False
+    try:
+        pipeline = strict_json_read(pipeline_manifest_path)
+    except (OSError, ValueError, json.JSONDecodeError):
+        return False
+    if not isinstance(pipeline, dict) or pipeline.get("run_id") != extraction_run_id:
+        return False
+
+    def exact_record(record: Any, path: Path) -> bool:
+        if not isinstance(record, dict) or not isinstance(record.get("path"), str):
+            return False
+        try:
+            candidate = Path(record["path"]).expanduser().resolve(strict=True)
+            expected = path.expanduser().resolve(strict=True)
+            return (
+                candidate == expected
+                and record.get("bytes") == expected.stat().st_size
+                and record.get("sha256") == sha256_file(expected)
+            )
+        except (OSError, RuntimeError, ValueError):
+            return False
+
+    inputs = pipeline.get("inputs")
+    requirements_record = inputs.get("requirements") if isinstance(inputs, dict) else None
+    return (
+        exact_record(pipeline.get("format_spec_record"), format_spec_path)
+        and exact_record(pipeline.get("source_clause_record"), clauses_path)
+        and exact_record(requirements_record, original_source_path)
+        and isinstance(requirements_record, dict)
+        and requirements_record.get("sha256") == original_source_sha256
+    )
+
+
 def resolve_bound_requirement_docx(
     extraction_manifest_path: Path,
     clauses_path: Path,
     format_spec_path: Path,
+    pipeline_manifest_path: Path | None = None,
 ) -> tuple[Path | None, dict[str, Any]]:
     """Resolve and verify the exact extracted requirements DOCX bundle."""
     try:
@@ -49,7 +118,8 @@ def resolve_bound_requirement_docx(
             "reason": "the requirement extraction manifest is missing or not completed",
         }]}
 
-    source_value = manifest.get("normalized_source_document") or manifest.get("source_document")
+    original_source_value = manifest.get("source_document")
+    source_value = manifest.get("normalized_source_document") or original_source_value
     expected_source_sha = (manifest.get("normalized_source_sha256")
                            or manifest.get("source_sha256"))
     if not isinstance(source_value, str) or not source_value:
@@ -82,6 +152,31 @@ def resolve_bound_requirement_docx(
             "mismatches": mismatches,
             "reason": "source, clauses and format spec must match the completed extraction manifest byte-for-byte",
         }]}
+    # Extraction records keep the submitted input identity separately from a
+    # normalized DOCX. In particular, a .doc source may be converted to a
+    # temporary .docx while the format spec remains bound to the original
+    # source path. Verify both records and compare the spec path to the
+    # submitted input, while returning the normalized DOCX for OOXML parsing.
+    lineage_source = source_docx
+    actual_original_source_sha: str | None = None
+    if isinstance(original_source_value, str) and original_source_value:
+        original_source = Path(original_source_value)
+        if not original_source.is_file():
+            return None, {"status": "blocked", "findings": [{
+                "code": "requirements_original_source_missing",
+                "path": original_source_value,
+                "reason": "the original requirement input named by the extraction manifest is unavailable",
+            }]}
+        lineage_source = original_source
+        actual_original_source_sha = sha256_file(original_source)
+        expected_original_sha = manifest.get("source_sha256")
+        if not isinstance(expected_original_sha, str) or expected_original_sha != actual_original_source_sha:
+            return None, {"status": "blocked", "findings": [{
+                "code": "requirements_original_source_binding_mismatch",
+                "expected": expected_original_sha,
+                "actual": actual_original_source_sha,
+                "reason": "the original requirement input path and hash must match the extraction manifest",
+            }]}
     try:
         spec = strict_json_read(format_spec_path)
     except (OSError, ValueError, json.JSONDecodeError) as exc:
@@ -91,16 +186,127 @@ def resolve_bound_requirement_docx(
         }]}
     provenance = spec.get("semantic_review_provenance") if isinstance(spec, dict) else None
     spec_source = spec.get("source_document") if isinstance(spec, dict) else None
-    if (not isinstance(spec, dict)
-            or spec.get("run_id") != manifest.get("run_id")
-            or not isinstance(provenance, dict)
-            or provenance.get("run_id") != manifest.get("run_id")
-            or provenance.get("source_sha256") != actuals["source_sha256"]
-            or not isinstance(spec_source, str)
-            or Path(spec_source).resolve() != source_docx.resolve()):
+    base_lineage_valid = (
+        isinstance(spec, dict)
+        and spec.get("run_id") == manifest.get("run_id")
+        and isinstance(spec_source, str)
+        and Path(spec_source).resolve() == lineage_source.resolve()
+    )
+    current_spec_sha = sha256_file(format_spec_path)
+    projection = spec.get("source_projection") if isinstance(spec, dict) else None
+    projection_valid = False
+    projection_reason = "source_projection_missing"
+    if isinstance(projection, dict):
+        projection_reason = "source_projection_invalid"
+        parent = projection.get("parent_format_spec")
+        selected_roles = projection.get("selected_roles")
+        if (
+            projection.get("protocol") == "deterministic_requirement_subset_v1"
+            and isinstance(parent, dict)
+            and isinstance(parent.get("path"), str)
+            and isinstance(parent.get("sha256"), str)
+            and re.fullmatch(r"[0-9a-f]{64}", parent["sha256"])
+            and isinstance(selected_roles, list)
+            and selected_roles
+            and all(isinstance(value, str) and value for value in selected_roles)
+            and len(selected_roles) == len(set(selected_roles))
+        ):
+            try:
+                parent_path = Path(parent["path"]).expanduser().resolve(strict=True)
+                expected_parent_path = (
+                    extraction_manifest_path.expanduser().resolve().parent / "format-spec.json"
+                ).resolve(strict=True)
+                parent_bytes = parent_path.read_bytes()
+                parent_spec = strict_json_read(parent_path)
+            except (OSError, RuntimeError, ValueError, json.JSONDecodeError):
+                parent_bytes = None
+                expected_parent_path = None
+                parent_spec = None
+            if parent_bytes is None:
+                projection_reason = "source_projection_parent_unavailable"
+            elif parent_path != expected_parent_path:
+                projection_reason = "source_projection_parent_path_not_canonical"
+            elif hashlib.sha256(parent_bytes).hexdigest() != parent["sha256"]:
+                projection_reason = "source_projection_parent_hash_mismatch"
+            elif manifest.get("format_spec_sha256") != parent["sha256"]:
+                projection_reason = "source_projection_parent_not_bound_to_extraction_manifest"
+            elif not isinstance(parent_spec, dict):
+                projection_reason = "source_projection_parent_spec_malformed"
+            elif (
+                not base_lineage_valid
+                or parent_spec.get("run_id") != manifest.get("run_id")
+                or parent_spec.get("source_document") != spec_source
+                or parent_spec.get("analysis_mode") not in {"rule_only", "known_template"}
+                or spec.get("analysis_mode") != parent_spec.get("analysis_mode")
+            ):
+                projection_reason = "source_projection_parent_lineage_mismatch"
+            elif projection.get("projection_code_sha256") != sha256_file(Path(__file__).resolve()):
+                projection_reason = "source_projection_code_identity_mismatch"
+            else:
+                expected_requirements, expected_instances = deterministic_requirement_subset(
+                    parent_spec, selected_roles,
+                )
+                expected_projection_sha256 = hashlib.sha256(
+                    json.dumps(
+                        {"requirements": expected_requirements,
+                         "content_instances": expected_instances},
+                        ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+                    ).encode("utf-8")
+                ).hexdigest()
+                selected_instance_ids = {
+                    str(value)
+                    for item in expected_requirements
+                    for value in item.get("field_instance_ids", [])
+                }
+                projection_valid = (
+                    spec.get("requirements") == expected_requirements
+                    and spec.get("content_instances") == expected_instances
+                    and projection.get("projected_payload_sha256") == expected_projection_sha256
+                    and spec.get("roles") == {}
+                    and spec.get("status") == "rule_resolved"
+                    and len(expected_requirements) > 0
+                    and selected_instance_ids == {
+                        str(item.get("id")) for item in expected_instances
+                    }
+                )
+                projection_reason = (
+                    "deterministic_role_subset_replayed_and_hashed_from_manifest_bound_parent"
+                    if projection_valid else "source_projection_output_differs_from_parent_replay"
+                )
+    semantic_lineage_valid = (
+        isinstance(provenance, dict)
+        and provenance.get("run_id") == manifest.get("run_id")
+        and provenance.get("source_sha256") == (
+            actual_original_source_sha or actuals["source_sha256"]
+        )
+    )
+    pipeline_manifest_lineage_valid = _pipeline_manifest_binds_current_spec(
+        pipeline_manifest_path,
+        extraction_run_id=str(manifest.get("run_id") or ""),
+        original_source_path=lineage_source,
+        original_source_sha256=actual_original_source_sha or actuals["source_sha256"],
+        clauses_path=clauses_path,
+        format_spec_path=format_spec_path,
+    )
+    deterministic_lineage_valid = (
+        isinstance(spec, dict)
+        and spec.get("analysis_mode") in {"rule_only", "known_template"}
+        and (
+            manifest.get("format_spec_sha256") == current_spec_sha
+            or pipeline_manifest_lineage_valid
+        )
+    )
+    if not (base_lineage_valid and (
+            semantic_lineage_valid or deterministic_lineage_valid or projection_valid)):
         return None, {"status": "blocked", "findings": [{
             "code": "format_spec_source_lineage_mismatch",
-            "reason": "the derived format spec must retain the extraction run, exact requirement source path, and source digest",
+            "reason": (
+                "the format spec must retain the extraction run and exact requirement source path/hash; "
+                "deterministic review requires the manifest-bound source spec or a replayable projection "
+                f"(base_lineage={base_lineage_valid}, semantic_lineage={semantic_lineage_valid}, "
+                f"manifest_spec_digest={deterministic_lineage_valid}, "
+                f"pipeline_manifest={pipeline_manifest_lineage_valid}, projection={projection_reason})"
+            ),
         }]}
     return source_docx, {
         "status": "verified",
@@ -108,7 +314,11 @@ def resolve_bound_requirement_docx(
         "source_docx_sha256": actuals["source_sha256"],
         "requirement_clauses_sha256": actuals["requirement_clauses_sha256"],
         "format_spec_sha256": sha256_file(format_spec_path),
-        "format_spec_source_lineage": "verified_run_source_path_and_sha256",
+        "format_spec_source_lineage": (
+            "verified_deterministic_subset_parent_projection"
+            if projection_valid else "verified_pipeline_manifest_current_spec"
+            if pipeline_manifest_lineage_valid else "verified_run_source_path_and_sha256"
+        ),
     }
 
 

@@ -225,6 +225,97 @@ class PropertyReceiptTests(unittest.TestCase):
         self.assertEqual(empty_variant["status"], "unverified")
         self.assertIsNone(empty_variant["actual"])
 
+    @staticmethod
+    def _source_scoped_requirement():
+        return {
+            "id": "R_SCOPE",
+            "role": "body_text",
+            "clause_ids": ["C_RULE", "C1", "C2"],
+            "properties": {"text": "甲段", "font": {"size_pt": 12}},
+            "field_instance_ids": ["I1", "I2"],
+            "source_scope": {
+                "kind": "explicit_clause_set",
+                "anchor_clause_ids": [],
+                "target_clause_ids": ["C1", "C2"],
+            },
+        }
+
+    @staticmethod
+    def _source_scoped_observations():
+        observations = []
+        for instance_id, clause_id in (("I1", "C1"), ("I2", "C2")):
+            observations.append({
+                "field_instance_id": instance_id,
+                "actual": {"font": {"size_pt": 12}},
+                "source_bindings": [{
+                    "clause_id": clause_id,
+                    "source_scope_requirement_id": "R_SCOPE",
+                    "source_scope_kind": "explicit_clause_set",
+                    "source_scope_target_clause_ids": ["C1", "C2"],
+                    "source_scope_binding_sha256": "a" * 64,
+                    "source_scope_source_document_sha256": "b" * 64,
+                }],
+                "text": "甲段",
+                "serialized_target_status": "verified",
+            })
+        return observations
+
+    def test_source_scoped_receipt_uses_every_exact_instance_and_binding(self) -> None:
+        requirement = self._source_scoped_requirement()
+        receipts = build_property_receipts(
+            [requirement], {"body_text": {"style_name": "Body Text"}},
+            {"body_text": {"font": {"size_pt": 8}}},
+            actual_by_requirement={"R_SCOPE": self._source_scoped_observations()},
+            serialized_docx_sha256="c" * 64,
+        )
+        self.assertEqual(len(receipts), 1)
+        self.assertEqual(receipts[0]["property_path"], "font.size_pt")
+        self.assertEqual(receipts[0]["status"], "verified")
+        self.assertEqual(receipts[0]["verification_method"], "serialized_docx_exact_content_instance")
+        self.assertEqual(
+            [item["field_instance_id"] for item in receipts[0]["actual"]], ["I1", "I2"],
+        )
+        self.assertEqual(receipts[0]["target_locator"], "content_instances:I1,I2")
+        self.assertEqual(expected_receipt_ids([requirement]), {"PR-R_SCOPE-0001"})
+
+    def test_source_scoped_receipt_fails_if_any_target_format_differs(self) -> None:
+        observations = self._source_scoped_observations()
+        observations[1]["actual"]["font"]["size_pt"] = 8
+        receipts = build_property_receipts(
+            [self._source_scoped_requirement()], {}, {"body_text": {"font": {"size_pt": 12}}},
+            actual_by_requirement={"R_SCOPE": observations},
+            serialized_docx_sha256="d" * 64,
+        )
+        self.assertEqual(receipts[0]["status"], "failed")
+        self.assertEqual(receipts[0]["actual"][1]["value"], 8)
+
+    def test_source_scoped_receipt_is_unverified_for_missing_projection_or_bad_binding(self) -> None:
+        requirement = self._source_scoped_requirement()
+        observations = self._source_scoped_observations()[:1]
+        missing = build_property_receipts(
+            [requirement], {}, {"body_text": {"font": {"size_pt": 12}}},
+            actual_by_requirement={"R_SCOPE": observations}, serialized_docx_sha256="e" * 64,
+        )
+        self.assertEqual(missing[0]["status"], "unverified")
+        self.assertIn("source_scope_observation_instance_set_mismatch", missing[0]["status_reason"])
+        altered = self._source_scoped_observations()
+        altered[0]["source_bindings"][0]["source_scope_target_clause_ids"] = ["C1"]
+        invalid = build_property_receipts(
+            [requirement], {}, {"body_text": {"font": {"size_pt": 12}}},
+            actual_by_requirement={"R_SCOPE": altered}, serialized_docx_sha256="f" * 64,
+        )
+        self.assertEqual(invalid[0]["status"], "unverified")
+        self.assertIn("source_scope_binding_receipt_mismatch", invalid[0]["status_reason"])
+        mixed = self._source_scoped_observations()
+        mixed[1]["source_bindings"][0]["source_scope_binding_sha256"] = "c" * 64
+        mixed_hashes = build_property_receipts(
+            [requirement], {}, {"body_text": {"font": {"size_pt": 12}}},
+            actual_by_requirement={"R_SCOPE": mixed}, serialized_docx_sha256="0" * 64,
+        )
+        self.assertEqual(mixed_hashes[0]["status"], "unverified")
+        self.assertIn("source_scope_binding_identity_not_consistent",
+                      mixed_hashes[0]["status_reason"])
+
     def test_font_property_without_latin_content_is_unknown_not_failed(self) -> None:
         requirement = [{"id": "R_FONT", "role": "bibliography_heading",
                         "clause_ids": ["C_FONT"],

@@ -1506,6 +1506,9 @@
         "verification": {
           "$ref": "#/$defs/verificationSpec"
         },
+        "source_scope": {
+          "$ref": "#/$defs/sourceScopeBinding"
+        },
         "field_instance_ids": {
           "type": "array",
           "items": {
@@ -1651,6 +1654,38 @@
           "minLength": 1
         }
       },
+      "additionalProperties": false
+    },
+    "sourceScopeBinding": {
+      "type": "object",
+      "required": ["kind", "anchor_clause_ids", "target_clause_ids"],
+      "properties": {
+        "kind": {
+          "enum": ["explicit_clause_set", "same_paragraph_range", "same_table_row_range"],
+          "description": "Ranges execute only when exact source clause IDs and location anchors are supplied and validated. Unresolved prose references remain questions, not executable scopes."
+        },
+        "anchor_clause_ids": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        },
+        "target_clause_ids": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "minItems": 1,
+          "uniqueItems": true
+        }
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"kind": {"const": "explicit_clause_set"}}, "required": ["kind"]},
+          "then": {"properties": {"anchor_clause_ids": {"maxItems": 0}}}
+        },
+        {
+          "if": {"properties": {"kind": {"enum": ["same_paragraph_range", "same_table_row_range"]}}, "required": ["kind"]},
+          "then": {"properties": {"anchor_clause_ids": {"minItems": 2, "maxItems": 2}}}
+        }
+      ],
       "additionalProperties": false
     },
     "sourceFragment": {

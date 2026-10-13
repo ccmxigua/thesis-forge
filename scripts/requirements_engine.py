@@ -86,6 +86,10 @@ from source_obligation_compiler import (
     materialize_publication_default_policy,
     materialize_soft_keyword_count_guidance,
 )
+from source_scope_binding import (
+    diagnose_source_scope_reference,
+    validate_source_scope_binding,
+)
 from requirements_input import RequirementsInputError, normalize_requirements_input
 from resource_registry import materialize_declaration_resources
 from semantic_review_ledger import (
@@ -1791,11 +1795,30 @@ def build_rule_result(source: Path, clauses: list[dict[str, Any]]) -> tuple[dict
             if role is not None:
                 candidates = [role]
         if role is None:
+            scope_diagnosis = diagnose_source_scope_reference(clause, clauses)
             questions.append({
                 "question_id": f"Q{len(questions)+1:04d}", "clause_id": clause["id"],
-                "question": "该格式要求对应哪个语义角色？", "source_text": clause["text"],
+                "question": (
+                    "该格式要求所指的来源范围未能唯一绑定；请指定确切章节、段落或表格条目。"
+                    if scope_diagnosis else "该格式要求对应哪个语义角色？"
+                ), "source_text": clause["text"],
                 "candidate_roles": candidates or ["unknown"], "evidence_ids": clause["evidence_ids"],
                 "context_before": clause["context_before"], "context_after": clause["context_after"],
+                **({"source_scope_diagnosis": scope_diagnosis} if scope_diagnosis else {}),
+            })
+            continue
+        scope_diagnosis = diagnose_source_scope_reference(clause, clauses)
+        if role in CONTENT_INSTANCE_ROLES and scope_diagnosis:
+            questions.append({
+                "question_id": f"Q{len(questions)+1:04d}",
+                "clause_id": clause["id"],
+                "question": "该格式要求所指的来源范围未能唯一绑定；请指定确切章节、段落或表格条目。",
+                "source_text": clause["text"],
+                "candidate_roles": [role],
+                "evidence_ids": clause["evidence_ids"],
+                "context_before": clause["context_before"],
+                "context_after": clause["context_after"],
+                "source_scope_diagnosis": scope_diagnosis,
             })
             continue
         if role == "figure_table_title":
@@ -2039,6 +2062,7 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
                 "Return formatting requirements supported by cited clause_ids and evidence_ids.",
                 "Repeated fixed text at distinct source locations is not one concatenated literal. Emit a separate text requirement for each occurrence (for example, an outer cover and an inner title page), each with its own clause_ids, evidence_ids and source_fragment_clause_ids. Similar words do not prove identical scope or a contradiction. With an explicit fragment selector, omit properties.text or use null so code materializes the exact current-source literal, including whitespace. Never select one occurrence while copying another's text or attach unselected repeated occurrences to that requirement.",
                 "For a literal spanning multiple extracted clauses, provide source_fragment_clause_ids in source order only when the requirement role supports a top-level properties.text field; code verifies every exact span and materializes that field. For a genuine fixed declaration, use a current-source candidate only as a source-text grouping; code materializes heading/body_parts from unique complete source evidence, including punctuation, and never adds properties.text. The candidate is not an executable-clause list. For other structural roles without a top-level text field, use only their declared role-native fields. Never concatenate across clauses unless their source locations prove adjacency; if the relation, destination, or separator is unclear, leave the requirement unresolved.",
+                "For a formatting rule whose target is a source range or a referenced item, never resolve ‘above’, ‘first item’, or a forward reference by proximity or ordinal text alone. If the exact target clauses are clear, provide source_scope with explicit current target_clause_ids; same_paragraph_range and same_table_row_range also require two exact anchor_clause_ids and code verifies the complete intervening set. If multiple ‘first’ entries or a vague anaphor remain possible, leave the requirement pending and expose candidate clauses for human selection; never emit a shared role style for an unresolved target range.",
                 "existing_requirement_id selects an exact supplied current-input candidate; it is not a new output ID. Omit it for a new requirement (null in native structured output). Code assigns new IDs. Never increment IDs or borrow one from a neighboring chunk.",
                 "Every requirement object MUST include a non-empty reason explaining why its role and properties are supported by the cited clause/evidence.",
                 "When a clause exactly supports an existing deterministic requirement, set existing_requirement_id and preserve that requirement's role, properties, and evidence_ids exactly. Copy only the supplied candidate payload; do not expand it with shared role defaults, inherited body styles, or other properties from the surrounding schema.",
@@ -2610,6 +2634,7 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
         )
     schema = strict_json_loads((Path(__file__).resolve().parents[1] / "schema" / "format-spec.schema.json").read_text(encoding="utf-8"))
     accepted_indexes: set[int] = set()
+    scoped_requirement_rows: list[tuple[int, str, dict[str, Any]]] = []
     llm_shared_role_props: dict[str, dict[str, Any]] = {}
     # Keep conflicts between separate LLM requirements strict, but do not let
     # a deterministic baseline veto an otherwise schema-valid LLM semantic
@@ -2692,6 +2717,7 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
         )
         role = item.get("role"); props = item.get("properties")
         clause_ids = set(item.get("clause_ids") or []); cited_evidence = set(item.get("evidence_ids") or [])
+        source_scope = item.get("source_scope")
         confidence = item.get("confidence")
         reasons = []
         if not role or not isinstance(props, dict):
@@ -2703,6 +2729,22 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
             )
         if role not in ALLOWED_REQUIREMENT_ROLES and existing_requirement is None: reasons.append("unknown_requirement_role")
         if not clause_ids or not clause_ids <= all_clause_ids: reasons.append("invalid_clause_ids")
+        scope_reference_clause_ids = [
+            cid for cid in clause_ids
+            if cid in clause_map and diagnose_source_scope_reference(clause_map[cid], clauses)
+        ]
+        if (role in CONTENT_INSTANCE_ROLES and scope_reference_clause_ids
+                and source_scope is None):
+            reasons.append("source_scope_binding_required_for_referenced_content")
+        if source_scope is not None:
+            if role not in CONTENT_INSTANCE_ROLES:
+                reasons.append("source_scope_binding_requires_content_instance_role")
+            if existing_requirement is not None:
+                reasons.append("source_scope_cannot_rebind_existing_requirement")
+            scope_errors, _scope_projection = validate_source_scope_binding(
+                source_scope, clauses, cited_clause_ids=clause_ids,
+            )
+            reasons.extend(scope_errors)
         allowed_evidence = {eid for cid in clause_ids if cid in clause_map for eid in clause_map[cid]["evidence_ids"]}
         if not cited_evidence or not cited_evidence <= allowed_evidence or not cited_evidence <= evidence_ids:
             reasons.append("invalid_evidence_ids")
@@ -2753,7 +2795,7 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
             conflicts.append({"type": "llm_contract", "reason": reasons, "response": item})
             audit.append({"accepted": False, "reason": reasons, "response": item}); continue
         field_instance_ids: list[str] = []
-        if role in CONTENT_INSTANCE_ROLES:
+        if role in CONTENT_INSTANCE_ROLES and source_scope is None:
             instance_id, instance_error = _register_content_instance(
                 spec["content_instances"], item, role, props, clause_ids,
                 cited_evidence, clause_map, reason,
@@ -2765,8 +2807,13 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
                 audit.append({"accepted": False, "reason": "llm_internal_conflict", "response": item}); continue
             if instance_id:
                 field_instance_ids = [instance_id]
+        # A scoped request's text is descriptive evidence for its rule. Its
+        # output targets must already exist as source-bound content instances
+        # and are selected only by source_scope below; registering the request
+        # text here could create or style an instance outside that scope.
         normalized_props = _style_properties_for_role(role, props)
-        collect_shared_role_props(role, normalized_props, field_instance_ids)
+        if source_scope is None:
+            collect_shared_role_props(role, normalized_props, field_instance_ids)
         if existing_requirement is not None:
             req = copy.deepcopy(existing_requirement)
             req["clause_ids"] = sorted(clause_ids)
@@ -2929,7 +2976,12 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
                 spec[top_key] = merged_top_level
                 merge_conflicts = []
         else:
-            if role in CONTENT_INSTANCE_ROLES:
+            if source_scope is not None and role in CONTENT_INSTANCE_ROLES:
+                # A source-scoped style is compiled only onto the explicit
+                # content instances after every response item has been read.
+                # It must never leak into the shared role default.
+                merge_conflicts = []
+            elif role in CONTENT_INSTANCE_ROLES:
                 merge_conflicts = _merge_role_group(spec["roles"], target_roles, normalized_props)
                 # Literal-content requirements may legitimately use a style
                 # override for this particular instance.  The instance keeps
@@ -2994,6 +3046,9 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
                 req["source_fragment_clause_ids"] = copy.deepcopy(
                     item["source_fragment_clause_ids"]
                 )
+            if source_scope is not None:
+                req["source_scope"] = copy.deepcopy(source_scope)
+                scoped_requirement_rows.append((item_index, req["id"], copy.deepcopy(source_scope)))
             for field in ("applicability", "input_prerequisites", "verification"):
                 if field in item:
                     req[field] = copy.deepcopy(item[field])
@@ -3002,6 +3057,75 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
         audit.append({"accepted": True, "response_index": item_index,
                       "requirement_ids": [r["id"] for r in item_requirements],
                       "role": role, "normalized_roles": list(target_roles)})
+
+    # Resolve a reviewed source range against literal content instances only.
+    # The reviewer supplies exact clause IDs; this code never expands prose
+    # such as “above”, “first item”, or “the following rule” into a target.
+    for response_index, requirement_id, source_scope in scoped_requirement_rows:
+        requirement = next((item for item in spec["requirements"]
+                            if item.get("id") == requirement_id), None)
+        if not isinstance(requirement, dict):
+            continue
+        target_clause_ids = list(source_scope.get("target_clause_ids") or [])
+        role = str(requirement.get("role") or "")
+        selected_ids: set[str] = set()
+        resolution_errors: list[str] = []
+        target_clause_id_set = set(target_clause_ids)
+        for target_clause_id in target_clause_ids:
+            candidates = [
+                instance for instance in spec["content_instances"]
+                if isinstance(instance, dict) and instance.get("role") == role
+                and target_clause_id in set(instance.get("clause_ids") or [])
+            ]
+            out_of_scope_candidates = [
+                instance for instance in candidates
+                if not set(instance.get("clause_ids") or []) <= target_clause_id_set
+            ]
+            if out_of_scope_candidates:
+                resolution_errors.append(
+                    f"source_scope_target_instance_contains_unselected_clause:{target_clause_id}"
+                )
+            if len(candidates) != 1:
+                resolution_errors.append(
+                    f"source_scope_target_instance_count:{target_clause_id}:{len(candidates)}"
+                )
+                continue
+            selected_ids.add(str(candidates[0].get("id")))
+        if not resolution_errors and selected_ids:
+            style_properties = _style_properties_for_role(role, requirement.get("properties", {}))
+            for instance in spec["content_instances"]:
+                if not isinstance(instance, dict) or instance.get("id") not in selected_ids:
+                    continue
+                staged_style = copy.deepcopy(instance.get("style_properties", {}))
+                style_conflicts = _deep_merge(staged_style, style_properties)
+                if style_conflicts:
+                    resolution_errors.extend(
+                        f"source_scope_style_conflict:{instance.get('id')}:{path}"
+                        for path, _old, _new in style_conflicts
+                    )
+                else:
+                    instance["style_properties"] = staged_style
+            if not resolution_errors:
+                requirement["field_instance_ids"] = sorted(selected_ids)
+                requirement["source_scope"]["target_clause_ids"] = target_clause_ids
+        if resolution_errors:
+            spec["requirements"] = [
+                item for item in spec["requirements"] if item.get("id") != requirement_id
+            ]
+            accepted_indexes.discard(response_index)
+            conflicts.append({
+                "type": "source_scope_binding",
+                "reason": resolution_errors,
+                "requirement_id": requirement_id,
+                "response_index": response_index,
+                "source_scope": source_scope,
+            })
+            for record in audit:
+                if record.get("response_index") == response_index and record.get("accepted") is True:
+                    record["accepted"] = False
+                    record["reason"] = "source_scope_target_instance_unresolved"
+                    record["source_scope_errors"] = resolution_errors
+                    record.pop("requirement_ids", None)
 
     # In a complete evidence-bound review, explicit shared body-text style
     # requirements take precedence over a contaminated deterministic baseline

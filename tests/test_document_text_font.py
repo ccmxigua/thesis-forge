@@ -11,6 +11,7 @@ from pathlib import Path
 from docx import Document
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
+from docx.shared import Pt
 from lxml import etree
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
@@ -22,6 +23,7 @@ import test_host_agent_bridge as bridge_fixtures
 from semantic_contract import attach_request_provenance
 import post_generation_format_audit as post_audit
 import apply_format_spec as formatter
+from property_receipts import build_property_receipts
 
 
 class DocumentTextFontTests(unittest.TestCase):
@@ -459,6 +461,143 @@ class DocumentTextFontTests(unittest.TestCase):
         independent["applicability"] = {"status": "conditional", "conditions": [
             {"fact": "source_inventory.table", "operator": "present", "value": None}], "exceptions": []}
         self.assertEqual(fonts.document_font_safe_roles(spec), {})
+
+    def test_source_scoped_instances_are_rechecked_from_serialized_docx(self):
+        doc = Document()
+        texts = ("甲标签", "乙标签")
+        for text in texts:
+            doc.add_paragraph(text)
+        target_clause_ids = ["C1", "C2"]
+        instances = []
+        bindings = {}
+        for index, (clause_id, text) in enumerate(zip(target_clause_ids, texts)):
+            instance_id = f"I{index + 1}"
+            digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+            instances.append({
+                "id": instance_id, "role": "cover_field_label", "text": text,
+                "style_properties": {"font": {"size_pt": 12}},
+            })
+            bindings[instance_id] = [{
+                "clause_id": clause_id, "evidence_id": f"E{index + 1}",
+                "start_offset": 0, "end_offset": len(text), "source_sha256": digest,
+                "text": text, "source_kind": "paragraph",
+                "location": {"part": "document", "child_index": index, "paragraph": 0},
+                "source_scope_requirement_id": "R_SCOPE",
+                "source_scope_kind": "explicit_clause_set",
+                "source_scope_binding_sha256": "a" * 64,
+                "source_scope_target_clause_ids": target_clause_ids,
+                "source_scope_source_document_sha256": "b" * 64,
+            }]
+        instance_audit = formatter.apply_content_instance_overrides(
+            doc, {"content_instances": instances},
+            {"cover_field_label": {"style_name": "Normal"}}, bindings,
+            source_paragraphs=formatter._content_instance_paragraphs(doc),
+        )
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "scoped.docx"
+            doc.save(path)
+
+            def receipt_for_current_bytes(records):
+                serialized = Document(path)
+                actuals = formatter.audit_serialized_content_instance_targets(serialized, records)
+                observations = [{
+                    "field_instance_id": item["instance_id"],
+                    "actual": actuals.get(item["instance_id"]),
+                    "source_bindings": item["source_bindings"],
+                    "text": item["text"],
+                    "serialized_target_status": item.get("serialized_target_status"),
+                } for item in records]
+                requirement = {
+                    "id": "R_SCOPE", "role": "cover_field_label",
+                    "clause_ids": target_clause_ids,
+                    "properties": {"font": {"size_pt": 12}},
+                    "field_instance_ids": ["I1", "I2"],
+                    "source_scope": {
+                        "kind": "explicit_clause_set", "anchor_clause_ids": [],
+                        "target_clause_ids": target_clause_ids,
+                    },
+                }
+                return build_property_receipts(
+                    [requirement], {}, {"cover_field_label": {"font": {"size_pt": 8}}},
+                    actual_by_requirement={"R_SCOPE": observations},
+                    serialized_docx_sha256=hashlib.sha256(path.read_bytes()).hexdigest(),
+                )[0]
+
+            good = receipt_for_current_bytes(copy.deepcopy(instance_audit))
+            self.assertEqual(good["status"], "verified")
+            self.assertEqual([item["value"] for item in good["actual"]], [12, 12])
+
+            changed = Document(path)
+            changed.paragraphs[1].runs[0].font.size = Pt(10)
+            changed.save(path)
+            changed_receipt = receipt_for_current_bytes(copy.deepcopy(instance_audit))
+            self.assertEqual(changed_receipt["status"], "failed")
+            self.assertEqual(changed_receipt["actual"][1]["value"], 10)
+
+            doc.save(path)
+            missing_projection = copy.deepcopy(instance_audit)
+            missing_projection[0]["target_locators"] = []
+            missing_receipt = receipt_for_current_bytes(missing_projection)
+            self.assertEqual(missing_receipt["status"], "unverified")
+
+    def test_duplicate_source_literals_survive_prefix_insertions_only_when_all_are_mapped(self):
+        doc = Document()
+        doc.add_paragraph("重复标签")
+        doc.add_paragraph("重复标签")
+        text = "重复标签"
+        digest = hashlib.sha256(text.encode("utf-8")).hexdigest()
+        instances = []
+        bindings = {}
+        for index, size in enumerate((12, 16)):
+            instance_id = f"DUP-{index + 1}"
+            clause_id = f"CD{index + 1}"
+            instances.append({
+                "id": instance_id, "role": "cover_field_label", "text": text,
+                "style_properties": {"font": {"size_pt": size}},
+            })
+            bindings[instance_id] = [{
+                "clause_id": clause_id, "evidence_id": f"ED{index + 1}",
+                "start_offset": 0, "end_offset": len(text), "source_sha256": digest,
+                "text": text, "source_kind": "paragraph",
+                "location": {"part": "document", "child_index": index, "paragraph": 0},
+            }]
+        records = formatter.apply_content_instance_overrides(
+            doc, {"content_instances": instances},
+            {"cover_field_label": {"style_name": "Normal"}}, bindings,
+            source_paragraphs=formatter._content_instance_paragraphs(doc),
+        )
+        with tempfile.TemporaryDirectory() as td:
+            path = Path(td) / "duplicate-labels.docx"
+            doc.save(path)
+            prefixed = Document(path)
+            marker = prefixed.add_paragraph("Review marker")
+            marker._p.getparent().remove(marker._p)
+            prefixed.paragraphs[0]._p.addprevious(marker._p)
+            prefixed.save(path)
+
+            resolved_records = copy.deepcopy(records)
+            actuals = formatter.audit_serialized_content_instance_targets(
+                Document(path), resolved_records,
+            )
+            self.assertEqual(
+                [actuals[key]["font"]["size_pt"] for key in ("DUP-1", "DUP-2")],
+                [12, 16],
+            )
+            self.assertTrue(all(item["serialized_target_status"] == "verified"
+                                for item in resolved_records))
+
+            with_extra_duplicate = Document(path)
+            with_extra_duplicate.add_paragraph(text)
+            with_extra_duplicate.save(path)
+            unresolved_records = copy.deepcopy(records)
+            unresolved = formatter.audit_serialized_content_instance_targets(
+                Document(path), unresolved_records,
+            )
+            self.assertEqual(unresolved, {})
+            self.assertTrue(all(item["serialized_target_status"] == "unverified"
+                                for item in unresolved_records))
+            self.assertTrue(all("ambiguous" in item["serialized_target_errors"][0]
+                                for item in unresolved_records))
 
     def test_global_source_rejects_unrelated_property_expansion(self):
         response, chunk = self.fixture("论文中出现英文时需要使用Times New Roman字体")

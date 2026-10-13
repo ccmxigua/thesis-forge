@@ -21,7 +21,11 @@ sys.path.insert(0, str(ROOT / "scripts"))
 from requirements_engine import merge_llm_primary
 from format_spec_validation import load_and_validate
 from resource_registry import materialize_declaration_resources
-from template_reconciliation import extract_template_evidence, reconcile_template
+from template_reconciliation import (
+    _conflict_question_source,
+    extract_template_evidence,
+    reconcile_template,
+)
 
 
 def _source() -> dict:
@@ -92,6 +96,33 @@ class TemplateEvidenceTest(unittest.TestCase):
 
 
 class TemplateReconciliationTest(unittest.TestCase):
+    def test_conflict_question_uses_exact_written_clause_and_excludes_template_evidence(self) -> None:
+        clauses = {
+            "C1": {"id": "C1", "text": "第一条 目录样式", "evidence_ids": ["E1"]},
+            "C2": {"id": "C2", "text": "第二条 正文样式", "evidence_ids": ["E2"]},
+        }
+        clause_id, source_text, evidence_ids = _conflict_question_source(
+            ["C1", "C2"],
+            {"source_text": "第二条 正文样式", "evidence_ids": ["E1", "E2", "TE1"]},
+            clauses,
+            preferred_evidence_ids=["E2", "TE1"],
+        )
+        self.assertEqual(clause_id, "C2")
+        self.assertEqual(source_text, "第二条 正文样式")
+        self.assertEqual(evidence_ids, ["E2"])
+
+    def test_conflict_question_fails_closed_for_multiple_written_clause_candidates(self) -> None:
+        clauses = {
+            "C1": {"id": "C1", "text": "第一条 目录样式", "evidence_ids": ["E1"]},
+            "C2": {"id": "C2", "text": "第一条 正文样式", "evidence_ids": ["E2"]},
+        }
+        with self.assertRaisesRegex(ValueError, "cannot be uniquely bound"):
+            _conflict_question_source(
+                ["C1", "C2"],
+                {"source_text": "两个第一条", "evidence_ids": ["E1", "E2"]},
+                clauses,
+            )
+
     def test_agreement_uniquely_resolves_question(self) -> None:
         clause = {"id": "C1", "text": "一级标题使用黑体三号", "evidence_ids": ["E1"]}
         spec = {

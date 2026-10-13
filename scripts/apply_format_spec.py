@@ -59,6 +59,8 @@ from source_table_contract import (
     resolve_bound_requirement_docx,
 )
 from source_obligation_inventory_input import load_bound_scope_inventory
+from source_scope_binding import validate_source_scope_binding
+from source_binding_report import build_source_binding_report
 from manual_review import (
     add_manual_review_items,
     filter_manual_marker_ledger,
@@ -2469,16 +2471,88 @@ def validate_content_instance_source_bindings(
             and instance_id in (requirement.get("field_instance_ids") or [])
             and requirement.get("role") == instance.get("role")
             and isinstance(requirement.get("properties"), dict)
-            and requirement["properties"].get("text") == text
-            and set(clause_ids) == set(requirement.get("clause_ids") or [])
-            and set(evidence_ids) == set(requirement.get("evidence_ids") or [])
-            and source_fragment_clause_ids == requirement.get("source_fragment_clause_ids")
+            and (
+                (
+                    requirement["properties"].get("text") == text
+                    and set(clause_ids) == set(requirement.get("clause_ids") or [])
+                    and set(evidence_ids) == set(requirement.get("evidence_ids") or [])
+                    and source_fragment_clause_ids == requirement.get("source_fragment_clause_ids")
+                )
+                or (
+                    isinstance(requirement.get("source_scope"), dict)
+                    and instance_id in (requirement.get("field_instance_ids") or [])
+                    and bool(set(clause_ids) & set(
+                        requirement["source_scope"].get("target_clause_ids") or []
+                    ))
+                )
+            )
             for requirement in requirements
         )
         if not compatible_requirement:
             errors.append(f"{label}:no_matching_source_bound_requirement")
         if instance_bindings:
             bindings[instance_id] = instance_bindings
+    for requirement in requirements:
+        if not isinstance(requirement, dict) or "source_scope" not in requirement:
+            continue
+        requirement_id = str(requirement.get("id") or "")
+        role = str(requirement.get("role") or "")
+        scope_errors, scope_projection = validate_source_scope_binding(
+            requirement.get("source_scope"), clauses_by_id.values(),
+            cited_clause_ids=set(requirement.get("clause_ids") or []),
+        )
+        if scope_errors or scope_projection is None:
+            errors.extend(
+                f"requirement:{requirement_id}:{error}" for error in scope_errors
+            )
+            continue
+        requested_instance_ids = requirement.get("field_instance_ids")
+        if (not isinstance(requested_instance_ids, list) or not requested_instance_ids
+                or any(not isinstance(value, str) or not value for value in requested_instance_ids)
+                or len(requested_instance_ids) != len(set(requested_instance_ids))):
+            errors.append(f"requirement:{requirement_id}:source_scope_field_instance_ids_required")
+            continue
+        selected_ids: set[str] = set()
+        target_clause_id_set = set(scope_projection["target_clause_ids"])
+        for target_clause_id in scope_projection["target_clause_ids"]:
+            candidates = [
+                instance for instance in instances
+                if isinstance(instance, dict) and instance.get("role") == role
+                and target_clause_id in set(instance.get("clause_ids") or [])
+            ]
+            if any(
+                not set(instance.get("clause_ids") or []) <= target_clause_id_set
+                for instance in candidates
+            ):
+                errors.append(
+                    f"requirement:{requirement_id}:source_scope_target_instance_contains_unselected_clause:{target_clause_id}"
+                )
+            if len(candidates) != 1:
+                errors.append(
+                    f"requirement:{requirement_id}:source_scope_target_instance_count:"
+                    f"{target_clause_id}:{len(candidates)}"
+                )
+                continue
+            selected_ids.add(str(candidates[0].get("id")))
+        if set(requested_instance_ids) != selected_ids:
+            errors.append(f"requirement:{requirement_id}:source_scope_instance_projection_mismatch")
+        scope_digest_payload = {
+            "source_scope": scope_projection,
+            "source_document_sha256": manifest_source_sha256,
+            "clause_artifact_sha256": clause_artifact_sha256,
+            "document_evidence_artifact_sha256": document_evidence_artifact_sha256,
+            "evidence_context_artifact_sha256": evidence_context_artifact_sha256,
+        }
+        scope_receipt = {
+            "source_scope_requirement_id": requirement_id,
+            "source_scope_binding_sha256": sha256_json(scope_digest_payload),
+            "source_scope_kind": scope_projection["kind"],
+            "source_scope_target_clause_ids": list(scope_projection["target_clause_ids"]),
+            "source_scope_source_document_sha256": manifest_source_sha256,
+        }
+        for instance_id in selected_ids:
+            for binding in bindings.get(instance_id, []):
+                binding.update(copy.deepcopy(scope_receipt))
     return errors, bindings
 
 
@@ -2726,7 +2800,16 @@ def apply_content_instance_overrides(
                 raise ValueError(f"content instance {instance_id!r} has ambiguous unbound literal")
             matches = candidates
         applied = 0
+        target_locators: list[dict[str, Any]] = []
         for paragraph in matches:
+            target_index = next((index for index, candidate in enumerate(paragraphs)
+                                 if candidate._p is paragraph._p or candidate._p == paragraph._p), None)
+            if target_index is not None:
+                target_locators.append({
+                    "inventory_index": target_index,
+                    "text": paragraph.text,
+                    "text_sha256": hashlib.sha256(paragraph.text.encode("utf-8")).hexdigest(),
+                })
             if mapping and mapping.get("style_name") and paragraph.style.name != mapping["style_name"]:
                 paragraph.style = mapping["style_name"]
             if style_properties:
@@ -2745,6 +2828,7 @@ def apply_content_instance_overrides(
             "text": text,
             "style_properties": copy.deepcopy(style_properties),
             "source_bindings": copy.deepcopy(source_bindings.get(instance_id, [])),
+            "target_locators": target_locators,
             "match_count": len(matches),
             "applied_count": applied,
             "binding_policy": "source_file_bound_location_or_unique_target_literal",
@@ -2756,6 +2840,176 @@ def apply_content_instance_overrides(
                        "literal content was not present in the generated/source DOCX; no text was synthesized"),
         })
     return records
+
+
+def _serialized_paragraph_instance_snapshot(
+    paragraph: Paragraph, doc: Document, literal: str,
+) -> tuple[dict[str, Any] | None, str | None]:
+    """Read effective/direct formatting for the exact serialized literal target."""
+    paragraph_text = paragraph.text
+    if not isinstance(literal, str) or not literal or literal not in paragraph_text:
+        return None, "target_literal_not_present_in_serialized_paragraph"
+    if paragraph_text.count(literal) != 1:
+        return None, "target_literal_not_unique_in_serialized_paragraph"
+    result = style_snapshot(paragraph.style, doc)
+    paragraph_format = paragraph.paragraph_format
+    reverse_align = {value: key for key, value in ALIGN.items()}
+    direct_paragraph = {
+        "alignment": (reverse_align.get(paragraph_format.alignment)
+                      if paragraph_format.alignment is not None else None),
+        "first_line_indent_pt": paragraph_format.first_line_indent,
+        "left_indent_pt": paragraph_format.left_indent,
+        "right_indent_pt": paragraph_format.right_indent,
+        "space_before_pt": paragraph_format.space_before,
+        "space_after_pt": paragraph_format.space_after,
+        "page_break_before": paragraph_format.page_break_before,
+        "keep_with_next": paragraph_format.keep_with_next,
+    }
+    for key, value in direct_paragraph.items():
+        if value is None:
+            continue
+        if key.endswith("_pt"):
+            value = round(float(value.pt), 3)
+        result["paragraph"][key] = value
+    direct_spacing = paragraph_format.line_spacing
+    if direct_spacing is not None:
+        rule = paragraph_format.line_spacing_rule
+        line_type = {value: key for key, value in LINE.items()}.get(rule)
+        if line_type in {"exact", "at_least"}:
+            result["paragraph"]["line_spacing"] = {
+                "type": line_type, "value": round(float(direct_spacing.pt), 3), "unit": "pt",
+            }
+        elif line_type:
+            result["paragraph"]["line_spacing"] = {
+                "type": line_type, "value": float(direct_spacing), "unit": "multiple",
+            }
+
+    start = paragraph_text.find(literal)
+    end = start + len(literal)
+    cursor = 0
+    relevant_runs: list[Run] = []
+    for run in _paragraph_runs_including_nested(paragraph):
+        run_start, run_end = cursor, cursor + len(run.text)
+        if run_start < end and run_end > start:
+            relevant_runs.append(run)
+        cursor = run_end
+    if not relevant_runs:
+        return None, "target_literal_has_no_serialized_text_runs"
+    base_font = result.get("font", {})
+    values_by_key: dict[str, list[Any]] = {key: [] for key in ("latin", "cjk", "size_pt", "bold", "italic")}
+    for run in relevant_runs:
+        rpr = run._element.rPr
+        rfonts = rpr.rFonts if rpr is not None else None
+        direct = {
+            "latin": run.font.name,
+            "cjk": rfonts.get(qn("w:eastAsia")) if rfonts is not None else None,
+            "size_pt": round(float(run.font.size.pt), 3) if run.font.size is not None else None,
+            "bold": run.font.bold,
+            "italic": run.font.italic,
+        }
+        for key, value in direct.items():
+            values_by_key[key].append(base_font.get(key) if value is None else value)
+    for key, values in values_by_key.items():
+        unique = list(dict.fromkeys(values))
+        result["font"][key] = unique[0] if len(unique) == 1 else {"values": unique}
+    return result, None
+
+
+def audit_serialized_content_instance_targets(
+    doc: Document, instance_audit: list[dict[str, Any]],
+) -> dict[str, dict[str, Any]]:
+    """Re-resolve source-bound targets after serialization and read their formatting."""
+    paragraphs = _content_instance_paragraphs(doc)
+    actual_by_instance: dict[str, dict[str, Any]] = {}
+    locator_groups: dict[tuple[str, str], list[tuple[int, int, int]]] = {}
+    for record_index, record in enumerate(instance_audit):
+        if not isinstance(record, dict):
+            continue
+        locators = record.get("target_locators") if isinstance(record.get("target_locators"), list) else []
+        for locator_index, locator in enumerate(locators):
+            if not isinstance(locator, dict):
+                continue
+            text, text_sha, inventory_index = (
+                locator.get("text"), locator.get("text_sha256"), locator.get("inventory_index"),
+            )
+            if (isinstance(text, str) and text
+                    and isinstance(text_sha, str)
+                    and hashlib.sha256(text.encode("utf-8")).hexdigest() == text_sha
+                    and type(inventory_index) is int and inventory_index >= 0):
+                locator_groups.setdefault((text, text_sha), []).append(
+                    (record_index, locator_index, inventory_index)
+                )
+    # Review markers and scorecards may add paragraphs before source text. If
+    # identical literals occur more than once, preserve their source order only
+    # when every serialized occurrence is accounted for by one unique original
+    # locator. An extra unbound duplicate makes the mapping ambiguous.
+    resolved_locator_indexes: dict[tuple[int, int], int] = {}
+    unresolved_locator_keys: dict[tuple[int, int], str] = {}
+    for key, locator_rows in locator_groups.items():
+        candidate_indexes = [
+            index for index, paragraph in enumerate(paragraphs)
+            if paragraph.text == key[0]
+            and hashlib.sha256(paragraph.text.encode("utf-8")).hexdigest() == key[1]
+        ]
+        original_indexes = [row[2] for row in locator_rows]
+        if (candidate_indexes and len(candidate_indexes) == len(locator_rows)
+                and len(set(original_indexes)) == len(original_indexes)):
+            for row, candidate_index in zip(
+                sorted(locator_rows, key=lambda item: item[2]), candidate_indexes,
+            ):
+                resolved_locator_indexes[(row[0], row[1])] = candidate_index
+        else:
+            error = "serialized_target_locator_missing" if not candidate_indexes else \
+                "serialized_target_locator_ambiguous"
+            for record_index, locator_index, _original_index in locator_rows:
+                unresolved_locator_keys[(record_index, locator_index)] = error
+    for record_index, record in enumerate(instance_audit):
+        if not isinstance(record, dict):
+            continue
+        instance_id = str(record.get("instance_id") or "")
+        locators = record.get("target_locators") if isinstance(record.get("target_locators"), list) else []
+        observations: list[dict[str, Any]] = []
+        errors: list[str] = []
+        for locator_index, locator in enumerate(locators):
+            if not isinstance(locator, dict):
+                errors.append("serialized_target_locator_malformed")
+                continue
+            text = locator.get("text")
+            text_sha = locator.get("text_sha256")
+            original_index = locator.get("inventory_index")
+            key = (record_index, locator_index)
+            if key in unresolved_locator_keys:
+                errors.append(unresolved_locator_keys[key])
+                continue
+            serialized_index = resolved_locator_indexes.get(key)
+            if serialized_index is None or not 0 <= serialized_index < len(paragraphs):
+                errors.append("serialized_target_locator_missing")
+                continue
+            selected = paragraphs[serialized_index]
+            if (selected.text != text
+                    or hashlib.sha256(selected.text.encode("utf-8")).hexdigest() != text_sha):
+                errors.append("serialized_target_locator_projection_mismatch")
+                continue
+            actual, error = _serialized_paragraph_instance_snapshot(
+                selected, doc, str(record.get("text") or ""),
+            )
+            if error:
+                errors.append(error)
+                continue
+            observations.append({
+                "inventory_index": original_index,
+                "serialized_inventory_index": serialized_index,
+                "paragraph_text_sha256": text_sha,
+                "actual": actual,
+                "verification_method": "serialized_docx_exact_content_instance",
+            })
+        record["serialized_target_observations"] = observations
+        record["serialized_target_status"] = "verified" if observations and not errors else "unverified"
+        if errors:
+            record["serialized_target_errors"] = errors
+        if observations and not errors:
+            actual_by_instance[instance_id] = observations[0]["actual"]
+    return actual_by_instance
 
 
 def role_coverage(doc: Document, roles: dict[str, Any], mappings: dict[str, Any]) -> list[dict[str, Any]]:
@@ -5589,6 +5843,23 @@ def main(argv: list[str]) -> int:
     write("execution-receipts.json", {"schema_version": "1.0", "receipts": execution_receipts})
     # Re-open the serialized file before validation to catch OOXML round-trip errors.
     check = Document(args.output); findings = []; coverage_warnings = []
+    content_instance_actual_by_id = audit_serialized_content_instance_targets(
+        check, content_instance_audit,
+    )
+    write("content-instance-audit.json", {
+        "schema_version": "1.0",
+        "policy": "match_existing_literal_text_only",
+        "instances": content_instance_audit,
+        "counts": {
+            "total": len(content_instance_audit),
+            "applied": sum(item.get("status") == "applied" for item in content_instance_audit),
+            "shared_style_present": sum(item.get("status") == "shared_style_present" for item in content_instance_audit),
+            "not_present": sum(item.get("status") == "not_present" for item in content_instance_audit),
+            "serialized_target_verified": sum(
+                item.get("serialized_target_status") == "verified" for item in content_instance_audit
+            ),
+        },
+    })
     findings.extend(source_table_contract_findings)
     document_font_findings = audit_document_font(args.output, spec)
     findings.extend(document_font_findings)
@@ -5918,6 +6189,29 @@ def main(argv: list[str]) -> int:
             except KeyError:
                 pass
         receipt_requirements.append(item)
+    source_scope_actuals: dict[str, list[dict[str, Any]]] = {}
+    instance_audit_by_id = {
+        str(item.get("instance_id")): item
+        for item in content_instance_audit if isinstance(item, dict) and item.get("instance_id")
+    }
+    for requirement in receipt_requirements:
+        if not isinstance(requirement, dict) or not isinstance(requirement.get("source_scope"), dict):
+            continue
+        requirement_id = str(requirement.get("id") or "")
+        observations: list[dict[str, Any]] = []
+        for instance_id in requirement.get("field_instance_ids", []):
+            instance_record = instance_audit_by_id.get(str(instance_id), {})
+            observations.append({
+                "field_instance_id": str(instance_id),
+                "actual": copy.deepcopy(content_instance_actual_by_id.get(str(instance_id))),
+                "source_bindings": copy.deepcopy(instance_record.get("source_bindings", [])),
+                "text": instance_record.get("text"),
+                "serialized_target_status": instance_record.get("serialized_target_status"),
+                "serialized_target_errors": copy.deepcopy(
+                    instance_record.get("serialized_target_errors", [])
+                ),
+            })
+        source_scope_actuals[requirement_id] = observations
     semantic_actuals, verification_methods, role_observability, role_font_actuals = _receipt_semantic_actuals(
         check, spec, mappings, receipt_requirements, applied_section_plan,
         section_findings, cover_contract,
@@ -5959,6 +6253,7 @@ def main(argv: list[str]) -> int:
         serialized_docx_sha256=serialized_docx_sha256,
         role_results=role_results,
         verification_methods=verification_methods,
+        actual_by_requirement=source_scope_actuals,
         role_observability=role_observability,
         applicable_roles={
             item["role"] for item in coverage
@@ -6054,11 +6349,52 @@ def main(argv: list[str]) -> int:
         # property receipt to that final serialized DOCX instead of leaving a
         # receipt that hashes only the pre-marker intermediate.
         serialized_docx_sha256 = hashlib.sha256(args.output.read_bytes()).hexdigest()
+        final_check = Document(args.output)
+        # The review scorecard is part of the final DOCX. Re-resolve scoped
+        # content instances in that exact serialized file before issuing final
+        # source-bound receipts; a prior in-memory paragraph is not evidence.
+        content_instance_actual_by_id = audit_serialized_content_instance_targets(
+            final_check, content_instance_audit,
+        )
+        write("content-instance-audit.json", {
+            "schema_version": "1.0",
+            "policy": "match_existing_literal_text_only",
+            "instances": content_instance_audit,
+            "counts": {
+                "total": len(content_instance_audit),
+                "applied": sum(item.get("status") == "applied" for item in content_instance_audit),
+                "shared_style_present": sum(item.get("status") == "shared_style_present" for item in content_instance_audit),
+                "not_present": sum(item.get("status") == "not_present" for item in content_instance_audit),
+                "serialized_target_verified": sum(
+                    item.get("serialized_target_status") == "verified" for item in content_instance_audit
+                ),
+            },
+        })
+        source_scope_actuals = {}
+        for requirement in receipt_requirements:
+            if not isinstance(requirement, dict) or not isinstance(requirement.get("source_scope"), dict):
+                continue
+            requirement_id = str(requirement.get("id") or "")
+            observations = []
+            for instance_id in requirement.get("field_instance_ids", []):
+                instance_record = instance_audit_by_id.get(str(instance_id), {})
+                observations.append({
+                    "field_instance_id": str(instance_id),
+                    "actual": copy.deepcopy(content_instance_actual_by_id.get(str(instance_id))),
+                    "source_bindings": copy.deepcopy(instance_record.get("source_bindings", [])),
+                    "text": instance_record.get("text"),
+                    "serialized_target_status": instance_record.get("serialized_target_status"),
+                    "serialized_target_errors": copy.deepcopy(
+                        instance_record.get("serialized_target_errors", [])
+                    ),
+                })
+            source_scope_actuals[requirement_id] = observations
         property_receipts = build_property_receipts(
             receipt_requirements, mappings, actual_by_role,
             serialized_docx_sha256=serialized_docx_sha256,
             role_results=role_results,
             verification_methods=verification_methods,
+            actual_by_requirement=source_scope_actuals,
             role_observability=role_observability,
             applicable_roles={
                 item["role"] for item in coverage
@@ -6083,7 +6419,6 @@ def main(argv: list[str]) -> int:
             obligation_scope_inventory=obligation_scope_inventory,
             expected_docx_sha256=serialized_docx_sha256,
         )
-        final_check = Document(args.output)
         serialized_format_audit = {
             "protocol": "serialized_format_repairs_audit_v1",
             "docx_sha256": serialized_docx_sha256,
@@ -6313,6 +6648,30 @@ def main(argv: list[str]) -> int:
               "preview_placeholders": bool(preview_mode),
               "preview_bypassed_blockers": preview_bypassed_blockers,
               "output_docx": str(args.output)}
+    if args.output_policy == "review_draft":
+        if not isinstance(manual_review_document_ledger, dict):
+            raise SystemExit("source-binding report requires a current-run-bound manual ledger")
+        source_binding_report = build_source_binding_report(
+            manual_review_document_ledger["binding"],
+            source_docx_sha256=hashlib.sha256(args.input.read_bytes()).hexdigest(),
+            output_docx_sha256=hashlib.sha256(args.output.read_bytes()).hexdigest(),
+            questions=[{
+                "question_id": (item.get("question_ids") or [None])[0],
+                "clause_id": (item.get("clause_ids") or [None])[0],
+                "source_scope_diagnosis": copy.deepcopy(item["source_scope_diagnosis"]),
+            } for item in manual_review_document_ledger.get("items", [])
+                if isinstance(item, dict) and isinstance(item.get("source_scope_diagnosis"), dict)],
+            content_instance_audit=content_instance_audit,
+            property_receipts=property_receipts,
+            manual_items=manual_review_document_ledger.get("items", []),
+        )
+        write("source-binding-report.json", source_binding_report)
+        report["source_binding_report"] = {
+            "path": str((args.out_dir / "source-binding-report.json").resolve()),
+            "protocol": source_binding_report["protocol"],
+            "summary": source_binding_report["summary"],
+            "submission_ready": False,
+        }
     write("clause-compliance-report.json", compliance)
     write("external-compliance-checklist.json", compliance["external_checklist"])
     write("submission-audit.json", submission_audit)

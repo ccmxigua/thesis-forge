@@ -191,6 +191,24 @@
           "source_start": {"type": "integer", "minimum": 0},
           "source_end": {"type": "integer", "minimum": 1},
           "source_text_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+          "source_binding_classification": {
+            "enum": ["human_approval_required", "missing_target_instance", "bound_but_unverified"]
+          },
+          "source_scope_diagnosis": {
+            "type": "object",
+            "required": ["status", "classification", "reason", "resolution_policy"],
+            "properties": {
+              "status": {"const": "pending_input"},
+              "classification": {
+                "enum": ["semantic_ambiguity", "human_confirmation_required", "parser_capability_gap"]
+              },
+              "reason": {"type": "string", "minLength": 1},
+              "source_clause_id": {"type": ["string", "null"]},
+              "candidate_clause_ids": {"type": "array", "items": {"type": "string"}, "uniqueItems": true},
+              "resolution_policy": {"const": "human_selects_exact_clause_ids_before_execution"}
+            },
+            "additionalProperties": true
+          },
           "source_location": {
             "type": "object",
             "required": ["evidence_id", "start_offset", "end_offset", "source_sha256"],

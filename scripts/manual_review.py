@@ -735,6 +735,21 @@ def _question_item(
         or question.get("text")
         or ""
     )
+    scope_diagnosis = question.get("source_scope_diagnosis")
+    scope_classification = (
+        scope_diagnosis.get("classification")
+        if isinstance(scope_diagnosis, dict) else None
+    )
+    scope_actions = {
+        "semantic_ambiguity": "请在报告列出的候选条款中明确选择精确 clause_id；系统不会按邻近位置代选。",
+        "human_confirmation_required": "请依据权威文本明确确认目标条款并提供精确 clause_id；系统不会自动绑定。",
+        "parser_capability_gap": "请补充可读取的结构锚点或结构化来源片段，再重新绑定；不要猜测目标。",
+    }
+    scope_reasons = {
+        "semantic_ambiguity": "来源范围存在多个候选，需要人工消歧。",
+        "human_confirmation_required": "来源引用仍需人工确认精确目标。",
+        "parser_capability_gap": "当前解析器无法从现有结构中观察到目标锚点。",
+    }
     return {
         "source_type": "open_question",
         "source_code": "open_question",
@@ -748,10 +763,22 @@ def _question_item(
         # question is useful as the reason, but cannot locate an inline marker
         # in the generated document or explain what the reviewer must decide.
         "source_text": source_text,
-        "reason": str(question.get("reason") or question.get("question") or ""),
-        "action": "请人工确认该条款的适用对象、数值单位或权威解释。",
+        "reason": str(
+            question.get("reason")
+            or scope_reasons.get(scope_classification)
+            or question.get("question") or ""
+        ),
+        "action": str(
+            question.get("action")
+            or scope_actions.get(scope_classification)
+            or "请人工确认该条款的适用对象、数值单位或权威解释。"
+        ),
         "placeholder_text": f"【待人工处理：{clause_id or question_id or '未绑定问题'}】",
         "original_blocking": True,
+        **({"source_scope_diagnosis": copy.deepcopy(scope_diagnosis)}
+           if isinstance(scope_diagnosis, dict) else {}),
+        **({"source_binding_classification": "human_approval_required"}
+           if question.get("source_binding_classification") == "human_approval_required" else {}),
         "producer_records": copy.deepcopy(producer_records or [
             _producer_record("open_question_normalized", question),
         ]),

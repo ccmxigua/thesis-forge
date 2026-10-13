@@ -3063,6 +3063,16 @@ b&=2\notag
             self.assertEqual(conflict_markers[0]["evidence_ids"], unsupported["evidence_ids"])
             self.assertFalse(manual_ledger["submission_ready"])
             report = json.loads((work / "application" / "validation-report.json").read_text())
+            source_binding_report_path = work / "application" / "source-binding-report.json"
+            self.assertTrue(source_binding_report_path.is_file())
+            source_binding_report = json.loads(source_binding_report_path.read_text())
+            self.assertEqual(source_binding_report["protocol"], "source_binding_outcomes_v1")
+            self.assertFalse(source_binding_report["submission_ready"])
+            self.assertEqual(
+                source_binding_report["output_docx_sha256"],
+                hashlib.sha256((td / "output.docx").read_bytes()).hexdigest(),
+            )
+            self.assertEqual(report["source_binding_report"]["summary"], source_binding_report["summary"])
             self.assertFalse(report["docx_fully_compliant"])
             self.assertFalse(report["submission_ready"])
             self.assertTrue(report["manual_review_marker_audit"]["valid"])

@@ -453,6 +453,27 @@ class ManualReviewTests(unittest.TestCase):
         self.assertEqual(item["question_ids"], ["Q-PRODUCER-1"])
         self.assertEqual(item["evidence_ids"], ["E-PRODUCER-1", "E-PRODUCER-2"])
 
+    def test_source_scope_diagnosis_and_specific_action_survive_manual_todo(self) -> None:
+        diagnosis = {
+            "status": "pending_input",
+            "classification": "semantic_ambiguity",
+            "reason": "multiple_source_anchors_match_reference",
+            "source_clause_id": "C-SCOPE-3",
+            "candidate_clause_ids": ["C-SCOPE-1", "C-SCOPE-2"],
+            "resolution_policy": "human_selects_exact_clause_ids_before_execution",
+        }
+        ledger = build_manual_review_ledger({}, [{
+            "question_id": "Q-SCOPE-3", "clause_id": "C-SCOPE-3",
+            "evidence_ids": ["E-SCOPE-3"], "source_text": "第一条中字段使用小四号。",
+            "question": "请确认所指的第一条。", "source_scope_diagnosis": diagnosis,
+        }], binding=self._binding())
+        item = next(row for row in ledger["items"] if row["source_type"] == "open_question")
+        self.assertEqual(item["source_scope_diagnosis"], diagnosis)
+        self.assertIn("候选条款", item["action"])
+        self.assertIn("不会按邻近位置代选", item["action"])
+        self.assertIn("多个候选", item["reason"])
+        self.assertEqual(load_and_validate(ledger, ROOT / "schema" / "manual-review-ledger.schema.json"), [])
+
     def test_same_question_text_at_distinct_evidence_occurrences_is_not_collapsed(self) -> None:
         ledger = build_manual_review_ledger({}, [
             {

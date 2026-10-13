@@ -701,6 +701,14 @@ def build_host_review_response_schema(
         {"type": "string", "enum": clause_ids}
         if clause_ids else {"type": "string"}
     )
+    source_scope_schema = request_defs.get("sourceScopeBinding")
+    if isinstance(source_scope_schema, dict):
+        for name in ("anchor_clause_ids", "target_clause_ids"):
+            item_schema = (
+                source_scope_schema.get("properties", {}).get(name, {}).get("items")
+            )
+            if isinstance(item_schema, dict):
+                item_schema.update(copy.deepcopy(clause_id_schema))
     if isinstance(reported_conflict_definition, dict) and clause_ids:
         reported_conflict_definition["properties"]["clause_ids"]["items"] = copy.deepcopy(
             clause_id_schema
@@ -726,6 +734,7 @@ def build_host_review_response_schema(
         "applicability": {"$ref": "#/$defs/applicabilitySpec"},
         "input_prerequisites": {"type": "array", "items": {"$ref": "#/$defs/inputPrerequisiteSpec"}},
         "verification": {"$ref": "#/$defs/verificationSpec"},
+        "source_scope": {"$ref": "#/$defs/sourceScopeBinding"},
     }
     requirement_required = [
         "role", "properties", "clause_ids", "evidence_ids", "confidence", "reason",

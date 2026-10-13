@@ -334,7 +334,24 @@ def build_scorecard(binding: dict[str, Any], receipt_audit: dict[str, Any],
                if row["identity"].get("semantic_basis") == "typed_source_atom"):
             raise ValueError("scorecard contains a typed unit outside the verified source inventory")
     for item in manual_items:
-        add("human_review", item, str(item.get("source_code") or item.get("source_text") or "人工核验"), "pending", item)
+        diagnosis = item.get("source_scope_diagnosis")
+        classification = (
+            diagnosis.get("classification") if isinstance(diagnosis, dict)
+            else item.get("source_binding_classification")
+        )
+        diagnostic_labels = {
+            "semantic_ambiguity": "来源范围歧义，待人工选择精确条款",
+            "human_confirmation_required": "来源目标待人工确认",
+            "parser_capability_gap": "来源结构锚点不可解析",
+            "human_approval_required": "需有权人员签字或审批",
+            "missing_target_instance": "规范对象已解析、缺实际封面实例",
+            "bound_but_unverified": "已绑定实例但尚未验证",
+        }
+        label = diagnostic_labels.get(
+            classification,
+            str(item.get("source_code") or item.get("source_text") or "人工核验"),
+        )
+        add("human_review", item, label, "pending", item)
     for item in findings:
         # This is a known observability gap, not evidence that the document's
         # drawing/math text uses the wrong font. Keep it visible and blocking
@@ -480,7 +497,8 @@ def scorecard_lines(card: dict[str, Any]) -> list[str]:
             "property_path", "property", "expected", "actual", "required_value",
             "evaluation_unit_id", "canonical_obligation_key",
             "template_value", "reason", "status_reason", "action", "message", "status",
-            "current_output_instance",
+            "current_output_instance", "source_scope_diagnosis",
+            "source_binding_classification", "diagnostic_summary",
         ) if key in record}
         instance = fields.get("current_output_instance")
         if isinstance(instance, dict):

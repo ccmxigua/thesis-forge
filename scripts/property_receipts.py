@@ -68,6 +68,20 @@ def _execution_property_items(role: str, properties: dict[str, Any]) -> list[tup
     ]
 
 
+def _requirement_execution_items(requirement: dict[str, Any]) -> list[tuple[int, str, Any]]:
+    role = str(requirement.get("role") or "")
+    properties = requirement.get("properties")
+    if not isinstance(properties, dict):
+        return []
+    items = _execution_property_items(role, properties)
+    if isinstance(requirement.get("source_scope"), dict):
+        # Scoped literal identity is verified by the source-span/content-instance
+        # audit. A requirement's one text value cannot be compared to every
+        # member of a multi-instance range as though all targets were identical.
+        items = [item for item in items if item[1] != "text"]
+    return items
+
+
 def flatten(value: Any, prefix: str = "") -> dict[str, Any]:
     result: dict[str, Any] = {}
     if isinstance(value, dict):
@@ -157,7 +171,7 @@ def expected_receipt_ids(
             continue
         result.update(
             f"PR-{requirement_id}-{index:04d}"
-            for index, _path, _value in _execution_property_items(role, properties)
+            for index, _path, _value in _requirement_execution_items(requirement)
         )
     return result
 
@@ -172,7 +186,7 @@ def build_property_receipts(
     applicable_roles: set[str] | None = None,
     verification_methods: dict[str, str] | None = None,
     verification_method: str = "serialized_docx_style",
-    actual_by_requirement: dict[str, dict[str, Any]] | None = None,
+    actual_by_requirement: dict[str, Any] | None = None,
     role_observability: dict[str, dict[str, dict[str, Any]]] | None = None,
 ) -> list[dict[str, Any]]:
     """Create one receipt per declared requirement property.
@@ -220,6 +234,7 @@ def build_property_receipts(
             continue
         has_requirement_actual = requirement_id in actual_by_requirement
         requirement_actual = actual_by_requirement.get(requirement_id)
+        source_scoped = isinstance(requirement.get("source_scope"), dict)
         selected_actual = (
             requirement_actual if has_requirement_actual and isinstance(requirement_actual, dict)
             else actual_by_role.get(role, {})
@@ -230,12 +245,120 @@ def build_property_receipts(
             f"style:{mapping.get('style_name')}"
             if mapping.get("style_name") else f"role:{role}"
         )
-        for index, property_path, expected_value in _execution_property_items(role, properties):
+        scoped_observation_errors: list[str] = []
+        scoped_values: dict[str, list[dict[str, Any]]] = {}
+        scoped_observations: list[dict[str, Any]] = []
+        if source_scoped:
+            target_locator = "content_instances:" + ",".join(
+                str(value) for value in requirement.get("field_instance_ids", [])
+            )
+            scoped_observations = (
+                requirement_actual if isinstance(requirement_actual, list) else []
+            )
+            expected_instance_ids = requirement.get("field_instance_ids")
+            target_clause_ids = requirement["source_scope"].get("target_clause_ids")
+            if (not isinstance(expected_instance_ids, list) or not expected_instance_ids
+                    or any(not isinstance(value, str) or not value for value in expected_instance_ids)
+                    or len(expected_instance_ids) != len(set(expected_instance_ids))):
+                scoped_observation_errors.append("source_scope_instance_ids_missing_or_invalid")
+                expected_instance_ids = []
+            if (not isinstance(target_clause_ids, list) or not target_clause_ids
+                    or any(not isinstance(value, str) or not value for value in target_clause_ids)
+                    or len(target_clause_ids) != len(set(target_clause_ids))):
+                scoped_observation_errors.append("source_scope_target_clause_ids_missing_or_invalid")
+                target_clause_ids = []
+            observations_by_id: dict[str, dict[str, Any]] = {}
+            for observation in scoped_observations:
+                if not isinstance(observation, dict):
+                    scoped_observation_errors.append("source_scope_observation_malformed")
+                    continue
+                instance_id = observation.get("field_instance_id")
+                if not isinstance(instance_id, str) or not instance_id:
+                    scoped_observation_errors.append("source_scope_observation_instance_id_missing")
+                    continue
+                if instance_id in observations_by_id:
+                    scoped_observation_errors.append("source_scope_observation_instance_id_duplicate:" + instance_id)
+                    continue
+                observations_by_id[instance_id] = observation
+            if set(observations_by_id) != set(expected_instance_ids):
+                scoped_observation_errors.append("source_scope_observation_instance_set_mismatch")
+            target_binding_counts = {clause_id: 0 for clause_id in target_clause_ids}
+            scoped_binding_hashes: set[str] = set()
+            scoped_source_hashes: set[str] = set()
+            for instance_id in expected_instance_ids:
+                observation = observations_by_id.get(instance_id)
+                if observation is None:
+                    continue
+                instance_actual = observation.get("actual")
+                if not isinstance(instance_actual, dict):
+                    scoped_observation_errors.append("source_scope_serialized_instance_unverified:" + instance_id)
+                bindings = observation.get("source_bindings")
+                if not isinstance(bindings, list) or not bindings:
+                    scoped_observation_errors.append("source_scope_binding_receipt_missing:" + instance_id)
+                    continue
+                verified_bindings = []
+                for binding in bindings:
+                    if not isinstance(binding, dict):
+                        scoped_observation_errors.append("source_scope_binding_receipt_malformed:" + instance_id)
+                        continue
+                    clause_id = binding.get("clause_id")
+                    scope_targets = binding.get("source_scope_target_clause_ids")
+                    scope_hash = binding.get("source_scope_binding_sha256")
+                    source_hash = binding.get("source_scope_source_document_sha256")
+                    if (binding.get("source_scope_requirement_id") != requirement_id
+                            or scope_targets != target_clause_ids
+                            or binding.get("source_scope_kind") != requirement["source_scope"].get("kind")
+                            or not isinstance(scope_hash, str)
+                            or not re.fullmatch(r"[0-9a-f]{64}", scope_hash)
+                            or not isinstance(source_hash, str)
+                            or not re.fullmatch(r"[0-9a-f]{64}", source_hash)
+                            or not isinstance(clause_id, str)
+                            or clause_id not in target_binding_counts):
+                        scoped_observation_errors.append("source_scope_binding_receipt_mismatch:" + instance_id)
+                        continue
+                    scoped_binding_hashes.add(scope_hash)
+                    scoped_source_hashes.add(source_hash)
+                    target_binding_counts[clause_id] += 1
+                    verified_bindings.append(binding)
+                if isinstance(instance_actual, dict) and verified_bindings:
+                    flattened_actual = flatten(instance_actual)
+                    for property_path in flatten(properties):
+                        if property_path == "text":
+                            observed_text = observation.get("text")
+                            if isinstance(observed_text, str) and observation.get("serialized_target_status") == "verified":
+                                flattened_actual[property_path] = observed_text
+                        if property_path in flattened_actual:
+                            scoped_values.setdefault(property_path, []).append({
+                                "field_instance_id": instance_id,
+                                "value": flattened_actual[property_path],
+                                "source_bindings": copy.deepcopy(verified_bindings),
+                            })
+            if any(count != 1 for count in target_binding_counts.values()):
+                scoped_observation_errors.append("source_scope_target_binding_coverage_mismatch")
+            if len(scoped_binding_hashes) != 1 or len(scoped_source_hashes) != 1:
+                scoped_observation_errors.append("source_scope_binding_identity_not_consistent")
+        execution_items = _requirement_execution_items(requirement)
+        for index, property_path, expected_value in execution_items:
             actual_value = actual.get(property_path)
             status_reason = None
             if property_path == "__requirement__":
                 actual_value = bool(role_results.get(role))
-            if (role not in actual_by_role
+            if source_scoped:
+                property_observations = scoped_values.get(property_path, [])
+                actual_value = copy.deepcopy(property_observations)
+                if not property_observations:
+                    status = "unverified"
+                elif any(not satisfies(property_path, item["value"], expected_value)
+                         for item in property_observations):
+                    status = "failed"
+                elif scoped_observation_errors or len(property_observations) != len(expected_instance_ids):
+                    status = "unverified"
+                else:
+                    status = "verified"
+                if status == "unverified":
+                    status_reason = ";".join(dict.fromkeys(scoped_observation_errors)) or \
+                        "source-scoped serialized observations are incomplete"
+            elif (role not in actual_by_role
                     or (property_path != "__requirement__"
                         and property_path not in actual)):
                 status = "unverified"
@@ -257,10 +380,11 @@ def build_property_receipts(
                 status = "unverified"
                 status_reason = "source cover field set has no instance-specific binding"
             observation = role_observability.get(role, {}).get(property_path)
-            if isinstance(observation, dict) and observation.get("observed") is False:
+            if (not source_scoped and isinstance(observation, dict)
+                    and observation.get("observed") is False):
                 status = "unverified"
                 status_reason = str(observation.get("reason") or "property has no observed content")
-            receipts.append({
+            receipt = {
                 "receipt_id": f"PR-{requirement_id}-{index:04d}",
                 "requirement_id": requirement_id,
                 "clause_ids": list(requirement.get("clause_ids") or []),
@@ -272,6 +396,7 @@ def build_property_receipts(
                 "status": status,
                 **({"status_reason": status_reason} if status_reason else {}),
                 "verification_method": (
+                    "serialized_docx_exact_content_instance" if source_scoped else
                     observation.get("verification_method")
                     if isinstance(observation, dict) and observation.get("verification_method")
                     else verification_methods.get(role, verification_method)
@@ -279,7 +404,17 @@ def build_property_receipts(
                 "serialized_docx_sha256": serialized_docx_sha256,
                 **({"evaluation_units": copy.deepcopy(requirement["evaluation_units"])}
                    if "evaluation_units" in requirement else {}),
-            })
+            }
+            if (role == "cover" and property_path == "fields"
+                    and isinstance(expected_value, list) and expected_value
+                    and actual_value == []):
+                receipt.update({
+                    "diagnostic_classification": "missing_target_instance",
+                    "diagnostic_summary": "规范对象已解析、缺实际封面实例",
+                    "status": "failed",
+                    "status_reason": "格式规范含明确封面字段，但当前 DOCX 的封面字段实例清单为空。",
+                })
+            receipts.append(receipt)
     return receipts
 
 

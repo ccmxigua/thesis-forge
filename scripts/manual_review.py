@@ -777,6 +777,8 @@ def _question_item(
         "original_blocking": True,
         **({"source_scope_diagnosis": copy.deepcopy(scope_diagnosis)}
            if isinstance(scope_diagnosis, dict) else {}),
+        **({"source_scope_resolution": copy.deepcopy(question["source_scope_resolution"])}
+           if isinstance(question.get("source_scope_resolution"), dict) else {}),
         **({"source_binding_classification": "human_approval_required"}
            if question.get("source_binding_classification") == "human_approval_required" else {}),
         "producer_records": copy.deepcopy(producer_records or [

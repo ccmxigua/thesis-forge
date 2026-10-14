@@ -64,19 +64,42 @@ def build_source_binding_report(
     for question in questions:
         diagnosis = question.get("source_scope_diagnosis")
         if not isinstance(diagnosis, dict):
-            continue
-        classification = diagnosis.get("classification")
-        if classification not in _SCOPE_CLASSES:
-            raise ValueError("source-binding question has an unknown scope classification")
-        outcomes.append({
-            "classification": classification,
-            "status": "pending_input",
-            "source_clause_id": diagnosis.get("source_clause_id") or question.get("clause_id"),
-            "question_id": question.get("question_id"),
-            "candidate_clause_ids": copy.deepcopy(diagnosis.get("candidate_clause_ids", [])),
-            "reason": diagnosis.get("reason"),
-            "resolution_policy": diagnosis.get("resolution_policy"),
-        })
+            classification = None
+        else:
+            classification = diagnosis.get("classification")
+            if classification not in _SCOPE_CLASSES:
+                raise ValueError("source-binding question has an unknown scope classification")
+            outcomes.append({
+                "classification": classification,
+                "status": "pending_input",
+                "source_clause_id": diagnosis.get("source_clause_id") or question.get("clause_id"),
+                "question_id": question.get("question_id"),
+                "candidate_clause_ids": copy.deepcopy(diagnosis.get("candidate_clause_ids", [])),
+                "reason": diagnosis.get("reason"),
+                "resolution_policy": diagnosis.get("resolution_policy"),
+            })
+
+        resolution = question.get("source_scope_resolution")
+        if isinstance(resolution, dict) and resolution.get("target_status") == "target_absent":
+            # A resolved source rule with no target instance is diagnostic
+            # evidence only. Keep it separate from scope ambiguity and never
+            # turn the missing target into a passing application receipt.
+            outcomes.append({
+                "classification": "target_absent",
+                "status": "unverified",
+                "source_clause_id": question.get("clause_id"),
+                "question_id": question.get("question_id"),
+                "input_document_sha256": binding.get("input_source_sha256"),
+                "rule_interpretation_status": resolution.get("rule_interpretation_status"),
+                "target_status": "target_absent",
+                "verification_status": "unverified",
+                "field_labels": copy.deepcopy(resolution.get("field_labels", [])),
+                "field_list_clause_ids": copy.deepcopy(resolution.get("field_list_clause_ids", [])),
+                "candidate_table_child_indexes": copy.deepcopy(
+                    resolution.get("candidate_table_child_indexes", [])
+                ),
+                "reason": resolution.get("reason"),
+            })
 
     for instance in content_instance_audit:
         instance_id = instance.get("instance_id")

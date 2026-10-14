@@ -6975,9 +6975,15 @@ def main(argv: list[str]) -> int:
             questions=[{
                 "question_id": (item.get("question_ids") or [None])[0],
                 "clause_id": (item.get("clause_ids") or [None])[0],
-                "source_scope_diagnosis": copy.deepcopy(item["source_scope_diagnosis"]),
+                **({"source_scope_diagnosis": copy.deepcopy(item["source_scope_diagnosis"])}
+                   if isinstance(item.get("source_scope_diagnosis"), dict) else {}),
+                **({"source_scope_resolution": copy.deepcopy(item["source_scope_resolution"])}
+                   if isinstance(item.get("source_scope_resolution"), dict) else {}),
             } for item in manual_review_document_ledger.get("items", [])
-                if isinstance(item, dict) and isinstance(item.get("source_scope_diagnosis"), dict)],
+                if isinstance(item, dict) and (
+                    isinstance(item.get("source_scope_diagnosis"), dict)
+                    or isinstance(item.get("source_scope_resolution"), dict)
+                )],
             content_instance_audit=content_instance_audit,
             property_receipts=property_receipts,
             manual_items=manual_review_document_ledger.get("items", []),

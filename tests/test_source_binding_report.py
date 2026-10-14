@@ -40,6 +40,54 @@ def _sha(data: bytes) -> str:
 
 
 class SourceBindingReportTests(unittest.TestCase):
+    def test_target_absence_survives_review_ledger_and_formal_source_report_as_unverified(self) -> None:
+        question = {
+            "question_id": "Q-TARGET-ABSENT",
+            "clause_id": "C-TJ-FIELDS",
+            "question": "规则和字段顺序已解析，但输入中没有目标封面表格。",
+            "source_text": "封面字段标签格式规则。",
+            "evidence_ids": ["E-TJ-RULE"],
+            "source_scope_diagnosis": {
+                "status": "pending_input",
+                "classification": "human_confirmation_required",
+                "reason": "source_range_requires_explicit_target_clause_set",
+                "source_clause_id": "C-TJ-FIELDS",
+                "candidate_clause_ids": ["C-TJ-LIST"],
+                "resolution_policy": "human_selects_exact_clause_ids_before_execution",
+            },
+            "source_scope_resolution": {
+                "rule_interpretation_status": "resolved",
+                "target_status": "target_absent",
+                "verification_status": "unverified",
+                "reason": "rule_and_field_list_resolved_but_target_table_absent",
+                "field_labels": ["专业名称", "作者学号", "论文作者", "指导教师"],
+                "field_list_clause_ids": ["C-TJ-LIST"],
+                "candidate_table_child_indexes": [],
+            },
+        }
+        ledger = build_manual_review_ledger({}, [question], binding=_binding())
+        item = ledger["items"][0]
+        self.assertEqual(item["source_scope_resolution"]["target_status"], "target_absent")
+        self.assertEqual(item["source_scope_resolution"]["verification_status"], "unverified")
+
+        report = build_source_binding_report(
+            _binding(), source_docx_sha256="1" * 64,
+            output_docx_sha256="2" * 64,
+            questions=[{
+                "question_id": item["question_ids"][0],
+                "clause_id": item["clause_ids"][0],
+                "source_scope_diagnosis": item["source_scope_diagnosis"],
+                "source_scope_resolution": item["source_scope_resolution"],
+            }],
+            content_instance_audit=[], property_receipts=[], manual_items=ledger["items"],
+        )
+        absent = [row for row in report["outcomes"] if row["classification"] == "target_absent"]
+        self.assertEqual(len(absent), 1)
+        self.assertEqual(absent[0]["status"], "unverified")
+        self.assertEqual(absent[0]["target_status"], "target_absent")
+        self.assertEqual(absent[0]["input_document_sha256"], _binding()["input_source_sha256"])
+        self.assertFalse(report["submission_ready"])
+
     def test_adjacent_clause_question_and_approval_survive_todo_and_scorecard(self) -> None:
         clause_a = {"id": "C1", "text": "第一条：封面字段格式。", "evidence_ids": ["E1"]}
         clause_b = {"id": "C2", "text": "第一条：正文段落格式。", "evidence_ids": ["E2"]}

@@ -63,7 +63,13 @@ def build_source_binding_report(
     outcomes: list[dict[str, Any]] = []
     for question in questions:
         diagnosis = question.get("source_scope_diagnosis")
-        if not isinstance(diagnosis, dict):
+        resolution = question.get("source_scope_resolution")
+        target_absent_resolved = (
+            isinstance(resolution, dict)
+            and resolution.get("target_status") == "target_absent"
+            and resolution.get("rule_interpretation_status") == "resolved"
+        )
+        if not isinstance(diagnosis, dict) or target_absent_resolved:
             classification = None
         else:
             classification = diagnosis.get("classification")
@@ -79,7 +85,6 @@ def build_source_binding_report(
                 "resolution_policy": diagnosis.get("resolution_policy"),
             })
 
-        resolution = question.get("source_scope_resolution")
         if isinstance(resolution, dict) and resolution.get("target_status") == "target_absent":
             # A resolved source rule with no target instance is diagnostic
             # evidence only. Keep it separate from scope ambiguity and never

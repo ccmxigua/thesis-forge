@@ -89,6 +89,7 @@ from source_obligation_compiler import (
 from source_scope_binding import (
     diagnose_source_scope_reference,
     resolve_ordered_field_targets,
+    resolve_template_range_target,
     validate_source_scope_binding,
 )
 from requirements_input import RequirementsInputError, normalize_requirements_input
@@ -1852,9 +1853,57 @@ def _merge_role_group(roles: dict[str, Any], target_roles: tuple[str, ...],
     return conflicts
 
 
+def preserve_deterministic_source_scope_questions(
+    primary_questions: list[dict[str, Any]],
+    deterministic_questions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Keep source-bound scope diagnostics after semantic primary review.
+
+    A complete model review may resolve prose meaning, but it cannot make a
+    deterministic target observation or an unresolved structural anchor
+    disappear from the human review ledger.
+    """
+    merged = [copy.deepcopy(item) for item in primary_questions if isinstance(item, dict)]
+    by_clause = {
+        str(item.get("clause_id")): item for item in merged
+        if isinstance(item.get("clause_id"), str) and item.get("clause_id")
+    }
+    for diagnostic in deterministic_questions:
+        if not isinstance(diagnostic, dict) or not (
+            isinstance(diagnostic.get("source_scope_diagnosis"), dict)
+            or isinstance(diagnostic.get("source_scope_resolution"), dict)
+        ):
+            continue
+        clause_id = diagnostic.get("clause_id")
+        existing = by_clause.get(str(clause_id)) if clause_id else None
+        if existing is None:
+            existing = copy.deepcopy(diagnostic)
+            merged.append(existing)
+            if clause_id:
+                by_clause[str(clause_id)] = existing
+        if isinstance(diagnostic.get("source_scope_resolution"), dict):
+            existing["source_scope_resolution"] = copy.deepcopy(
+                diagnostic["source_scope_resolution"]
+            )
+        if isinstance(diagnostic.get("source_scope_diagnosis"), dict):
+            existing["source_scope_diagnosis"] = copy.deepcopy(
+                diagnostic["source_scope_diagnosis"]
+            )
+        resolution = existing.get("source_scope_resolution")
+        if (isinstance(resolution, dict)
+                and resolution.get("target_status") == "target_absent"
+                and resolution.get("rule_interpretation_status") == "resolved"):
+            existing.pop("source_scope_diagnosis", None)
+            existing["source_scope_question"] = diagnostic.get("question")
+    for index, item in enumerate(merged, start=1):
+        item["question_id"] = f"Q{index:04d}"
+    return merged
+
+
 def build_rule_result(
     source: Path, clauses: list[dict[str, Any]], *,
     target_clauses: list[dict[str, Any]] | None = None,
+    official_template_evidence: dict[str, Any] | None = None,
 ) -> tuple[dict[str, Any], list[dict[str, Any]], list[dict[str, Any]]]:
     roles: dict[str, Any] = {}; page: dict[str, Any] = {}; requirements = []; questions = []; conflicts = []
     content_instances: list[dict[str, Any]] = []
@@ -1901,6 +1950,36 @@ def build_rule_result(
             })
             continue
         scope_diagnosis = diagnose_source_scope_reference(clause, scope_clauses)
+        if role == "thesis_classified_index" and scope_diagnosis:
+            template_range = resolve_template_range_target(
+                clause,
+                official_template_evidence=official_template_evidence,
+                target_clauses=target_clauses,
+            )
+            target_status = template_range.get("target_status")
+            questions.append({
+                "question_id": f"Q{len(questions)+1:04d}",
+                "clause_id": clause["id"],
+                "question": (
+                    "官方模板中的分类号、密级端点已绑定，但当前目标未观察到这些字段；"
+                    "目标缺失状态仍未核验。"
+                    if target_status == "target_absent"
+                    else "分类号至密级的来源范围不能据当前材料安全应用；请补充可核验的官方模板锚点或目标结构。"
+                ),
+                "source_text": clause["text"],
+                "candidate_roles": [role],
+                "evidence_ids": clause["evidence_ids"],
+                "context_before": clause.get("context_before", []),
+                "context_after": clause.get("context_after", []),
+                **({"source_scope_diagnosis": scope_diagnosis}
+                   if target_status != "target_absent" else {}),
+                "source_scope_resolution": template_range,
+            })
+            # The role is a range over title-page fields, not a document-wide
+            # paragraph style. Until the target structure is uniquely bound,
+            # keep the clause diagnostic and do not turn it into an executable
+            # role-wide requirement.
+            continue
         if role in CONTENT_INSTANCE_ROLES and scope_diagnosis:
             ordered_targets = resolve_ordered_field_targets(clause, scope_clauses, role)
             if ordered_targets.get("status") == "resolved":
@@ -1995,7 +2074,8 @@ def build_rule_result(
                 "evidence_ids": clause["evidence_ids"],
                 "context_before": clause["context_before"],
                 "context_after": clause["context_after"],
-                "source_scope_diagnosis": scope_diagnosis,
+                **({"source_scope_diagnosis": scope_diagnosis}
+                   if ordered_targets.get("status") != "target_absent" else {}),
                 "source_scope_resolution": {
                     "rule_interpretation_status": (
                         "resolved" if ordered_targets.get("status") == "target_absent"
@@ -2008,6 +2088,9 @@ def build_rule_result(
                     "field_list_clause_ids": ordered_targets.get("field_list_clause_ids", []),
                     "candidate_table_child_indexes": ordered_targets.get(
                         "candidate_table_child_indexes", []
+                    ),
+                    "candidate_target_clause_ids": ordered_targets.get(
+                        "candidate_target_clause_ids", []
                     ),
                 },
             })
@@ -4760,6 +4843,7 @@ def _analyse(args: argparse.Namespace) -> int:
     )
     rule_spec, rule_questions, rule_conflicts = build_rule_result(
         source, clauses, target_clauses=target_clauses,
+        official_template_evidence=official_template_evidence,
     )
     spec, questions, conflicts = rule_spec, rule_questions, rule_conflicts
     spec["analysis_mode"] = args.analysis_mode
@@ -4894,6 +4978,9 @@ def _analyse(args: argparse.Namespace) -> int:
                           "evidence_ids": next((c["evidence_ids"] for c in clauses if c["id"] == cid), [])}
                          for i, cid in enumerate(spec["completeness"]["unresolved_clause_ids"])]
             questions = bind_question_records(questions, clauses, evidence)
+            questions = preserve_deterministic_source_scope_questions(
+                questions, rule_questions,
+            )
     else:
         llm_request = build_llm_request(questions, clauses) if questions else None
         if questions and supplied_response is not None:

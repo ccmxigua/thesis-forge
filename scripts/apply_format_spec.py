@@ -5644,9 +5644,13 @@ def main(argv: list[str]) -> int:
                 source_table_contract = compile_source_table_contract(
                     requirement_source or args.input, source_clauses, spec,
                     source_binding=source_binding,
+                    official_template_docx=args.official_template,
                 )
             else:
-                source_table_contract = compile_source_table_contract(args.input, source_clauses, spec)
+                source_table_contract = compile_source_table_contract(
+                    args.input, source_clauses, spec,
+                    official_template_docx=args.official_template,
+                )
             source_table_contract_findings = [
                 {"role": "table", "property": item.get("code", "source_table_contract"),
                  "failure_type": item.get("code", "source_table_contract"),

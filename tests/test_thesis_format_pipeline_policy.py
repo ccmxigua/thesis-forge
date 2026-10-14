@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 
 from docx import Document
+from docx.enum.section import WD_SECTION
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "scripts"))
@@ -17,15 +19,45 @@ from thesis_format_pipeline import (  # noqa: E402
     _source_content_verification_release_gates,
     _code_owned_source_content_verification_release_gates,
     enforce_obligation_review_output_policy,
+    ensure_preview_page_number_selector,
 )
 from obligation_workflow import OBLIGATION_ANALYSIS_LEDGER_PROTOCOL  # noqa: E402
 from format_spec_validation import load_and_validate  # noqa: E402
 from manual_review import build_manual_review_ledger  # noqa: E402
 from manual_review_display import append_manual_review_markers, audit_manual_review_markers  # noqa: E402
 from semantic_contract import sha256_json  # noqa: E402
+from section_model import compile_section_plan  # noqa: E402
 
 
 class ThesisFormatPipelinePolicyTests(unittest.TestCase):
+    def test_preview_page_selector_matches_unique_arabic_or_chinese_chapter_one(self) -> None:
+        for heading in ("第1章 研究背景", "第一章 研究背景"):
+            with self.subTest(heading=heading), tempfile.TemporaryDirectory() as td:
+                path = Path(td) / "body-only.docx"
+                document = Document()
+                document.add_paragraph("前言")
+                document.add_section(WD_SECTION.NEW_PAGE)
+                document.add_paragraph(heading)
+                document.add_paragraph("正文")
+                document.save(path)
+
+                spec = {"page": {"page_number": {
+                    "front_matter_format": "roman", "body_format": "decimal",
+                }}}
+                manifest: dict = {}
+                self.assertTrue(ensure_preview_page_number_selector(spec, manifest))
+                selector = spec["page"]["page_number"]["body_start_selector"]
+                pattern = re.compile(selector["heading_text_pattern"])
+                self.assertIsNotNone(pattern.search(heading))
+                self.assertIsNone(pattern.search("第2章 理论基础"))
+                self.assertEqual(
+                    manifest["preview_inferred_page_number_selector"]["heading_text_pattern"],
+                    selector["heading_text_pattern"],
+                )
+                section_plan = compile_section_plan(spec, path)
+                self.assertTrue(section_plan["valid"], section_plan["findings"])
+                self.assertEqual(section_plan["body_start_section"], 2)
+
     @staticmethod
     def _pending_bundle(
         *, clause_id: str, text: str, start: int, end: int, obligation_index: int = 0,

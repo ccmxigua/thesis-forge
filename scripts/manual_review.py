@@ -735,7 +735,18 @@ def _question_item(
         or question.get("text")
         or ""
     )
-    scope_diagnosis = question.get("source_scope_diagnosis")
+    scope_resolution = question.get("source_scope_resolution")
+    target_absent_resolved = (
+        isinstance(scope_resolution, dict)
+        and scope_resolution.get("target_status") == "target_absent"
+        and scope_resolution.get("rule_interpretation_status") == "resolved"
+    )
+    # A resolved rule with an absent target is not an unresolved source-range
+    # problem. Keep the absence visible as unverified input, without exposing a
+    # stale nearby-scope diagnosis or asking the author to choose an anchor.
+    scope_diagnosis = (
+        question.get("source_scope_diagnosis") if not target_absent_resolved else None
+    )
     scope_classification = (
         scope_diagnosis.get("classification")
         if isinstance(scope_diagnosis, dict) else None
@@ -764,12 +775,16 @@ def _question_item(
         # in the generated document or explain what the reviewer must decide.
         "source_text": source_text,
         "reason": str(
-            question.get("reason")
+            ("来源规则已解析，但当前目标未观察到对应字段；状态保持未核验。"
+             if target_absent_resolved else None)
+            or question.get("reason")
             or scope_reasons.get(scope_classification)
             or question.get("question") or ""
         ),
         "action": str(
-            question.get("action")
+            ("补充或核验当前目标中的对应字段；缺失不代表自动通过。"
+             if target_absent_resolved else None)
+            or question.get("action")
             or scope_actions.get(scope_classification)
             or "请人工确认该条款的适用对象、数值单位或权威解释。"
         ),
@@ -777,8 +792,8 @@ def _question_item(
         "original_blocking": True,
         **({"source_scope_diagnosis": copy.deepcopy(scope_diagnosis)}
            if isinstance(scope_diagnosis, dict) else {}),
-        **({"source_scope_resolution": copy.deepcopy(question["source_scope_resolution"])}
-           if isinstance(question.get("source_scope_resolution"), dict) else {}),
+        **({"source_scope_resolution": copy.deepcopy(scope_resolution)}
+           if isinstance(scope_resolution, dict) else {}),
         **({"source_binding_classification": "human_approval_required"}
            if question.get("source_binding_classification") == "human_approval_required" else {}),
         "producer_records": copy.deepcopy(producer_records or [

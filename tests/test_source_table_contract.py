@@ -82,6 +82,21 @@ def make_bundle(root: Path) -> tuple[Path, Path, Path, Path, list[dict]]:
     return source, clauses_path, spec_path, manifest_path, clauses
 
 
+def make_caption_template(path: Path, positions: list[str]) -> None:
+    doc = Document()
+    for index, position in enumerate(positions, start=1):
+        if position == "above":
+            doc.add_paragraph(f"表1-{index} 表题")
+            doc.add_table(rows=1, cols=1).cell(0, 0).text = "XXXX"
+        elif position == "below":
+            doc.add_table(rows=1, cols=1).cell(0, 0).text = "XXXX"
+            doc.add_paragraph(f"表1-{index} 表题")
+        elif position == "unpaired":
+            doc.add_paragraph(f"表1-{index} 表题")
+            doc.add_paragraph("unrelated text")
+    doc.save(path)
+
+
 class SourceTableContractTests(unittest.TestCase):
     def test_compiles_exact_bound_three_line_and_border_width_clauses(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -100,6 +115,125 @@ class SourceTableContractTests(unittest.TestCase):
             })
             self.assertEqual([item["status"] for item in spec["clause_compliance"]],
                              ["pending_execution", "pending_execution"])
+
+    def test_compiles_one_source_bound_uniform_fraction_for_three_horizontal_lines(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = root / "requirements.docx"
+            text = "表格用三线表，黑色单线，线粗3/4磅"
+            doc = Document()
+            doc.add_paragraph(text)
+            doc.save(source)
+            clauses = [clause("C-uniform", text, "E-uniform", 0, text)]
+            spec = {
+                "roles": {"table_caption": {"position": "above"}},
+                "requirements": [],
+                "clause_compliance": [{
+                    "clause_id": "C-uniform", "status": "unsupported_backend",
+                    "requirement_ids": [],
+                }],
+            }
+
+            result = compile_source_table_contract(source, clauses, spec)
+
+            self.assertEqual(result["status"], "compiled", result["findings"])
+            self.assertEqual(result["interpretation_basis"],
+                             "single_clause_uniform_three_horizontal_lines")
+            self.assertEqual(result["contract"]["border_widths_pt"], {
+                "top": 0.75, "header": 0.75, "bottom": 0.75,
+                "left": 0, "right": 0, "inside_h": 0, "inside_v": 0,
+            })
+            requirement = next(row for row in spec["requirements"] if row["role"] == "table")
+            self.assertEqual(requirement["clause_ids"], ["C-uniform"])
+            self.assertIn("uniform", requirement["reason"])
+            self.assertEqual(spec["clause_compliance"][0]["status"], "pending_execution")
+
+    def test_single_clause_uniform_width_mapping_fails_closed_on_incomplete_or_ambiguous_text(self) -> None:
+        cases = (
+            ("表格用三线表，线粗3/4磅", "source_table_width_unparsed"),
+            ("表格用三线表，黑色单线", "source_table_width_unparsed"),
+            ("表格用三线表，黑色单线，线粗1/0磅", "source_table_width_unparsed"),
+            ("表格用三线表，黑色单线，线粗1磅和线粗2磅", "source_table_width_unparsed"),
+            ("表格用三线表，黑色单线，线粗12.1磅", "source_table_width_out_of_range"),
+        )
+        for index, (text, expected_code) in enumerate(cases):
+            with self.subTest(text=text), tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                source = root / "requirements.docx"
+                doc = Document()
+                doc.add_paragraph(text)
+                doc.save(source)
+                clauses = [clause(f"C-uniform-{index}", text, "E-uniform", 0, text)]
+                spec = {
+                    "roles": {"table_caption": {"position": "above"}},
+                    "requirements": [], "clause_compliance": [],
+                }
+
+                result = compile_source_table_contract(source, clauses, spec)
+
+                self.assertEqual(result["status"], "blocked")
+                self.assertEqual(result["contract"], None)
+                self.assertIn(expected_code, {item["code"] for item in result["findings"]})
+
+    def test_silent_caption_position_uses_unique_consistent_official_template_layout(self) -> None:
+        with tempfile.TemporaryDirectory() as td:
+            root = Path(td)
+            source = root / "requirements.docx"
+            template = root / "official-template.docx"
+            text = "表格用三线表，黑色单线，线粗3/4磅"
+            doc = Document()
+            doc.add_paragraph(text)
+            doc.save(source)
+            make_caption_template(template, ["above", "above"])
+            clauses = [clause("C-uniform", text, "E-uniform", 0, text)]
+            spec = {
+                "roles": {"table_caption": {"font": {"cjk": "SimHei"}}},
+                "requirements": [], "clause_compliance": [{
+                    "clause_id": "C-uniform", "status": "unsupported_backend",
+                    "requirement_ids": [],
+                }],
+            }
+
+            result = compile_source_table_contract(
+                source, clauses, spec, official_template_docx=template,
+            )
+
+            self.assertEqual(result["status"], "compiled", result["findings"])
+            self.assertEqual(result["contract"]["caption_position"], "above")
+            self.assertEqual(result["caption_position_source"], "official_template_layout")
+            evidence = result["caption_position_evidence"]
+            self.assertEqual(evidence["status"], "resolved")
+            self.assertEqual(evidence["source"]["sha256"], sha256_file(template))
+            self.assertEqual(len(evidence["observations"]), 2)
+
+    def test_missing_unpaired_or_conflicting_template_caption_positions_fail_closed(self) -> None:
+        for index, positions in enumerate(([], ["unpaired"], ["above", "below"])):
+            with self.subTest(positions=positions), tempfile.TemporaryDirectory() as td:
+                root = Path(td)
+                source = root / "requirements.docx"
+                template = root / "official-template.docx"
+                text = "表格用三线表，黑色单线，线粗3/4磅"
+                doc = Document()
+                doc.add_paragraph(text)
+                doc.save(source)
+                make_caption_template(template, positions)
+                clauses = [clause(f"C-uniform-{index}", text, "E-uniform", 0, text)]
+                spec = {
+                    "roles": {"table_caption": {"font": {"cjk": "SimHei"}}},
+                    "requirements": [], "clause_compliance": [{
+                        "clause_id": f"C-uniform-{index}", "status": "unsupported_backend",
+                        "requirement_ids": [],
+                    }],
+                }
+
+                result = compile_source_table_contract(
+                    source, clauses, spec, official_template_docx=template,
+                )
+
+                self.assertEqual(result["status"], "blocked")
+                self.assertIsNone(result["contract"])
+                self.assertEqual(result["findings"][0]["code"],
+                                 "source_table_caption_position_unresolved")
 
     def test_manifest_source_or_clause_digest_substitution_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as td:

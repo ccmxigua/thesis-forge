@@ -69,16 +69,14 @@ class SourceBindingReportTests(unittest.TestCase):
         item = ledger["items"][0]
         self.assertEqual(item["source_scope_resolution"]["target_status"], "target_absent")
         self.assertEqual(item["source_scope_resolution"]["verification_status"], "unverified")
+        self.assertNotIn("source_scope_diagnosis", item)
+        self.assertIn("未核验", item["reason"])
+        self.assertIn("不代表自动通过", item["action"])
 
         report = build_source_binding_report(
             _binding(), source_docx_sha256="1" * 64,
             output_docx_sha256="2" * 64,
-            questions=[{
-                "question_id": item["question_ids"][0],
-                "clause_id": item["clause_ids"][0],
-                "source_scope_diagnosis": item["source_scope_diagnosis"],
-                "source_scope_resolution": item["source_scope_resolution"],
-            }],
+            questions=[question],
             content_instance_audit=[], property_receipts=[], manual_items=ledger["items"],
         )
         absent = [row for row in report["outcomes"] if row["classification"] == "target_absent"]

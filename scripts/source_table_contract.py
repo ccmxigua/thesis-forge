@@ -11,6 +11,7 @@ import copy
 import hashlib
 import json
 import re
+from fractions import Fraction
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,7 @@ from semantic_contract import strict_json_read
 
 
 NUMBER = r"([0-9]+(?:\.[0-9]+)?)"
+TABLE_CAPTION_START = re.compile(r"^(?:续\s*)?表\s*\d+\s*[-－—.]\s*\d+(?:\s|$)")
 
 
 def deterministic_requirement_subset(
@@ -380,12 +382,169 @@ def _bound_clause(clause: dict[str, Any], source_texts: list[str],
     return True, "manifest_source_locator_literal_and_digest_verified"
 
 
+def _official_template_caption_position(template_docx: Path) -> dict[str, Any]:
+    """Read caption/table adjacency from the exact official template bytes.
+
+    This is a template-supplied default for a silent position property. It
+    never guesses from general conventions: every caption-like sample must be
+    immediately adjacent to one table (ignoring blank paragraphs), and all
+    observed samples must agree on above/below.
+    """
+    try:
+        before = {"bytes": template_docx.stat().st_size, "sha256": sha256_file(template_docx)}
+        doc = Document(template_docx)
+        records: list[dict[str, Any]] = []
+        paragraph_index = 0
+        table_index = 0
+        for body_child_index, node in enumerate(doc._element.body.iterchildren()):
+            if node.tag.endswith("}p"):
+                paragraph = Paragraph(node, doc)
+                records.append({
+                    "kind": "paragraph", "text": paragraph.text.strip(),
+                    "paragraph_index": paragraph_index,
+                    "body_child_index": body_child_index,
+                })
+                paragraph_index += 1
+            elif node.tag.endswith("}tbl"):
+                records.append({
+                    "kind": "table", "table_index": table_index,
+                    "body_child_index": body_child_index,
+                })
+                table_index += 1
+            else:
+                records.append({"kind": "barrier", "body_child_index": body_child_index})
+        after = {"bytes": template_docx.stat().st_size, "sha256": sha256_file(template_docx)}
+    except Exception as exc:
+        return {
+            "status": "blocked", "reason": "official_template_structure_unreadable",
+            "error": f"{type(exc).__name__}: {exc}",
+        }
+    if before != after:
+        return {
+            "status": "blocked", "reason": "official_template_changed_during_caption_inspection",
+            "before": before, "after": after,
+        }
+
+    caption_candidates: list[dict[str, Any]] = []
+    for index, record in enumerate(records):
+        if record.get("kind") != "paragraph" or not TABLE_CAPTION_START.match(
+            str(record.get("text") or "")
+        ):
+            continue
+        previous = next((records[pos] for pos in range(index - 1, -1, -1)
+                         if records[pos].get("kind") != "paragraph"
+                         or records[pos].get("text")), None)
+        following = next((records[pos] for pos in range(index + 1, len(records))
+                          if records[pos].get("kind") != "paragraph"
+                          or records[pos].get("text")), None)
+        neighbors = []
+        is_continuation_caption = re.match(r"^续\s*表", str(record.get("text") or ""))
+        if (not is_continuation_caption and isinstance(previous, dict)
+                and previous.get("kind") == "table"):
+            neighbors.append(("below", previous))
+        if isinstance(following, dict) and following.get("kind") == "table":
+            neighbors.append(("above", following))
+        candidates = [{
+            "position": position,
+            "table_body_child_index": table_record.get("body_child_index"),
+            "table_index": table_record.get("table_index"),
+        } for position, table_record in neighbors]
+        caption_candidates.append({
+            "caption_text": record.get("text"),
+            "paragraph_index": record.get("paragraph_index"),
+            "caption_body_child_index": record.get("body_child_index"),
+            "candidates": candidates,
+        })
+
+    # A caption between two tables can be adjacent to both: it may be below
+    # the preceding table or above the following one. Resolve the complete
+    # one-to-one caption/table mapping from the template structure itself.
+    # If the mapping is not unique, retain the evidence and fail closed.
+    assignments: list[list[dict[str, Any]]] = []
+    ordered_candidates = sorted(
+        caption_candidates,
+        key=lambda item: (len(item["candidates"]), item["caption_body_child_index"]),
+    )
+
+    def assign_captions(
+        remaining: list[dict[str, Any]], used_tables: set[int],
+        current: list[dict[str, Any]],
+    ) -> None:
+        if len(assignments) >= 2:
+            return
+        if not remaining:
+            assignments.append(current.copy())
+            return
+        available_by_caption = [
+            (caption, [candidate for candidate in caption["candidates"]
+                       if candidate["table_index"] not in used_tables])
+            for caption in remaining
+        ]
+        caption, available = min(available_by_caption, key=lambda pair: len(pair[1]))
+        if not available:
+            return
+        next_remaining = [item for item in remaining if item is not caption]
+        for candidate in available:
+            assign_captions(
+                next_remaining,
+                used_tables | {int(candidate["table_index"])},
+                [*current, {**caption, **candidate}],
+            )
+
+    assign_captions(ordered_candidates, set(), [])
+    unresolved_captions: list[dict[str, Any]] = []
+    observations: list[dict[str, Any]] = []
+    if not assignments:
+        unresolved_captions = [{
+            "caption_text": item["caption_text"],
+            "paragraph_index": item["paragraph_index"],
+            "body_child_index": item["caption_body_child_index"],
+            "candidates": item["candidates"],
+        } for item in caption_candidates]
+    elif len(assignments) == 1:
+        observations = assignments[0]
+    else:
+        unresolved_captions = [{
+            "caption_text": item["caption_text"],
+            "paragraph_index": item["paragraph_index"],
+            "body_child_index": item["caption_body_child_index"],
+            "candidates": item["candidates"],
+        } for item in caption_candidates]
+    source_record = {
+        "kind": "official_template_layout",
+        "path": str(template_docx.resolve()),
+        **before,
+    }
+    if not observations or unresolved_captions:
+        return {
+            "status": "blocked", "reason": "official_template_caption_table_mapping_not_unique",
+            "source": source_record, "observations": observations,
+            "unresolved_captions": unresolved_captions,
+        }
+    tables = [row["table_index"] for row in observations]
+    positions = {row["position"] for row in observations}
+    if len(tables) != len(set(tables)) or len(positions) != 1:
+        return {
+            "status": "semantic_ambiguity",
+            "reason": "official_template_caption_samples_conflict_or_reuse_a_table",
+            "source": source_record, "observations": observations,
+            "unresolved_captions": [],
+        }
+    return {
+        "status": "resolved", "position": next(iter(positions)),
+        "source": source_record, "observations": observations,
+        "unresolved_captions": [],
+        "policy": "unique_one_to_one_official_template_caption_table_mapping",
+    }
+
+
 def compile_source_table_contract(
     source_docx: Path,
     clauses: list[dict[str, Any]],
     spec: dict[str, Any],
     *,
     source_binding: dict[str, Any] | None = None,
+    official_template_docx: Path | None = None,
 ) -> dict[str, Any]:
     """Return a code-owned table contract or a fail-closed diagnostic."""
     relevant = [clause for clause in clauses
@@ -426,36 +585,78 @@ def compile_source_table_contract(
     three_line = [c for c in relevant if re.search(r"三线表", c["text"])]
     border_clauses = [c for c in relevant if re.search(r"外边框线", c["text"])
                       and re.search(r"内边框线", c["text"])]
-    if len(three_line) != 1 or len(border_clauses) != 1:
+    width_source_clause: dict[str, Any] | None = None
+    uniform_clause: dict[str, Any] | None = None
+    outer = inner = None
+    mapping_basis = "separate_outer_inner_width_clauses"
+    width_parse_error = False
+    if len(three_line) == 1 and len(border_clauses) == 1 and len(relevant) == 2:
+        width_source_clause = border_clauses[0]
+        text = width_source_clause["text"]
+        outer_match = re.search(r"外边框线\s*粗\s*" + NUMBER + r"\s*(?:磅|pt)", text, re.I)
+        inner_match = re.search(r"内边框线\s*粗\s*" + NUMBER + r"\s*(?:磅|pt)", text, re.I)
+        if outer_match and inner_match:
+            outer, inner = float(outer_match.group(1)), float(inner_match.group(1))
+        else:
+            width_parse_error = True
+    elif len(three_line) == 1 and not border_clauses and len(relevant) == 1:
+        # A single source clause can state a three-line topology and one
+        # uniform line width. That width maps to the three horizontal rules;
+        # the compiler does not invent different outside/inside values.
+        uniform_clause = three_line[0]
+        width_source_clause = uniform_clause
+        text = str(uniform_clause.get("text") or "")
+        width_matches = list(re.finditer(
+            r"线粗\s*(?P<value>[0-9]+(?:\.[0-9]+)?(?:\s*/\s*[0-9]+(?:\.[0-9]+)?)?)\s*(?:磅|pt)",
+            text, re.I,
+        ))
+        if "黑色" in text and "单线" in text and len(width_matches) == 1:
+            raw_width = re.sub(r"\s+", "", width_matches[0].group("value"))
+            try:
+                outer = inner = float(Fraction(raw_width))
+                width_source_clause = uniform_clause
+                mapping_basis = "single_clause_uniform_three_horizontal_lines"
+            except (ValueError, ZeroDivisionError):
+                width_parse_error = True
+        else:
+            width_parse_error = True
+    if len(three_line) != 1 or width_source_clause is None:
         return {"status": "blocked", "source_clauses": source_records, "contract": None,
                 "findings": [{"code": "source_table_topology_ambiguous",
-                              "reason": "requires exactly one source-bound three-line rule and one source-bound outer/inner width rule"}]}
-
-    text = border_clauses[0]["text"]
-    outer_match = re.search(r"外边框线\s*粗\s*" + NUMBER + r"\s*(?:磅|pt)", text, re.I)
-    inner_match = re.search(r"内边框线\s*粗\s*" + NUMBER + r"\s*(?:磅|pt)", text, re.I)
-    if not outer_match or not inner_match:
+                              "reason": "requires one source-bound three-line rule plus explicit outer/inner widths, or one source-bound clause with an unambiguous uniform three-line width"}]}
+    if width_parse_error or outer is None or inner is None:
         return {"status": "blocked", "source_clauses": source_records, "contract": None,
                 "findings": [{"code": "source_table_width_unparsed",
-                              "reason": "explicit outer and inner line widths could not be parsed"}]}
-    outer, inner = float(outer_match.group(1)), float(inner_match.group(1))
+                              "reason": "the source does not contain exactly one supported width declaration for its stated topology"}]}
     if not (0 < outer <= 12 and 0 <= inner <= 12):
         return {"status": "blocked", "source_clauses": source_records, "contract": None,
                 "findings": [{"code": "source_table_width_out_of_range",
                               "outer_pt": outer, "inner_pt": inner}]}
 
-    clause_ids = [str(c["id"]) for c in (three_line[0], border_clauses[0])]
+    source_contract_clauses = (
+        [uniform_clause] if uniform_clause is not None
+        else [three_line[0], width_source_clause]
+    )
+    clause_ids = list(dict.fromkeys(str(c["id"]) for c in source_contract_clauses))
     evidence_ids = list(dict.fromkeys(
-        str(eid) for c in (three_line[0], border_clauses[0]) for eid in c.get("evidence_ids", [])
+        str(eid) for c in source_contract_clauses for eid in c.get("evidence_ids", [])
     ))
     border_widths = {"top": outer, "header": inner, "bottom": outer,
                      "left": 0, "right": 0, "inside_h": 0, "inside_v": 0}
     caption_position = (spec.get("roles", {}).get("table_caption", {}).get("position")
                        if isinstance(spec.get("roles"), dict) else None)
+    caption_position_source = "format_spec" if caption_position in {"above", "below"} else None
+    caption_position_evidence: dict[str, Any] | None = None
+    if caption_position not in {"above", "below"} and official_template_docx is not None:
+        caption_position_evidence = _official_template_caption_position(official_template_docx)
+        if caption_position_evidence.get("status") == "resolved":
+            caption_position = caption_position_evidence["position"]
+            caption_position_source = "official_template_layout"
     if caption_position not in {"above", "below"}:
         return {"status": "blocked", "source_clauses": source_records, "contract": None,
                 "findings": [{"code": "source_table_caption_position_unresolved",
-                              "reason": "captioned table scope requires a source-resolved table caption position"}]}
+                              "reason": "captioned table scope requires an explicit format-spec position or a unique consistent position from the exact official template",
+                              "official_template_evidence": caption_position_evidence}]}
     contract = {
         "style": "three_line", "top_border_pt": outer,
         "header_border_pt": inner, "bottom_border_pt": outer,
@@ -490,8 +691,12 @@ def compile_source_table_contract(
             "evidence_ids": evidence_ids, "clause_ids": clause_ids,
             "resolved_by": "template", "confidence": 1.0,
             "source_text": "\n".join(str(c.get("source_text_full") or c["text"])
-                                      for c in (three_line[0], border_clauses[0])),
-            "reason": "The exact source-bound three-line and width clauses compile to explicit table-edge properties.",
+                                      for c in source_contract_clauses),
+            "reason": (
+                "The source-bound single-clause uniform line width maps to the three horizontal rules."
+                if mapping_basis == "single_clause_uniform_three_horizontal_lines"
+                else "The exact source-bound three-line and separate outer/inner width clauses compile to explicit table-edge properties."
+            ),
         })
 
     compliance = {r.get("clause_id"): r for r in spec.get("clause_compliance", [])
@@ -522,7 +727,10 @@ def compile_source_table_contract(
         "status": "blocked" if findings else "compiled",
         "source_docx_sha256": sha256_file(source_docx),
         "source_binding": copy.deepcopy(source_binding),
+        "caption_position_source": caption_position_source,
+        "caption_position_evidence": caption_position_evidence,
         "source_clauses": source_records, "contract": contract,
+        "interpretation_basis": mapping_basis,
         "requirement_id": requirement_id, "table_scope": "captioned_tables",
         "findings": findings,
     }

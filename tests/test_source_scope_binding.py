@@ -141,6 +141,212 @@ class SourceScopeBindingTests(unittest.TestCase):
              if item["role"] == "cover_field_label" for clause_id in item["clause_ids"]},
         )
 
+    def test_tjufe_cover_absence_suppresses_stale_scope_diagnosis_for_labels_and_values(self) -> None:
+        fields_text = "自上而下为：专业名称、作者学号、论文作者、指导教师"
+        fields = clause(
+            "C-FIELDS", fields_text, fields_text, evidence_id="E-FIELDS",
+            location={"part": "document", "child_index": 1, "paragraph": 0},
+        )
+        fields["context_before"] = ["（一）封面"]
+        fields["context_after"] = []
+        label_text = "专业名称至指导教师标题中文字体为宋体，四号，分散对齐，无缩进，单倍行距"
+        label = clause(
+            "C-LABEL", label_text, label_text, evidence_id="E-LABEL",
+            location={"part": "document", "child_index": 2, "paragraph": 0},
+        )
+        label["context_before"] = ["（一）封面"]
+        label["context_after"] = []
+        value_text = "对应填写的内容为宋体，四号，居中对齐，无缩进，单倍行距"
+        value = clause(
+            "C-VALUE", value_text, value_text, evidence_id="E-VALUE",
+            location={"part": "document", "child_index": 3, "paragraph": 0},
+        )
+        value["context_before"] = [label_text, "（一）封面"]
+        value["context_after"] = []
+
+        _, questions, conflicts = requirements_engine.build_rule_result(
+            Path("synthetic-tjufe-source.docx"), [fields, label, value],
+            target_clauses=[],
+        )
+        self.assertEqual(conflicts, [])
+        by_clause = {item["clause_id"]: item for item in questions}
+        for clause_id in ("C-LABEL", "C-VALUE"):
+            with self.subTest(clause_id=clause_id):
+                self.assertEqual(
+                    by_clause[clause_id]["source_scope_resolution"]["target_status"],
+                    "target_absent",
+                )
+                self.assertEqual(
+                    by_clause[clause_id]["source_scope_resolution"]["verification_status"],
+                    "unverified",
+                )
+                self.assertNotIn("source_scope_diagnosis", by_clause[clause_id])
+
+    def test_title_page_range_requires_hash_bound_ordered_template_endpoints(self) -> None:
+        text = "分类号至密级标题及内容：中文字体为宋体，西文字体为Times New Roman，四号"
+        source_clause = clause(
+            "C-CLASSIFICATION", text, text, evidence_id="E-CLASSIFICATION",
+            location={"part": "document", "child_index": 10, "paragraph": 0},
+        )
+        source_clause["context_before"] = ["（二）扉页"]
+        source_clause["context_after"] = []
+        template_sha = "a" * 64
+        official_template = {
+            "source": {"kind": "official_template_docx", "sha256": template_sha},
+            "items": [
+                {
+                    "id": "TE-A", "category": "fixed_text", "normalized_text": "分类号:XXXX",
+                    "provenance": {"source_kind": "official_template_docx", "source_sha256": template_sha},
+                    "source_location": {"part": "word/document.xml", "paragraph_index": 42},
+                },
+                {
+                    "id": "TE-B", "category": "fixed_text", "normalized_text": "密级:XXXX",
+                    "provenance": {"source_kind": "official_template_docx", "source_sha256": template_sha},
+                    "source_location": {"part": "word/document.xml", "paragraph_index": 43},
+                },
+            ],
+        }
+        spec, questions, conflicts = requirements_engine.build_rule_result(
+            Path("synthetic-tjufe-source.docx"), [source_clause],
+            target_clauses=[], official_template_evidence=official_template,
+        )
+        self.assertEqual(conflicts, [])
+        item = next(q for q in questions if q["clause_id"] == "C-CLASSIFICATION")
+        self.assertEqual(item["source_scope_resolution"]["field_labels"], ["分类号", "密级"])
+        self.assertEqual(item["source_scope_resolution"]["template_evidence_ids"], ["TE-A", "TE-B"])
+        self.assertEqual(item["source_scope_resolution"]["target_status"], "target_absent")
+        self.assertEqual(item["source_scope_resolution"]["verification_status"], "unverified")
+        self.assertNotIn("thesis_classified_index", spec["roles"])
+        self.assertNotIn("source_scope_diagnosis", item)
+
+    def test_title_page_range_fails_closed_without_unique_official_template_binding(self) -> None:
+        text = "分类号至密级标题及内容：中文字体为宋体，四号"
+        source_clause = clause(
+            "C-CLASSIFICATION", text, text, evidence_id="E-CLASSIFICATION",
+            location={"part": "document", "child_index": 10, "paragraph": 0},
+        )
+        source_clause["context_before"] = ["（二）扉页"]
+        source_clause["context_after"] = []
+        duplicated = {
+            "source": {"kind": "official_template_docx", "sha256": "a" * 64},
+            "items": [
+                {
+                    "id": "TE-A1", "category": "fixed_text", "normalized_text": "分类号:XXXX",
+                    "provenance": {"source_kind": "official_template_docx", "source_sha256": "a" * 64},
+                    "source_location": {"part": "word/document.xml", "paragraph_index": 42},
+                },
+                {
+                    "id": "TE-A2", "category": "fixed_text", "normalized_text": "分类号:YYYY",
+                    "provenance": {"source_kind": "official_template_docx", "source_sha256": "a" * 64},
+                    "source_location": {"part": "word/document.xml", "paragraph_index": 44},
+                },
+                {
+                    "id": "TE-B", "category": "fixed_text", "normalized_text": "密级:XXXX",
+                    "provenance": {"source_kind": "official_template_docx", "source_sha256": "a" * 64},
+                    "source_location": {"part": "word/document.xml", "paragraph_index": 43},
+                },
+            ],
+        }
+        _, questions, _ = requirements_engine.build_rule_result(
+            Path("synthetic-tjufe-source.docx"), [source_clause],
+            target_clauses=[], official_template_evidence=duplicated,
+        )
+        item = next(q for q in questions if q["clause_id"] == "C-CLASSIFICATION")
+        self.assertNotIn("target_status", item["source_scope_resolution"])
+        self.assertEqual(item["source_scope_resolution"]["status"], "semantic_ambiguity")
+
+    def test_conditional_ranges_and_anaphoric_successor_remain_ambiguous(self) -> None:
+        first_text = "所属学院至论文作者标题（博士扉页的论文作者至论文评阅人标题）中文字体为宋体"
+        second_text = "对应填写的内容为宋体，四号，加粗"
+        source = first_text + "。" + second_text
+        location = {"part": "document", "child_index": 56, "paragraph": 0}
+        first = clause(
+            "C-HEADER-RANGE", first_text, source, evidence_id="E-TITLE",
+            location=location, start=0,
+        )
+        first["context_before"] = ["（二）扉页"]
+        second = clause(
+            "C-CORRESPONDING-CONTENT", second_text, source, evidence_id="E-TITLE",
+            location=location, start=len(first_text) + 1,
+        )
+        second["context_before"] = ["（二）扉页"]
+        records = [first, second]
+
+        range_diagnosis = diagnose_source_scope_reference(first, records)
+        self.assertEqual(range_diagnosis["classification"], "semantic_ambiguity")
+        self.assertEqual(range_diagnosis["source_ranges"], [
+            {"left": "所属学院", "right": "论文作者"},
+            {"left": "论文作者", "right": "论文评阅人", "condition": "博士扉页"},
+        ])
+        anaphora_diagnosis = diagnose_source_scope_reference(second, records)
+        self.assertEqual(anaphora_diagnosis["classification"], "semantic_ambiguity")
+        self.assertEqual(anaphora_diagnosis["candidate_clause_ids"], ["C-HEADER-RANGE"])
+        self.assertEqual(
+            anaphora_diagnosis["candidates"][0]["antecedent_source_ranges"],
+            range_diagnosis["source_ranges"],
+        )
+
+    def test_explicit_title_page_range_does_not_select_cover_or_unanchored_candidates(self) -> None:
+        current_text = "论文作者至论文评阅人标题使用宋体"
+        current = {"id": "C-CURRENT", "text": current_text,
+                   "context_before": ["（二）扉页"], "evidence_ids": ["E-CURRENT"]}
+        cover = {"id": "C-COVER", "text": "论文作者：导师姓名",
+                 "context_before": ["（一）封面"], "evidence_ids": ["E-COVER"]}
+        unanchored = {"id": "C-UNANCHORED", "text": "论文评阅人：专家姓名",
+                      "evidence_ids": ["E-UNKNOWN"]}
+
+        result = diagnose_source_scope_reference(current, [cover, unanchored, current])
+
+        self.assertEqual(result["classification"], "parser_capability_gap")
+        self.assertEqual(result["candidate_clause_ids"], [])
+
+    def test_primary_merge_cannot_erase_source_scope_ambiguity_or_target_absence(self) -> None:
+        deterministic = [
+            {
+                "question_id": "Q-RULE-1", "clause_id": "C-TARGET",
+                "question": "目标字段缺失，状态未核验。",
+                "source_scope_resolution": {
+                    "rule_interpretation_status": "resolved",
+                    "target_status": "target_absent",
+                    "verification_status": "unverified",
+                    "field_labels": ["甲", "乙"],
+                },
+                "source_scope_diagnosis": {
+                    "status": "pending_input", "classification": "human_confirmation_required",
+                    "reason": "stale_scope_diagnosis",
+                    "resolution_policy": "human_selects_exact_clause_ids_before_execution",
+                },
+            },
+            {
+                "question_id": "Q-RULE-2", "clause_id": "C-RANGE",
+                "question": "两种条件范围待人工消歧。",
+                "source_scope_diagnosis": {
+                    "status": "pending_input", "classification": "semantic_ambiguity",
+                    "reason": "source_clause_contains_conditional_range_alternatives",
+                    "resolution_policy": "human_selects_exact_clause_ids_before_execution",
+                },
+            },
+        ]
+        primary = [{
+            "question_id": "Q-PRIMARY-1", "clause_id": "C-TARGET",
+            "question": "模型认为格式规则已理解。",
+        }]
+
+        result = requirements_engine.preserve_deterministic_source_scope_questions(
+            primary, deterministic,
+        )
+
+        by_clause = {item["clause_id"]: item for item in result}
+        self.assertEqual(set(by_clause), {"C-TARGET", "C-RANGE"})
+        self.assertEqual(by_clause["C-TARGET"]["source_scope_resolution"]["target_status"],
+                         "target_absent")
+        self.assertNotIn("source_scope_diagnosis", by_clause["C-TARGET"])
+        self.assertEqual(by_clause["C-TARGET"]["source_scope_question"],
+                         "目标字段缺失，状态未核验。")
+        self.assertEqual(by_clause["C-RANGE"]["source_scope_diagnosis"]["classification"],
+                         "semantic_ambiguity")
+        self.assertEqual(len({item["question_id"] for item in result}), 2)
+
     def test_tjufe_cover_ordered_range_compiles_only_matching_cover_cells(self) -> None:
         fields_text = "专业名称、作者学号、论文作者、指导教师"
         clauses: list[dict] = []

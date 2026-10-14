@@ -21,29 +21,220 @@ _FORWARD_REFERENCE = re.compile(r"(?:如下|下表|下图|下文|后文|见下|�
 _SOURCE_RANGE = re.compile(r"(?P<left>[^，。；;：:（）()]+?)至(?P<right>[^，。；;：:（）()]+)")
 
 
-def _source_range_terms(text: str) -> tuple[str, str] | None:
-    """Extract only the literal endpoints of a prose range, never its targets.
-
-    Formatting clauses often append a property immediately after the range
-    (for example, “专业名称至指导教师标题中文字体为宋体”).  Stop the right
-    endpoint before that property phrase so the diagnostic can list possible
-    anchors without silently selecting them.
-    """
-    match = _SOURCE_RANGE.search(text)
-    if not match:
-        return None
-    left = match.group("left").strip()
-    right = match.group("right").strip()
-    right = re.split(
-        r"(?:中文字体|西文字体|字体|字号|对齐|无缩进|单倍行距|采用|使用|为|[，,。；;：:\s])",
-        right,
+def _clean_source_range_endpoint(value: str) -> str:
+    value = re.split(
+        r"(?:中文字体|西文字体|字体|字号|对齐|无缩进|单倍行距|标题及内容|标题|字段|内容|采用|使用|为|[，,。；;：:\s])",
+        value,
         maxsplit=1,
     )[0].strip()
-    # “标题” describes the endpoint label; it is not part of its literal
-    # text in the target document.
-    right = re.sub(r"(?:标题|字段|内容)$", "", right).strip()
-    left = re.sub(r"(?:标题|字段|内容)$", "", left).strip()
-    return (left, right) if left and right else None
+    return re.sub(r"(?:标题|字段|内容)$", "", value).strip()
+
+
+def _source_range_records(text: str) -> list[dict[str, str]]:
+    """Extract literal range endpoints and any explicit scope qualifier.
+
+    A clause may state conditional alternatives in parentheses, such as one
+    range for a master title page and another for a doctoral title page.  Keep
+    every range and its qualifier so those alternatives remain visible instead
+    of silently using only the first one.
+    """
+    results: list[dict[str, str]] = []
+    for match in _SOURCE_RANGE.finditer(text):
+        raw_left = match.group("left").strip()
+        condition = None
+        qualifier = re.match(
+            r"(?P<condition>[^，。；;（）()]*?(?:扉页|封面))的(?P<endpoint>[^，。；;（）()]*)$",
+            raw_left,
+        )
+        if qualifier:
+            condition = qualifier.group("condition").strip()
+            raw_left = qualifier.group("endpoint").strip()
+        left = _clean_source_range_endpoint(raw_left)
+        right = _clean_source_range_endpoint(match.group("right"))
+        if left and right:
+            record = {"left": left, "right": right}
+            if condition:
+                record["condition"] = condition
+            if record not in results:
+                results.append(record)
+    return results
+
+
+def _source_range_terms_all(text: str) -> list[tuple[str, str]]:
+    return [(item["left"], item["right"]) for item in _source_range_records(text)]
+
+
+def _source_range_terms(text: str) -> tuple[str, str] | None:
+    """Compatibility helper for the single-range field-list compiler."""
+    ranges = _source_range_terms_all(text)
+    return ranges[0] if ranges else None
+
+
+def _section_compatible(current: dict[str, Any], candidate: dict[str, Any]) -> bool:
+    """Exclude provably cross-section candidates while retaining ambiguity.
+
+    A current explicit section anchor requires the same explicit candidate
+    anchor. With no current anchor, candidates stay diagnostic only; the code
+    cannot infer that they are cross-section selections.
+    """
+    current_section = _section_marker(current)
+    candidate_section = _section_marker(candidate)
+    if current_section is not None:
+        return current_section == candidate_section
+    return True
+
+
+def _adjacent_preceding_source_clauses(
+    clause: dict[str, Any], clauses: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Return the closest contiguous clause(s) in the same source paragraph.
+
+    This narrows a diagnostic for “corresponding content” to the actual nearby
+    antecedent.  It is evidence for a human, never an automatic scope choice.
+    """
+    current_span = clause.get("source_span")
+    current_text = clause.get("source_evidence_text")
+    if not isinstance(current_span, dict) or not isinstance(current_text, str):
+        return []
+    start = current_span.get("start_offset")
+    if type(start) is not int:
+        return []
+    candidates: list[tuple[int, dict[str, Any]]] = []
+    for item in clauses:
+        if item is clause or not _section_compatible(clause, item):
+            continue
+        span = item.get("source_span")
+        if not isinstance(span, dict):
+            continue
+        if any(span.get(key) != current_span.get(key) for key in (
+            "evidence_id", "source_sha256", "location",
+        )):
+            continue
+        end = span.get("end_offset")
+        if type(end) is not int or end > start:
+            continue
+        gap = current_text[end:start]
+        if len(gap) > 2 or any(char not in "。；;，,：: \t\r\n" for char in gap):
+            continue
+        candidates.append((len(gap), item))
+    if not candidates:
+        return []
+    closest_gap = min(gap for gap, _ in candidates)
+    return [item for gap, item in candidates if gap == closest_gap]
+
+
+def resolve_template_range_target(
+    clause: dict[str, Any], *,
+    official_template_evidence: dict[str, Any] | None,
+    target_clauses: list[dict[str, Any]] | None,
+) -> dict[str, Any]:
+    """Bind one explicit source range to unique, hash-matched template labels.
+
+    Template labels are accepted only as endpoints when their evidence is
+    explicitly attributed to one official-template source hash.  The target
+    is reported absent only when a supplied target structure contains neither
+    endpoint.  Partial or present targets remain unverified.
+    """
+    ranges = _source_range_terms_all(str(clause.get("text") or ""))
+    if len(ranges) != 1:
+        return {"status": "semantic_ambiguity" if ranges else "parser_capability_gap",
+                "reason": "template_range_requires_one_explicit_endpoint_pair",
+                "target_clause_ids": []}
+    if not isinstance(official_template_evidence, dict):
+        return {"status": "parser_capability_gap",
+                "reason": "official_template_endpoint_evidence_not_supplied",
+                "target_clause_ids": []}
+    source = official_template_evidence.get("source")
+    source_sha = source.get("sha256") if isinstance(source, dict) else None
+    if (not isinstance(source, dict) or source.get("kind") != "official_template_docx"
+            or not isinstance(source_sha, str) or not re.fullmatch(r"[0-9a-f]{64}", source_sha)):
+        return {"status": "parser_capability_gap",
+                "reason": "official_template_source_identity_unverified",
+                "target_clause_ids": []}
+
+    left, right = ranges[0]
+
+    def endpoint_matches(endpoint: str) -> list[dict[str, Any]]:
+        normalized_endpoint = _normalized_field_literal(endpoint)
+        matches: list[dict[str, Any]] = []
+        items = official_template_evidence.get("items")
+        if not isinstance(items, list):
+            return matches
+        for item in items:
+            if not isinstance(item, dict) or item.get("category") != "fixed_text":
+                continue
+            provenance = item.get("provenance")
+            if (not isinstance(provenance, dict)
+                    or provenance.get("source_kind") != "official_template_docx"
+                    or provenance.get("source_sha256") != source_sha):
+                continue
+            literal = _normalized_field_literal(item.get("normalized_text") or item.get("value"))
+            if not literal.startswith(normalized_endpoint):
+                continue
+            suffix = literal[len(normalized_endpoint):]
+            if suffix and suffix[0] not in {":", "："}:
+                continue
+            location = item.get("source_location")
+            if (not isinstance(location, dict)
+                    or location.get("part") != "word/document.xml"
+                    or type(location.get("paragraph_index")) is not int):
+                continue
+            matches.append(item)
+        return matches
+
+    left_matches = endpoint_matches(left)
+    right_matches = endpoint_matches(right)
+    if len(left_matches) != 1 or len(right_matches) != 1:
+        return {
+            "status": "semantic_ambiguity" if len(left_matches) > 1 or len(right_matches) > 1
+            else "parser_capability_gap",
+            "reason": "official_template_range_endpoints_not_unique",
+            "field_labels": [left, right],
+            "template_evidence_ids": [
+                str(item.get("id")) for item in [*left_matches, *right_matches] if item.get("id")
+            ],
+            "template_source_sha256": source_sha,
+            "target_clause_ids": [],
+        }
+    left_location = left_matches[0]["source_location"]
+    right_location = right_matches[0]["source_location"]
+    if left_location["paragraph_index"] >= right_location["paragraph_index"]:
+        return {"status": "semantic_ambiguity",
+                "reason": "official_template_range_endpoint_order_conflict",
+                "field_labels": [left, right],
+                "template_evidence_ids": [left_matches[0]["id"], right_matches[0]["id"]],
+                "template_source_sha256": source_sha,
+                "target_clause_ids": []}
+
+    target_ids: list[str] = []
+    observed: list[str] = []
+    if target_clauses is not None:
+        for item in target_clauses:
+            if not isinstance(item, dict):
+                continue
+            text = _normalized_field_literal(item.get("text"))
+            for endpoint in (left, right):
+                normalized_endpoint = _normalized_field_literal(endpoint)
+                if text.startswith(normalized_endpoint + ":") or text.startswith(normalized_endpoint + "："):
+                    target_ids.append(str(item.get("id")))
+                    observed.append(endpoint)
+    absent = target_clauses is not None and not observed
+    return {
+        "status": "target_absent" if absent else "resolved",
+        "reason": ("official_template_range_bound_but_no_endpoint_in_target"
+                   if absent else "official_template_range_bound_target_not_absent_or_not_supplied"),
+        "rule_interpretation_status": "resolved",
+        "target_status": "target_absent" if absent else (
+            "target_unobserved" if target_clauses is None else "target_present_unverified"
+        ),
+        "verification_status": "unverified",
+        "field_labels": [left, right],
+        "template_evidence_ids": [left_matches[0]["id"], right_matches[0]["id"]],
+        "template_source_sha256": source_sha,
+        "template_paragraph_indexes": [left_location["paragraph_index"], right_location["paragraph_index"]],
+        "candidate_target_clause_ids": target_ids,
+        "target_clause_ids": [],
+    }
 
 
 def _normalized_field_literal(value: Any) -> str:
@@ -259,19 +450,28 @@ def diagnose_source_scope_reference(
     ordinal_terms = list(dict.fromkeys(_ORDINAL.findall(text)))
     anaphoric = bool(_ANAPHORA.search(text))
     forward = bool(_FORWARD_REFERENCE.search(text))
-    source_range = _source_range_terms(text)
-    if source_range is None and source_text != text:
-        candidate_range = _source_range_terms(source_text)
-        if candidate_range and any(term and term in text for term in candidate_range):
-            source_range = candidate_range
-    if not (ordinal_terms or anaphoric or forward or source_range):
+    source_range_records = _source_range_records(text)
+    source_ranges = [(item["left"], item["right"]) for item in source_range_records]
+    if not source_ranges and source_text != text:
+        candidate_range_records = _source_range_records(source_text)
+        candidate_ranges = [(item["left"], item["right"]) for item in candidate_range_records]
+        source_ranges = [
+            pair for pair in candidate_ranges
+            if any(term and term in text for term in pair)
+        ]
+        source_range_records = [
+            item for item in candidate_range_records
+            if (item["left"], item["right"]) in source_ranges
+        ]
+    source_range = source_ranges[0] if len(source_ranges) == 1 else None
+    if not (ordinal_terms or anaphoric or forward or source_ranges):
         return None
 
     current_index = next((i for i, item in enumerate(clauses) if item is clause), None)
     candidates: list[dict[str, Any]] = []
     if ordinal_terms:
         for item in clauses:
-            if item is clause:
+            if item is clause or not _section_compatible(clause, item):
                 continue
             item_text = str(item.get("text") or "")
             matched = [term for term in ordinal_terms if term in item_text]
@@ -283,13 +483,17 @@ def diagnose_source_scope_reference(
                     "location": dict(item.get("location") or {}),
                     "matched_terms": matched,
                 })
+    elif len(source_ranges) > 1:
+        # Multiple explicit ranges in one rule usually encode conditional
+        # variants.  Keep the literal alternatives rather than choosing one.
+        pass
     elif source_range:
         endpoint_terms = source_range
         # Endpoint labels sometimes have a semantic suffix in the requirement
         # prose (e.g. “指导教师标题”).  Match the stripped literal endpoint
         # against current extracted clauses for diagnosis only.
         for item in clauses:
-            if item is clause:
+            if item is clause or not _section_compatible(clause, item):
                 continue
             item_text = str(item.get("text") or "")
             matched = [term for term in endpoint_terms if term and term in item_text]
@@ -302,14 +506,23 @@ def diagnose_source_scope_reference(
                     "matched_terms": matched,
                 })
     elif anaphoric and current_index is not None:
-        # List nearby preceding source clauses as candidates for a human.  The
-        # list is diagnostic only; proximity never resolves an anaphor.
-        for item in clauses[max(0, current_index - 6):current_index]:
+        adjacent = _adjacent_preceding_source_clauses(clause, clauses)
+        preceding = adjacent or [
+            item for item in clauses[max(0, current_index - 6):current_index]
+            if _section_compatible(clause, item)
+        ]
+        # The closest source-span adjacency gives a precise candidate, but is
+        # still only diagnostic evidence and never automatically binds scope.
+        for item in preceding:
+            antecedent_ranges = _source_range_records(str(item.get("text") or ""))
             candidates.append({
                 "clause_id": item.get("id"),
                 "text": str(item.get("text") or ""),
                 "evidence_ids": list(item.get("evidence_ids") or []),
                 "location": dict(item.get("location") or {}),
+                **({"antecedent_source_ranges": [
+                        dict(record) for record in antecedent_ranges
+                ]} if antecedent_ranges else {}),
             })
     elif forward and current_index is not None:
         for item in clauses[current_index + 1:current_index + 7]:
@@ -322,7 +535,15 @@ def diagnose_source_scope_reference(
                     "location": dict(location),
                 })
 
-    if source_range and candidates:
+    if len(source_ranges) > 1:
+        classification = "semantic_ambiguity"
+        reason = "source_clause_contains_conditional_range_alternatives"
+    elif anaphoric and any(
+        len(item.get("antecedent_source_ranges", [])) > 1 for item in candidates
+    ):
+        classification = "semantic_ambiguity"
+        reason = "anaphoric_antecedent_contains_conditional_range_alternatives"
+    elif source_range and candidates:
         matched_counts: dict[str, int] = {}
         for candidate in candidates:
             for term in candidate.get("matched_terms", []):
@@ -345,7 +566,7 @@ def diagnose_source_scope_reference(
     elif ordinal_terms and len(candidates) == 1:
         classification = "human_confirmation_required"
         reason = "ordinal_reference_requires_explicit_anchor"
-    elif source_range:
+    elif source_ranges:
         classification = "parser_capability_gap"
         reason = "source_range_endpoints_not_observable_in_current_extraction"
     else:
@@ -359,7 +580,10 @@ def diagnose_source_scope_reference(
         "source_text": text,
         "reference_terms": ordinal_terms + (["anaphora"] if anaphoric else [])
         + (["forward_reference"] if forward else [])
-        + (["source_range"] if source_range else []),
+        + (["source_range"] if source_ranges else []),
+        "source_ranges": [
+            dict(item) for item in source_range_records
+        ],
         "candidate_clause_ids": [str(item["clause_id"]) for item in candidates
                                  if isinstance(item.get("clause_id"), str)],
         "candidates": candidates,

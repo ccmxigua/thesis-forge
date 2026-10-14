@@ -2917,13 +2917,17 @@ def ensure_preview_page_number_selector(spec: dict[str, Any], manifest: dict[str
         return False
     rule["body_start_selector"] = {
         "strategy": "heading_text",
-        "heading_text_pattern": r"^第\s*1\s*章",
+        # The source may number its first chapter with the Arabic digit or
+        # the Chinese numeral. The section planner verifies a unique actual
+        # paragraph match in the input DOCX; this pattern does not supply a
+        # chapter title or create a boundary that is absent from the source.
+        "heading_text_pattern": r"^第\s*(?:1|一)\s*章",
         "evidence_ids": [],
     }
     manifest["preview_inferred_page_number_selector"] = {
         "strategy": "heading_text",
-        "heading_text_pattern": r"^第\s*1\s*章",
-        "reason": "synthetic thesis has an explicit chapter-one body boundary",
+        "heading_text_pattern": r"^第\s*(?:1|一)\s*章",
+        "reason": "preview selector matches an explicit first-chapter heading; section-plan enforces a unique input paragraph",
     }
     manifest.setdefault("preview_bypassed_section_plan_findings", []).append("body_selector_required")
     return True

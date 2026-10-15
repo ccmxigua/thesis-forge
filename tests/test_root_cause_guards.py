@@ -98,6 +98,57 @@ class RootCauseGuardTests(unittest.TestCase):
         )
         self.assertIsNone(sample_content_guard(clauses[2], clauses))
 
+    def _with_nearby_bibliography_context(
+        self, text: str, clause_id: str = "C_TARGET",
+    ) -> tuple[dict, list[dict]]:
+        heading = {
+            "id": "C_REFERENCE_HEADING",
+            "text": "参考文献",
+            "source_kind": "paragraph",
+            "location": {"part": "document", "child_index": 100, "order": 100},
+        }
+        target = {
+            "id": clause_id,
+            "text": text,
+            "source_kind": "paragraph",
+            "location": {"part": "document", "child_index": 106, "order": 106},
+        }
+        return target, [heading, target]
+
+    def test_numbered_abstract_requirements_are_not_sampled_by_nearby_bibliography(self) -> None:
+        numbered_requirements = [
+            (
+                "C00039",
+                "（1）摘要应具有独立性和自含性，即不阅读报告全文，就能获得必要的信息",
+            ),
+            (
+                "C00041",
+                "（3）摘要的字数，硕士学位论文应在1000字左右，博士学位论文应在2500字左右",
+            ),
+            ("C_SIMILAR_NORM", "（4）公式应另起一行居中书写"),
+        ]
+        for clause_id, text in numbered_requirements:
+            with self.subTest(clause_id=clause_id):
+                target, clauses = self._with_nearby_bibliography_context(text, clause_id)
+                self.assertIsNone(sample_content_guard(target, clauses))
+
+    def test_numbered_reference_citations_remain_samples_when_author_or_title_contains_should_words(self) -> None:
+        entries = [
+            "[1] Doe. Sample thesis.",
+            "（2）李应. 应用研究中的摘要应当如何组织[J]. 管理学刊，2024.",
+            "（3）李应. 摘要应在何处书写的研究[J]. 管理学刊，2024.",
+        ]
+        for text in entries:
+            with self.subTest(text=text):
+                target, clauses = self._with_nearby_bibliography_context(text)
+                result = sample_content_guard(target, clauses)
+                self.assertEqual(result["kind"], "numbered_bibliography_entry")
+
+    def test_numbered_title_with_non_normative_ying_does_not_disable_sample_guard(self) -> None:
+        target, clauses = self._with_nearby_bibliography_context("（1）应急管理研究报告的题名")
+        result = sample_content_guard(target, clauses)
+        self.assertEqual(result["kind"], "numbered_bibliography_entry")
+
     def test_partial_chinese_abstract_cannot_claim_full_coverage(self) -> None:
         request = _request("中文摘要一般300～1000字，使用第三人称，包含目的、方法、成果、结论和创新性，不加评论。")
         response = {

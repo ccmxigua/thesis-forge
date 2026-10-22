@@ -1154,6 +1154,10 @@ b&=2\notag
             td = Path(td); target = td / "target.docx"; spec_path = td / "spec.json"
             first = td / "first.docx"; second = td / "second.docx"
             doc = Document()
+            # The explicit tab positions must fit the fixture's text area.
+            doc.sections[0].page_width = Inches(12)
+            doc.sections[0].left_margin = Inches(0.75)
+            doc.sections[0].right_margin = Inches(0.75)
             doc.add_paragraph("第4章 附录A 实验配置", "Heading 1")
             doc.add_paragraph("第5章 附录B 补充结果", "Heading 1")
             equation = doc.add_paragraph()
@@ -1207,12 +1211,14 @@ b&=2\notag
         self.assertEqual(removed, 3)
         self.assertEqual([(p.style.name, p.text) for p in doc.paragraphs], [("Title", source_title.text)])
 
-    def test_equation_layout_rejects_a_number_not_driven_by_right_tab(self) -> None:
+    def test_equation_layout_repairs_a_number_not_driven_by_right_tab(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             td = Path(td); target = td / "target.docx"; spec_path = td / "spec.json"
             doc = Document(); equation = doc.add_paragraph()
             math_para = OxmlElement("m:oMathPara"); math_para.append(OxmlElement("m:oMath")); equation._p.append(math_para)
             equation.add_run("（3.1）")
+            raw_findings = apply_format_spec.audit_equation_layout(doc, {"number_alignment": "right"})
+            self.assertTrue(any(item["property"] == "equations[1].tab_usage" for item in raw_findings))
             doc.save(target)
             spec_path.write_text(json.dumps({
                 "schema_version": "1.0", "source_document": "test", "status": "semantic_resolved",
@@ -1222,9 +1228,11 @@ b&=2\notag
             }), encoding="utf-8")
             result = run_raw("scripts/apply_format_spec.py", str(target), str(spec_path), str(td / "out.docx"),
                              "--out-dir", str(td / "audit"))
-            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
             findings = json.loads((td / "audit" / "validation-report.json").read_text())["findings"]
-            self.assertTrue(any(item.get("property") == "equations[1].tab_usage" for item in findings))
+            self.assertEqual(findings, [])
+            formatted = Document(td / "out.docx").paragraphs[0]
+            self.assertEqual(formatted.text, "\t\t（3.1）")
 
     def test_v2_overlays_merge(self) -> None:
         for overlay in sorted((ROOT / "schema").glob("*overlay*.yaml")):

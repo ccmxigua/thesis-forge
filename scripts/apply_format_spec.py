@@ -22,7 +22,7 @@ from docx.enum.style import WD_STYLE_TYPE
 from docx.enum.text import WD_ALIGN_PARAGRAPH, WD_BREAK, WD_LINE_SPACING
 from docx.oxml import OxmlElement, parse_xml
 from docx.oxml.ns import qn
-from docx.shared import Mm, Pt, RGBColor
+from docx.shared import Mm, Pt, RGBColor, Twips
 from docx.text.paragraph import Paragraph
 from docx.text.run import Run
 
@@ -5233,73 +5233,468 @@ def _receipt_semantic_actuals(
     return actual, methods, role_observability, role_font_actuals
 
 
-def _set_equation_tabs(paragraph: Paragraph, center: int, right: int) -> None:
+def _equation_tab_position_twips(doc: Document, paragraph: Paragraph,
+                                 equation_spec: dict[str, Any]) -> int | None:
+    explicit = equation_spec.get("right_tab_twips")
+    if not isinstance(explicit, int) or explicit <= 0:
+        explicit = None
+    cells = paragraph._p.xpath("ancestor::w:tc[1]")
+    if cells:
+        tc = cells[0]
+        tcpr = tc.find(qn("w:tcPr"))
+        tcw = tcpr.find(qn("w:tcW")) if tcpr is not None else None
+        table = tc.getparent().getparent()
+        fixed_layout, grid_width = _fixed_table_cell_grid_width_twips(table, tc)
+        if fixed_layout:
+            # For fixed-layout tables the grid defines the rendered columns.
+            # Cell tcW can be stale or inconsistent with tblGrid (some DOCX
+            # producers leave the default cell width behind after changing
+            # the grid); using it can put a right tab in the next cell, where
+            # the equation number is clipped. If the fixed grid cannot be
+            # resolved unambiguously, fail closed.
+            if grid_width is None:
+                return None
+            if tcw is not None and tcw.get(qn("w:type"), "dxa") != "dxa":
+                return None
+            width = grid_width
+        else:
+            if tcw is None or tcw.get(qn("w:type"), "dxa") != "dxa":
+                return None
+            try:
+                width = int(tcw.get(qn("w:w"), "0"))
+            except (TypeError, ValueError):
+                return None
+            # Under automatic table layout, conflicting preferred-cell and
+            # grid widths do not identify the rendered cell width uniquely.
+            # Do not guess a tab stop that may hide a label in a neighboring
+            # cell.
+            if grid_width is not None and grid_width != width:
+                return None
+        margins = _effective_table_cell_margins_twips(doc, table, tc)
+        if margins is None:
+            return None
+        width -= margins["left"] + margins["right"]
+    else:
+        section_index = _paragraph_section_indices(doc).get(paragraph._p, 0)
+        if not doc.sections:
+            return None
+        section = doc.sections[min(section_index, len(doc.sections) - 1)]
+        width = section.page_width.twips
+        width -= section.left_margin.twips + section.right_margin.twips
+        if section.gutter is not None:
+            width -= section.gutter.twips
+    left = paragraph.paragraph_format.left_indent
+    right = paragraph.paragraph_format.right_indent
+    if left is not None:
+        width -= left.twips
+    if right is not None:
+        width -= right.twips
+    if width <= 0:
+        return None
+    if explicit is not None:
+        # A global tab coordinate may not fit a narrower table cell.  Do not
+        # silently let it spill into adjacent content.
+        return explicit if explicit <= width else None
+    return width
+
+
+
+def _fixed_table_cell_grid_width_twips(table, cell) -> tuple[bool, int | None]:
+    """Resolve a cell's grid-track width and report the layout mode.
+
+    The position is based on the cell's grid column and gridSpan, including
+    gridBefore. A missing, malformed, or out-of-range grid returns a missing
+    width so fixed-layout callers can fail closed and automatic-layout callers
+    can reject a conflicting preferred cell width.
+    """
+    tblpr = table.find(qn("w:tblPr"))
+    layout = tblpr.find(qn("w:tblLayout")) if tblpr is not None else None
+    fixed_layout = layout is not None and layout.get(qn("w:type")) == "fixed"
+    grid = table.find(qn("w:tblGrid"))
+    grid_columns = grid.findall(qn("w:gridCol")) if grid is not None else []
+    if not grid_columns:
+        return fixed_layout, None
+    widths: list[int] = []
+    try:
+        widths = [int(column.get(qn("w:w"), "0")) for column in grid_columns]
+    except (TypeError, ValueError):
+        return fixed_layout, None
+    if any(width <= 0 for width in widths):
+        return fixed_layout, None
+
+    row = cell.getparent()
+    row_pr = row.find(qn("w:trPr"))
+    grid_before_node = row_pr.find(qn("w:gridBefore")) if row_pr is not None else None
+    try:
+        grid_column = int(grid_before_node.get(qn("w:val"), "0")) if grid_before_node is not None else 0
+    except (TypeError, ValueError):
+        return fixed_layout, None
+    if grid_column < 0:
+        return fixed_layout, None
+    for previous in row.findall(qn("w:tc")):
+        if previous is cell:
+            break
+        previous_pr = previous.find(qn("w:tcPr"))
+        previous_span_node = previous_pr.find(qn("w:gridSpan")) if previous_pr is not None else None
+        try:
+            previous_span = int(previous_span_node.get(qn("w:val"), "1")) if previous_span_node is not None else 1
+        except (TypeError, ValueError):
+            return fixed_layout, None
+        if previous_span <= 0:
+            return fixed_layout, None
+        grid_column += previous_span
+    else:
+        return fixed_layout, None
+
+    cell_pr = cell.find(qn("w:tcPr"))
+    span_node = cell_pr.find(qn("w:gridSpan")) if cell_pr is not None else None
+    try:
+        span = int(span_node.get(qn("w:val"), "1")) if span_node is not None else 1
+    except (TypeError, ValueError):
+        return fixed_layout, None
+    if span <= 0 or grid_column < 0 or grid_column + span > len(widths):
+        return fixed_layout, None
+    return fixed_layout, sum(widths[grid_column:grid_column + span])
+
+
+
+def _cell_margin_declaration(margins, edge: str) -> tuple[bool, int | None]:
+    """Return whether an edge is declared and its twips value.
+
+    None means the margin is declared in an unsupported unit, so callers must
+    fail closed instead of silently reverting to a wider tab-stop coordinate.
+    """
+    if margins is None:
+        return False, None
+    candidates = [edge, "start" if edge == "left" else "end"]
+    for name in candidates:
+        node = margins.find(qn(f"w:{name}"))
+        if node is None:
+            continue
+        unit = node.get(qn("w:type"), "dxa")
+        if unit == "nil":
+            return True, 0
+        if unit != "dxa":
+            return True, None
+        try:
+            value = int(node.get(qn("w:w"), "0"))
+            return True, value if value >= 0 else None
+        except (TypeError, ValueError):
+            return True, None
+    return False, None
+
+
+
+def _effective_table_cell_margins_twips(doc: Document, table, cell) -> dict[str, int] | None:
+    """Resolve cell margins from document defaults, table style, table, then cell.
+
+    Paragraph tab stops inside a cell are measured from the text area, not the
+    cell's outer grid width.  Ignoring margins inherited from a table style can
+    push an equation number into the neighboring cell.
+    """
+    effective = {"left": 0, "right": 0}
+    styles_root = doc.styles.element
+    defaults = styles_root.find(qn("w:docDefaults"))
+    if defaults is not None:
+        tbl_defaults = defaults.find(qn("w:tblPrDefault"))
+        default_tblpr = tbl_defaults.find(qn("w:tblPr")) if tbl_defaults is not None else None
+        default_margins = default_tblpr.find(qn("w:tblCellMar")) if default_tblpr is not None else None
+        for edge in effective:
+            declared, value = _cell_margin_declaration(default_margins, edge)
+            if declared:
+                if value is None:
+                    return None
+                effective[edge] = value
+
+    tblpr = table.find(qn("w:tblPr"))
+    style_node = tblpr.find(qn("w:tblStyle")) if tblpr is not None else None
+    style_id = style_node.get(qn("w:val")) if style_node is not None else None
+    styles = list(styles_root.findall(qn("w:style")))
+    by_id = {style.get(qn("w:styleId")): style for style in styles}
+    if style_id is None:
+        style_id = next((style.get(qn("w:styleId")) for style in styles
+                         if style.get(qn("w:type")) == "table"
+                         and style.get(qn("w:default")) in {"1", "true"}), None)
+    chain = []
+    seen = set()
+    current = style_id
+    while current and current in by_id and current not in seen:
+        seen.add(current)
+        style = by_id[current]
+        chain.append(style)
+        based_on = style.find(qn("w:basedOn"))
+        current = based_on.get(qn("w:val")) if based_on is not None else None
+    for style in reversed(chain):
+        style_tblpr = style.find(qn("w:tblPr"))
+        style_margins = style_tblpr.find(qn("w:tblCellMar")) if style_tblpr is not None else None
+        for edge in effective:
+            declared, value = _cell_margin_declaration(style_margins, edge)
+            if declared:
+                if value is None:
+                    return None
+                effective[edge] = value
+
+    table_margins = tblpr.find(qn("w:tblCellMar")) if tblpr is not None else None
+    for edge in effective:
+        declared, value = _cell_margin_declaration(table_margins, edge)
+        if declared:
+            if value is None:
+                return None
+            effective[edge] = value
+
+    tcpr = cell.find(qn("w:tcPr"))
+    cell_margins = tcpr.find(qn("w:tcMar")) if tcpr is not None else None
+    for edge in effective:
+        declared, value = _cell_margin_declaration(cell_margins, edge)
+        if declared:
+            if value is None:
+                return None
+            effective[edge] = value
+    return effective
+
+
+
+def _equation_center_tab_position_twips(doc: Document, paragraph: Paragraph,
+                                        equation_spec: dict[str, Any]) -> int | None:
+    explicit = equation_spec.get("center_tab_twips")
+    right = _equation_tab_position_twips(doc, paragraph, equation_spec)
+    if isinstance(explicit, int) and explicit > 0:
+        return explicit if right is not None and explicit <= right else None
+    return round(right / 2) if right is not None else None
+
+
+
+def _default_equation_indents(paragraph: Paragraph, paragraph_spec: dict[str, Any]) -> int:
+    """Neutralize incidental asymmetric source indents for body-centered math.
+
+    Source-declared indent values remain untouched; otherwise the display block
+    uses the full paragraph text area.  Explicit template alignment and
+    paragraph properties still take precedence through ``paragraph_spec``.
+    """
+    changed = 0
+    for attribute, keys in (
+        ("left_indent", {"left_indent_pt"}),
+        ("right_indent", {"right_indent_pt"}),
+        ("first_line_indent", {"first_line_indent_pt", "first_line_indent_chars"}),
+    ):
+        if keys.intersection(paragraph_spec):
+            continue
+        current = getattr(paragraph.paragraph_format, attribute)
+        if current is None or current.twips != 0:
+            setattr(paragraph.paragraph_format, attribute, Twips(0))
+            changed += 1
+    return changed
+
+
+
+_EQUATION_NUMBER = re.compile(r"[（(]\s*\d+(?:[.．-]\d+)*\s*[）)]")
+
+
+def _equation_run_text(run) -> str:
+    return "".join("\t" if child.tag == qn("w:tab") else child.text or ""
+                   for child in run if child.tag in {qn("w:t"), qn("w:tab")})
+
+
+def _equation_layout_parts(paragraph: Paragraph) -> dict[str, Any] | None:
+    """Preflight the entire edit; fields, drawings and ambiguous tails stay intact."""
+    nodes = paragraph._p.xpath("./m:oMathPara|./m:oMath")
+    if len(nodes) != 1:
+        return None
+    children = list(paragraph._p)
+    index = children.index(nodes[0])
+    anchors = {qn(f"w:{name}") for name in (
+        "bookmarkStart", "bookmarkEnd", "commentRangeStart", "commentRangeEnd", "proofErr",
+    )}
+    before, after = [], []
+    for position, child in enumerate(children):
+        if child is nodes[0] or child.tag in anchors or child.tag == qn("w:pPr"):
+            continue
+        if child.tag != qn("w:r") or any(
+                item.tag not in {qn("w:rPr"), qn("w:t"), qn("w:tab")} for item in child):
+            return None
+        (before if position < index else after).append(child)
+    prefix = "".join(_equation_run_text(run) for run in before)
+    tail = "".join(_equation_run_text(run) for run in after)
+    if prefix.strip() or (tail.strip() and not _EQUATION_NUMBER.fullmatch(tail.strip())):
+        return None
+    return {"math": nodes[0], "before": before, "after": after,
+            "prefix": prefix, "tail": tail, "label": tail.strip() or None}
+
+
+def _materialize_equation_padding(paragraph: Paragraph, runs: list[Any],
+                                  padding: str, target) -> int:
+    """Replace only separator whitespace, keeping math, label runs and anchors."""
+    old_xml = paragraph._p.xml
+    tab_run = None
+    remaining = len(padding)
+    for run in runs:
+        value = _equation_run_text(run)
+        if tab_run is None and value and not value.strip() and len(value) <= remaining:
+            tab_run = run
+        for child in list(run):
+            if not remaining:
+                break
+            if child.tag == qn("w:tab"):
+                run.remove(child)
+                remaining -= 1
+            elif child.tag == qn("w:t"):
+                take = min(remaining, len(child.text or ""))
+                child.text = (child.text or "")[take:]
+                remaining -= take
+    if tab_run is None:
+        tab_run = OxmlElement("w:r")
+        # Put a new centering tab outside starts immediately enclosing math.
+        index = paragraph._p.index(target)
+        while index > 0 and paragraph._p[index - 1].tag in {
+                qn("w:bookmarkStart"), qn("w:commentRangeStart")}:
+            index -= 1
+        paragraph._p.insert(index, tab_run)
+    tab_run.append(OxmlElement("w:tab"))
+    return int(paragraph._p.xml != old_xml)
+
+
+def _set_equation_tab_stop(paragraph: Paragraph, alignment: str, position: int) -> int:
     ppr = paragraph._p.get_or_add_pPr()
     tabs = ppr.find(qn("w:tabs"))
-    if tabs is not None:
-        ppr.remove(tabs)
-    tabs = OxmlElement("w:tabs")
-    for align, pos in (("center", center), ("right", right)):
-        tab = OxmlElement("w:tab"); tab.set(qn("w:val"), align); tab.set(qn("w:pos"), str(pos)); tabs.append(tab)
-    ppr.append(tabs)
+    if tabs is None:
+        tabs = OxmlElement("w:tabs")
+        ppr.append(tabs)
+    old_xml = tabs.xml
+    matches = [tab for tab in tabs if tab.get(qn("w:val")) == alignment]
+    if matches:
+        tab = matches[0]
+        for duplicate in matches[1:]:
+            tabs.remove(duplicate)
+    else:
+        tab = OxmlElement("w:tab")
+        tab.set(qn("w:val"), alignment)
+        tabs.append(tab)
+    tab.set(qn("w:pos"), str(position))
+    tab.attrib.pop(qn("w:leader"), None)
+    return int(tabs.xml != old_xml)
 
 
-def apply_equation_layout(doc: Document, equation_spec: dict[str, Any]) -> dict[str, int]:
-    counts = {"equations": 0, "tabs_set": 0, "borders_removed": 0}
-    if not equation_spec:
-        return counts
-    center = int(equation_spec.get("center_tab_twips", 4680))
-    right = int(equation_spec.get("right_tab_twips", 9360))
-    for paragraph in doc.paragraphs:
+def _effective_equation_tabs(paragraph: Paragraph) -> dict[int, str]:
+    """Include inherited explicit stops, which can intercept a formula's tabs."""
+    chain, seen = [], set()
+    style = paragraph.style
+    while style is not None and style.style_id not in seen:
+        seen.add(style.style_id)
+        chain.append(style.element)
+        style = style.base_style
+    tabs = {}
+    for node in [*reversed(chain), paragraph._p]:
+        for tab in node.xpath("./w:pPr/w:tabs/w:tab"):
+            position = int(tab.get(qn("w:pos")))
+            value = tab.get(qn("w:val"), "left")
+            if value == "clear":
+                tabs.pop(position, None)
+            else:
+                tabs[position] = value
+    return tabs
+
+
+def apply_equation_layout(doc: Document, equation_spec: dict[str, Any], *,
+                          paragraph_spec: dict[str, Any] | None = None) -> dict[str, int]:
+    paragraph_spec = paragraph_spec or {}
+    alignment = equation_spec.get("alignment", paragraph_spec.get("alignment") or "center")
+    counts = {"equations": 0, "tabs_set": 0, "borders_removed": 0,
+              "center_tabs_materialized": 0, "number_tabs_materialized": 0,
+              "equation_tab_layout_unresolved": 0}
+    for paragraph in all_body_paragraphs(doc):
         if not is_display_equation(paragraph):
             continue
         counts["equations"] += 1
-        if equation_spec.get("alignment") == "center" or equation_spec.get("number_alignment") == "right":
-            _set_equation_tabs(paragraph, center, right); counts["tabs_set"] += 1
+        parts = _equation_layout_parts(paragraph)
+        if parts is None:
+            counts["equation_tab_layout_unresolved"] += 1
+            continue
+        if alignment == "center":
+            _default_equation_indents(paragraph, paragraph_spec)
+        center = _equation_center_tab_position_twips(doc, paragraph, equation_spec)
+        right = _equation_tab_position_twips(doc, paragraph, equation_spec)
+        if (alignment == "center" and center is None) or (parts["label"] and right is None):
+            counts["equation_tab_layout_unresolved"] += 1
+            continue
+        paragraph.alignment = ALIGN["left" if alignment == "center" else alignment]
+        if alignment == "center":
+            counts["tabs_set"] += _set_equation_tab_stop(paragraph, "center", center)
+            counts["center_tabs_materialized"] += _materialize_equation_padding(
+                paragraph, parts["before"], parts["prefix"], parts["math"],
+            )
+        if parts["label"]:
+            counts["tabs_set"] += _set_equation_tab_stop(paragraph, "right", right)
+            tail = parts["tail"]
+            padding = tail[:len(tail) - len(tail.lstrip())]
+            label_run = next(run for run in parts["after"] if _equation_run_text(run).strip())
+            counts["number_tabs_materialized"] += _materialize_equation_padding(
+                paragraph, parts["after"], padding, label_run,
+            )
         if equation_spec.get("no_lines"):
-            ppr = paragraph._p.get_or_add_pPr(); borders = ppr.find(qn("w:pBdr"))
+            ppr = paragraph._p.get_or_add_pPr()
+            borders = ppr.find(qn("w:pBdr"))
             if borders is not None:
-                ppr.remove(borders); counts["borders_removed"] += 1
+                ppr.remove(borders)
+                counts["borders_removed"] += 1
     return counts
 
 
-def audit_equation_layout(doc: Document, equation_spec: dict[str, Any]) -> list[dict[str, Any]]:
+def audit_equation_layout(doc: Document, equation_spec: dict[str, Any], *,
+                          paragraph_spec: dict[str, Any] | None = None) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
-    if not equation_spec:
-        return findings
-    center = str(int(equation_spec.get("center_tab_twips", 4680)))
-    right = str(int(equation_spec.get("right_tab_twips", 9360)))
-    for index, paragraph in enumerate((p for p in doc.paragraphs if is_display_equation(p)), 1):
+    paragraph_spec = paragraph_spec or {}
+    alignment = equation_spec.get("alignment", paragraph_spec.get("alignment") or "center")
+    display = (p for p in all_body_paragraphs(doc) if is_display_equation(p))
+    for index, paragraph in enumerate(display, 1):
+        def finding(prop, actual, required):
+            findings.append({"role": "equations", "property": f"equations[{index}].{prop}",
+                             "template_value": actual, "required_value": required})
+
+        parts = _equation_layout_parts(paragraph)
+        if parts is None:
+            finding("layout_structure", "ambiguous", "standalone math and supported numeric label")
+            continue
+        expected = ALIGN["left" if alignment == "center" else alignment]
+        if paragraph.alignment != expected:
+            finding("paragraph.alignment", str(paragraph.alignment), str(expected))
         tab_nodes = paragraph._p.xpath("./w:pPr/w:tabs/w:tab")
-        tabs = {(n.get(qn("w:val")), n.get(qn("w:pos"))) for n in tab_nodes}
-        if equation_spec.get("alignment") == "center" and ("center", center) not in tabs:
-            findings.append({"role": "equations", "property": f"equations[{index}].center_tab", "template_value": sorted(tabs), "required_value": center})
-        if equation_spec.get("number_alignment") == "right" and ("right", right) not in tabs:
-            findings.append({"role": "equations", "property": f"equations[{index}].right_tab", "template_value": sorted(tabs), "required_value": right})
-        raw_text = paragraph.text
-        text = raw_text.strip()
-        number = re.search(r"[（(]\s*\d+(?:[.-]\d+)*\s*[）)]\s*$", raw_text)
-        if equation_spec.get("number_parentheses") and not number:
-            findings.append({"role": "equations", "property": f"equations[{index}].number_parentheses", "template_value": text, "required_value": "(number)"})
-        if equation_spec.get("same_line") and (not number or "\n" in raw_text):
-            findings.append({"role": "equations", "property": f"equations[{index}].same_line", "template_value": False, "required_value": True})
-        # A right tab stop alone does not right-align anything.  Require the
-        # equation paragraph to actually traverse a center tab and a right tab
-        # before its trailing number, as produced by the conversion filter.
-        if number and (equation_spec.get("alignment") == "center" or equation_spec.get("number_alignment") == "right"):
-            before_number = raw_text[:number.start()]
-            required_tabs = 2 if equation_spec.get("alignment") == "center" and equation_spec.get("number_alignment") == "right" else 1
-            if before_number.count("\t") < required_tabs:
-                findings.append({"role": "equations", "property": f"equations[{index}].tab_usage",
-                                 "template_value": before_number.count("\t"), "required_value": f">={required_tabs}"})
-        if equation_spec.get("no_lines") and paragraph._p.xpath("./w:pPr/w:pBdr/*[not(@w:val='nil') and not(@w:val='none')]"):
-            findings.append({"role": "equations", "property": f"equations[{index}].no_lines", "template_value": False, "required_value": True})
+        try:
+            tabs = {(kind, pos) for pos, kind in _effective_equation_tabs(paragraph).items()}
+        except (TypeError, ValueError):
+            finding("tab_stops", "malformed", "integer positions")
+            continue
+        for kind, needed, position, used, runs in (
+            ("center", alignment == "center",
+             _equation_center_tab_position_twips(doc, paragraph, equation_spec),
+             parts["prefix"], parts["before"]),
+            ("right", bool(parts["label"]),
+             _equation_tab_position_twips(doc, paragraph, equation_spec),
+             parts["tail"][:len(parts["tail"]) - len(parts["tail"].lstrip())], parts["after"]),
+        ):
+            if not needed:
+                continue
+            if position is None:
+                finding(f"{kind}_tab_position", None, "unambiguous body or cell text width")
+            elif (kind, position) not in tabs:
+                finding(f"{kind}_tab", sorted(tabs), position)
+            actual_tabs = sum(len(run.findall(qn("w:tab"))) for run in runs)
+            if used != "\t" or actual_tabs != 1:
+                finding("center_tab_usage" if kind == "center" else "tab_usage", used, "one real tab")
+            lower = 0 if kind == "center" or alignment != "center" else (
+                _equation_center_tab_position_twips(doc, paragraph, equation_spec) or 0)
+            if position is not None and any(lower < pos < position for _, pos in tabs):
+                finding(f"{kind}_tab_preempted", sorted(tabs), "no intervening tab stop")
+        if equation_spec.get("number_parentheses") and not parts["label"]:
+            finding("number_parentheses", paragraph.text, "(number)")
+        if equation_spec.get("same_line") and (not parts["label"] or "\n" in paragraph.text):
+            finding("same_line", False, True)
         if equation_spec.get("no_lines"):
-            leaders = [n.get(qn("w:leader")) for n in tab_nodes if n.get(qn("w:leader")) not in {None, "none"}]
-            if leaders:
-                findings.append({"role": "equations", "property": f"equations[{index}].tab_leader",
-                                 "template_value": leaders, "required_value": "none"})
+            if paragraph._p.xpath("./w:pPr/w:pBdr/*[not(@w:val='nil') and not(@w:val='none')]"):
+                finding("no_lines", False, True)
+            if any(node.get(qn("w:leader")) not in {None, "none"} for node in tab_nodes):
+                finding("tab_leader", "visible", "none")
     return findings
+
 
 
 def main(argv: list[str]) -> int:
@@ -5995,7 +6390,10 @@ def main(argv: list[str]) -> int:
     pagination_changes = apply_object_pagination(doc, mappings, spec.get("objects", {}), spec.get("tables", {}))
     toc_fields_updated = set_toc_depth(doc, spec.get("document_structure", {}).get("toc_depth"))
     appendix_changes = apply_appendix_rules(doc, spec.get("appendices", {}))
-    equation_changes = apply_equation_layout(doc, spec.get("equations", {}))
+    equation_paragraph_spec = effective_roles.get("equation", {}).get("paragraph", {})
+    equation_changes = apply_equation_layout(
+        doc, spec.get("equations", {}), paragraph_spec=equation_paragraph_spec,
+    )
     cover_contract = compile_cover_contract(spec.get("cover", {}), spec.get("thesis_profile", {})) if spec.get("cover") else {}
     cover_changes = apply_cover(doc, spec.get("cover", {}), spec.get("thesis_profile", {}), cover_contract, mappings)
     declaration_changes = apply_declarations(
@@ -6329,7 +6727,9 @@ def main(argv: list[str]) -> int:
     })
     findings.extend(audit_document_structure(check, spec.get("document_structure", {}), mappings))
     findings.extend(audit_appendix_rules(check, spec.get("appendices", {}), spec.get("thesis_profile", {})))
-    findings.extend(audit_equation_layout(check, spec.get("equations", {})))
+    findings.extend(audit_equation_layout(
+        check, spec.get("equations", {}), paragraph_spec=equation_paragraph_spec,
+    ))
     findings.extend(audit_cover(check, spec.get("cover", {}), spec.get("thesis_profile", {}), mappings))
     findings.extend(audit_declarations(
         check, spec.get("declarations", {}), resource_items(spec)

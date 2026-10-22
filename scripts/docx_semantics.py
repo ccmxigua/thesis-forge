@@ -115,7 +115,16 @@ def has_drawing(paragraph: Any) -> bool:
 
 
 def is_display_equation(paragraph: Any) -> bool:
-    return bool(paragraph._p.xpath(".//m:oMathPara"))
+    # A display container embedded in prose is mixed content. A single direct
+    # oMath without prose is also a display block; run-level math stays inline.
+    nodes = paragraph._p.xpath("./m:oMathPara|./m:oMath")
+    if len(nodes) != 1:
+        return False
+    objects = paragraph._p.xpath(".//m:oMathPara|.//m:oMath[not(ancestor::m:oMathPara)]")
+    if len(objects) != 1:
+        return False
+    text = re.sub(r"[\s\u00a0\u3000]+", "", paragraph.text or "")
+    return not text or bool(re.fullmatch(r"[（(][^()（）\r\n]+[）)]", text))
 
 
 def is_table_cell_paragraph(paragraph: Any) -> bool:

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import io
+import shutil
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -76,7 +78,7 @@ class EquationLayoutTests(unittest.TestCase):
           <m:oMathParaPr><m:jc m:val="left"/></m:oMathParaPr><m:oMath><m:eqArr>
           <m:e><m:r><m:rPr><m:aln/></m:rPr><m:t>a=</m:t></m:r>
           <m:f><m:num><m:r><m:t>1</m:t></m:r></m:num><m:den><m:r><m:t>2</m:t></m:r></m:den></m:f></m:e>
-          <m:e><m:r><m:rPr><m:aln/></m:rPr><m:t>=b</m:t></m:r>
+          <m:e><m:r><m:rPr><m:aln/></m:rPr><m:t>b=</m:t></m:r>
           <m:sSub><m:e><m:r><m:t>x</m:t></m:r></m:e><m:sub><m:r><m:t>n</m:t></m:r></m:sub></m:sSub></m:e>
           </m:eqArr></m:oMath></m:oMathPara>''')
         for tag in ("bookmarkStart", "commentRangeStart"):
@@ -103,6 +105,41 @@ class EquationLayoutTests(unittest.TestCase):
         self.assertEqual(result.text, "\t\t(12.10)")
         self.assertTrue(next(r for r in result.runs if "12.10" in r.text).bold)
         self.assertEqual(audit_equation_layout(Document(buffer), {}), [])
+
+    @unittest.skipUnless(shutil.which("soffice"), "LibreOffice is required")
+    def test_leading_aligned_relation_requires_exact_rollback_if_export_corrupts_it(self):
+        # Some exporters paint a real inverted question mark for the leading
+        # '=' in an authored alignment run. Keep that original counterexample:
+        # the actual rendered bytes, not an engine-version exception, decide.
+        import fitz
+        doc = Document(); paragraph = doc.add_paragraph()
+        group = parse_xml('''<m:oMathPara xmlns:m="http://schemas.openxmlformats.org/officeDocument/2006/math">
+          <m:oMathParaPr><m:jc m:val="left"/></m:oMathParaPr><m:oMath><m:eqArr>
+          <m:e><m:r><m:rPr><m:aln/></m:rPr><m:t>a=</m:t></m:r>
+          <m:f><m:num><m:r><m:t>1</m:t></m:r></m:num><m:den><m:r><m:t>2</m:t></m:r></m:den></m:f></m:e>
+          <m:e><m:r><m:rPr><m:aln/></m:rPr><m:t>=b</m:t></m:r>
+          <m:sSub><m:e><m:r><m:t>x</m:t></m:r></m:e><m:sub><m:r><m:t>n</m:t></m:r></m:sub></m:sSub></m:e>
+          </m:eqArr></m:oMath></m:oMathPara>''')
+        paragraph._p.append(group); paragraph.add_run("   (12.10)")
+        original = canonical(paragraph._p); math_before = canonical(group)
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            receipt = apply_equation_layout(doc, {}, evidence_dir=root)
+            observation = receipt["geometry_checks"][0]
+            with fitz.open(root/observation["validation_key"]/"probe.pdf") as rendered:
+                wide_equals = rendered[0].get_text().count("=")
+                context_equals = rendered[-1].get_text().count("=")
+            if wide_equals != 2 or context_equals != 2:
+                self.assertEqual(receipt["equation_tab_layout_unresolved"], 1)
+                self.assertEqual({f["code"] for f in observation["findings"]},
+                                 {"equation_probe_glyphs_incomplete", "equation_rendered_glyphs_incomplete"})
+                self.assertEqual(canonical(paragraph._p), original)
+                self.assertEqual(receipt["layout_repairs"], [])
+            else:
+                self.assertEqual(receipt["equation_tab_layout_unresolved"], 0, receipt)
+                self.assertEqual(observation["findings"], [])
+                self.assertEqual(paragraph.text, "\t\t(12.10)")
+            self.assertEqual(canonical(paragraph._p.xpath("./m:oMathPara")[0]), math_before)
 
     def test_padding_variants_and_second_application_are_idempotent(self):
         for parts in (("(2.4)",), ("  (2.4)",), ("  ", "(2.4)"),

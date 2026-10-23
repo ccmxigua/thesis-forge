@@ -18,6 +18,17 @@ PyMuPDF. `equation_geometry.py` renders a private, source-bound probe containing
 wide math and label measurements and the proposed paragraph at its actual text
 measure and page height. It checks complete extracted math glyphs, width,
 height, center, label clearance, right alignment, and the rendered label line.
+Context bounds use actual painted glyph/rule ink, with label paint separated
+by a private color, rather than an exporter's logical font boxes. Different
+exporters can give identical stretched outlines different text boxes; the
+existing two-point tolerance is unchanged. A math rule crossing a number is
+included in the math bounds and still fails the collision check.
+Right tabs are checked against the label's text advance, retaining full-width
+parenthesis bearings; clipping and collisions use painted ink. The isolated
+paragraph starts at an artificial page top, so vertical checks use complete
+ink height versus the source height budget and physical PDF edges, rather
+than treating an ascender in the probe margin as source-document clipping.
+Absolute source-page vertical placement still requires full-page review.
 A label that automatically wraps is detected even without an explicit newline.
 When equation line spacing is unspecified, automatic line height lets native
 math limits and tall objects remain visible; inherited fixed body line heights
@@ -29,6 +40,10 @@ This probe is a bounded geometry check. It is not whole-document visual
 acceptance, native Word/WPS testing, or a submission-readiness attestation.
 Review full rendered pages separately, including surrounding content and page
 breaks. Word/WPS open/save/reopen remains a separate check.
+An exporter that corrupts a source relation (for example a leading aligned
+`=` painted as an inverted question mark in some LibreOffice exports) remains
+blocked by glyph completeness. The source paragraph is restored exactly;
+there is no character replacement or renderer-version exemption.
 
 If the formula or label will not fit, the renderer is unavailable, glyph
 extraction is incomplete, or the container is ambiguous, the tool returns a

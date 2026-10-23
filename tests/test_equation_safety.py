@@ -81,6 +81,21 @@ def spec(paragraph=None, font=None):
 
 
 class EquationSafetyWithoutRendererTests(unittest.TestCase):
+    def test_actual_ink_keeps_a_math_rule_crossing_the_number(self):
+        import fitz
+        pdf = fitz.open(); page = pdf.new_page()
+        sentinel = 0x13A5C7; color = tuple(c/255 for c in fitz.sRGB_to_rgb(sentinel))
+        page.insert_text((80, 70), "x+y=1", fontsize=12)
+        page.insert_text((180, 70), "(1)", fontsize=12, color=color)
+        page.draw_line((100, 65), (195, 65), color=(0, 0, 0))
+        page.draw_line((180, 74), (195, 74), color=color)
+        math_box, label_box = geometry._context_ink(page, sentinel)
+        self.assertGreaterEqual(math_box.x1, 195)
+        self.assertLess(math_box.y1, 74)
+        self.assertGreaterEqual(label_box.y1, 74)
+        self.assertTrue(math_box.intersects(label_box))
+        pdf.close()
+
     def test_unavailable_renderer_restores_source_and_fails_closed(self):
         doc = document(); paragraph = add_equation(doc.add_paragraph())
         before = canonical(paragraph._p)

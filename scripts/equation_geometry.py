@@ -154,6 +154,39 @@ def _box(rects):
     return box
 
 
+def _context_ink(page, sentinel):
+    """Separate math and labels by paint color, using actual glyph outlines.
+
+    Logical text boxes can overhang or understate stretched glyphs depending
+    on the exporter. seqno binds each text trace to its real drawing bounds.
+    A math rule crossing a label still belongs to math and must collide.
+    """
+    import fitz
+    expected = fitz.sRGB_to_rgb(sentinel)
+
+    def label_color(color):
+        return (color is not None and len(color) == 3
+                and all(abs(component*255-value) <= 1 for component, value in zip(color, expected)))
+
+    ink = page.get_bboxlog(); maths = []; labels = []
+    for span in page.get_texttrace():
+        if not any(chr(c[0]).strip() for c in span["chars"] if c[0] >= 0):
+            continue
+        kind, bounds = ink[span["seqno"]]
+        if kind not in {"fill-text", "stroke-text"}:
+            continue
+        (labels if label_color(span["color"]) else maths).append(bounds)
+    for drawing in page.get_drawings():
+        # A horizontal/vertical stroke has an empty logical Rect. Its paint
+        # bounds include stroke width and must survive rectangle unions.
+        bounds = ink[drawing["seqno"]][1]
+        if label_color(drawing.get("color")) or label_color(drawing.get("fill")):
+            labels.append(bounds)
+        else:
+            maths.append(bounds)
+    return _box(maths), _box(labels)
+
+
 def _render(probe):
     import fitz
     soffice = shutil.which("soffice")
@@ -235,17 +268,23 @@ def verify_equation(doc, paragraph, *, width, height, left, right, center,
                 context = rendered[-1]; spans = _spans(context)
                 labels = [s for s in spans if s["color"] == sentinel and s["text"].strip()]
                 math_spans = [s for s in spans if s["color"] != sentinel]
-                labels_box = _box([s["bbox"] for s in labels])
-                paths = [d["rect"] for d in context.get_drawings()
-                         if labels_box is None or not d["rect"].intersects(labels_box)]
-                actual_math = _box([s["bbox"] for s in math_spans] + paths)
+                actual_math, labels_box = _context_ink(context, sentinel)
+                # Tabs align text advances, not the inside edge of a glyph.
+                # Full-width parentheses can have large trailing bearings.
+                label_layout_box = _box([s["bbox"] for s in labels])
                 if actual_math is None or not _complete(expected_text, "".join(s["text"] for s in math_spans)):
                     findings.append(failure("equation_rendered_glyphs_incomplete"))
                 else:
                     origin = _MARGIN / 20
                     if actual_math.x0 < origin + left/20 - _TOLERANCE or actual_math.x1 > origin + right/20 + _TOLERANCE:
                         findings.append(failure("equation_rendered_outside_text_area", bbox=list(actual_math)))
-                    if actual_math.y0 < origin - _TOLERANCE or actual_math.y1 > origin + height/20 + _TOLERANCE:
+                    # This isolated paragraph starts at an artificial page
+                    # top. An ascender can overhang its first line into the
+                    # probe margin without clipping. Check the full ink height
+                    # against the original budget and the physical PDF edges;
+                    # absolute placement in the source requires full-page review.
+                    if (actual_math.height > height/20 + _TOLERANCE
+                            or actual_math.y0 < 2 or actual_math.y1 > context.rect.height-2):
                         findings.append(failure("equation_rendered_outside_page_height", bbox=list(actual_math)))
                     if alignment == "center" and abs((actual_math.x0+actual_math.x1)/2 - origin - center/20) > _TOLERANCE:
                         findings.append(failure("equation_rendered_not_centered", bbox=list(actual_math), required_center_pt=origin+center/20))
@@ -257,8 +296,9 @@ def verify_equation(doc, paragraph, *, width, height, left, right, center,
                     if labels_box is None or not _complete(label, "".join(s["text"] for s in labels)):
                         findings.append(failure("equation_rendered_number_missing"))
                     elif actual_math is not None:
-                        if abs(labels_box.x1 - (_MARGIN + right)/20) > _TOLERANCE:
-                            findings.append(failure("equation_rendered_number_not_right_aligned", bbox=list(labels_box)))
+                        if label_layout_box is None or abs(label_layout_box.x1 - (_MARGIN + right)/20) > _TOLERANCE:
+                            findings.append(failure("equation_rendered_number_not_right_aligned",
+                                                    bbox=list(label_layout_box) if label_layout_box else None))
                         if (labels_box.y0+labels_box.y1)/2 < actual_math.y0-_TOLERANCE or (labels_box.y0+labels_box.y1)/2 > actual_math.y1+_TOLERANCE:
                             findings.append(failure("equation_rendered_number_not_same_line", math_bbox=list(actual_math), label_bbox=list(labels_box)))
                         if actual_math.intersects(labels_box):
@@ -269,7 +309,8 @@ def verify_equation(doc, paragraph, *, width, height, left, right, center,
                           "label_width_pt": label_box.width if label_box else None,
                           "label_height_pt": label_box.height if label_box else None,
                           "context_math_bbox": list(actual_math) if actual_math else None,
-                          "context_label_bbox": list(labels_box) if labels_box else None}
+                          "context_label_bbox": list(labels_box) if labels_box else None,
+                          "context_label_layout_bbox": list(label_layout_box) if label_layout_box else None}
             if len(rendered) != expected_pages:
                 result = {"status": "manual_review_required", "findings": findings, "probe_geometry_verified": False}
             result.update(probe_docx_sha256=hashlib.sha256(probe).hexdigest(), validation_key=key,

@@ -1133,6 +1133,10 @@
         "same_line": {
           "type": "boolean"
         },
+        "wrap_simple_sums": {
+          "type": "boolean",
+          "description": "Allow reversible, render-checked continuation rows for flat identifier/number addition chains (default true). Structured math and authored alignment are preserved."
+        },
         "no_lines": {
           "type": "boolean"
         },

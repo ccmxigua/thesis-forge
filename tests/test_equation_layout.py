@@ -62,9 +62,11 @@ class EquationLayoutTests(unittest.TestCase):
         counts = apply_equation_layout(doc, {})
         self.assertEqual(counts["equations"], 2)
         self.assertEqual(protected, [canonical(p._p) for p in (inline, mixed, direct_inline)])
-        for p in (display, direct_display):
-            self.assertEqual(p.text, "\t")
-            self.assertEqual(tab_positions(p)["center"], 4320)
+        self.assertEqual(display.text, "")
+        self.assertEqual(display.alignment, WD_ALIGN_PARAGRAPH.CENTER)
+        self.assertEqual(direct_display.text, "\t")
+        self.assertEqual(tab_positions(direct_display)["center"], 4320)
+        self.assertTrue(all(check["status"] == "passed" for check in counts["geometry_checks"]))
         self.assertEqual(audit_equation_layout(doc, {}), [])
 
     def test_multiline_math_and_review_anchors_survive_serialization(self):
@@ -174,6 +176,7 @@ class EquationLayoutTests(unittest.TestCase):
     def test_nested_table_and_one_edge_margin_override(self):
         doc = Document()
         outer = doc.add_table(rows=1, cols=1)
+        outer.autofit = False
         table = outer.cell(0, 0).add_table(rows=1, cols=1)
         table.autofit = False
         table.columns[0].width = Twips(3000)
@@ -235,7 +238,7 @@ class EquationLayoutTests(unittest.TestCase):
 
     def test_declared_role_alignment_and_indents_are_respected(self):
         doc = Document()
-        p = add_math(doc.add_paragraph())
+        p = add_math(doc.add_paragraph(), direct=True)
         p.paragraph_format.left_indent = Twips(360)
         props = {"alignment": "left", "left_indent_pt": 18}
         apply_equation_layout(doc, {}, paragraph_spec=props)

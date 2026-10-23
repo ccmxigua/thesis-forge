@@ -25,6 +25,9 @@ from docx.oxml.ns import qn
 from docx.shared import Mm, Pt, RGBColor, Twips
 from docx.text.paragraph import Paragraph
 from docx.text.run import Run
+from equation_geometry import has_math_ink, verify_equation
+import equation_reflow
+import equation_compat
 
 from artifact_io import atomic_write_text, commit_files, sibling_temp
 from document_text_font import apply_document_font, audit_document_font, document_font_safe_roles
@@ -1518,12 +1521,14 @@ def set_font(style, spec: dict[str, Any]) -> None:
 def set_paragraph(style, spec: dict[str, Any]) -> None:
     p = style.paragraph_format
     if spec.get("alignment") in ALIGN: p.alignment = ALIGN[spec["alignment"]]
+    if spec.get("left_indent_pt") is not None: p.left_indent = Pt(float(spec["left_indent_pt"]))
+    if spec.get("right_indent_pt") is not None: p.right_indent = Pt(float(spec["right_indent_pt"]))
+    # The first-line setter removes/reinserts attributes. Use the same order
+    # on the first pass and on subsequent passes for byte-stable OOXML.
     if spec.get("first_line_indent_pt") is not None: p.first_line_indent = Pt(float(spec["first_line_indent_pt"]))
     elif spec.get("first_line_indent_chars") is not None:
         size = style.font.size.pt if style.font.size else 12
         p.first_line_indent = Pt(float(spec["first_line_indent_chars"]) * size)
-    if spec.get("left_indent_pt") is not None: p.left_indent = Pt(float(spec["left_indent_pt"]))
-    if spec.get("right_indent_pt") is not None: p.right_indent = Pt(float(spec["right_indent_pt"]))
     if spec.get("space_before_pt") is not None: p.space_before = Pt(float(spec["space_before_pt"]))
     if spec.get("space_after_pt") is not None: p.space_after = Pt(float(spec["space_after_pt"]))
     line_pt = float(spec.get("spacing_line_height_pt") or (style.font.size.pt if style.font.size else 12))
@@ -1586,22 +1591,24 @@ def apply_direct_format(paragraph, role_spec: dict[str, Any]) -> None:
     # instances with stale direct formatting even though the shared style
     # audit passes.  Walk the underlying XML and wrap each run instead.
     for run in _paragraph_runs_including_nested(paragraph):
-        if font_spec.get("latin"): run.font.name = font_spec["latin"]
-        if font_spec.get("size_pt") is not None: run.font.size = Pt(float(font_spec["size_pt"]))
-        if font_spec.get("bold") is not None: run.font.bold = bool(font_spec["bold"])
-        if font_spec.get("italic") is not None: run.font.italic = bool(font_spec["italic"])
-        rpr = run._element.get_or_add_rPr(); fonts = rpr.get_or_add_rFonts()
+        _apply_editable_run_font(run, font_spec)
+    # Direct paragraph properties are set to the same values as the style.
+    pseudo = type("ParagraphStyleProxy", (), {"paragraph_format": paragraph.paragraph_format,
+                                               "font": paragraph.style.font,
+                                               "element": paragraph._p})()
+    set_paragraph(pseudo, role_spec.get("paragraph", {}))
+
+
+def _apply_editable_run_font(run, font_spec: dict[str, Any]) -> None:
+    if font_spec.get("latin"): run.font.name = font_spec["latin"]
+    if font_spec.get("size_pt") is not None: run.font.size = Pt(float(font_spec["size_pt"]))
+    if font_spec.get("bold") is not None: run.font.bold = bool(font_spec["bold"])
+    if font_spec.get("italic") is not None: run.font.italic = bool(font_spec["italic"])
+    if font_spec.get("cjk") or font_spec.get("latin"):
+        fonts = run._element.get_or_add_rPr().get_or_add_rFonts()
         if font_spec.get("cjk"): fonts.set(qn("w:eastAsia"), font_spec["cjk"])
         if font_spec.get("latin"):
             for key in ("ascii", "hAnsi", "cs"): fonts.set(qn("w:" + key), font_spec["latin"])
-    # Direct paragraph properties are set to the same values as the style so
-    # legacy documents with local overrides still render deterministically.
-    pseudo = type("ParagraphStyleProxy", (), {"paragraph_format": paragraph.paragraph_format,
-                                               "font": paragraph.style.font,
-                                               # set_paragraph() uses the element only
-                                               # for outline-level OOXML updates.
-                                               "element": paragraph._p})()
-    set_paragraph(pseudo, role_spec.get("paragraph", {}))
 
 
 def chinese_number(value: int) -> str:
@@ -5283,10 +5290,23 @@ def _equation_tab_position_twips(doc: Document, paragraph: Paragraph,
         width -= section.left_margin.twips + section.right_margin.twips
         if section.gutter is not None:
             width -= section.gutter.twips
-    left = paragraph.paragraph_format.left_indent
-    right = paragraph.paragraph_format.right_indent
-    if left is not None:
-        width -= left.twips
+        cols = section._sectPr.find(qn("w:cols"))
+        if cols is not None:
+            try:
+                count = int(cols.get(qn("w:num"), "1"))
+                gap = int(cols.get(qn("w:space"), "720"))
+                if count < 1 or gap < 0 or cols.findall(qn("w:col")):
+                    return None
+                if count > 1:
+                    if cols.get(qn("w:equalWidth"), "1") in {"0", "false", "off"} or cols.findall(qn("w:col")):
+                        # Unequal columns need a rendered current-column map.
+                        return None
+                    width = (width - gap * (count - 1)) // count
+            except (TypeError, ValueError):
+                return None
+    # Word tab coordinates use the container's text origin, not the indented
+    # paragraph origin. The right stop therefore subtracts only right indent.
+    right = _equation_effective_indent(paragraph, "right_indent")
     if right is not None:
         width -= right.twips
     if width <= 0:
@@ -5366,7 +5386,9 @@ def _cell_margin_declaration(margins, edge: str) -> tuple[bool, int | None]:
     """
     if margins is None:
         return False, None
-    candidates = [edge, "start" if edge == "left" else "end"]
+    candidates = [edge]
+    if edge in {"left", "right"}:
+        candidates.append("start" if edge == "left" else "end")
     for name in candidates:
         node = margins.find(qn(f"w:{name}"))
         if node is None:
@@ -5392,7 +5414,7 @@ def _effective_table_cell_margins_twips(doc: Document, table, cell) -> dict[str,
     cell's outer grid width.  Ignoring margins inherited from a table style can
     push an equation number into the neighboring cell.
     """
-    effective = {"left": 0, "right": 0}
+    effective = {"left": 0, "right": 0, "top": 0, "bottom": 0}
     styles_root = doc.styles.element
     defaults = styles_root.find(qn("w:docDefaults"))
     if defaults is not None:
@@ -5460,7 +5482,16 @@ def _equation_center_tab_position_twips(doc: Document, paragraph: Paragraph,
     right = _equation_tab_position_twips(doc, paragraph, equation_spec)
     if isinstance(explicit, int) and explicit > 0:
         return explicit if right is not None and explicit <= right else None
-    return round(right / 2) if right is not None else None
+    left = _equation_effective_indent(paragraph, "left_indent")
+    origin = left.twips if left is not None else 0
+    return round((origin + right) / 2) if right is not None and origin < right else None
+
+
+def _equation_effective_indent(paragraph: Paragraph, name: str):
+    value = getattr(paragraph.paragraph_format, name)
+    if value is not None:
+        return value
+    return inherited_style_value(paragraph.style, lambda style: getattr(style.paragraph_format, name))
 
 
 
@@ -5477,12 +5508,19 @@ def _default_equation_indents(paragraph: Paragraph, paragraph_spec: dict[str, An
         ("right_indent", {"right_indent_pt"}),
         ("first_line_indent", {"first_line_indent_pt", "first_line_indent_chars"}),
     ):
-        if keys.intersection(paragraph_spec):
+        if any(paragraph_spec.get(key) is not None for key in keys):
             continue
         current = getattr(paragraph.paragraph_format, attribute)
         if current is None or current.twips != 0:
             setattr(paragraph.paragraph_format, attribute, Twips(0))
             changed += 1
+        ind = paragraph._p.get_or_add_pPr().find(qn("w:ind"))
+        if ind is not None:
+            aliases = {"left_indent": ("leftChars", "start"),
+                       "right_indent": ("rightChars", "end"),
+                       "first_line_indent": ("firstLineChars", "hangingChars")}[attribute]
+            for name in aliases:
+                ind.attrib.pop(qn("w:" + name), None)
     return changed
 
 
@@ -5539,7 +5577,11 @@ def _materialize_equation_padding(paragraph: Paragraph, runs: list[Any],
                 remaining -= 1
             elif child.tag == qn("w:t"):
                 take = min(remaining, len(child.text or ""))
-                child.text = (child.text or "")[take:]
+                value = (child.text or "")[take:]
+                if value:
+                    child.text = value
+                else:
+                    run.remove(child)
                 remaining -= take
     if tab_run is None:
         tab_run = OxmlElement("w:r")
@@ -5574,6 +5616,19 @@ def _set_equation_tab_stop(paragraph: Paragraph, alignment: str, position: int) 
     return int(tabs.xml != old_xml)
 
 
+def _trim_equation_label_padding(runs):
+    for run in reversed(runs):
+        for child in reversed(list(run)):
+            if child.tag == qn("w:tab"):
+                run.remove(child)
+            elif child.tag == qn("w:t"):
+                value = (child.text or "").rstrip()
+                if value:
+                    child.text = value
+                    return
+                run.remove(child)
+
+
 def _effective_equation_tabs(paragraph: Paragraph) -> dict[int, str]:
     """Include inherited explicit stops, which can intercept a formula's tabs."""
     chain, seen = [], set()
@@ -5594,17 +5649,187 @@ def _effective_equation_tabs(paragraph: Paragraph) -> dict[int, str]:
     return tabs
 
 
+def _equation_render_observation(doc, paragraph, equation_spec, alignment, *, evidence_dir=None):
+    if not has_math_ink(paragraph):
+        return {"status": "empty_placeholder", "findings": [], "probe_geometry_verified": False}
+    def unresolved(code):
+        return {"status": "manual_review_required", "probe_geometry_verified": False,
+                "findings": [{"code": code, "requires_manual_review": True}]}
+    parts = _equation_layout_parts(paragraph)
+    if parts is None:
+        return unresolved("equation_structure_ambiguous")
+    first = _equation_effective_indent(paragraph, "first_line_indent")
+    if first is not None and first.twips:
+        return unresolved("equation_first_line_indent_requires_review")
+    # Resolve each inherited attribute before deciding whether it is unknown.
+    # A derived Equation style commonly sets firstLineChars=0 over a Normal
+    # style's firstLineChars=200; the base value is then not active geometry.
+    effective_indents = {}
+    sources = [style.element for style in reversed(_equation_style_chain(paragraph))]
+    for source in [*sources, paragraph._p]:
+        ind = source.find(qn("w:pPr"))
+        ind = ind.find(qn("w:ind")) if ind is not None else None
+        if ind is not None:
+            effective_indents.update(ind.attrib)
+    if any(effective_indents.get(qn("w:"+key)) not in {None, "0"}
+           for key in ("leftChars", "rightChars", "firstLineChars", "hangingChars", "start", "end")):
+        return unresolved("equation_character_or_directional_indent_requires_review")
+    right_indent = _equation_effective_indent(paragraph, "right_indent")
+    left_indent = _equation_effective_indent(paragraph, "left_indent")
+    left = left_indent.twips if left_indent is not None else 0
+    rindent = right_indent.twips if right_indent is not None else 0
+    available = _equation_tab_position_twips(doc, paragraph, {})
+    right = _equation_tab_position_twips(doc, paragraph, equation_spec)
+    center = _equation_center_tab_position_twips(doc, paragraph, equation_spec)
+    if available is None or right is None or center is None or left < 0 or rindent < 0:
+        return unresolved("equation_container_or_indent_unresolved")
+    width = available + rindent
+    section_index = _paragraph_section_indices(doc).get(paragraph._p, 0)
+    section = doc.sections[min(section_index, len(doc.sections)-1)]
+    height = section.page_height.twips-section.top_margin.twips-section.bottom_margin.twips
+    cells = paragraph._p.xpath("ancestor::w:tc[1]")
+    if cells:
+        cell = cells[0]; table = cell.getparent().getparent()
+        fixed, _grid = _fixed_table_cell_grid_width_twips(table, cell)
+        if not fixed:
+            return unresolved("equation_autofit_table_requires_review")
+        # The isolated paragraph probe cannot reproduce conditional table
+        # fonts/margins or an automatic outer table's eventual track widths.
+        # Do not promote those unknown containers to measured geometry.
+        for ancestor_cell in paragraph._p.xpath("ancestor::w:tc"):
+            ancestor_table = ancestor_cell.getparent().getparent()
+            ancestor_fixed, _ = _fixed_table_cell_grid_width_twips(ancestor_table, ancestor_cell)
+            if not ancestor_fixed:
+                return unresolved("equation_autofit_outer_table_requires_review")
+            if ancestor_table.xpath("./w:tblPr/w:tblpPr|./w:tblPr/w:bidiVisual"):
+                return unresolved("equation_positioned_or_rtl_table_requires_review")
+            style_ids = ancestor_table.xpath("./w:tblPr/w:tblStyle/@w:val")
+            seen = set()
+            while style_ids and style_ids[0] not in seen:
+                style_id = style_ids[0]; seen.add(style_id)
+                style = next((s for s in doc.styles.element.findall(qn("w:style"))
+                              if s.get(qn("w:styleId")) == style_id), None)
+                if style is None:
+                    return unresolved("equation_table_style_unresolved")
+                if style.xpath("./w:rPr|./w:pPr|./w:tblStylePr//w:rPr|./w:tblStylePr//w:pPr|./w:tblStylePr//w:tcMar|./w:tblStylePr//w:tblCellMar"):
+                    return unresolved("equation_contextual_table_style_requires_review")
+                style_ids = style.xpath("./w:basedOn/@w:val")
+        tblpr = table.find(qn("w:tblPr"))
+        preferred = tblpr.find(qn("w:tblW")) if tblpr is not None else None
+        if preferred is not None and preferred.get(qn("w:type"), "auto") not in {"auto", "nil"}:
+            grid = table.find(qn("w:tblGrid"))
+            try:
+                total = sum(int(n.get(qn("w:w"))) for n in grid)
+                if preferred.get(qn("w:type")) != "dxa" or int(preferred.get(qn("w:w"))) != total:
+                    return unresolved("equation_table_preferred_width_conflicts_with_grid")
+            except (TypeError, ValueError):
+                return unresolved("equation_table_width_unresolved")
+        rowpr = cell.getparent().find(qn("w:trPr"))
+        rowheight = rowpr.find(qn("w:trHeight")) if rowpr is not None else None
+        if rowheight is not None and rowheight.get(qn("w:hRule")) == "exact":
+            if len(cell.findall(qn("w:p"))) != 1 or cell.find(qn("w:tbl")) is not None:
+                return unresolved("equation_exact_row_shared_height_requires_review")
+            margins = _effective_table_cell_margins_twips(doc, table, cell)
+            try:
+                height = min(height, int(rowheight.get(qn("w:val")))-margins["top"]-margins["bottom"])
+            except (TypeError, ValueError):
+                return unresolved("equation_table_row_height_unresolved")
+    return verify_equation(doc, paragraph, width=width, height=height, left=left, right=right,
+                           center=center, label=parts["label"], alignment=alignment, evidence_dir=evidence_dir)
+
+
+def _equation_style_chain(paragraph):
+    chain, seen = [], set(); style = paragraph.style
+    while style is not None and style.style_id not in seen:
+        seen.add(style.style_id); chain.append(style); style = style.base_style
+    return chain
+
+
+def _equation_native_centering(parts, alignment, equation_spec):
+    if alignment != "center" or parts["label"] or equation_spec.get("center_tab_twips") is not None:
+        return False
+    if parts["math"].tag != qn("m:oMathPara"):
+        return False
+    pr = parts["math"].find(qn("m:oMathParaPr"))
+    jc = pr.find(qn("m:jc")) if pr is not None else None
+    return jc is None or jc.get(qn("m:val")) in {"center", "centerGroup"}
+
+
+def _try_additive_equation_reflow(doc, paragraph, equation_spec, alignment,
+                                  observation, math_index, *, evidence_dir=None):
+    if alignment != "center" or equation_spec.get("wrap_simple_sums") is False:
+        return None
+    codes = {finding["code"] for finding in observation["findings"]}
+    if not codes.intersection({"equation_too_wide", "equation_number_has_no_clearance"}):
+        return None
+    # Unsupported geometry must stay blocking; wrapping cannot cure an unknown
+    # container, clipping from a fixed row height, or an unavailable renderer.
+    if any("unresolved" in code or "unavailable" in code or "requires_review" in code for code in codes):
+        return None
+    natural_width = observation.get("math_width_pt")
+    if not isinstance(natural_width, (int, float)):
+        return None
+    parts = _equation_layout_parts(paragraph)
+    if parts is None:
+        return None
+    center = _equation_center_tab_position_twips(doc, paragraph, equation_spec)
+    right = _equation_tab_position_twips(doc, paragraph, equation_spec)
+    left_indent = _equation_effective_indent(paragraph, "left_indent")
+    left = left_indent.twips if left_indent is not None else 0
+    if center is None or right is None:
+        return None
+    label_width = observation.get("label_width_pt") or 0
+    gap = max(1.0, (observation.get("label_height_pt") or 0)/2) if parts["label"] else 0
+    target = min((center-left)/20, (right-center)/20-label_width-gap)*2
+    if target <= 0:
+        return None
+    source_node = parts["math"]
+    # Preserve the complete source namespace context for exact staged replay.
+    from lxml import etree
+    source = etree.fromstring(equation_reflow.canonical(source_node))
+    parent = source_node.getparent(); current = source_node; attempts = []
+    for cuts in equation_reflow.candidate_breaks(source, natural_width, target):
+        candidate = equation_reflow.reflow(source, cuts)
+        parent.replace(current, candidate); current = candidate
+        try:
+            record = equation_reflow.proof(source, candidate, cuts, math_index)
+        except ValueError:
+            parent.replace(current, source_node)
+            observation["findings"].append({"code": "equation_reflow_integrity_unproven",
+                                             "requires_manual_review": True})
+            return None
+        result = _equation_render_observation(doc, paragraph, equation_spec, alignment,
+                                              evidence_dir=evidence_dir)
+        attempts.append({"rows": len(cuts)+1, "break_offsets": cuts, "geometry": result})
+        if not result["findings"]:
+            return {"observation": result, "proof": record,
+                    "attempts": attempts, "initial_geometry": observation}
+    if current is not source_node:
+        parent.replace(current, source_node)
+    if attempts:
+        observation["reflow_attempts"] = attempts
+        observation["findings"].append({"code": "equation_reflow_no_safe_partition",
+                                         "attempted_rows": [attempt["rows"] for attempt in attempts],
+                                         "requires_manual_review": True})
+    return None
+
+
 def apply_equation_layout(doc: Document, equation_spec: dict[str, Any], *,
-                          paragraph_spec: dict[str, Any] | None = None) -> dict[str, int]:
+                          paragraph_spec: dict[str, Any] | None = None,
+                          font_spec: dict[str, Any] | None = None, evidence_dir=None) -> dict[str, Any]:
     paragraph_spec = paragraph_spec or {}
     alignment = equation_spec.get("alignment", paragraph_spec.get("alignment") or "center")
     counts = {"equations": 0, "tabs_set": 0, "borders_removed": 0,
               "center_tabs_materialized": 0, "number_tabs_materialized": 0,
-              "equation_tab_layout_unresolved": 0}
+              "equation_tab_layout_unresolved": 0, "manual_review_items": [], "geometry_checks": [],
+              "layout_repairs": [], "reflow_evidence": []}
+    math_nodes = _equation_math_nodes(doc)
     for paragraph in all_body_paragraphs(doc):
         if not is_display_equation(paragraph):
             continue
         counts["equations"] += 1
+        before = copy.deepcopy(paragraph._p)
+        before_counts = {key: counts[key] for key in ("tabs_set", "center_tabs_materialized", "number_tabs_materialized", "borders_removed")}
         parts = _equation_layout_parts(paragraph)
         if parts is None:
             counts["equation_tab_layout_unresolved"] += 1
@@ -5614,15 +5839,36 @@ def apply_equation_layout(doc: Document, equation_spec: dict[str, Any], *,
         center = _equation_center_tab_position_twips(doc, paragraph, equation_spec)
         right = _equation_tab_position_twips(doc, paragraph, equation_spec)
         if (alignment == "center" and center is None) or (parts["label"] and right is None):
+            paragraph._p.clear(); paragraph._p.attrib.update(before.attrib); paragraph._p.extend(list(before))
             counts["equation_tab_layout_unresolved"] += 1
+            counts["manual_review_items"].append({"equation_index": counts["equations"],
+                                                "status": "manual_review_required",
+                                                "findings": [{"code": "equation_container_width_unresolved"}]})
             continue
-        paragraph.alignment = ALIGN["left" if alignment == "center" else alignment]
-        if alignment == "center":
+        native_center = _equation_native_centering(parts, alignment, equation_spec)
+        paragraph.alignment = ALIGN["center" if native_center else "left" if alignment == "center" else alignment]
+        paragraph.paragraph_format.keep_together = True
+        if paragraph_spec.get("line_spacing") is None:
+            # A fixed line height inherited from body text can hide n-ary
+            # limits or overlap tall math. Let an unspecified display line
+            # grow to its native object height. An explicit requirement is
+            # retained and must pass the same rendered completeness checks.
+            paragraph.paragraph_format.line_spacing = 1.0
+        if native_center:
+            # Native unnumbered centerGroup already uses the paragraph's
+            # measure. A preceding center tab would center it a second time.
+            # Remove only external padding; leave the entire OMML unchanged.
+            for run in parts["before"]:
+                for child in list(run):
+                    if child.tag in {qn("w:t"), qn("w:tab")}:
+                        run.remove(child)
+        elif alignment == "center":
             counts["tabs_set"] += _set_equation_tab_stop(paragraph, "center", center)
             counts["center_tabs_materialized"] += _materialize_equation_padding(
                 paragraph, parts["before"], parts["prefix"], parts["math"],
             )
         if parts["label"]:
+            _trim_equation_label_padding(parts["after"])
             counts["tabs_set"] += _set_equation_tab_stop(paragraph, "right", right)
             tail = parts["tail"]
             padding = tail[:len(tail) - len(tail.lstrip())]
@@ -5636,11 +5882,45 @@ def apply_equation_layout(doc: Document, equation_spec: dict[str, Any], *,
             if borders is not None:
                 ppr.remove(borders)
                 counts["borders_removed"] += 1
+        if font_spec:
+            for run in paragraph.runs:
+                _apply_editable_run_font(run, font_spec)
+        # Make only the standard, already-true growth default explicit. This
+        # never substitutes fonts or changes an author's grow=0 / shape choice.
+        # Publish its reversible proof only after the real layout probe passes.
+        math_index = next((i for i, node in enumerate(math_nodes) if node is parts["math"]), None)
+        compatibility_proof = None
+        if math_index is not None:
+            normalized = equation_compat.materialize_growth(parts["math"])
+            if equation_compat.canonical(normalized) != equation_compat.canonical(parts["math"]):
+                compatibility_proof = equation_compat.proof(parts["math"], normalized, math_index)
+                parts["math"].getparent().replace(parts["math"], normalized)
+                parts["math"] = normalized
+        geometry = _equation_render_observation(doc, paragraph, equation_spec, alignment, evidence_dir=evidence_dir)
+        if geometry["findings"]:
+            if math_index is not None:
+                repair = _try_additive_equation_reflow(doc, paragraph, equation_spec, alignment,
+                    geometry, math_index, evidence_dir=evidence_dir)
+                if repair is not None:
+                    counts["layout_repairs"].append(repair["proof"])
+                    counts["reflow_evidence"].append({"equation_index": counts["equations"], **repair})
+                    geometry = repair["observation"]
+        counts["geometry_checks"].append(geometry)
+        if not geometry["findings"] and compatibility_proof is not None:
+            counts["layout_repairs"].append(compatibility_proof)
+        if geometry["findings"]:
+            # Restore the original paragraph in place; keep caller and receipt
+            # element identities stable and never publish a clipped candidate.
+            paragraph._p.clear(); paragraph._p.attrib.update(before.attrib)
+            paragraph._p.extend(list(before))
+            counts.update(before_counts)
+            counts["equation_tab_layout_unresolved"] += 1
+            counts["manual_review_items"].append({"equation_index": counts["equations"], **geometry})
     return counts
 
 
 def audit_equation_layout(doc: Document, equation_spec: dict[str, Any], *,
-                          paragraph_spec: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+                          paragraph_spec: dict[str, Any] | None = None, evidence_dir=None) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
     paragraph_spec = paragraph_spec or {}
     alignment = equation_spec.get("alignment", paragraph_spec.get("alignment") or "center")
@@ -5654,7 +5934,8 @@ def audit_equation_layout(doc: Document, equation_spec: dict[str, Any], *,
         if parts is None:
             finding("layout_structure", "ambiguous", "standalone math and supported numeric label")
             continue
-        expected = ALIGN["left" if alignment == "center" else alignment]
+        native_center = _equation_native_centering(parts, alignment, equation_spec)
+        expected = ALIGN["center" if native_center else "left" if alignment == "center" else alignment]
         if paragraph.alignment != expected:
             finding("paragraph.alignment", str(paragraph.alignment), str(expected))
         tab_nodes = paragraph._p.xpath("./w:pPr/w:tabs/w:tab")
@@ -5664,7 +5945,7 @@ def audit_equation_layout(doc: Document, equation_spec: dict[str, Any], *,
             finding("tab_stops", "malformed", "integer positions")
             continue
         for kind, needed, position, used, runs in (
-            ("center", alignment == "center",
+            ("center", alignment == "center" and not native_center,
              _equation_center_tab_position_twips(doc, paragraph, equation_spec),
              parts["prefix"], parts["before"]),
             ("right", bool(parts["label"]),
@@ -5684,6 +5965,8 @@ def audit_equation_layout(doc: Document, equation_spec: dict[str, Any], *,
                 _equation_center_tab_position_twips(doc, paragraph, equation_spec) or 0)
             if position is not None and any(lower < pos < position for _, pos in tabs):
                 finding(f"{kind}_tab_preempted", sorted(tabs), "no intervening tab stop")
+        if native_center and parts["prefix"]:
+            finding("native_center_prefix", parts["prefix"], "no external padding")
         if equation_spec.get("number_parentheses") and not parts["label"]:
             finding("number_parentheses", paragraph.text, "(number)")
         if equation_spec.get("same_line") and (not parts["label"] or "\n" in paragraph.text):
@@ -5693,8 +5976,45 @@ def audit_equation_layout(doc: Document, equation_spec: dict[str, Any], *,
                 finding("no_lines", False, True)
             if any(node.get(qn("w:leader")) not in {None, "none"} for node in tab_nodes):
                 finding("tab_leader", "visible", "none")
+        geometry = _equation_render_observation(doc, paragraph, equation_spec, alignment, evidence_dir=evidence_dir)
+        for item in geometry["findings"]:
+            findings.append({"role": "equations", "property": f"equations[{index}].rendered_geometry",
+                             "failure_type": item["code"], "template_value": item,
+                             "required_value": "complete visible math and noncolliding same-line number",
+                             "requires_manual_review": True})
     return findings
 
+
+
+def _equation_math_nodes(doc):
+    return doc._element.xpath(".//m:oMathPara|.//m:oMath[not(ancestor::m:oMathPara)]")
+
+
+def _equation_math_signature(doc):
+    from lxml import etree
+    return [hashlib.sha256(etree.tostring(node, method="c14n")).hexdigest()
+            for node in _equation_math_nodes(doc)]
+
+
+def _equation_blocked_report(args, changes, findings):
+    manual_items = changes.get("manual_review_items") or [
+        {"code": item.get("failure_type", item.get("property", "equation_geometry_unresolved")),
+         "requires_manual_review": True, "evidence": item} for item in findings]
+    report = {"valid": False, "pipeline_valid": False, "supported_subset_valid": False,
+              "format_ready": False, "submission_ready": False, "review_draft_ready": False,
+              "diagnostic_draft_generated": False, "overall_status": "manual_review_required",
+              "failure_type": "equation_layout_unsafe_or_unverifiable",
+              "output_policy": args.output_policy, "output_docx": None,
+              "requested_output_docx": str(args.output), "output_updated": False,
+              "existing_output_preserved": args.output.exists(),
+              "source_docx_sha256": hashlib.sha256(args.input.read_bytes()).hexdigest(),
+              "equation_layout_changes": changes, "findings": findings,
+              "manual_review_items": manual_items,
+              "reason": "Formula layout cannot be safely accepted; source and existing output are preserved. Review equation geometry evidence before choosing a layout."}
+    for name in ("equation-layout-review.json", "validation-report.json"):
+        atomic_write_text(args.out_dir/name, json.dumps(report, ensure_ascii=False, indent=2)+"\n")
+    print(json.dumps(report, ensure_ascii=False))
+    return 1
 
 
 def main(argv: list[str]) -> int:
@@ -6168,6 +6488,7 @@ def main(argv: list[str]) -> int:
     )
     source_drawing_baseline = audit_drawing_line_boxes(Document(args.input))
     doc = Document(args.input)
+    source_math_signature = _equation_math_signature(doc)
     prepared_header_layout = prepare_header_scope_boundaries(doc, spec)
     original_source_paragraphs = _content_instance_paragraphs(doc)
     args.out_dir.mkdir(parents=True, exist_ok=True)
@@ -6393,7 +6714,13 @@ def main(argv: list[str]) -> int:
     equation_paragraph_spec = effective_roles.get("equation", {}).get("paragraph", {})
     equation_changes = apply_equation_layout(
         doc, spec.get("equations", {}), paragraph_spec=equation_paragraph_spec,
+        font_spec=effective_roles.get("equation", {}).get("font", {}),
+        evidence_dir=args.out_dir/"equation-geometry",
     )
+    if equation_changes["equation_tab_layout_unresolved"]:
+        equation_findings = audit_equation_layout(doc, spec.get("equations", {}),
+            paragraph_spec=equation_paragraph_spec, evidence_dir=args.out_dir/"equation-geometry")
+        return _equation_blocked_report(args, equation_changes, equation_findings)
     cover_contract = compile_cover_contract(spec.get("cover", {}), spec.get("thesis_profile", {})) if spec.get("cover") else {}
     cover_changes = apply_cover(doc, spec.get("cover", {}), spec.get("thesis_profile", {}), cover_contract, mappings)
     declaration_changes = apply_declarations(
@@ -6526,6 +6853,16 @@ def main(argv: list[str]) -> int:
         document_font_execution = apply_document_font(doc, spec)
         doc.save(staged_output)
         canonicalize_docx_zip(staged_output)
+        staged_doc = Document(staged_output)
+        equation_findings = audit_equation_layout(staged_doc, spec.get("equations", {}),
+            paragraph_spec=equation_paragraph_spec, evidence_dir=args.out_dir/"equation-geometry")
+        if not equation_reflow.integrity_matches(source_math_signature,
+                _equation_math_nodes(staged_doc), equation_changes.get("layout_repairs", [])):
+            equation_findings.append({"role": "equations", "property": "math_content_integrity",
+                                      "failure_type": "equation_math_content_changed",
+                                      "requires_manual_review": True})
+        if equation_findings:
+            return _equation_blocked_report(args, equation_changes, equation_findings)
         commit_files([(staged_output, args.output)])
     finally:
         staged_output.unlink(missing_ok=True)
@@ -6729,6 +7066,7 @@ def main(argv: list[str]) -> int:
     findings.extend(audit_appendix_rules(check, spec.get("appendices", {}), spec.get("thesis_profile", {})))
     findings.extend(audit_equation_layout(
         check, spec.get("equations", {}), paragraph_spec=equation_paragraph_spec,
+        evidence_dir=args.out_dir/"equation-geometry",
     ))
     findings.extend(audit_cover(check, spec.get("cover", {}), spec.get("thesis_profile", {}), mappings))
     findings.extend(audit_declarations(

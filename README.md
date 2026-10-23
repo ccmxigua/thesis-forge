@@ -32,6 +32,12 @@ python3 scripts/audit_toc_materialization.py /absolute/source.docx /absolute/new
 
 该入口只从来源 DOCX 的目录域深度和语义标题读取条目，要求输出标题唯一匹配；使用 LibreOffice 实际 PDF 书签页码填入动态 `PAGEREF` 字段缓存，并重渲染直到缓存与最终分页一致。它不会调用或声称 Word/LibreOffice 更新了字段；分节重启、非十进制页码、重复或缺失书签、缓存不收敛以及不可见目录行均失败关闭。新 DOCX、渲染及审计报告必须放在新路径。该结果仍是 `submission_ready=false` 的可编辑审查草稿，不能代替 Word 发布验收或人工格式审查。
 
+显示公式的通用布局会按正文、等宽分栏或固定表格的实际文本宽度居中，保护行内公式、数学内容及已有内部对齐。非空公式需要 LibreOffice/PyMuPDF 实渲染检查；公式过宽、过高、编号碰撞或容器无法可靠判定时，返回人工处理项并保留已有输出。依赖、证据和适用边界见 [公式几何安全检查](docs/equation-geometry-safety.md)；该局部探针不等于 Word/WPS 或整篇论文视觉验收。
+
+对能严格识别的平直加法链，横向溢出时会尝试在原有 `+` 前生成连续行，逐次实渲染并保留完整源 XML 的可逆重演证明；这会改变版式容器，不改变原字符、顺序或字体。已有分数、矩阵、括号和内部对齐不自动改写，超页高整组和宽于单元格的编号仍需版面选择。可用 `equations.wrap_simple_sums=false` 关闭该后备布局。
+
+多行矩阵／数组的括号会将规范已有的默认伸展值显式写为 `m:grow=1`，保留作者的显式设置和全部数学内容，并记录可逆证明。WPS／Word 原生导出还需用 `scripts/audit_equation_export.py` 检查实际 PDF 的字符映射和括号覆盖高度；缺少证据或检测失败会返回非零状态。该兼容处理不代表原生渲染已经验收，操作与证据格式见上述文档。
+
 需要把长篇机器评分明细从论文草稿中分离时，使用 `scripts/review_package_export.py` 的 source-bound 导出协议：`strip` 只接受与当前 scorecard JSON 逐字匹配的前置评分块和人工标记原文，将每个 `MR-*` 缩为带唯一编号的简短待审提示，并只改写 `word/document.xml`；完整理由、来源映射和处理要求保留在外置台账。随后必须对新 DOCX 重新物化目录、渲染并审计。用 `scripts/reconcile_current_output.py --external-scorecard-out <new-scorecard.json>` 将新 PDF/DOCX 的当前状态写入外部 scorecard，不把评分段落插回论文；最后运行 `review_package_export.py export` 生成可编辑审查台账 DOCX、完整机器 JSON 和中文人工复核指引。指引将明确区分失败、未核验和待人工，列出来源原文、下一步和缺失的论文定位，不把内部代码或未知状态解释成通过；逐项编号和完整机器映射写入独立技术 JSON。`review_draft` 的单项属性检查状态不是论文总分；只有完整、来源绑定且人工确认的义务范围以及适用的评分权重都已明确时才允许显示总体分数。当前来源范围合同仍将重要性标为未评估，因此总体分数保持未评分；有完整证据时，范围覆盖率和满足率作为单独的无权重指标显示。主流程可用 `--obligation-scope-inventory <source-first-scope.json>` 接入该范围清单，并将源文件哈希与当前 run/source 绑定后转交应用层。未知、待人工、范围缺失或不完整不会折算成 0。若需从格式契约回查原始条款，可传入 `--source-requirements-dir <review/requirements>`、`--requirements-docx <exact-requirements.docx>` 和 `--technical-json <report-technical.json>`。该入口核验要求 DOCX 与抽取清单、条款目录、格式契约的字节绑定，并确认引述能在 DOCX 原文中找到；缺失、冲突或不可信映射保持未决。外置台账保留完整当前/历史条目和哈希绑定；任何一步均不提高 `submission_ready`，也不表示完成新的语义审查。
 
 以下 V2 overlay、`convert.sh` 和 API 说明属于旧版兼容工具，不是新文档的来源审查入口，也不能证明学校要求已满足。

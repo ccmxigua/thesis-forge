@@ -83,7 +83,8 @@ directional indents are retained when interpretation is unresolved.
 `repair_toc_navigation` uses the existing guarded full-field parser, transaction
 and serialized audit. Declare source heading roles explicitly in the rules.
 It does not move/delete original bookmarks or recompute cached pages. A target
-touched by an unproved partial/cross-paragraph range is still rejected. Body
+touched by an unproved partial/cross-paragraph range is rejected in the default
+strict policy. Body
 cross-references are not repaired by guessing. Navigation evidence is bound to
 the final candidate SHA; no static result is native click/save evidence.
 
@@ -91,6 +92,57 @@ the final candidate SHA; no static result is native click/save evidence.
 label and a bound caption/adjacent object. Literal text is not proof of narrative
 meaning or first visual mention. No figure movement, scaling or prose insertion
 occurs. Floating layout still requires a renderer and an author decision.
+
+## Optional boundary and additive-target proofs
+
+The original range guards remain the default. A rule with exactly one subtitle
+prefix or bibliography terminal action can additionally declare
+`"boundary_edit_policy": "navigation_only"`. This is a narrower proof path,
+not permission to ignore a range. It reads the complete supplied package's
+complex fields (including split instructions), simple fields and hyperlink
+anchors. Missing, dynamic, cross-story, ambiguous or unsupported consumers
+remain blocked. `REF`/`NOTEREF` text readers, `TOC \\b` selections and external
+reference contexts do not establish this proof. Comment, permission and move
+ranges cannot authorize a text change. A point comment reference can remain
+untouched while an unrelated boundary is edited.
+
+Only the first `w:t` gets the explicit decorative prefix, or the final full-stop
+variant gets its configured replacement. Existing runs, attributes, markers,
+comment references, reference data, URL/DOI tokens and all other text remain.
+No font change or generated citation supplies authority to change content.
+The ledger records exact before/after text and source/final locators. Its inverse
+is checked against an independent source-based control with the same authorized
+formatting and no boundary text edits, across **all Word XML parts**, before
+publication and again on the serialized candidate. Every OPC member payload
+must also equal the verified staged payload. A local `inverse_verified` entry
+and the full `boundary_inverse` report are distinct scopes.
+
+Unrelated footer MC alternatives may contain complete literal `PAGE` fields.
+When delimiters and instruction are independently paired inside each logical
+story/branch and no dynamic argument exists, every possible branch reads no
+bookmark text. The inventory records that conservative consumer union, while
+`display_selection_unresolved` remains true. It does not choose, flatten,
+refresh or change the branch. A REF/IF/unknown/revised or cross-branch field
+does not qualify.
+
+With navigation repair enabled, the separate explicit
+`"navigation_target_policy": "bound_heading_additive"` can bind a unique source
+heading even when unrelated original cross-paragraph endpoints touch it. It
+requires one consistent TOC HYPERLINK/PAGEREF pair, a complete consumer graph,
+no additional/non-TOC reader of that pair's old target, and an unambiguous whole
+heading. Point or partial local bookmarks cannot supply ownership. All original
+ranges and their other consumers remain; only the selected TOC pair can be
+retargeted to an existing complete heading range or a new complete managed pair.
+No author bookmark is adopted just because its name starts with `TF_TOC`.
+
+Permissions/revisions and wide comment ranges remain blocked. A complete inline
+comment may stay enclosed by the new whole-heading range only when **both**
+actual insertion positions are outside that comment; its text and all control
+markers remain unchanged and are independently audited. The serialized audit
+binds final bytes, without recomputing cached pages or asserting native clicks.
+`toc_navigation.restore_additive_navigation` is an exact in-memory inverse for
+the still-identical receipt-bound candidate; it refuses subsequent user edits.
+Retargeting navigation is not reconstruction of an author's old range intent.
 
 ## Publication and evidence
 

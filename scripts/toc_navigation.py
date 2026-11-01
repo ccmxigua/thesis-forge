@@ -54,6 +54,13 @@ def _media(doc):
     return {str(p.partname):hashlib.sha256(p.blob).hexdigest()for p in doc.part.package.parts
             if str(p.partname).startswith(('/word/media/','/word/embeddings/'))}
 
+def _control_markers(doc):
+    controls={W+k for k in ('commentRangeStart','commentRangeEnd','commentReference','permStart','permEnd',
+                           'moveFromRangeStart','moveFromRangeEnd','moveToRangeStart','moveToRangeEnd')}
+    return [{'tag':n.tag,'attributes':dict(n.attrib),'parent':_path(n.getparent()),
+             'nonbookmark_sibling_offset':sum(s.tag not in BOOK for s in n.itersiblings(preceding=True))}
+            for n in doc._element.body.iter()if n.tag in controls]
+
 def _registry(doc):
     starts=list(doc._element.body.iter(W+'bookmarkStart'));ends=list(doc._element.body.iter(W+'bookmarkEnd'))
     byid={};byname={};positions={n:i for i,n in enumerate(doc._element.body.iter())}
@@ -160,13 +167,49 @@ def _write_reference(ref,new):
 def _set_refresh_request(node):
     node.set(W+'val','true')
 
-def repair_toc_links(doc,scopes,plan):
+def _whole_heading_range(pair,p):
+    if not _owned_range(pair,p):return False
+    children=list(p);a,b=(children.index(n)for n in pair)
+    return bool(text(p).strip())and ''.join(text(n)for n in children[a+1:b])==text(p)
+
+def _bound_additive_proof(doc,scopes,target,paragraph,refs,partial,anchors):
+    from word_reference_inventory import inspect_references,reject_control_range_intersection
+    for node in (target,paragraph):
+        ppr=node.findall(W+'pPr')
+        if len(ppr)>1 or(ppr and node[0]is not ppr[0]):raise ValueError('paragraph insertion boundary malformed')
+    reject_control_range_intersection(target,outside_inline_comments=True)
+    reject_control_range_intersection(paragraph)
+    if len([p for p in doc._element.body.iter(W+'p') if p not in scopes.get('toc_results',set())
+            and _title_key(text(p))==_title_key(text(target))])!=1:
+        raise ValueError('bound source title is not unique across the document')
+    old={r['anchor']for r in refs}
+    if len(refs)!=2 or {r['kind']for r in refs}!={'HYPERLINK','PAGEREF'}or len(old)!=1:
+        raise ValueError('additive migration requires one consistent TOC field pair')
+    if not old<=set(anchors):raise ValueError('original reference target identity unresolved')
+    inventory=inspect_references(doc)
+    if not inventory['valid']:raise ValueError('complete reference inventory unresolved: '+str(inventory['findings']))
+    folded={name.casefold()for name in old}
+    consumers=[r for r in inventory['references']if r['target']and r['target'].casefold()in folded]
+    if len(consumers)!=2 or any(r['kind']not in {'HYPERLINK','PAGEREF'}or r['part']!='/word/document.xml'
+        or r['owner']!=_path(paragraph)or not r['in_toc_result']for r in consumers):
+        raise ValueError('original anchor has an additional/non-TOC consumer')
+    involved={name.casefold()for name in partial}
+    if any(r['target']and r['target'].casefold()in involved and r['kind']not in {'HYPERLINK','PAGEREF','ANCHOR'}
+           for r in inventory['references']):
+        raise ValueError('partial source range has a text-consuming reference')
+    return {'policy':'bound_heading_additive','old_pair_targets':sorted(old),
+            'partial_ranges_preserved':list(partial),'selected_pair_consumers':consumers,
+            'reference_inventory':inventory,'author_bookmark_ownership_inferred':False}
+
+def repair_toc_links(doc,scopes,plan,*,target_policy='strict'):
+    if target_policy not in {'strict','bound_heading_additive'}:raise ValueError('unknown TOC target policy')
     report={'protocol':PROTOCOL,'status':'not_applicable','changes':[],'entries':[],
             'findings':[],'native_navigation_verified':False,'native_page_numbers_verified':False,
             'cached_page_recomputed':False,'bookmarks_before':_book_records(doc),
             'bookmarks_expected':_book_records(doc),
             'body_content_before':_body_content(doc),
-            'objects_before':_objects(doc),'media_before':_media(doc)}
+            'objects_before':_objects(doc),'media_before':_media(doc),'target_policy':target_policy,
+            'control_markers_before':_control_markers(doc)}
     roots,malformed=collect_field_ranges(doc);frames=list(flatten_fields(roots))
     report['field_instructions_expected']=_instruction_state(frames)
     report['field_instructions_before']=copy.deepcopy(report['field_instructions_expected'])
@@ -184,6 +227,7 @@ def repair_toc_links(doc,scopes,plan):
         if role.startswith('heading_')or role in {'bibliography_heading','abstract_title_zh','abstract_title_en'}:
             candidates.setdefault(_title_key(text(node)),[]).append((node,role))
     planned=[];new_bookmarks={};used={n.get(W+'id')for n in doc._element.iter()if n.tag in BOOK}
+    inverse_paragraphs={}
     next_id=max([int(v)for v in used if str(v).isdigit()]+[-1])+1
     for paragraph in doc.paragraphs:
         p=paragraph._p
@@ -216,10 +260,19 @@ def repair_toc_links(doc,scopes,plan):
             level=_style_level(paragraph.style);m=re.fullmatch(r'heading_([1-9])',role)
             if level and m and level!=int(m[1]):raise ValueError('source/TOC level mismatch')
             valid=[name for name,pair in anchors.items()if _owned_range(pair,target)]
-            if any((_owner(pair[0])is target or _owner(pair[1])is target)and name not in valid for name,pair in anchors.items()):
-                raise ValueError('source bookmark covers an unproved partial heading range')
+            if target_policy=='bound_heading_additive':
+                if any(_owner(pair[0])is target and _owner(pair[1])is target and
+                       not _whole_heading_range(pair,target)for pair in anchors.values()):
+                    raise ValueError('point/partial bookmark cannot establish a complete bound heading')
+                valid=[name for name in valid if _whole_heading_range(anchors[name],target)]
+            partial=[name for name,pair in anchors.items()if
+                     (_owner(pair[0])is target or _owner(pair[1])is target)and name not in valid]
+            if partial and target_policy=='strict':raise ValueError('source bookmark covers an unproved partial heading range')
+            already=all(f['anchor']in valid for f in refs)and len(set(f['anchor']for f in refs))==1
+            if target_policy=='bound_heading_additive'and not already:
+                entry['bound_migration_proof']=_bound_additive_proof(doc,scopes,target,p,refs,partial,anchors)
             own=[f['anchor']for f in refs if f['anchor']in valid]
-            if all(f['anchor']in valid for f in refs)and len(set(f['anchor']for f in refs))==1:
+            if already:
                 name=refs[0]['anchor'];state='already_correct'
             else:
                 if len(set(own))>1:raise ValueError('paired reference ownership ambiguous')
@@ -248,6 +301,8 @@ def repair_toc_links(doc,scopes,plan):
                 for node in ref['frame']['instruction_nodes']:copy.deepcopy(node).text=new
                 entry['fields'].append({'locator':_path(ref['frame']['begin']),'kind':ref['kind'],'anchor':name,'instruction':new})
                 if new!=ref['instruction']:operations.append((ref,new))
+            if operations:
+                for node in (p,target):inverse_paragraphs.setdefault(_path(node),etree.tostring(node,encoding='unicode'))
             planned.append((entry,operations,target));report['entries'].append(entry)
         except (ValueError,TypeError,KeyError,AttributeError,etree.C14NError)as exc:
             entry['reason']=str(exc);report['entries'].append(entry)
@@ -259,6 +314,7 @@ def repair_toc_links(doc,scopes,plan):
     row_instructions_before={entry['paragraph_locator']:list(entry['field_instructions_expected'])for entry,ops,target in planned}
     settings_part=next((rel.target_part for rel in doc.part.rels.values()if rel.reltype.endswith('/settings')),None)
     settings_xml_before=etree.tostring(settings_part.element)if settings_part else None
+    inverse_body_hash=_hash(doc._element.body)
     rollback_paragraphs={_path(p):_hash(p)for p in doc._element.body.iter(W+'p')}
     try:
         for entry,ops,target in planned:
@@ -324,6 +380,11 @@ def repair_toc_links(doc,scopes,plan):
     if report['transaction_status']=='committed':
         roots,_=collect_field_ranges(doc);report['field_instructions_expected']=_instruction_state(list(flatten_fields(roots)))
         report['bookmarks_expected']=_book_records(doc)
+        if report['changes']:
+            report['additive_inverse']={'protocol':'bound_navigation_inverse_v1','paragraphs':inverse_paragraphs,
+                'body_before_sha256':inverse_body_hash,'body_after_sha256':_hash(doc._element.body),
+                'settings_before_xml':settings_xml_before.decode()if settings_xml_before else None,
+                'settings_after_sha256':_hash(settings_part.element)if settings_part else None}
     else:
         report['field_instructions_expected']=copy.deepcopy(report['field_instructions_before'])
         report['bookmarks_expected']=copy.deepcopy(report['bookmarks_before'])
@@ -331,6 +392,33 @@ def repair_toc_links(doc,scopes,plan):
                       'unhandled_preserved'if report['findings']else'references_repaired'if report['changes']else
                       'references_verified'if report['entries']else'not_applicable')
     return report
+
+def restore_additive_navigation(doc,report):
+    """Exact in-memory inverse for a still-identical managed candidate only."""
+    from docx.oxml import parse_xml
+    inverse=report.get('additive_inverse')
+    if not inverse or inverse.get('protocol')!='bound_navigation_inverse_v1' or not audit_toc_navigation(doc,report)['valid']:
+        raise ValueError('navigation inverse receipt invalid')
+    settings_part=next((r.target_part for r in doc.part.rels.values()if r.reltype.endswith('/settings')),None)
+    if(_hash(doc._element.body)!=inverse['body_after_sha256']or settings_part is None or
+       _hash(settings_part.element)!=inverse['settings_after_sha256']or inverse['settings_before_xml']is None):
+        raise ValueError('navigation candidate changed or settings identity unresolved')
+    before_body=copy.deepcopy(doc._element.body);before_settings=copy.deepcopy(settings_part.element)
+    def replace_contents(target,source):
+        target.attrib.clear();target.attrib.update(source.attrib)
+        for n in list(target):target.remove(n)
+        for n in source:target.append(copy.deepcopy(n))
+    try:
+        staged=[(_at(doc,path),parse_xml(xml.encode()))for path,xml in inverse['paragraphs'].items()]
+        for target,source in staged:replace_contents(target,source)
+        replace_contents(settings_part.element,parse_xml(inverse['settings_before_xml'].encode()))
+        if _hash(doc._element.body)!=inverse['body_before_sha256']:
+            raise ValueError('navigation inverse did not exactly restore source body')
+        _registry(doc)
+    except Exception:
+        replace_contents(doc._element.body,before_body);replace_contents(settings_part.element,before_settings)
+        raise
+    return {'restored':True,'native_navigation_verified':False}
 
 def audit_toc_navigation(doc,report):
     """Verify the navigation receipt independently on a serialized artifact."""
@@ -342,6 +430,9 @@ def audit_toc_navigation(doc,report):
     for item in old:
         if current.count(item)!=1:errors.append('original bookmark endpoint/range changed')
     if current!=report['bookmarks_expected']:errors.append('bookmark graph differs from the committed navigation receipt')
+    if 'control_markers_before'in report:
+        if _control_markers(doc)!=report['control_markers_before']:errors.append('comment/permission/revision markers changed')
+    elif report.get('target_policy')=='bound_heading_additive':errors.append('bound navigation control-marker proof missing')
     if not report['changes']and current!=old:errors.append('uncommitted transaction altered the original bookmark graph')
     if report['changes']:
         try:_registry(doc)

@@ -105,6 +105,10 @@ def validate_profile(profile):
             raise ValueError('terminal action requires bibliography entry role')
         if 'display_prefix' in rule and rule['role'] not in ('thesis_subtitle_zh','thesis_subtitle_en'):
             raise ValueError('display prefix requires a subtitle role')
+        if 'boundary_edit_policy' in rule and (
+                sum(k in rule for k in ('display_prefix','terminal')) != 1 or any(
+                    k in rule for k in ('header','table','spacer','keyword'))):
+            raise ValueError('boundary policy requires exactly one subtitle/terminal action')
         props = rule.get('paragraph', {})
         for a, b in (('first_line_indent_chars', 'first_line_indent_pt'),
                      ('space_before_lines', 'space_before_pt'), ('space_after_lines', 'space_after_pt')):
@@ -127,6 +131,8 @@ def validate_profile(profile):
             for v in node:
                 representable(v)
     representable(profile['rules'])
+    if profile.get('navigation_target_policy','strict')!='strict' and not profile.get('repair_toc_navigation'):
+        raise ValueError('navigation target policy requires explicit navigation repair')
 
 
 def _select(doc, selector):
@@ -374,8 +380,9 @@ def _copy_contents(target, source):
         target.append(copy.deepcopy(c))
 
 
-def _format_rule(doc, paragraph, rule):
-    _guard(paragraph, disruptive='display_prefix' in rule or 'terminal' in rule)
+def _format_rule(doc, paragraph, rule, *, boundary_records=None):
+    boundary = rule.get('boundary_edit_policy') == 'navigation_only'
+    _guard(paragraph, disruptive=not boundary and ('display_prefix' in rule or 'terminal' in rule))
     clone = copy.deepcopy(paragraph._p)
     staged = Paragraph(clone, paragraph._parent)
     font = rule.get('font', {}); props = rule.get('paragraph', {})
@@ -385,6 +392,15 @@ def _format_rule(doc, paragraph, rule):
         if text(node):
             _font(Run(node, staged), font)
     _paragraph(staged, props, font, doc)
+    if boundary:
+        from word_boundary_edits import stage_boundary_edit
+        try:
+            record = stage_boundary_edit(doc, paragraph, clone, rule)
+        except ValueError as exc:
+            raise Unhandled(str(exc)) from exc
+        if record is not None and boundary_records is not None:
+            boundary_records.append(record)
+        return clone
     if 'keyword' in rule:
         if rule['role'] not in ('keywords_zh', 'keywords_en'):
             raise Unhandled('keyword range requires an explicit keyword role')
@@ -629,6 +645,58 @@ def _protected_signature(doc):
     return records
 
 
+def _word_xml_state(doc):
+    from word_reference_inventory import roots
+    return {name:_digest(root) for name,root in roots(doc)}
+
+
+def _nonboundary_control(data, stages):
+    """Independent source-based formatting control, never copied from live output.
+
+    Use whole-node replacement here rather than the live mutation helper, so
+    faults in that helper cannot be repeated into the expected document.
+    """
+    from word_reference_inventory import roots
+    doc = Document(io.BytesIO(data)); bypart = dict(roots(doc)); prepared = []
+    for p, operations, spacers, baseline in stages:
+        source_root = p._p.getroottree().getroot()
+        partname = str(p.part.partname)
+        root = bypart[partname]
+        ns = {k:v for k,v in source_root.nsmap.items() if k}
+        insertion = root.getroottree().xpath(_path(p._p), namespaces=ns)[0]
+        replacements = []
+        for target, clone, part in operations:
+            control_root = bypart[str(part.partname)]
+            found = control_root.getroottree().xpath(_path(target), namespaces={k:v for k,v in target.nsmap.items() if k})
+            if len(found) != 1:
+                raise ValueError('independent formatting-control target unresolved')
+            replacements.append((found[0], copy.deepcopy(baseline if baseline is not None and target is p._p else clone)))
+        prepared.append((insertion, replacements, spacers))
+    for insertion, replacements, spacers in prepared:
+        for target, clone in replacements:
+            target.getparent().replace(target, clone)
+            if target is insertion:
+                insertion = clone
+        for spacer in spacers:
+            n = copy.deepcopy(spacer); insertion.addnext(n); insertion = n
+    return doc
+
+
+def _verify_boundary_inverse(doc, records, control_state, navigation=None):
+    from word_boundary_edits import apply_text_records
+    memory = io.BytesIO(); doc.save(memory); memory.seek(0)
+    restored = Document(memory)
+    if navigation and navigation['changes']:
+        from toc_navigation import restore_additive_navigation
+        restore_additive_navigation(restored, navigation)
+    apply_text_records(restored, records, inverse=True)
+    state = _word_xml_state(restored)
+    if state != control_state:
+        raise ValueError('complete candidate boundary inverse differs from independent formatting control')
+    return {'valid':True,'scope':'complete Word XML after exact inverse vs source-derived non-text-formatting control',
+            'word_xml_sha256':sha(json.dumps(state,sort_keys=True).encode()),'native_verified':False}
+
+
 def apply_profile(source, profile_path, output, report_path):
     """Publish a non-release candidate and receipt as one rollback-safe batch."""
     source, profile_path, output, report_path = map(Path, (source, profile_path, output, report_path))
@@ -675,12 +743,13 @@ def apply_profile(source, profile_path, output, report_path):
         except Unhandled as exc:
             report['rules'].append({'id':rule['id'], 'role':rule['role'], 'status':'unhandled_preserved', 'reason':str(exc)})
     plan = SimpleNamespace(owners={}, paragraphs={})
-    changed_parts = set(); staged_rules = []; effects = set()
+    changed_parts = set(); staged_rules = []; effects = set(); boundary_records = []; boundary_sources = []
     for rule, p in selected:
         item = {'id':rule['id'], 'role':rule['role'], 'locator':_path(p._p), 'status':'unhandled_preserved',
                 'source_evidence':rule['evidence']}
         try:
             _guard(p)
+            baseline = None
             if rule['role'].startswith('heading_') or rule['role'] in ('bibliography_heading', 'abstract_title_zh', 'abstract_title_en'):
                 plan.owners[p._p] = rule['role']; plan.paragraphs[p._p] = p
             if 'header' in rule:
@@ -692,8 +761,13 @@ def apply_profile(source, profile_path, output, report_path):
                 if rule.get('font') or rule.get('paragraph'):
                     operations.append((p._p, _format_rule(doc, p, rule), doc.part))
             else:
-                target = p._p; clone = _format_rule(doc, p, rule); part = doc.part
+                target = p._p
+                pending_text = []
+                clone = _format_rule(doc, p, rule, boundary_records=pending_text); part = doc.part
                 operations = [(target, clone, part)]
+                if pending_text:
+                    no_text = {k:v for k,v in rule.items() if k not in {'display_prefix','terminal','boundary_edit_policy'}}
+                    baseline = _format_rule(doc, p, no_text)
             spacers = _spacers(p, rule['spacer'], doc) if 'spacer' in rule else []
             keys = {target for target, _, _ in operations}
             if keys & effects:
@@ -702,13 +776,18 @@ def apply_profile(source, profile_path, output, report_path):
             item['before_sha256'] = _digest(target); item['after_sha256'] = _digest(clone)
             changed = any(_digest(t) != _digest(c) for t, c, _ in operations) or bool(spacers)
             item.update(status='applied' if changed else 'already_satisfied', inserted_spacers=len(spacers))
-            staged_rules.append((p, operations, spacers))
+            if rule.get('boundary_edit_policy'):
+                item['boundary_text_edits'] = pending_text
+                boundary_records.extend(pending_text)
+                boundary_sources.extend((p,record) for record in pending_text)
+            staged_rules.append((p, operations, spacers, baseline))
         except Unhandled as exc:
             item['reason'] = str(exc)
         report['rules'].append(item)
     # All scopes/effect conflicts are checked before the first live write.
     # Runtime faults abort the in-memory candidate; no output/receipt publishes.
-    for p, operations, spacers in staged_rules:
+    control_state = _word_xml_state(_nonboundary_control(data, staged_rules)) if boundary_records else None
+    for p, operations, spacers, baseline in staged_rules:
         for target, clone, part in operations:
             if _digest(target) != _digest(clone):
                 _copy_contents(target, clone)
@@ -718,8 +797,22 @@ def apply_profile(source, profile_path, output, report_path):
             insertion.addnext(node); insertion = node
         if spacers:
             changed_parts.add('word/document.xml')
+    for p,record in boundary_sources:
+        # Inserting a permitted spacer earlier in the story may shift the
+        # paragraph locator. The source-relative w:t identity stays fixed.
+        old_paragraph = record['source_paragraph_path']
+        suffix = record['text_node_path'][len(old_paragraph):]
+        record['final_text_node_path'] = _path(p._p)+suffix
+    if boundary_records:
+        from word_boundary_edits import apply_text_records
+        expected = Document(io.BytesIO(data))
+        apply_text_records(expected, boundary_records)
+        protected_before = _protected_signature(expected)
     if _protected_signature(doc) != protected_before:
         raise ValueError('formatting altered protected content/ranges; nothing published')
+    report['boundary_text_edit_count'] = len(boundary_records)
+    if boundary_records:
+        report['boundary_inverse'] = _verify_boundary_inverse(doc,boundary_records,control_state)
     navigation = None
     if profile.get('repair_toc_navigation', False):
         from toc_navigation import repair_toc_links, audit_toc_navigation
@@ -728,7 +821,8 @@ def apply_profile(source, profile_path, output, report_path):
         for f in flatten_fields(frames):
             if f['opcode'] == 'TOC' and f['separator'] is not None and f['end'] is not None:
                 toc.update(p._p for p in doc.paragraphs if any(order[f['separator']] < order[n] < order[f['end']] for n in p._p.iter()))
-        navigation = repair_toc_links(doc, {'toc_results':toc}, plan)
+        navigation = repair_toc_links(doc, {'toc_results':toc}, plan,
+                                      target_policy=profile.get('navigation_target_policy','strict'))
         if not audit_toc_navigation(doc, navigation)['valid']:
             raise ValueError('navigation integrity/rollback not verified; nothing published')
         report['navigation'] = navigation
@@ -756,6 +850,15 @@ def apply_profile(source, profile_path, output, report_path):
             if not audit['valid']:
                 raise ValueError('serialized navigation integrity failed')
             report['navigation_audit'] = audit
+        if boundary_records:
+            report['boundary_inverse'] = _verify_boundary_inverse(final,boundary_records,control_state,navigation)
+        with zipfile.ZipFile(io.BytesIO(data)) as original, zipfile.ZipFile(staged) as published:
+            if original.namelist() != published.namelist():
+                raise ValueError('serialized OPC member set/order changed')
+            for info in original.infolist():
+                expected_payload = after_parts[info.filename] if info.filename in changed_parts else original.read(info)
+                if published.read(info.filename) != expected_payload:
+                    raise ValueError('serialized OPC payload differs from verified staged state: '+info.filename)
         report['output_sha256'] = sha(staged.read_bytes())
         if navigation is not None:
             report['navigation_audit']['output_sha256'] = report['output_sha256']

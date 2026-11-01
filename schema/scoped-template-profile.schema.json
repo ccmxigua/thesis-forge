@@ -278,6 +278,10 @@
               }
             },
             "additionalProperties": false
+          },
+          "boundary_edit_policy": {
+            "const": "navigation_only",
+            "description": "Opt-in exact boundary text edits with complete package-reference proof; unknown/text consumers stay blocked."
           }
         },
         "additionalProperties": false
@@ -351,6 +355,12 @@
         },
         "additionalProperties": false
       }
+    },
+    "navigation_target_policy": {
+      "enum": [
+        "strict",
+        "bound_heading_additive"
+      ]
     }
   },
   "additionalProperties": false

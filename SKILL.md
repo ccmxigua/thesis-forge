@@ -1451,6 +1451,23 @@ replace the Word release gate above. Run
 `scripts/audit_toc_materialization.py` against the final source, DOCX, and PDF
 as a separate verifier; preserve its report with the new derived artifact.
 
+Where a fingerprinted LibreOffice/Java UNO installation is already available,
+the same post-format entry point offers explicit `--backend libreoffice-uno`.
+The default remains `pdf-cache`. UNO mode requires source/baseline hashes and
+an exact runtime profile; it updates one existing index in memory and publishes
+only a new PDF plus source-bound page/link evidence, never a DOCX. Its initial
+text-only subset rejects complex objects, uncertain references and protected
+scopes. It does not satisfy the Word release, typeface, repeatability or whole
+paper gates; `submission_ready` remains false. See
+`docs/libreoffice-uno-toc.md` for the strict profile, save state and diagnostics.
+
+PDF export audit entry points share `scripts/pdf_glyph_integrity.py`. Resource,
+page and font-object binding remains conservative: unsupported or ambiguous
+active resources are unverified, never covered by a different font. Typeface
+name comparisons preserve Chinese names and keep SimSun/宋体 distinct from
+FangSong/仿宋. See `docs/pdf-glyph-integrity.md`; this is not native Word/WPS
+or full-document acceptance.
+
 The pipeline writes a durable `running` manifest before external conversion or
 extraction. Unexpected exceptions and interrupts close it as terminal
 `failed`/`interrupted` records. `--allow-existing-work` is limited to a

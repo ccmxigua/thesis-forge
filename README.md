@@ -32,6 +32,10 @@ python3 scripts/audit_toc_materialization.py /absolute/source.docx /absolute/new
 
 该入口只从来源 DOCX 的目录域深度和语义标题读取条目，要求输出标题唯一匹配；使用 LibreOffice 实际 PDF 书签页码填入动态 `PAGEREF` 字段缓存，并重渲染直到缓存与最终分页一致。它不会调用或声称 Word/LibreOffice 更新了字段；分节重启、非十进制页码、重复或缺失书签、缓存不收敛以及不可见目录行均失败关闭。新 DOCX、渲染及审计报告必须放在新路径。该结果仍是 `submission_ready=false` 的可编辑审查草稿，不能代替 Word 发布验收或人工格式审查。
 
+已有匹配的 LibreOffice/Java UNO 安装时，可以显式选择 `--backend libreoffice-uno`，刷新内存中的现有目录后仅导出新 PDF。此模式要求来源/基线 SHA256 和运行时组件指纹，只接受可核验的文本、目录及内部引用子集；复杂对象或保护范围失败关闭，不回存 DOCX。默认缓存路径保持不变，所有结果仍为 `submission_ready=false`，不能代替 Word/WPS、指定字体或整稿验收。命令、配置及边界见 [可选 UNO 目录后端](docs/libreoffice-uno-toc.md)。
+
+PDF 导出审计共用[字形完整性检查](docs/pdf-glyph-integrity.md)，按 PDF 资源、页和字体对象保守绑定字形；不支持或不能唯一确定的字体映射保持待核，不能以另一字体覆盖率代替。字体名称比较保留中文字体身份，宋体与仿宋保持不同。该检查不等于指定字体、Word/WPS 或全稿验收。
+
 显示公式的通用布局会按正文、等宽分栏或固定表格的实际文本宽度居中，保护行内公式、数学内容及已有内部对齐。非空公式需要 LibreOffice/PyMuPDF 实渲染检查；公式过宽、过高、编号碰撞或容器无法可靠判定时，返回人工处理项并保留已有输出。依赖、证据和适用边界见 [公式几何安全检查](docs/equation-geometry-safety.md)；该局部探针不等于 Word/WPS 或整篇论文视觉验收。
 
 对能严格识别的平直加法链，横向溢出时会尝试在原有 `+` 前生成连续行，逐次实渲染并保留完整源 XML 的可逆重演证明；这会改变版式容器，不改变原字符、顺序或字体。已有分数、矩阵、括号和内部对齐不自动改写，超页高整组和宽于单元格的编号仍需版面选择。可用 `equations.wrap_simple_sums=false` 关闭该后备布局。

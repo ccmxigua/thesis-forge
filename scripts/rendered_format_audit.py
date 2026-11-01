@@ -22,6 +22,7 @@ from PIL import Image
 from PIL import ImageOps
 
 from semantic_contract import sha256_json, strict_json_read
+from pdf_glyph_integrity import audit_pdf_glyph_integrity
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 WP = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
@@ -151,8 +152,9 @@ def _drawing_records(path: Path) -> tuple[list[dict[str, Any]], list[dict[str, A
 
 
 def _font_key(value: str) -> str:
+    from font_declarations import font_comparison_key
     value = re.sub(r"^[A-Z]{6}\+", "", value)
-    return re.sub(r"[^a-z0-9]", "", value.casefold())
+    return font_comparison_key(value)
 
 
 def _style_names_used(path: Path) -> set[str]:
@@ -282,6 +284,8 @@ def audit(source_docx: Path, final_docx: Path, pdf_path: Path,
     image_instances: list[dict[str, Any]] = []
     with fitz.open(pdf_path) as document:
         page_count = len(document)
+        glyph_integrity = audit_pdf_glyph_integrity(document)
+        findings.extend(glyph_integrity["findings"])
         for page_number, page in enumerate(document, 1):
             for font in page.get_fonts(full=True):
                 base = str(font[3]) if len(font) > 3 else str(font[0])
@@ -307,10 +311,10 @@ def audit(source_docx: Path, final_docx: Path, pdf_path: Path,
                 })
 
     font_names = sorted(pdf_fonts)
-    font_keys = {_font_key(name) for name in font_names}
+    font_keys = {key for name in font_names if (key := _font_key(name))}
     font_findings = []
     for expected in expected_fonts:
-        if _font_key(expected["name"]) not in font_keys:
+        if not _font_key(expected["name"]) or _font_key(expected["name"]) not in font_keys:
             item = {"code": "rendered_pdf_font_mismatch", "expected": expected,
                     "actual_pdf_fonts": font_names}
             font_findings.append(item)
@@ -381,6 +385,7 @@ def audit(source_docx: Path, final_docx: Path, pdf_path: Path,
         "font_scope": font_scope,
         "actual_pdf_font_resources": [pdf_fonts[name] for name in font_names],
         "font_findings": font_findings,
+        "glyph_integrity": glyph_integrity,
         "findings": findings,
         "status": "passed" if not findings else "issues_found",
         "submission_ready": False,

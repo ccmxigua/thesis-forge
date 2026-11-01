@@ -1,0 +1,24 @@
+{
+  "scope": "existing independent synthetic V33 controls only; original files unmodified, no new conversion",
+  "files": [
+    {
+      "file": "render-1.pdf",
+      "bytes": 149252,
+      "sha256": "e82e4fba38875cdf15304ee8e2b6b6b4b009a2090751011c432a577f0f062b7b",
+      "original_executor_path": "/workspace/thesis-v33-multilevel-lo-20261031-ua3txctm/pdf/render-1.pdf"
+    },
+    {
+      "file": "render-2.pdf",
+      "bytes": 149252,
+      "sha256": "b17cbd907b2e834a0eccc4349b7528e5f55aac6c24824c4149df5544df8c4d63",
+      "original_executor_path": "/workspace/thesis-v33-multilevel-lo-20261031-ua3txctm/pdf/render-2.pdf"
+    },
+    {
+      "file": "source.docx",
+      "bytes": 43502,
+      "sha256": "1cc34a7ecdaac4917dc3efb14fb10875fe05d5d5c3445d8b39d45cd354a102fa",
+      "original_executor_path": "/workspace/thesis-v33-multilevel-offline-xpnc62na/deliverables/V33_multilevel_crossrefs_OFFLINE_UNVERIFIED.docx"
+    }
+  ],
+  "native_Word_WPS_verified": false
+}

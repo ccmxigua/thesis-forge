@@ -21,6 +21,7 @@ from lxml import etree
 import fitz
 
 from equation_compat import tall_delimiters
+from pdf_glyph_integrity import audit_pdf_glyph_integrity
 from semantic_contract import strict_json_read
 
 _DELIMITER_INK = set("[]{}()|⌈⌉⌊⌋⟨⟩⎡⎢⎣⎤⎥⎦⎧⎨⎩⎫⎬⎭⎛⎜⎝⎞⎟⎠")
@@ -176,16 +177,8 @@ def audit(source, pdf_path, regions=None):
                 mapping[key] = item
     with fitz.open(pdf_path) as pdf:
         fonts = sorted({font[3] for page in pdf for font in page.get_fonts()})
-        for number, page in enumerate(pdf, 1):
-            broken = {}
-            for span in page.get_texttrace():
-                bad = [c for c in span["chars"] if c[0] == 0xfffd]
-                if bad:
-                    entry = broken.setdefault(span["font"], {"count": 0, "glyph_ids": set()})
-                    entry["count"] += len(bad); entry["glyph_ids"].update(c[1] for c in bad)
-            for name, facts in broken.items():
-                findings.append(_finding("pdf_unicode_mapping_unresolved", page=number, font=name,
-                                         count=facts["count"], glyph_ids=sorted(facts["glyph_ids"])))
+        glyph_integrity = audit_pdf_glyph_integrity(pdf)
+        findings.extend(glyph_integrity["findings"])
         for index, di, delimiter in needed:
             item = mapping.get((index, di))
             if item is None:
@@ -207,7 +200,8 @@ def audit(source, pdf_path, regions=None):
                 "native_math_objects": len(math), "declared_math_font": font,
                 "observed_pdf_fonts": fonts, "tall_delimiters_requiring_coverage": len(needed),
                 "delimiter_observations": observations, "findings": findings,
-                "verification_scope": "PDF Unicode mapping and measured tall delimiter coverage; flat row text order",
+                "glyph_integrity": glyph_integrity,
+                "verification_scope": "PDF Unicode mapping, exact TrueType notdef records and measured tall delimiter coverage; flat row text order",
                 "whole_document_visual_review": False, "editor_ui_verified": False}
 
 

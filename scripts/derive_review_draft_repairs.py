@@ -49,6 +49,8 @@ CODE_FILES = (
     "scripts/source_table_contract.py",
     "scripts/derive_review_draft_repairs.py",
     "scripts/rendered_format_audit.py",
+    "scripts/pdf_glyph_integrity.py",
+    "scripts/font_declarations.py",
     "scripts/toc_materializer.py",
     "scripts/audit_toc_materialization.py",
     "scripts/draft_scorecard.py",

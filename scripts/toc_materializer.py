@@ -857,18 +857,35 @@ def materialize(
     return report
 
 
-def main() -> int:
+def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("source_docx", type=Path, help="immutable source DOCX defining TOC titles and levels")
     parser.add_argument("baseline_review_draft", type=Path, help="newly derived review-draft baseline with an empty TOC field")
-    parser.add_argument("output_docx", type=Path, help="new final review-draft DOCX path")
+    parser.add_argument("output_docx", type=Path, nargs="?", help="new review-draft DOCX (pdf-cache backend only)")
+    parser.add_argument("--backend", choices=("pdf-cache", "libreoffice-uno"), default="pdf-cache")
+    parser.add_argument("--runtime-profile", type=Path, help="explicit UNO installation/version/component fingerprints")
+    parser.add_argument("--source-sha256")
+    parser.add_argument("--baseline-sha256")
     parser.add_argument("--work-dir", type=Path, required=True,
                         help="new directory for all PDF renders, LO profiles, logs, and report")
     parser.add_argument("--max-iterations", type=int, default=8)
     parser.add_argument("--timeout", type=int, default=900)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
+    if args.backend == "pdf-cache":
+        if args.output_docx is None:
+            parser.error("pdf-cache requires output_docx")
+        if args.runtime_profile or args.source_sha256 or args.baseline_sha256:
+            parser.error("UNO identity flags require --backend libreoffice-uno")
+    elif args.output_docx is not None or not all((args.runtime_profile, args.source_sha256, args.baseline_sha256)):
+        parser.error("libreoffice-uno needs runtime profile and both SHA256 values, and accepts no output_docx")
     try:
-        report = materialize(args.source_docx.resolve(), args.baseline_review_draft.resolve(),
+        if args.backend == "libreoffice-uno":
+            from uno_toc_backend import export
+            report = export(args.source_docx, args.baseline_review_draft, args.work_dir,
+                            profile=args.runtime_profile, source_sha256=args.source_sha256,
+                            baseline_sha256=args.baseline_sha256, timeout=args.timeout)
+        else:
+            report = materialize(args.source_docx.resolve(), args.baseline_review_draft.resolve(),
                              args.output_docx.resolve(), args.work_dir.resolve(),
                              max_iterations=args.max_iterations, timeout=args.timeout)
     except Exception as exc:

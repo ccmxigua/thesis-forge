@@ -39,10 +39,21 @@ def atomic_write_text(path: Path, text: str, *, encoding: str = "utf-8") -> None
         temporary.unlink(missing_ok=True)
 
 
+class ArtifactRollbackError(OSError):
+    """Publication failed and at least one original needs explicit recovery."""
+
+    def __init__(self, original: Exception, errors: list[str], backups: dict[Path, Path]):
+        self.recovery_backups = {str(dst):str(src) for dst, src in backups.items() if src.exists()}
+        super().__init__("artifact publication rollback_failed; preserved recovery backups="
+                         +repr(self.recovery_backups)+"; restore errors="+repr(errors)
+                         +"; original failure="+str(original))
+
+
 def commit_files(staged_to_final: list[tuple[Path, Path]]) -> None:
     """Replace several outputs with rollback of all pre-existing destinations."""
     backups: dict[Path, Path] = {}
     committed: list[Path] = []
+    completed = False
     try:
         for _, destination in staged_to_final:
             if destination.exists():
@@ -53,13 +64,26 @@ def commit_files(staged_to_final: list[tuple[Path, Path]]) -> None:
         for staged, destination in staged_to_final:
             os.replace(staged, destination)
             committed.append(destination)
-    except Exception:
+        completed = True
+    except Exception as original:
+        errors: list[str] = []
         for destination in reversed(committed):
-            destination.unlink(missing_ok=True)
+            try:
+                destination.unlink(missing_ok=True)
+            except Exception as exc:
+                errors.append(f"remove candidate {destination}: {exc}")
         for destination, backup in backups.items():
             if backup.exists():
-                os.replace(backup, destination)
+                try:
+                    os.replace(backup, destination)
+                except Exception as exc:
+                    # Continue restoring other destinations and KEEP the only
+                    # copy of this original. Never erase it in finally.
+                    errors.append(f"restore {backup} -> {destination}: {exc}")
+        if errors:
+            raise ArtifactRollbackError(original, errors, backups) from original
         raise
     finally:
-        for backup in backups.values():
-            backup.unlink(missing_ok=True)
+        if completed:
+            for backup in backups.values():
+                backup.unlink(missing_ok=True)

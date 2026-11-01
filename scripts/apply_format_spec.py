@@ -6020,6 +6020,8 @@ def _equation_blocked_report(args, changes, findings):
 def main(argv: list[str]) -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("input", type=Path); p.add_argument("format_spec", type=Path); p.add_argument("output", type=Path)
+    p.add_argument("--scoped-profile", action="store_true",
+                   help="explicit source-bound scope profile instead of a role-wide format spec; non-release, no legacy fallback")
     p.add_argument("--out-dir", type=Path, required=True); p.add_argument("--style-map", type=Path)
     p.add_argument("--official-template", type=Path,
                    help="official DOCX whose mapped role styles supply defaults when written rules are silent")
@@ -6070,6 +6072,21 @@ def main(argv: list[str]) -> int:
     p.add_argument("--semantic-review-config", type=Path)
     p.add_argument("--case-id", help="stable case identity bound into semantic-content review")
     args = p.parse_args(argv)
+    if args.scoped_profile:
+        # This is a deliberately separate scope-only adapter. Mixing a native
+        # release/semantic/legacy configuration into it would widen authority.
+        if any(token.startswith("--") and token.split("=", 1)[0] not in
+               {"--out-dir", "--scoped-profile"} for token in argv):
+            p.error("--scoped-profile cannot be mixed with legacy, semantic or release options")
+        from scoped_template_profile import apply_profile
+        try:
+            result = apply_profile(args.input, args.format_spec, args.output,
+                                   args.out_dir / "scoped-template-report.json")
+        except (ValueError, OSError) as exc:
+            raise SystemExit(f"scoped template application failed; no legacy fallback: {exc}") from exc
+        print(json.dumps({"status":result["status"], "output_sha256":result["output_sha256"],
+                          "submission_ready":False}, ensure_ascii=False))
+        return 0
     if args.manual_review_items and not args.pipeline_manifest:
         p.error("--manual-review-items requires --pipeline-manifest")
     if args.obligation_scope_inventory and (

@@ -27,10 +27,13 @@ class DocumentNode:
     xml_order: int
 
 
-def _walk_table(table: Any, prefix: str, story: str, order: list[int], seen: set[int]) -> Iterator[DocumentNode]:
+def _walk_table(table: Any, prefix: str, story: str, order: list[int], seen: set[Any]) -> Iterator[DocumentNode]:
     for row_index, row in enumerate(table.rows):
         for cell_index, cell in enumerate(row.cells):
-            marker = id(cell._tc)
+            # Retain the XML proxy itself. An integer id alone outlives a
+            # released lxml proxy and can collide with a later cell's proxy.
+            # Merged cells still share one element and are visited once.
+            marker = cell._tc
             if marker in seen:
                 continue
             seen.add(marker)
@@ -59,7 +62,7 @@ def iter_document_nodes(doc: Any, *, include_stories: bool = False) -> Iterator[
     cells and loses body XML order.
     """
     order = [0]
-    seen_cells: set[int] = set()
+    seen_cells: set[Any] = set()
     body = doc._body
     table_index = 0
     paragraph_index = 0

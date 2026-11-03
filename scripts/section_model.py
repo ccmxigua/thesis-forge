@@ -131,9 +131,7 @@ def compile_section_plan(format_spec: Mapping[str, Any], docx: str | Path | Mapp
 
     if rule is None:
         rule = {}
-        formats = {"front": "none", "body": "none"}
-        body_start = 1
-    elif not isinstance(rule, Mapping):
+    if not isinstance(rule, Mapping):
         findings.append(finding(
             "page_number_rule_invalid", "page.page_number must be an object.",
             location="page.page_number", expected="object", actual=type(rule).__name__,
@@ -144,10 +142,31 @@ def compile_section_plan(format_spec: Mapping[str, Any], docx: str | Path | Mapp
     else:
         front = rule.get("front_matter_format")
         body = rule.get("body_format")
-        preserve_existing = bool(rule.get("preserve_existing_locations")) and front is None and body is None
+        # Absence of a numbering format is not an instruction to remove
+        # existing PAGE fields.  This also covers empty rules;
+        # only an explicit "none" format authorizes an unnumbered plan.
+        preserve_existing = front is None and body is None
         if preserve_existing:
-            # The official template is the executable authority when the
-            # requirements do not declare a page-number rule.  Derive only a
+            unsupported_directives = {
+                key: rule[key] for key in (
+                    "alignment", "front_matter_start", "body_start",
+                    "front_matter_start_selector", "body_start_selector",
+                ) if key in rule
+            }
+            if rule.get("replace_existing_fields") is True:
+                unsupported_directives["replace_existing_fields"] = True
+            if rule.get("preserve_existing_locations") is False:
+                unsupported_directives["preserve_existing_locations"] = False
+            if unsupported_directives:
+                findings.append(finding(
+                    "page_number_format_missing",
+                    "Explicit page-number changes require a numbering format; "
+                    "preservation must not silently ignore them.",
+                    location="page.page_number", expected="front_matter_format or body_format",
+                    actual=unsupported_directives,
+                ))
+            # The source's existing contract remains authoritative when the
+            # requirements do not declare a numbering format.  Derive only a
             # diagnostic front/body split; each section below copies its exact
             # serialized pgNumType and footer PAGE-field contract.
             body_start = next(
@@ -163,12 +182,6 @@ def compile_section_plan(format_spec: Mapping[str, Any], docx: str | Path | Mapp
                 1,
             )
             formats = {"front": "none", "body": "none"}
-        elif front is None and body is None:
-            # Alignment and other presentation hints can be extracted without
-            # any evidence that PAGE fields are required.  Compile that case
-            # to an explicit unnumbered plan rather than leaking JSON nulls or
-            # inventing a numbering format.
-            front = body = "none"
         if preserve_existing:
             selector = None
         else:

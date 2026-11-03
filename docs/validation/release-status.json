@@ -1,0 +1,91 @@
+{
+  "schema_version": "thesis-release-status/v1",
+  "runtime_source_commit": "0c7c8439805fdc1f27628d3802ea9faa1b3c437e",
+  "source_delivery": {
+    "status": "not_run",
+    "reason": "This report is frozen before project-branch publication; verify the final remote branch head separately. No merge is authorized."
+  },
+  "installation": {
+    "status": "passed",
+    "version": "1.0.2",
+    "registered_entry_verified": true,
+    "exact_declared_payload_verified": true,
+    "byte_identical_to_source_archive": false,
+    "observed_ui_changes": [
+      "agents/openai.yaml",
+      "assets/icon.svg"
+    ],
+    "installed_runtime_fingerprint_sha256": "a6636c50b740958090c98dab58286c9d737eca72d261437acd126b29ed790b9f"
+  },
+  "dot_execution": {
+    "status": "failed",
+    "scope": "Native acceptance failed; current-conversation preparation, semantic merge and deterministic candidate generation actually ran.",
+    "synthetic_candidates_generated": 2,
+    "complete_local_renders": 2,
+    "wps_attempts_completed": 2,
+    "wps_attempts_failed": 2,
+    "remaining_candidate_budget": 0,
+    "remaining_wps_attempts_for_existing_candidates": 0,
+    "open_native_finding": "After whole-TOC refresh and save-close-reopen, labels are 6/6/7 while linked targets and visible PAGE footers are 5/5/6. Cause remains unresolved.",
+    "next_action": "Stop native retries; further candidate generation or WPS acceptance requires a newly authorized validation budget."
+  },
+  "verification": {
+    "independent_code_review": "passed",
+    "applicable_regression": {
+      "status": "passed",
+      "tests_passed": 2480,
+      "subtests_passed": 1996,
+      "skipped": 46,
+      "warnings": 3,
+      "seconds": 520.11,
+      "commit": "251aa65666674bb813ad380e7c287ddb3b3e3d88",
+      "scope": "Budget-safe aggregate; actual model/native renderer launches withheld."
+    },
+    "version_packaging_regression": {
+      "status": "passed",
+      "tests_passed": 39,
+      "commit": "0c7c8439805fdc1f27628d3802ea9faa1b3c437e"
+    },
+    "unrestricted_native_suite": "not_run",
+    "remote_ci": {
+      "status": "not_run",
+      "reason": "The existing push/pull_request workflow is unchanged. Final publication uses [skip ci] to avoid unbudgeted native renders; skipped or pending is not passing."
+    },
+    "compile": "passed",
+    "installed_readonly_docx_capability": "passed",
+    "host_review_provenance": "not_formally_verified",
+    "clean_publication_tree_regression": {
+      "status": "passed",
+      "tests_passed": 2480,
+      "subtests_passed": 1996,
+      "skipped": 46,
+      "warnings": 3,
+      "seconds": 550.38,
+      "tested_tree_before_result_documentation": "bab5460f3bbaf348c7447ccb3e5913f9a2d2cd5b",
+      "runtime_payload_sha256": "728f311630347993dada9008d81979f4c421f5866e0c5c03f26f52b830960a25",
+      "scope": "Fresh budget-safe aggregate on the clean publication tree; no actual model/native renderer launch. Only this result documentation changed afterward."
+    }
+  },
+  "business_budget_used": {
+    "candidates": 2,
+    "full_local_renders": 2,
+    "wps_acceptances": 2
+  },
+  "formal_claims": {
+    "word_release_verified": false,
+    "independent_review_verified": false,
+    "provider_model_verified": false,
+    "submission_ready": false
+  },
+  "updated_at": "2026-11-03T11:37:00Z",
+  "package": {
+    "version": "1.0.2",
+    "sha256": "728f311630347993dada9008d81979f4c421f5866e0c5c03f26f52b830960a25"
+  },
+  "privacy": {
+    "private_documents_included": false,
+    "native_object_urls_included": false,
+    "raw_session_artifacts_included": false,
+    "evidence_policy": "Raw execution records, screenshots and candidate documents remain outside this repository; this file is a sanitized technical summary."
+  }
+}

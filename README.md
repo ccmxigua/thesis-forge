@@ -2,20 +2,24 @@
 
 **来源驱动的论文格式审查 skill**：普通 agent 对话使用当前 agent 和当前模型进行语义分析，本地 Python 校验、合并和生成 DOCX 草稿。无需默认切换到 Codex、OpenClaw 或某个固定模型。
 
+## 可移植包与当前主机能力
+
+`python scripts/skill_bundle.py build --output /absolute/thesis-skill.zip` 生成显式资源清单和逐文件 SHA256；解包后独立校验。`scripts/skill_runtime.py --request docx` 只读检查依赖及工具版本，不调用模型、不生成或渲染文档。运行依赖固定在 `requirements-runtime.txt`，实测 Python 3.12/Linux。安装及验收边界见 [安装说明](docs/install-dot.md)。源码交付、个人 skill 安装、当前会话真实运行分别记录。
+
 ## 普通 agent 对话使用（默认入口）
 
 让能读写文件、执行 Python 的 agent 加载本仓库 [SKILL.md](SKILL.md)，提供学校要求文件和论文源文件即可。下列步骤由 agent 执行，用户不必配置模型参数：
 
 ```bash
-# 默认只准备当前对话的审查包，不调用任何模型 API/agent CLI。
-python3 scripts/thesis_format.py /absolute/requirements.docx /absolute/thesis.docx
-# 记住输出中的 work_dir；当前 agent 读取全部 chunk 并写入所要求的 JSON。
-python3 scripts/merge_host_agent_review.py <work>/review/requirements \
-  --response-out <work>/review/host-agent-response.json
-python3 scripts/thesis_format.py /absolute/requirements.docx /absolute/thesis.docx \
-  /absolute/review.docx --work-dir <work> \
-  --llm-response <work>/review/host-agent-response.json
+python3 scripts/validation_budget.py init --campaign /absolute/campaign
+python3 scripts/current_session.py run /absolute/requirements.docx /absolute/thesis.docx \
+  --work-dir /absolute/new-run --campaign /absolute/campaign --author-task-id ACTUAL_TASK_ID
+# 当前会话按全部包完成响应并使用原 merge_host_agent_review.py 合并后：
+python3 scripts/current_session.py resume --work-dir /absolute/new-run
+python3 scripts/current_session.py generate --work-dir /absolute/new-run --operation-id STABLE_OPERATION_ID
 ```
+
+同一 campaign 跨候选复用，最多2个候选、每候选2次完整渲染和1次WPS保存关闭重开。普通 resume 只读，不重发不确定操作。独立内部审阅与WPS检查的证据导入见 SKILL.md；其限定状态不等于正式Word发布。旧 thesis_format.py 接口保留兼容，但不是绕过当前预算的入口。
 
 默认续跑只接受本轮来源及合并回执，生成可编辑审查草稿，`submission_ready=false`；不冒充独立复核或 Word/PDF 发布验收。当前对话不暴露模型名时，不猜测实际模型身份。没有文件/Python 工具的纯聊天环境不能执行本地项目。
 

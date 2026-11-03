@@ -26,8 +26,18 @@ ALIGNMENTS = {
 
 
 def all_story_paragraphs(story) -> list[Paragraph]:
-    """Return all story paragraphs, including paragraphs nested in SDTs."""
-    return [Paragraph(node, story) for node in story._element.xpath(".//w:p")]
+    """Read existing story paragraphs, including SDTs, without creating parts.
+
+    python-docx's ``_element`` accessor creates a header/footer when neither
+    this section nor its ancestors defines one.  Inventory and coverage calls
+    must not change a document merely by reading it.
+    """
+    definition = story
+    while definition.is_linked_to_previous:
+        definition = definition._prior_headerfooter
+        if definition is None:
+            return []
+    return [Paragraph(node, story) for node in definition._definition.element.xpath(".//w:p")]
 
 
 def _story(section, kind: str, variant: str):
@@ -191,6 +201,8 @@ def execute_section_plan(doc: Document, plan: Mapping[str, Any], *, alignment: s
     if alignment is not None and alignment not in ALIGNMENTS:
         raise ValueError(f"unsupported page-number alignment: {alignment}")
     preserve_existing = plan.get("page_properties_policy") == "preserve_existing"
+    if preserve_existing and alignment is not None:
+        raise ValueError("page-number alignment requires an explicit numbering format")
 
     even_odd_values = {bool(section.get("evenAndOdd")) for section in expected}
     if len(even_odd_values) != 1:

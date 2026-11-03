@@ -9,6 +9,7 @@ import argparse
 import copy
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -102,11 +103,11 @@ def _runtime_code_files() -> list[Path]:
         path = ROOT / relative
         if path.is_file():
             candidates.append(path)
-    for relative in ("requirements.txt", "requirements-test.txt", "pyproject.toml"):
+    for relative in ("requirements.txt", "requirements-test.txt", "requirements-runtime.txt", "skill-package.json", "reference.docx", "pyproject.toml"):
         path = ROOT / relative
         if path.is_file():
             candidates.append(path)
-    for directory in ("scripts", "schema", "resources", ".github/workflows"):
+    for directory in ("scripts", "schema", "resources", "filters", "csl", "template_profiles", "prompts", "references", "agents", ".github/workflows"):
         root = ROOT / directory
         if not root.is_dir():
             continue
@@ -2346,8 +2347,9 @@ def run_step(
     steps: list[dict[str, Any]],
     *,
     timeout: int = 1800,
+    env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    result = run_process(command, cwd=ROOT, timeout=timeout)
+    result = run_process(command, cwd=ROOT, timeout=timeout, **({"env": env} if env is not None else {}))
     steps.append({"name": name, "command": command, "returncode": result.returncode,
                   "stdout": result.stdout.strip(), "stderr": result.stderr.strip()})
     return result
@@ -3330,12 +3332,12 @@ def _main(argv: list[str]) -> int:
                 "artifact": file_record(effective_input),
             })
         else:
-            convert_cmd = [str(ROOT / "convert.sh"), str(source_input), str(effective_input)]
+            convert_cmd = ["bash", str(ROOT / "convert.sh"), str(source_input), str(effective_input)]
             if args.tex_overlay:
                 convert_cmd.append(str(args.tex_overlay.resolve()))
                 manifest["inputs"]["tex_overlay"] = file_record(args.tex_overlay)
             convert_cmd.extend(args.pandoc_arg)
-            result = run_step("latex_to_docx", convert_cmd, steps)
+            result = run_step("latex_to_docx", convert_cmd, steps, env={**os.environ, "PYTHON": sys.executable})
             if result.returncode or not effective_input.exists():
                 manifest.update(status="failed", reason="LaTeX to DOCX conversion failed")
                 write_json(manifest_path, manifest); print(json.dumps(manifest, ensure_ascii=False)); return result.returncode or 2

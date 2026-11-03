@@ -1599,6 +1599,76 @@ def apply_direct_format(paragraph, role_spec: dict[str, Any]) -> None:
     set_paragraph(pseudo, role_spec.get("paragraph", {}))
 
 
+
+def heading_paragraph_sha256(paragraph: Paragraph) -> str:
+    from lxml import etree
+    return hashlib.sha256(etree.tostring(paragraph._p, method="c14n")).hexdigest()
+
+
+def apply_heading_keep_with_next(
+    doc: Document, bindings: list[dict[str, Any]], *, enabled: bool,
+) -> list[dict[str, Any]]:
+    """Apply only explicitly source-bound heading pagination, never infer titles.
+
+    The caller supplies bindings from its already validated source/role parser.
+    Validate the whole batch before changing any paragraph. Text, runs, styles,
+    page breaks, OLE and mathematical content are not changed by this operation.
+    """
+    if enabled is not True:
+        return []
+    paragraphs = list(doc.paragraphs)
+    pending = []
+    seen = set()
+    for binding in bindings:
+        if not isinstance(binding, dict) or set(binding) != {
+            "paragraph_index", "expected_xml_sha256", "role", "rule_source"
+        }:
+            raise ValueError("heading binding fields are invalid")
+        index, role, rule = binding["paragraph_index"], binding["role"], binding["rule_source"]
+        if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < len(paragraphs) or index in seen:
+            raise ValueError("heading paragraph identity is invalid or duplicated")
+        if not isinstance(role, str) or not role.startswith("heading_") or role not in ROLE_STYLES:
+            raise ValueError("paragraph is not a source-confirmed heading role")
+        if not isinstance(rule, dict) or set(rule) != {
+            "requirement_id", "clause_ids", "evidence_ids", "source_text", "keep_with_next"
+        } or not isinstance(rule.get("keep_with_next"), bool):
+            raise ValueError("heading pagination rule is invalid")
+        if not all(isinstance(rule.get(k), str) and rule[k].strip() for k in ("requirement_id", "source_text")):
+            raise ValueError("heading rule source is missing")
+        if not all(isinstance(rule.get(k), list) and rule[k] and all(isinstance(x, str) and x for x in rule[k]) for k in ("clause_ids", "evidence_ids")):
+            raise ValueError("heading rule evidence is missing")
+        paragraph = paragraphs[index]
+        if heading_paragraph_sha256(paragraph) != binding["expected_xml_sha256"]:
+            raise ValueError("heading source paragraph bytes changed")
+        seen.add(index)
+        pending.append((paragraph, binding))
+    receipts = []
+    for paragraph, binding in pending:
+        before = paragraph.paragraph_format.keep_with_next
+        value = binding["rule_source"]["keep_with_next"]
+        paragraph.paragraph_format.keep_with_next = value
+        receipts.append({"paragraph_index": binding["paragraph_index"], "role": binding["role"],
+                         "rule_source": copy.deepcopy(binding["rule_source"]), "before": before,
+                         "after": value, "before_sha256": binding["expected_xml_sha256"],
+                         "after_sha256": heading_paragraph_sha256(paragraph)})
+    return receipts
+
+
+def _heading_pagination_rule(spec: dict[str, Any], role: str, role_spec: dict[str, Any]) -> dict[str, Any] | None:
+    value = role_spec.get("paragraph", {}).get("keep_with_next")
+    if not role.startswith("heading_") or not isinstance(value, bool):
+        return None
+    for requirement in spec.get("requirements", []):
+        if (requirement.get("role") == role
+                and requirement.get("properties", {}).get("paragraph", {}).get("keep_with_next") is value
+                and requirement.get("id") and requirement.get("clause_ids")
+                and requirement.get("evidence_ids") and requirement.get("source_text")):
+            return {"requirement_id": requirement["id"], "clause_ids": requirement["clause_ids"],
+                    "evidence_ids": requirement["evidence_ids"], "source_text": requirement["source_text"],
+                    "keep_with_next": value}
+    return None
+
+
 def _apply_editable_run_font(run, font_spec: dict[str, Any]) -> None:
     if font_spec.get("latin"): run.font.name = font_spec["latin"]
     if font_spec.get("size_pt") is not None: run.font.size = Pt(float(font_spec["size_pt"]))
@@ -6578,6 +6648,8 @@ def main(argv: list[str]) -> int:
         if was_created: created.append(name)
     applied_paragraphs = {}
     execution_receipts: list[dict[str, Any]] = []
+    heading_pagination_receipts: list[dict[str, Any]] = []
+    body_paragraph_indices = {p._p: i for i, p in enumerate(doc.paragraphs)}
     nodes_by_element = {node.paragraph._p: node for node in iter_document_nodes(doc)}
     # More specific roles must claim paragraphs before broad body prose.  A
     # body style such as Normal is frequently shared by converter-emitted
@@ -6658,6 +6730,13 @@ def main(argv: list[str]) -> int:
                 eligible_candidate = has_toc_field(paragraph)
             if structural_candidate or (role not in {"table_text", "equation"} and eligible_candidate):
                 old_style = paragraph.style.name
+                heading_rule = _heading_pagination_rule(spec, role, role_spec)
+                if heading_rule is not None and paragraph._p in body_paragraph_indices:
+                    heading_pagination_receipts.extend(apply_heading_keep_with_next(doc, [{
+                        "paragraph_index": body_paragraph_indices[paragraph._p],
+                        "expected_xml_sha256": heading_paragraph_sha256(paragraph),
+                        "role": role, "rule_source": heading_rule,
+                    }], enabled=True))
                 if mapping["style_name"] != paragraph.style.name:
                     paragraph.style = mapping["style_name"]
                 apply_direct_format(paragraph, role_spec); count += 1
@@ -6912,6 +6991,7 @@ def main(argv: list[str]) -> int:
     })
     if source_table_contract.get("status") != "not_applicable":
         write("source-table-contract.json", source_table_contract)
+    write("heading-pagination-receipts.json", {"schema_version": "1.0", "receipts": heading_pagination_receipts})
     write("execution-receipts.json", {"schema_version": "1.0", "receipts": execution_receipts})
     # Re-open the serialized file before validation to catch OOXML round-trip errors.
     check = Document(args.output); findings = []; coverage_warnings = []

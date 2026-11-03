@@ -130,7 +130,8 @@ def run_stage(command: list[str], label: str, *, timeout: int) -> int:
     return result.returncode
 
 
-def main(argv: list[str]) -> int:
+def main(argv: list[str], *, stage_executor=None) -> int:
+    execute_stage = stage_executor or run_stage
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument(
         "requirements", type=Path,
@@ -350,7 +351,7 @@ def main(argv: list[str]) -> int:
         execution_requirements = args.work_dir.resolve() / "execution" / "requirements"
         prepare = pipeline_command(args, prepare_host_review=True,
                                    requirements_dir=review_requirements)
-        code = run_stage(prepare, "fresh extraction + Host Agent packet", timeout=args.stage_timeout)
+        code = execute_stage(prepare, "fresh extraction + Host Agent packet", timeout=args.stage_timeout)
         if code:
             return code
         extraction_manifest = review_requirements / "extraction-manifest.json"
@@ -395,7 +396,7 @@ def main(argv: list[str]) -> int:
             if args.openclaw_bin:
                 bridge += ["--openclaw-bin", args.openclaw_bin]
             label = "explicit OpenClaw adapter review + provenance merge"
-        code = run_stage(bridge, label, timeout=args.stage_timeout)
+        code = execute_stage(bridge, label, timeout=args.stage_timeout)
         if code:
             return code
         final = pipeline_command(
@@ -407,7 +408,7 @@ def main(argv: list[str]) -> int:
             semantic_review_model=args.codex_model if adapter_id == "codex" else None,
             semantic_review_reasoning_effort=args.codex_reasoning_effort if adapter_id == "codex" else None,
         )
-        return run_stage(
+        return execute_stage(
             final,
             "full deterministic format + declaration resources + DOCX audits",
             timeout=args.stage_timeout,
@@ -462,7 +463,7 @@ def main(argv: list[str]) -> int:
         )
     else:
         p.error("final formatting requires --llm-response, or use --auto-host-agent for one-command execution")
-    return run_stage(command, "thesis-format stage", timeout=args.stage_timeout)
+    return execute_stage(command, "thesis-format stage", timeout=args.stage_timeout)
 
 
 if __name__ == "__main__":

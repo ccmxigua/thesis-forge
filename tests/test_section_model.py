@@ -228,7 +228,7 @@ class SectionModelTests(unittest.TestCase):
             )
             self.assertTrue(plan["valid"], plan["findings"])
             self.assertEqual(plan["page_properties_policy"], "preserve_existing")
-            result = execute_section_plan(doc, plan, alignment="center")
+            result = execute_section_plan(doc, plan)
             output = self.save(doc, td, "output.docx")
             after = inspect_docx(output)
             self.assertEqual(result["status"], "applied")
@@ -283,14 +283,15 @@ class SectionModelTests(unittest.TestCase):
             self.assertEqual(schema["title"], "SectionPlan")
             self.assertEqual(plan["schema_version"], "1.0")
 
-    def test_alignment_only_page_rule_compiles_to_explicit_unnumbered_plan(self) -> None:
+    def test_alignment_only_page_rule_blocks_instead_of_inventing_numbering(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             path = self.save(make_sections(2), td)
             plan = compile_section_plan({"page": {"page_number": {"alignment": "center"}}}, path)
-            self.assertTrue(plan["valid"], plan["findings"])
+            self.assertFalse(plan["valid"])
+            self.assertEqual(plan["page_properties_policy"], "preserve_existing")
             self.assertEqual([section["format"] for section in plan["sections"]], ["none", "none"])
             self.assertEqual([section["numbered"] for section in plan["sections"]], [False, False])
-            self.assertNotIn("page_number_format_missing", codes(plan["findings"]))
+            self.assertIn("page_number_format_missing", codes(plan["findings"]))
 
     def test_executor_rejects_invalid_or_topology_mismatched_plan(self) -> None:
         doc = make_sections(1)

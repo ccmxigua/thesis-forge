@@ -1,0 +1,14 @@
+interface:
+  display_name: Thesis LaTeX/DOCX Formatter
+  short_description: Format theses with host-model semantic review
+  default_prompt: Use $thesis-latex2docx to format this thesis from the supplied university
+    requirements and produce an audited DOCX.
+  icon_small: assets/icon.svg
+  icon_large: assets/icon.svg
+policy:
+  allow_implicit_invocation: true
+  products:
+  - chatgpt
+  - codex
+  - api
+  - atlas

@@ -146,8 +146,31 @@ def toc_routing(candidate: Path) -> dict:
     with ZipFile(candidate) as archive:
         members = {name: archive.read(name) for name in archive.namelist()}
     root = etree.fromstring(members['word/document.xml'], parser=etree.XMLParser(resolve_entities=False, no_network=True))
-    instructions = root.xpath('.//w:instrText/text() | .//w:fldSimple/@w:instr', namespaces=NS)
-    if not any(re.search(r'\bTOC\b', text, re.I) for text in instructions):
+    from types import SimpleNamespace
+    from toc_refresh import collect_field_ranges, flatten_fields
+    body = root.find('w:body', NS)
+    if body is None:
+        return {'toc_action': 'native_refresh_required', 'reasons': ['Missing document body; field scope cannot be established.']}
+    # Word may split an opcode over several instrText nodes. Parse each
+    # complete field rather than matching a token inside an arbitrary argument.
+    fields, malformed = collect_field_ranges(SimpleNamespace(_element=SimpleNamespace(body=body)))
+    simple_instructions = body.xpath('.//w:fldSimple/@w:instr', namespaces=NS)
+    parsed_fields = list(flatten_fields(fields))
+    has_toc = any(field['opcode'] == 'TOC' for field in parsed_fields) or any(
+        re.match(r'\s*TOC(?:\s|$)', text, re.I) for text in simple_instructions)
+    # Simple TOCs are handled by the existing materializer eligibility gates.
+    # Other malformed fields cannot establish that no dynamic TOC is present.
+    structural_errors = set(malformed) - {'simple_toc_field_not_supported'}
+    # A complete PAGE/REF/etc. field may legitimately omit its cached result
+    # and separator. The mutation-oriented parser flags that as incomplete,
+    # but its known opcode still proves this document has no TOC.
+    if not has_toc and parsed_fields and all(field['opcode'] for field in parsed_fields):
+        structural_errors.discard('incomplete_field')
+    structural_errors = sorted(structural_errors)
+    if structural_errors:
+        return {'toc_action': 'native_refresh_required',
+                'reasons': ['Field structure unresolved: ' + ', '.join(structural_errors)]}
+    if not has_toc:
         return {'toc_action': 'not_present', 'reasons': []}
     reasons = []
     try:

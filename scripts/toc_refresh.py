@@ -54,7 +54,7 @@ def collect_field_ranges(doc):
                 else:
                     frame = stack.pop()
                     frame['end'] = node
-                    if not frame['separate'] or not frame['instruction']:
+                    if not frame['separate'] or not ''.join(frame['instruction']).strip():
                         malformed.append('incomplete_field')
                     frame['opcode'] = re.split(r'\s+', ''.join(frame['instruction']).strip())[0].upper() if frame['instruction'] else ''
                     if stack:

@@ -3020,7 +3020,16 @@ def apply_content_instance_overrides(
                         f"content instance {instance_id!r} source location is not exact: {exc}"
                     ) from exc
             else:
-                candidates = [paragraph for paragraph in paragraphs if paragraph.text == fragment_text]
+                # A requirements-file locator proves the formatting rule, not
+                # the paragraph index or full sentence in the target thesis.
+                # Match its evidenced instance literal (e.g. "Abstract") while
+                # retaining fragment matching for explicitly composed literals.
+                target_literal = fragment_text
+                if (binding.get("source_document") is not None
+                        and not location_belongs_to_target(binding)
+                        and text and text in fragment_text):
+                    target_literal = text
+                candidates = [paragraph for paragraph in paragraphs if paragraph.text == target_literal]
                 if len(candidates) > 1:
                     raise ValueError(
                         f"content instance {instance_id!r} has ambiguous unlocated source literal"
@@ -4916,7 +4925,9 @@ def _appendix_heading_match(text: str) -> re.Match[str] | None:
 
 
 def _appendix_headings(doc: Document) -> list[Paragraph]:
-    return [p for p in doc.paragraphs if _appendix_heading_match(p.text)]
+    from toc_refresh import toc_result_paragraphs
+    cached = toc_result_paragraphs(doc)
+    return [p for p in doc.paragraphs if p._p not in cached and _appendix_heading_match(p.text)]
 
 
 def apply_appendix_rules(doc: Document, appendix_spec: dict[str, Any]) -> dict[str, int]:
@@ -6667,12 +6678,16 @@ def main(argv: list[str]) -> int:
         "keywords_zh": 15, "keywords_en": 15,
         "equation": 20, "toc": 20, "table_text": 30, "body_text": 100,
     }
+    from toc_refresh import toc_result_paragraphs
+    toc_cached_elements = toc_result_paragraphs(doc)
     claimed_elements: set[Any] = set()
     for role, mapping in sorted(mappings.items(), key=lambda item: (role_priority.get(item[0], 50), item[0])):
         count = 0
         role_spec = effective_roles[role]
         paragraphs = all_table_paragraphs(doc) if role == "table_text" else all_body_paragraphs(doc)
         for paragraph in paragraphs:
+            if role != "toc" and paragraph._p in toc_cached_elements:
+                continue
             if paragraph._p in claimed_elements:
                 continue
             section_index = section_indices.get(paragraph._p, 0)

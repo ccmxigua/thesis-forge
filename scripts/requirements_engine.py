@@ -2503,6 +2503,110 @@ def build_llm_request(questions: list[dict[str, Any]], clauses: list[dict[str, A
     }
 
 
+def _isolate_reviewed_rule_projections(spec, rule_spec, clause_map, review_map,
+                                      accepted_indexes, top_level_keys):
+    """Remove only source-bound baseline leaves invalidated by this review.
+
+    A role cache is not an independent source of authority. Missing reviews or
+    uncertain evidence bindings leave the corresponding baseline untouched.
+    Accepted replacement requirements always own their explicit properties.
+    """
+    def leaves(value, prefix=()):
+        for key, item in value.items():
+            path = prefix + (key,)
+            if isinstance(item, dict):
+                yield from leaves(item, path)
+            else:
+                yield path, item
+
+    def roles(role):
+        return ('figure_caption', 'table_caption') if role == 'figure_table_title' else (role,)
+
+    accepted_roles = {}
+    protected = set()
+    for req in spec.get('requirements', []):
+        for role in roles(req.get('role')):
+            for cid in req.get('clause_ids', []):
+                accepted_roles.setdefault(cid, set()).add(role)
+            # A local literal/scoped instance cannot authorize the stale
+            # singleton cache. Its style lives on the instance itself.
+            if req.get('field_instance_ids') or req.get('source_scope') or 'text' in req.get('properties', {}):
+                continue
+            for path, _ in leaves(_style_properties_for_role(role, req.get('properties', {}))):
+                protected.add((role, path))
+
+    def rejected(req, role):
+        cids = req.get('clause_ids', [])
+        eids = set(req.get('evidence_ids', []))
+        if not cids or not eids or any(cid not in clause_map for cid in cids):
+            return False
+        source_eids = set().union(*(set(clause_map[cid].get('evidence_ids', [])) for cid in cids))
+        if not eids <= source_eids or any(not eids.intersection(clause_map[cid].get('evidence_ids', [])) for cid in cids):
+            return False
+        for cid in cids:
+            review = review_map.get(cid)
+            if not review:
+                return False
+            if classification_requires_requirement(review['classification']):
+                indexes = set(review['requirement_indexes'])
+                if not indexes or not indexes <= accepted_indexes or role in accepted_roles.get(cid, set()):
+                    return False
+                if not accepted_roles.get(cid):
+                    return False
+            elif review['classification'] in {'verify_existing', 'unresolved'}:
+                return False
+        return True
+
+    contributors = {}
+    for req in rule_spec.get('requirements', []):
+        for role in roles(req.get('role')):
+            for path, value in leaves(_style_properties_for_role(role, req.get('properties', {}))):
+                contributors.setdefault((role, path), []).append((req, value, rejected(req, role)))
+    changes = []
+    for (role, path), entries in contributors.items():
+        if (role, path) in protected:
+            continue
+        root = spec.get(top_level_keys[role], {}) if role in top_level_keys else spec.get('roles', {}).get(role, {})
+        node = root
+        parents = []
+        for key in path[:-1]:
+            if not isinstance(node, dict) or key not in node:
+                break
+            parents.append((node, key))
+            node = node[key]
+        else:
+            if not isinstance(node, dict) or path[-1] not in node:
+                continue
+            old = node[path[-1]]
+            rejected_entries = [req for req, value, bad in entries if bad and value == old]
+            if not rejected_entries:
+                continue
+            survivors = []
+            for _, value, bad in entries:
+                if not bad and value not in survivors:
+                    survivors.append(value)
+            if old in survivors:
+                continue
+            # Restore only an unambiguous surviving source value. A disputed
+            # cache must not select between conflicting survivors implicitly.
+            if len(survivors) == 1:
+                node[path[-1]] = copy.deepcopy(survivors[0])
+            else:
+                del node[path[-1]]
+                for parent, key in reversed(parents):
+                    if parent[key] == {}:
+                        del parent[key]
+                    else:
+                        break
+            changes.append({'role': role, 'property': '.'.join(path), 'old_value': old,
+                            'action': 'restore_surviving_source' if len(survivors) == 1 else 'isolate',
+                            'surviving_values': copy.deepcopy(survivors),
+                            'source_requirement_ids': [req.get('id') for req in rejected_entries],
+                            'clause_ids': sorted({cid for req in rejected_entries for cid in req.get('clause_ids', [])}),
+                            'evidence_ids': sorted({eid for req in rejected_entries for eid in req.get('evidence_ids', [])})})
+    return changes
+
+
 def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dict[str, Any]],
                       response: dict[str, Any], evidence_ids: set[str], *,
                       expected_provenance: dict[str, Any] | None = None,
@@ -3400,6 +3504,37 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
                     record["reason"] = "source_scope_target_instance_unresolved"
                     record["source_scope_errors"] = resolution_errors
                     record.pop("requirement_ids", None)
+
+    # Shared content styles without a literal or instance scope are explicit
+    # role defaults, not local overrides. Rebuild this projection from accepted
+    # records only; neither a stale baseline nor item order may win a conflict.
+    shared_content_defaults = {}
+    shared_content_conflicts = set()
+    for requirement in spec["requirements"]:
+        role = requirement.get("role")
+        props = requirement.get("properties", {})
+        if (role not in CONTENT_INSTANCE_ROLES or role == "body_text"
+                or requirement.get("field_instance_ids")
+                or requirement.get("source_scope") or "text" in props
+                or requirement.get("applicability")):
+            continue
+        target = shared_content_defaults.setdefault(role, {})
+        for path, old, new in _deep_merge(target, _style_properties_for_role(role, props)):
+            shared_content_conflicts.add(role)
+            conflicts.append({"type": "llm_internal_conflict", "role": role,
+                              "property": path, "existing_value": old,
+                              "new_value": new, "reason": "conflicting_shared_content_defaults"})
+    for role, props in shared_content_defaults.items():
+        if role not in shared_content_conflicts:
+            _deep_overlay(spec["roles"].setdefault(role, {}), props)
+
+    isolated_projections = _isolate_reviewed_rule_projections(
+        spec, rule_spec, clause_map, review_map, accepted_indexes,
+        top_level_key_by_role,
+    )
+    if isolated_projections:
+        audit.append({"type": "reviewed_rule_projection_isolation",
+                      "changes": isolated_projections})
 
     # In a complete evidence-bound review, explicit shared body-text style
     # requirements take precedence over a contaminated deterministic baseline

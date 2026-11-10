@@ -84,6 +84,36 @@ def flatten_fields(frames):
         yield from flatten_fields(frame['children'])
 
 
+def toc_result_paragraphs(doc):
+    """Identify cached TOC paragraphs before role assignment or text mutation.
+
+    Complex fields span paragraphs and may split their instruction across runs.
+    Reuse the field parser; simple fields and explicit TOC styles also protect
+    saved results even when a producer has omitted the complex-field wrapper.
+    This is cache identification, not a claim that cached page numbers are valid.
+    """
+    from docx_semantics import all_body_paragraphs
+    paragraphs = list(all_body_paragraphs(doc))
+    protected = set()
+    order = {node: index for index, node in enumerate(doc._element.body.iter())}
+    frames, _ = collect_field_ranges(doc)
+    intervals = [(order[f['separator']], order[f['end']])
+                 for f in flatten_fields(frames)
+                 if f['opcode'] == 'TOC' and f['separator'] is not None and f['end'] is not None]
+    for paragraph in paragraphs:
+        nodes = list(paragraph._p.iter())
+        style = paragraph.style
+        if any(start < order[node] < end for start, end in intervals for node in nodes):
+            protected.add(paragraph._p)
+        if any(node.tag == W+'fldSimple' and re.match(r'\s*TOC\b', node.get(W+'instr', ''), re.I)
+               for node in nodes):
+            protected.add(paragraph._p)
+        if style is not None and any(re.fullmatch(r'(?:TOC|目录)\s*[1-9]', value or '', re.I)
+                                     for value in (style.name, style.style_id)):
+            protected.add(paragraph._p)
+    return protected
+
+
 def request_toc_refresh(doc, *, apply=True):
     """Request refresh only after the shared full-story field preflight."""
     roots, malformed = collect_field_ranges(doc)

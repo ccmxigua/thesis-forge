@@ -4930,10 +4930,60 @@ def _appendix_headings(doc: Document) -> list[Paragraph]:
     return [p for p in doc.paragraphs if p._p not in cached and _appendix_heading_match(p.text)]
 
 
+def _normalize_appendix_label(paragraph: Paragraph, prefix: str, label: str) -> bool:
+    """Edit only the label/separators, retaining title runs and native anchors.
+
+    Assigning Paragraph.text destroys bookmarks (including TOC destinations),
+    character styles and embedded objects. Admit plain text runs and inert
+    range markers only; unfamiliar/field content stays untouched for review.
+    """
+    allowed = {qn('w:' + name) for name in (
+        'pPr', 'r', 'bookmarkStart', 'bookmarkEnd', 'commentRangeStart',
+        'commentRangeEnd', 'proofErr',
+    )}
+    if any(child.tag not in allowed for child in paragraph._p):
+        return False
+    runs = list(paragraph.runs)
+    if any(child.tag not in {qn('w:rPr'), qn('w:t')}
+           for run in runs for child in run._r):
+        return False
+    nodes = [child for run in runs for child in run._r if child.tag == qn('w:t')]
+    text = paragraph.text
+    if ''.join(node.text or '' for node in nodes) != text:
+        return False
+    match = _appendix_heading_match(text)
+    if match is None or not nodes:
+        return False
+    title = match.group(2).strip()
+    title_start = len(text) - len(text.lstrip()) + match.start(2)
+    title_start += len(match.group(2)) - len(match.group(2).lstrip())
+    title_end = title_start + len(title)
+    edits = [(0, title_start, f'{prefix} {label}  '), (title_end, len(text), '')] if title else [
+        (0, len(text), f'{prefix} {label}')]
+    # Apply back-to-front so offsets from the original source remain valid.
+    for start, end, replacement in reversed(edits):
+        if start == end and not replacement:
+            continue
+        offset = 0
+        inserted = False
+        for node in nodes:
+            value = node.text or ''
+            node_end = offset + len(value)
+            if offset < end and node_end > start:
+                left, right = max(0, start - offset), min(len(value), end - offset)
+                value = value[:left] + (replacement if not inserted else '') + value[right:]
+                inserted = True
+                node.text = value
+                if value and (value[0].isspace() or value[-1].isspace()):
+                    node.set(qn('xml:space'), 'preserve')
+            offset = node_end
+    return True
+
+
 def apply_appendix_rules(doc: Document, appendix_spec: dict[str, Any]) -> dict[str, int]:
     """Normalize explicit appendix headings without manufacturing appendix content."""
     counts = {"headings": 0, "labels_normalized": 0, "page_breaks_set": 0,
-              "titles_missing": 0}
+              "titles_missing": 0, "labels_unresolved": 0}
     if not appendix_spec:
         return counts
     prefix = str(appendix_spec.get("label_prefix", "附录"))
@@ -4945,8 +4995,10 @@ def apply_appendix_rules(doc: Document, appendix_spec: dict[str, Any]) -> dict[s
             title = match.group(2).strip() if match else ""
             normalized = f"{prefix} {label}" + (f"  {title}" if title else "")
             if paragraph.text.strip() != normalized:
-                paragraph.text = normalized
-                counts["labels_normalized"] += 1
+                if _normalize_appendix_label(paragraph, prefix, label):
+                    counts["labels_normalized"] += 1
+                else:
+                    counts["labels_unresolved"] += 1
         if appendix_spec.get("page_break_each") and paragraph.paragraph_format.page_break_before is not True:
             paragraph.paragraph_format.page_break_before = True
             counts["page_breaks_set"] += 1
@@ -4973,6 +5025,14 @@ def audit_appendix_rules(doc: Document, appendix_spec: dict[str, Any], profile: 
             findings.append({"role": "appendices", "property": f"headings[{index + 1}].label",
                              "template_value": label if label else paragraph.text.strip(),
                              "required_value": expected})
+        if appendix_spec.get("label_style") == "alpha_upper":
+            title = match.group(2).strip() if match else ""
+            normalized = f"{appendix_spec.get('label_prefix', '附录')} {expected}" + (f"  {title}" if title else "")
+            if paragraph.text.strip() != normalized:
+                findings.append({"role": "appendices", "property": f"headings[{index + 1}].normalized_label",
+                                 "template_value": paragraph.text, "required_value": normalized,
+                                 "failure_type": "appendix_label_normalization_unresolved",
+                                 "reason": "The label was not normalized; preserve native content and review its structure."})
         if appendix_spec.get("page_break_each") and paragraph.paragraph_format.page_break_before is not True:
             findings.append({"role": "appendices", "property": f"headings[{index + 1}].page_break_before",
                              "template_value": paragraph.paragraph_format.page_break_before, "required_value": True})

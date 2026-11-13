@@ -316,7 +316,14 @@ def apply_toc_style_rules(doc,contract,*,scope_resolver,set_font,set_paragraph):
                 if value is not None:
                     if value and not size:raise ValueError('TOC character indent lacks explicit font size')
                     para[side+'_indent_pt']=value*(size or 1)
-            if font:set_font(staged,font)
+            if font:
+                set_font(staged,font)
+                # Concrete template faces must replace same-slot themes, not
+                # coexist with them: OOXML theme tokens otherwise win. Keep
+                # every unspecified script slot and its theme unchanged.
+                from font_declarations import set_explicit_faces
+                set_explicit_faces(staged.element.get_or_add_rPr().get_or_add_rFonts(),
+                                   cjk=font.get('cjk'), latin=font.get('latin'))
             if para:set_paragraph(staged,para)
             for side in ('left','right'):
                 value=props.get('paragraph',{}).get(side+'_indent_chars')

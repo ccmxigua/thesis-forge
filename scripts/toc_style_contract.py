@@ -419,3 +419,41 @@ def audit_toc_style_rules(doc,report):
     return {'status':report['status'],'definitions':records,'preserved_dependencies':dependencies,
             'valid':all(r['serialized_definition_matches']for r in records+dependencies),
             'native_rebuild_verified':False,'findings':report['findings']}
+
+
+def bound_complex_toc_scope(doc, opcodes):
+    """Only actual field intervals grant writes; TOC-like style names do not."""
+    from toc_refresh import collect_field_ranges, flatten_fields
+    frames, malformed = collect_field_ranges(doc)
+    order = {node: i for i, node in enumerate(doc._element.body.iter())}
+    scope = set()
+    intervals = []
+    for frame in flatten_fields(frames):
+        if frame['opcode'] not in opcodes:
+            continue
+        start, end = frame.get('separator'), frame.get('end')
+        if start is None or end is None or frame['unsafe']:
+            malformed.append('unresolved_toc_scope')
+            continue
+        intervals.append((order[start], order[end]))
+        for node, i in order.items():
+            if order[start] <= i <= order[end]:
+                p = node if node.tag == W+'p' else next(node.iterancestors(W+'p'), None)
+                if p is not None:
+                    scope.add(p)
+    # Layout controls and non-text glyphs are visible content too. A field
+    # sharing its paragraph with any such node cannot authorize paragraph
+    # style changes; controls within the result interval remain eligible.
+    visible_tags = {qn(tag) for tag in (
+        'w:t', 'w:drawing', 'w:pict', 'w:object', 'w:tab', 'w:br',
+        'w:cr', 'w:ptab', 'w:sym', 'w:noBreakHyphen', 'w:softHyphen',
+        'w:footnoteReference', 'w:endnoteReference', 'm:oMath', 'm:oMathPara',
+    )}
+    for p in scope:
+        for node in p.iter():
+            if node.tag in visible_tags:
+                if node.tag == W+'t' and not (node.text or '').strip():
+                    continue
+                if not any(start <= order.get(node, -1) <= end for start, end in intervals):
+                    malformed.append('mixed_toc_and_non_toc_paragraph')
+    return scope, bool(malformed)

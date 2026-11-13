@@ -6646,6 +6646,13 @@ def main(argv: list[str]) -> int:
     )
     source_drawing_baseline = audit_drawing_line_boxes(Document(args.input))
     doc = Document(args.input)
+    # Capture source ownership before header, cover, or style mutations. This
+    # inventory is exclusively for TOC compatibility; existing body routing
+    # and its execution receipts remain unchanged.
+    from source_role_binding import build_source_role_bindings
+    from toc_heading_fonts import bound_heading_plan, compact_toc_heading_fonts, audit_toc_heading_fonts
+    toc_source_bindings = build_source_role_bindings(doc, explicit_mappings=explicit)
+    toc_heading_plan = bound_heading_plan(doc, toc_source_bindings)
     source_math_signature = _equation_math_signature(doc)
     prepared_header_layout = prepare_header_scope_boundaries(doc, spec)
     original_source_paragraphs = _content_instance_paragraphs(doc)
@@ -7022,9 +7029,46 @@ def main(argv: list[str]) -> int:
     staged_output = sibling_temp(args.output)
     try:
         document_font_execution = apply_document_font(doc, spec)
+        # Layout changes invalidate cached TOC pages. Request native refresh;
+        # never calculate page numbers from physical PDF offsets.
+        from toc_style_contract import (bound_toc_style_rules, apply_toc_style_rules,
+                                        bound_complex_toc_scope, audit_toc_style_rules)
+        # Only an explicitly supplied official template grants level-style
+        # authority. Cached field formatting or a thesis comment is not enough.
+        toc_style_contract = bound_toc_style_rules(args.official_template)
+        # Never resolve a written/template authority conflict implicitly, even
+        # when one leaf happens to match. A level-merging policy would require
+        # separate source evidence and accounting for unsupported properties.
+        written_toc = bool(spec.get('roles', {}).get('toc')) or any(
+            item.get('role') == 'toc' and bool(item.get('properties'))
+            for item in spec.get('requirements', []) if isinstance(item, dict))
+        if written_toc and toc_style_contract['status'] == 'ready':
+            toc_style_contract = copy.deepcopy(toc_style_contract)
+            toc_style_contract['status'] = 'unhandled_preserved'
+            toc_style_contract['rules'] = {}
+            toc_style_contract['findings'].append({
+                'code': 'toc_style_written_authority_present',
+                'reason': 'Explicit written TOC properties take priority; template level extension not applied.'})
+        toc_style_application = apply_toc_style_rules(
+            doc, toc_style_contract, scope_resolver=bound_complex_toc_scope,
+            set_font=set_font, set_paragraph=set_paragraph)
+        toc_heading_fonts = compact_toc_heading_fonts(doc, toc_heading_plan, toc_style_application)
+        from toc_refresh import request_toc_refresh
+        toc_refresh_request = request_toc_refresh(
+            doc, apply=True, request_document_update=False)
+
         doc.save(staged_output)
         canonicalize_docx_zip(staged_output)
         staged_doc = Document(staged_output)
+        toc_serialized_sha = hashlib.sha256(staged_output.read_bytes()).hexdigest()
+        toc_heading_fonts['serialized_docx_sha256'] = toc_serialized_sha
+        toc_style_application['serialized_docx_sha256'] = toc_serialized_sha
+        toc_heading_fonts['serialized_audit'] = audit_toc_heading_fonts(staged_doc, toc_heading_fonts)
+        if not toc_heading_fonts['serialized_audit']['valid']:
+            raise ValueError('serialized heading font compaction differs; refusing commit')
+        toc_style_application['serialized_audit'] = audit_toc_style_rules(staged_doc, toc_style_application)
+        if not toc_style_application['serialized_audit']['valid']:
+            raise ValueError('serialized TOC style definitions differ; refusing commit')
         equation_findings = audit_equation_layout(staged_doc, spec.get("equations", {}),
             paragraph_spec=equation_paragraph_spec, evidence_dir=args.out_dir/"equation-geometry")
         if not equation_reflow.integrity_matches(source_math_signature,
@@ -7041,6 +7085,11 @@ def main(argv: list[str]) -> int:
         args.out_dir / name,
         json.dumps(data, ensure_ascii=False, indent=2) + "\n",
     )
+    write("toc-refresh-request.json", toc_refresh_request)
+    write("toc-style-application.json", toc_style_application)
+    write("toc-heading-fonts.json", toc_heading_fonts)
+    write("toc-source-role-bindings.json", {"schema_version": "1.0",
+        "records": toc_source_bindings.records, "findings": toc_source_bindings.findings})
     write("style-map.json", mappings); write("conflicts.json", conflicts)
     write("section-plan-applied.json", applied_section_plan)
     write("section-execution.json", section_execution)
@@ -7550,6 +7599,15 @@ def main(argv: list[str]) -> int:
         try:
             check.save(staged_output)
             canonicalize_docx_zip(staged_output)
+            # Audit the exact final review artifact, not the pre-scorecard file.
+            final_toc_doc = Document(staged_output)
+            toc_heading_fonts['serialized_audit'] = audit_toc_heading_fonts(final_toc_doc, toc_heading_fonts)
+            toc_style_application['serialized_audit'] = audit_toc_style_rules(final_toc_doc, toc_style_application)
+            if not (toc_heading_fonts['serialized_audit']['valid'] and toc_style_application['serialized_audit']['valid']):
+                raise ValueError('final review draft TOC formatting differs; refusing commit')
+            final_toc_sha = hashlib.sha256(staged_output.read_bytes()).hexdigest()
+            toc_heading_fonts['serialized_docx_sha256'] = final_toc_sha
+            toc_style_application['serialized_docx_sha256'] = final_toc_sha
             manual_review_marker_audit = audit_manual_review_markers(
                 staged_output, manual_review_document_ledger,
             )
@@ -7562,6 +7620,8 @@ def main(argv: list[str]) -> int:
             commit_files([(staged_output, args.output)])
         finally:
             staged_output.unlink(missing_ok=True)
+        write("toc-heading-fonts.json", toc_heading_fonts)
+        write("toc-style-application.json", toc_style_application)
         write("manual-review-markers.json", {
             "schema_version": "1.0",
             "policy": args.output_policy,

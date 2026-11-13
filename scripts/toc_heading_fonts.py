@@ -28,6 +28,18 @@ def _heading(role):
         'heading_appendix','heading_conclusion','heading_acknowledgments','heading_publications',
         'heading_references','bibliography_heading','abstract_title_zh','abstract_title_en'})
 
+def bound_heading_plan(doc, bindings):
+    """Snapshot only unambiguous, pre-mutation source heading ownership."""
+    from template_role_policy import Plan
+    plan = Plan()
+    for paragraph in doc.paragraphs:
+        roles = bindings.roles_by_element.get(paragraph._p, ())
+        if len(roles) == 1:
+            role = next(iter(roles))
+            if _heading(role):
+                plan.claim(paragraph, role)
+    return plan
+
 def _check_style_dependencies(style):
     """Require a resolved, unprotected style chain for this projection only.
 
@@ -94,6 +106,13 @@ def compact_toc_heading_fonts(doc,plan,style_application):
                 found=anchors.get(match[1]or match[2],[])
                 if len(found)!=1:raise ValueError('TOC source bookmark absent or ambiguous')
                 source=next(found[0].iterancestors(W+'p'),None)
+                bookmark_id = found[0].get(W+'id')
+                starts = [n for n in doc._element.iter(W+'bookmarkStart') if n.get(W+'id') == bookmark_id]
+                ends = [n for n in doc._element.iter(W+'bookmarkEnd') if n.get(W+'id') == bookmark_id]
+                if (not bookmark_id or len(starts) != 1 or len(ends) != 1
+                        or source is None or next(ends[0].iterancestors(W+'p'), None) is not source
+                        or list(source.iter()).index(found[0]) >= list(source.iter()).index(ends[0])):
+                    raise ValueError('TOC source bookmark range absent, ambiguous or not within heading')
                 if source in seen:continue
                 source_p=plan.paragraphs.get(source);role=plan.owners.get(source,'')
                 if source_p is None or not _heading(role)or source.getparent()is not doc._element.body:

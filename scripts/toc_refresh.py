@@ -114,7 +114,7 @@ def toc_result_paragraphs(doc):
     return protected
 
 
-def request_toc_refresh(doc, *, apply=True):
+def request_toc_refresh(doc, *, apply=True, request_document_update=True):
     """Request refresh only after the shared full-story field preflight."""
     roots, malformed = collect_field_ranges(doc)
     tocs = [f for f in flatten_fields(roots) if f['opcode'] == 'TOC']
@@ -174,13 +174,15 @@ def request_toc_refresh(doc, *, apply=True):
             'previous_cached_text':''.join(frame['cached_text']),
             'status':'requires_native_update_and_verification'})
     if selected:
-        if apply:
+        if apply and request_document_update:
             setting = doc.settings.element.find(W+'updateFields')
             if setting is None:
                 setting = OxmlElement('w:updateFields')
                 doc.settings.element.append(setting)
             setting.set(qn('w:val'), 'true')
+        if apply:
             report['refresh_flags_written'] = True
+        report['document_wide_update_requested'] = bool(apply and request_document_update)
         report['status'] = 'native_update_required'
         report['required_action'] = 'Update the entire TOC in the target native engine, save/reopen, and compare each cached page with its actual destination/footer.'
     return report

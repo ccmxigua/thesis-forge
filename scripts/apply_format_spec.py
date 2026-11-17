@@ -975,6 +975,9 @@ def apply_cover(doc: Document, cover: dict[str, Any], profile: dict[str, Any],
         if field["id"] == "title_zh": style = styles["title_zh"]
         elif field["id"] == "title_en": style = styles["title_en"]
         paragraph = _insert_paragraph_before(anchor, text, style)
+        # Generated interior cover fields must not inherit a page break from
+        # Normal or their generated style; the cover's final break is separate.
+        paragraph.paragraph_format.page_break_before = False
         if field["id"] == "title_zh":
             paragraph.alignment = WD_ALIGN_PARAGRAPH.CENTER
             for run in paragraph.runs: run.font.name = "SimHei"; run.font.size = Pt(22)
@@ -3874,15 +3877,13 @@ def apply_object_pagination(doc: Document, mappings: dict[str, Any], object_spec
             next_node = children[i + 1] if i + 1 < len(children) else None
             next_para = paragraphs.get(next_node)
             if next_para is not None and figure_style and next_para.style.name == figure_style:
-                ppr = child.get_or_add_pPr()
-                if ppr.find(qn("w:keepNext")) is None: ppr.append(OxmlElement("w:keepNext"))
+                paragraphs[child].paragraph_format.keep_with_next = True
                 counts["figures_kept_with_captions"] += 1
         if child.tag == qn("w:p") and table_style and object_spec.get("keep_table_with_caption"):
             para = paragraphs.get(child)
             next_node = children[i + 1] if i + 1 < len(children) else None
             if para is not None and para.style.name == table_style and next_node is not None and next_node.tag == qn("w:tbl"):
-                ppr = child.get_or_add_pPr()
-                if ppr.find(qn("w:keepNext")) is None: ppr.append(OxmlElement("w:keepNext"))
+                para.paragraph_format.keep_with_next = True
                 counts["table_captions_kept_with_tables"] += 1
     return counts
 

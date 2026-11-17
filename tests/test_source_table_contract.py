@@ -103,7 +103,7 @@ class SourceTableContractTests(unittest.TestCase):
             root = Path(td)
             source, clauses_path, spec_path, manifest_path, clauses = make_bundle(root)
             bound_source, binding = resolve_bound_requirement_docx(manifest_path, clauses_path, spec_path)
-            self.assertEqual(bound_source, source)
+            self.assertEqual(bound_source, source.resolve(strict=True))
             self.assertEqual(binding["status"], "verified")
             spec = json.loads(spec_path.read_text())
             result = compile_source_table_contract(source, clauses, spec, source_binding=binding)
@@ -263,7 +263,7 @@ class SourceTableContractTests(unittest.TestCase):
                 manifest_path, clauses_path, spec_path,
             )
 
-            self.assertEqual(bound_source, source)
+            self.assertEqual(bound_source, source.resolve(strict=True))
             self.assertEqual(binding["status"], "verified")
             self.assertEqual(
                 binding["format_spec_source_lineage"],
@@ -299,7 +299,7 @@ class SourceTableContractTests(unittest.TestCase):
             bound_source, binding = resolve_bound_requirement_docx(
                 manifest_path, clauses_path, spec_path,
             )
-            self.assertEqual(bound_source, normalized_source)
+            self.assertEqual(bound_source, normalized_source.resolve(strict=True))
             self.assertEqual(binding["status"], "verified")
 
             wrong_original = root / "same-bytes-different-original-path.docx"
@@ -360,7 +360,7 @@ class SourceTableContractTests(unittest.TestCase):
             bound_source, binding = resolve_bound_requirement_docx(
                 manifest_path, clauses_path, spec_path, pipeline_path,
             )
-            self.assertEqual(bound_source, source)
+            self.assertEqual(bound_source, source.resolve(strict=True))
             self.assertEqual(binding["status"], "verified")
             self.assertEqual(
                 binding["format_spec_source_lineage"],
@@ -425,7 +425,7 @@ class SourceTableContractTests(unittest.TestCase):
             bound_source, binding = resolve_bound_requirement_docx(
                 manifest_path, clauses_path, projection_path,
             )
-            self.assertEqual(bound_source, source)
+            self.assertEqual(bound_source, source.resolve(strict=True))
             self.assertEqual(binding["status"], "verified")
             self.assertEqual(
                 binding["format_spec_source_lineage"],

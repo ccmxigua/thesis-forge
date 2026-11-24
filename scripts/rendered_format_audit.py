@@ -23,13 +23,15 @@ from PIL import ImageOps
 
 from semantic_contract import sha256_json, strict_json_read
 from pdf_glyph_integrity import audit_pdf_glyph_integrity
+from drawing_line_box import effective_line_spacing, inline_drawing_geometry, line_box_assessment
 
 W = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
 WP = "http://schemas.openxmlformats.org/drawingml/2006/wordprocessingDrawing"
 A = "http://schemas.openxmlformats.org/drawingml/2006/main"
 R = "http://schemas.openxmlformats.org/officeDocument/2006/relationships"
 PR = "http://schemas.openxmlformats.org/package/2006/relationships"
-NS = {"w": W, "wp": WP, "a": A, "r": R, "pr": PR}
+NS = {"w": W, "wp": WP, "a": A, "r": R, "pr": PR,
+      "pic": "http://schemas.openxmlformats.org/drawingml/2006/picture"}
 EMU_PER_PT = 12700.0
 
 
@@ -67,35 +69,12 @@ def _styles(zf: ZipFile) -> tuple[dict[str, dict[str, Any]], dict[str, str]]:
     return styles, names
 
 
-def _effective_spacing(paragraph: etree._Element, styles: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    direct = paragraph.find("w:pPr/w:spacing", namespaces=NS)
-    if direct is not None and (direct.get(f"{{{W}}}line") is not None or direct.get(f"{{{W}}}lineRule") is not None):
-        raw, rule, owner = direct.get(f"{{{W}}}line"), direct.get(f"{{{W}}}lineRule", "auto"), "paragraph"
-    else:
-        pstyle = paragraph.find("w:pPr/w:pStyle", namespaces=NS)
-        sid = pstyle.get(f"{{{W}}}val") if pstyle is not None else "Normal"
-        seen: set[str] = set()
-        raw = rule = None
-        owner = None
-        while sid and sid not in seen:
-            seen.add(sid)
-            entry = styles.get(sid, {})
-            if entry.get("line") is not None or entry.get("line_rule") is not None:
-                raw, rule, owner = entry.get("line"), entry.get("line_rule", "auto"), sid
-                break
-            sid = entry.get("based_on")
-    try:
-        line_pt = round(int(raw) / 20.0, 3) if raw is not None and rule in {"exact", "atLeast"} else None
-    except (TypeError, ValueError):
-        line_pt = None
-    return {"rule": rule, "line_pt": line_pt, "owner": owner}
-
-
 def _drawing_records(path: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
     with ZipFile(path) as zf:
         document = etree.fromstring(zf.read("word/document.xml"))
         rels = etree.fromstring(zf.read("word/_rels/document.xml.rels"))
-        styles, names = _styles(zf)
+        _style_map, names = _styles(zf)
+        styles_root = etree.fromstring(zf.read("word/styles.xml"))
         relmap = {
             relation.get("Id"): _resolve_target("word/document.xml", relation.get("Target", ""))
             for relation in rels if relation.get("Id") and relation.get("Target")
@@ -104,23 +83,48 @@ def _drawing_records(path: Path) -> tuple[list[dict[str, Any]], list[dict[str, A
         line_boxes = []
         paragraphs = document.xpath(".//w:body//w:p", namespaces=NS)
         for p_index, paragraph in enumerate(paragraphs, 1):
-            blips = paragraph.xpath(".//a:blip[@r:embed]", namespaces=NS)
-            if not blips:
+            # Only a plain embedded-picture container is raster-only. Keep a
+            # separate aggregate unverified record for a mixed/group container:
+            # one embedded image never proves visibility of its other content.
+            blips = paragraph.xpath(
+                ".//a:blip[@r:embed] | .//w:drawing["
+                "not(.//a:blip[@r:embed]) or .//a:blip[@r:link] or "
+                ".//a:graphicData/*[not(self::pic:pic)]]",
+                namespaces=NS,
+            )
+            if not paragraph.xpath(".//w:drawing", namespaces=NS):
                 continue
             pstyle = paragraph.find("w:pPr/w:pStyle", namespaces=NS)
             sid = pstyle.get(f"{{{W}}}val") if pstyle is not None else "Normal"
-            spacing = _effective_spacing(paragraph, styles)
+            spacing = effective_line_spacing(paragraph, styles_root)
+            geometry = inline_drawing_geometry(paragraph)
             heights = []
             for blip_index, blip in enumerate(blips, 1):
+                if blip.tag == f"{{{W}}}drawing":
+                    records.append({
+                        "paragraph_index": p_index, "drawing_index_in_paragraph": blip_index,
+                        "representation": "unsupported_or_mixed_drawing_container",
+                        "record_scope": "aggregate_container_not_individual_object",
+                        "embedded_raster_count": len(blip.xpath(".//a:blip[@r:embed]", namespaces=NS)),
+                        "linked_image_count": len(blip.xpath(".//a:blip[@r:link]", namespaces=NS)),
+                        "graphic_content_tags": [node.tag for node in blip.xpath(".//a:graphicData/*", namespaces=NS)],
+                        "visibility_binding_supported": False,
+                        "source_crop": [], "extent_pt": {},
+                        "media_sha256": None, "pixel_sha256": None, "pixel_size": None,
+                    })
+                    continue
                 rid = blip.get(f"{{{R}}}embed")
                 target = relmap.get(rid)
                 extent_node = blip.getparent()
                 while extent_node is not None and extent_node.tag not in {f"{{{WP}}}inline", f"{{{WP}}}anchor"}:
                     extent_node = extent_node.getparent()
                 extent = extent_node.find("wp:extent", namespaces=NS) if extent_node is not None else None
+                source_crop = [dict(node.attrib) for node in blip.getparent().findall("a:srcRect", namespaces=NS)]
                 try:
                     height_pt = round(int(extent.get("cy")) / EMU_PER_PT, 3) if extent is not None else None
                     width_pt = round(int(extent.get("cx")) / EMU_PER_PT, 3) if extent is not None else None
+                    if height_pt is not None and (height_pt <= 0 or width_pt <= 0):
+                        height_pt = width_pt = None
                 except (TypeError, ValueError):
                     height_pt = width_pt = None
                 if height_pt is not None:
@@ -142,11 +146,14 @@ def _drawing_records(path: Path) -> tuple[list[dict[str, Any]], list[dict[str, A
                     "relationship_id": rid, "media_part": member, "media_sha256": media_sha,
                     "pixel_size": pixel_size, "pixel_sha256": pixel_sha,
                     "extent_pt": {"width": width_pt, "height": height_pt},
+                    "source_crop": source_crop,
                 })
             line_boxes.append({
                 "paragraph_index": p_index, "style_id": sid, "style_name": names.get(sid, sid),
-                "drawing_count": len(blips), "max_drawing_extent_pt": max(heights) if heights else None,
-                "effective_line_spacing": spacing,
+                "drawing_count": len(paragraph.xpath(".//w:drawing", namespaces=NS)),
+                "observation_record_count": len(blips), "max_drawing_extent_pt": max(heights) if heights else None,
+                "effective_line_spacing": spacing, "geometry": geometry,
+                "assessment": line_box_assessment(geometry, spacing), "rendered_verified": False,
             })
         return records, line_boxes
 
@@ -265,14 +272,19 @@ def audit(source_docx: Path, final_docx: Path, pdf_path: Path,
         if before.get("media_sha256") != after.get("media_sha256") or before.get("pixel_size") != after.get("pixel_size"):
             findings.append({"code": "drawing_media_changed", "drawing_index": index,
                              "source": before, "output": after})
+        if before.get("source_crop") != after.get("source_crop"):
+            findings.append({"code": "drawing_crop_changed", "drawing_index": index, "status": "failed",
+                             "source_crop": before.get("source_crop"), "output_crop": after.get("source_crop"),
+                             "reason": "matching media bytes do not establish preservation of image cropping"})
     for row in output_line_boxes:
-        spacing = row.get("effective_line_spacing") or {}
-        extent = row.get("max_drawing_extent_pt")
-        if (spacing.get("rule") == "exact"
-                or (spacing.get("rule") == "atLeast" and spacing.get("line_pt") is not None
-                    and extent is not None and spacing["line_pt"] + .05 < extent)):
+        if row["assessment"] == "restrictive_exact":
             findings.append({"code": "drawing_line_box_not_object_safe", "paragraph_index": row["paragraph_index"],
-                             "line_box": spacing, "drawing_extent_pt": extent})
+                             "line_box": row["effective_line_spacing"], "geometry": row["geometry"],
+                             "reason": "observed inline bounds exceed a fixed exact line height", "rendered_verified": False})
+        elif row["assessment"] == "unverified":
+            findings.append({"code": "drawing_line_box_geometry_unverified", "paragraph_index": row["paragraph_index"],
+                             "status": "unverified", "line_box": row["effective_line_spacing"],
+                             "geometry": row["geometry"], "rendered_verified": False})
 
     spec = strict_json_read(format_spec_path)
     expected_fonts, font_scope_findings, font_scope = _font_expectations(
@@ -304,7 +316,8 @@ def audit(source_docx: Path, final_docx: Path, pdf_path: Path,
                     "pixel_size": [int(info.get("width", 0)), int(info.get("height", 0))],
                     "pixel_sha256": _pdf_image_pixel_sha(document, info.get("xref")),
                     "bbox_pt": [round(value, 2) for value in info["bbox"]],
-                    "visible_area_ratio": round(visibility, 6),
+                    "raster_bbox_area_inside_page_ratio": round(visibility, 6),
+                    "visible_area_ratio": None, "visible_clip_bound": False,
                     "fully_inside_page": (bbox.x0 >= -.25 and bbox.y0 >= -.25
                                            and bbox.x1 <= page.rect.width + .25
                                            and bbox.y1 <= page.rect.height + .25),
@@ -323,6 +336,11 @@ def audit(source_docx: Path, final_docx: Path, pdf_path: Path,
     remaining = list(image_instances)
     drawing_visibility = []
     for index, drawing in enumerate(output_drawings, 1):
+        if drawing.get("visibility_binding_supported") is False:
+            drawing_visibility.append({**drawing, "status": "unverified"})
+            findings.append({"code": "rendered_drawing_visibility_unverified", "drawing_index": index,
+                             "reason": "non-embedded raster or unsupported drawing lacks a reliable PDF visibility binding"})
+            continue
         size = drawing.get("pixel_size")
         pixel_sha = drawing.get("pixel_sha256")
         exact_candidates = [i for i, image in enumerate(remaining)
@@ -347,17 +365,12 @@ def audit(source_docx: Path, final_docx: Path, pdf_path: Path,
         actual_height = round(image["bbox_pt"][3] - image["bbox_pt"][1], 2)
         row = {**drawing, "rendered": image, "expected_extent_height_pt": expected_height,
                "rendered_height_pt": actual_height}
-        row["status"] = "passed"
-        if not image["fully_inside_page"] or image["visible_area_ratio"] < .999:
-            row["status"] = "clipped"
-            findings.append({"code": "rendered_drawing_clipped_by_page", "drawing_index": index,
-                             "page": image["page"], "bbox_pt": image["bbox_pt"],
-                             "visible_area_ratio": image["visible_area_ratio"]})
-        if expected_height is None or abs(actual_height - expected_height) > 2.0:
-            row["status"] = "extent_mismatch"
-            findings.append({"code": "rendered_drawing_extent_mismatch", "drawing_index": index,
-                             "page": image["page"], "expected_pt": expected_height,
-                             "actual_pt": actual_height})
+        # A full raster transform does not bind the effective PDF clipping
+        # path. An on-page bbox can still hide half the image behind a clip.
+        row["status"] = "unverified"
+        findings.append({"code": "rendered_drawing_visibility_unverified", "drawing_index": index,
+                         "page": image["page"], "source_crop": drawing["source_crop"],
+                         "reason": "PDF raster bounds are observed but the effective visible clipping path is unbound"})
         drawing_visibility.append(row)
 
     renderer = None

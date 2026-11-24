@@ -390,9 +390,10 @@
           "$ref": "#/$defs/lineSpacing"
         },
         "outline_level": {
+          "description": "1 through 9 mean heading levels 1 through 9 (OOXML 0 through 8). Use 10 for body text / 正文文本 (OOXML outlineLvl=9). Never use 9 for body text.",
           "type": "integer",
           "minimum": 1,
-          "maximum": 9
+          "maximum": 10
         },
         "page_break_before": {
           "type": "boolean"

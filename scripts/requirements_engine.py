@@ -1462,6 +1462,20 @@ def _merge_scoped_projection(
     return conflicts
 
 
+def _merge_document_structure_projection(
+    dst: dict[str, Any], src: dict[str, Any], *, prefer_incoming: bool = False,
+) -> list[tuple[str, Any, Any]]:
+    """Conjoin required-role subsets without changing ordered-list semantics."""
+    remaining = copy.deepcopy(src)
+    incoming = remaining.get("required_roles")
+    existing = dst.get("required_roles", [])
+    if (isinstance(incoming, list) and isinstance(existing, list)
+            and all(isinstance(role, str) for role in [*existing, *incoming])):
+        dst["required_roles"] = list(dict.fromkeys([*existing, *incoming]))
+        remaining.pop("required_roles")
+    return _merge_scoped_projection(dst, remaining, prefer_incoming=prefer_incoming)
+
+
 def _merge_cover_projection(
     dst: dict[str, Any], src: dict[str, Any], *, prefer_incoming: bool = False,
 ) -> list[tuple[str, Any, Any]]:
@@ -2553,8 +2567,11 @@ def _isolate_reviewed_rule_projections(spec, rule_spec, clause_map, review_map,
                     return False
                 if not accepted_roles.get(cid):
                     return False
-            elif review['classification'] in {'verify_existing', 'unresolved'}:
+            elif review['classification'] == 'verify_existing':
                 return False
+            # An explicit unresolved review grants no formatting authority.
+            # Isolate its stale role-cache leaves, without reclassifying the
+            # clause or claiming that a different source value is correct.
         return True
 
     contributors = {}
@@ -3289,6 +3306,8 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
                 projection_merge = (
                     _merge_cover_projection
                     if top_key == "cover"
+                    else _merge_document_structure_projection
+                    if top_key == "document_structure"
                     else _merge_scoped_projection
                 )
                 projection_conflicts = [
@@ -3311,7 +3330,10 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
                 # explicitly resolved, while scoped collections are unioned
                 # into deterministic content already present in ``spec``.
                 baseline_probe = copy.deepcopy(preserved.get(top_key, {}))
-                baseline_conflicts = _deep_merge(baseline_probe, props)
+                baseline_conflicts = (
+                    _merge_document_structure_projection(baseline_probe, props)
+                    if top_key == "document_structure" else _deep_merge(baseline_probe, props)
+                )
                 for key, old, new in baseline_conflicts:
                     conflicts.append({
                         "type": "rule_llm_conflict", "role": target_roles[0],
@@ -3332,6 +3354,10 @@ def merge_llm_primary(source: Path, rule_spec: dict[str, Any], clauses: list[dic
                         merged_top_level, staged_llm, prefer_incoming=True,
                     )
                     if top_key == "cover"
+                    else _merge_document_structure_projection(
+                        merged_top_level, scoped_props, prefer_incoming=True,
+                    )
+                    if top_key == "document_structure"
                     else _merge_scoped_projection(
                         merged_top_level, scoped_props, prefer_incoming=True,
                     )

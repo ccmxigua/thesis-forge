@@ -74,7 +74,18 @@ def build_neutral_thesis(path: Path) -> None:
     doc.add_paragraph("This fixture exercises all executable semantic roles.", ROLE_STYLE_NAMES["abstract_body_en"])
     doc.add_paragraph("Keywords: documents; validation; testing", ROLE_STYLE_NAMES["keywords_en"])
     doc.add_paragraph("目 录", ROLE_STYLE_NAMES["toc"])
-    doc.add_paragraph("1 Introduction ................................ 1", ROLE_STYLE_NAMES["body_text"])
+    # The visible title is not the TOC field. Include a real self-contained
+    # field with a cached result while leaving native refresh unverified.
+    toc = doc.add_paragraph()
+    begin = OxmlElement("w:fldChar"); begin.set(qn("w:fldCharType"), "begin")
+    toc.add_run()._r.append(begin)
+    instr = OxmlElement("w:instrText"); instr.text = ' TOC \\o "1-3" \\h '
+    toc.add_run()._r.append(instr)
+    sep = OxmlElement("w:fldChar"); sep.set(qn("w:fldCharType"), "separate")
+    toc.add_run()._r.append(sep)
+    toc.add_run("1 Introduction ................................ 1")
+    end = OxmlElement("w:fldChar"); end.set(qn("w:fldCharType"), "end")
+    toc.add_run()._r.append(end)
 
     # Main matter has multiple sections and heading depths.
     doc.add_section(WD_SECTION.NEW_PAGE)

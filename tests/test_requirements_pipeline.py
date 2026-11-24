@@ -803,7 +803,10 @@ b&=2\notag
             self.assertTrue(report["valid"]); self.assertGreaterEqual(report["paragraphs_directly_formatted"]["body_text"], 1)
             d = Document(output)
             self.assertTrue(d.paragraphs[1].text.startswith("第一章"))
-            self.assertEqual(d.styles["Normal"].font.size.pt, 12)
+            self.assertEqual(d.styles["Normal"]._element.xml, Document(target).styles["Normal"]._element.xml)
+            body = next(p for p in d.paragraphs if p.style.name == "Thesis Body Text")
+            self.assertEqual(body.style.font.size.pt, 12)
+            self.assertTrue(body.text.strip())
             self.assertAlmostEqual(d.sections[0].left_margin.cm, 3.0, places=1)
 
     def test_exact_bibliography_sample_allows_heading_style_reuse(self) -> None:
@@ -1433,7 +1436,7 @@ b&=2\notag
             pending = {item["role"]: item for item in report["pending_content"]}
             self.assertEqual(set(pending), {"body_text"})
             self.assertEqual(pending["body_text"]["placeholder"], "——")
-            self.assertTrue(any(paragraph.style.name == ROLE_STYLE_NAMES["body_text"]
+            self.assertTrue(any(paragraph.style.name == pending["body_text"]["style"]
                                 and paragraph.text.strip() == "——"
                                 for paragraph in Document(output).paragraphs))
 
@@ -2709,7 +2712,7 @@ b&=2\notag
         rule_spec = {
             "schema_version": "1.0", "roles": {}, "page": {}, "requirements": [], "content_instances": [],
             "content_constraints": {"keywords_zh": {"required": True, "min_count": 3, "max_count": 5}},
-            "document_structure": {"required_roles": ["baseline"], "ordered_roles": ["baseline"]},
+            "document_structure": {"required_roles": ["abstract_title_zh"], "ordered_roles": ["abstract_title_zh"]},
         }
         spec, conflicts, audit = requirements_engine.merge_llm_primary(
             Path("synthetic-source"), rule_spec, clauses, response, {"E1", "E2"},
@@ -2720,7 +2723,7 @@ b&=2\notag
         self.assertEqual(spec["status"], "semantic_resolved")
         self.assertEqual(spec["content_constraints"]["keywords_zh"],
                          {"required": True, "min_count": 5, "max_count": 8})
-        self.assertEqual(spec["document_structure"]["required_roles"], ["cover", "body_text"])
+        self.assertEqual(spec["document_structure"]["required_roles"], ["abstract_title_zh", "cover", "body_text"])
         self.assertTrue(any(item.get("type") == "rule_llm_conflict" for item in conflicts))
         by_clause = {
             clause_id: next(req for req in spec["requirements"] if clause_id in req["clause_ids"])
@@ -3263,7 +3266,7 @@ b&=2\notag
                              "--out-dir", str(td / "good-audit"), "--compliance-mode", "supported_subset")
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
 
-    def test_continued_table_requires_render_evidence_and_repeats_header(self) -> None:
+    def test_continued_table_requires_scoped_native_evidence_without_inventing_header_flags(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             td = Path(td); source = td / "source.docx"; output = td / "output.docx"
             spec_path = td / "spec.json"; audit = td / "audit"
@@ -3279,11 +3282,14 @@ b&=2\notag
             spec_path.write_text(json.dumps(spec), encoding="utf-8")
             result = run_raw("scripts/apply_format_spec.py", str(source), str(spec_path), str(output),
                              "--out-dir", str(audit), "--compliance-mode", "supported_subset")
-            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
             report = json.loads((audit / "validation-report.json").read_text())
-            self.assertTrue(any(item["property"] == "tables.continuation.render_verification"
-                                for item in report["findings"]))
-            self.assertEqual(report["table_changes"]["header_rows_repeated"], 1)
+            self.assertEqual(report["table_continuation_geometry"]["status"], "pending_native_geometry")
+            self.assertFalse(report["submission_ready"])
+            self.assertEqual(report["table_changes"]["header_rows_repeated"], 0)
+            self.assertFalse(Document(output).tables[0]._tbl.xpath(".//w:tblHeader"))
+            self.assertIn("continued_table_native_scope_pending",
+                          {row["code"] for row in report["submission_audit"]["submission_blockers"]})
 
     def test_acknowledgments_section_length_is_audited(self) -> None:
         with tempfile.TemporaryDirectory() as td:
@@ -3420,7 +3426,11 @@ b&=2\notag
             coverage = {item["role"]: item for item in report["role_coverage"]}
             self.assertEqual(coverage["toc"]["status"], "present")
             self.assertEqual(coverage["toc"]["count"], 1)
-            self.assertEqual(Document(output).paragraphs[1].style.name, "TOC Heading")
+            final = Document(output)
+            self.assertEqual(final.paragraphs[0].style.name, "TOC Heading")
+            self.assertEqual(final.paragraphs[0]._p.xml, Document(source).paragraphs[0]._p.xml)
+            self.assertNotEqual(final.paragraphs[1].style.name, "TOC Heading")
+            self.assertEqual(final.paragraphs[1].style.font.size.pt, 12)
 
     def test_content_instance_style_override_is_applied_without_synthesizing_text(self) -> None:
         with tempfile.TemporaryDirectory() as td:

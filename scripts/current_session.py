@@ -102,6 +102,9 @@ def inspect_session(work_dir: Path, *, include_checks: bool=True) -> dict:
                            'input_sha256':source_records['source']['sha256'],'code_sha256':config['code_sha256'],'candidate_sha256':candidate_sha}
         if reasons:return status
         if candidate_sha:
+            from separated_delivery import inspect_paper
+            status['delivery']=inspect_paper(output)
+            status['delivery']['next_action']='export_and_verify_separate_review_package'
             status['next_action']='independent_review'
             if include_checks:
                 status['toc']=toc_routing(output)

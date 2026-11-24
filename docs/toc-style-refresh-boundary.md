@@ -49,14 +49,13 @@ remains false. A native application may still copy other heading properties.
 A passing configuration audit must not be reported as native font retention or
 full-document acceptance; fresh native refresh/visual evidence remains required.
 
-The engineering CLI now invokes this contract and compatibility projection.
-Source-role ownership is captured immediately after loading the input, before
-header, cover and style mutations, solely for TOC use; existing body-role routing
-is not replaced. The four receipts are `toc-source-role-bindings.json`,
-`toc-style-application.json`, `toc-heading-fonts.json` and
-`toc-refresh-request.json`. Only TOC-scoped dirty flags are requested, without
-enabling document-wide automatic field updates. This CLI integration has
-synthetic regression evidence, not native WPS acceptance.
+The CLI preserves two distinct ownership captures. `toc-source-role-bindings.json`
+binds the original input before header, cover, section and style mutations,
+and only that capture authorizes TOC heading projection. The broader
+`source-role-bindings.json` is captured later, after layout preparation, for
+the 1.0.3 execution scope. Neither receipt is native Word/WPS acceptance.
+Other TOC receipts remain `toc-style-application.json`,
+`toc-heading-fonts.json` and `toc-refresh-request.json`.
 
 Both TOC audits are rerun on the final review-draft serialization after manual
 markers and the scorecard are added. Successful receipts bind that final DOCX

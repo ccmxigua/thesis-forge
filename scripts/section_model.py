@@ -6,6 +6,7 @@ never edits a document and never guesses when a selector cannot be resolved.
 """
 from __future__ import annotations
 
+import copy
 import re
 from pathlib import Path
 from typing import Any, Mapping
@@ -41,7 +42,7 @@ def _selector_section(selector: Mapping[str, Any], evidence: Mapping[str, Any], 
             return None, findings
         return value, findings
     if strategy == "first_heading_1":
-        matches = [p for p in evidence.get("paragraphs", []) if p.get("is_heading_1") and str(p.get("text", "")).strip()]
+        matches = [p for p in evidence.get("paragraphs", []) if not p.get("is_toc_entry") and p.get("is_heading_1") and str(p.get("text", "")).strip()]
         if not matches:
             findings.append(finding(
                 f"{code_prefix}_no_match", "Section-boundary selector matched no Heading 1 paragraph.",
@@ -76,7 +77,7 @@ def _selector_section(selector: Mapping[str, Any], evidence: Mapping[str, Any], 
                 evidence={"error": str(exc)},
             ))
             return None, findings
-        matches = [p for p in evidence.get("paragraphs", []) if regex.search(str(p.get("text", "")).strip())]
+        matches = [p for p in evidence.get("paragraphs", []) if not p.get("is_toc_entry") and regex.search(str(p.get("text", "")).strip())]
         if not matches:
             findings.append(finding(
                 f"{code_prefix}_no_match", "heading_text selector matched no paragraph.",
@@ -112,13 +113,17 @@ def _positive_start(value: Any, location: str, findings: list[dict[str, Any]]) -
     return value
 
 
-def compile_section_plan(format_spec: Mapping[str, Any], docx: str | Path | Mapping[str, Any]) -> dict[str, Any]:
+def compile_section_plan(format_spec: Mapping[str, Any], docx: str | Path | Mapping[str, Any], *,
+                         preserve_unresolved_front: bool = False) -> dict[str, Any]:
     """Compile a JSON-serializable SectionPlan.
 
     ``docx`` may be a path or a prior :func:`page_field_ops.inspect_docx`
     result, which makes this function deterministic and easy to compose.
     Semantic/configuration errors are represented in ``findings`` and make the
     plan invalid; unresolved values are not silently defaulted.
+    ``preserve_unresolved_front`` retains source numbering before an explicitly
+    selected body when review-draft front scope has no selector. Preservation
+    does not verify the source numbering against that unresolved requirement.
     """
     evidence = _coerce_evidence(docx)
     section_count = int(evidence.get("section_count", 0))
@@ -233,6 +238,22 @@ def compile_section_plan(format_spec: Mapping[str, Any], docx: str | Path | Mapp
             actual={"front": front_start_section, "body": body_start},
         ))
 
+    preserve_front = bool(
+        preserve_unresolved_front and not preserve_existing and front_selector is None
+        and rule.get("front_matter_format") not in {None, "none"}
+        and body_start is not None and body_start > 1
+    )
+    if preserve_front:
+        # A format alone cannot identify where a cover/declaration ends and
+        # abstract numbering begins. Keep this scope unresolved, not guessed.
+        front_start_section = None
+        findings.append(finding(
+            "front_selector_unresolved_preserved",
+            "Front-matter numbering has no bound start selector; source numbering before the body was preserved.",
+            location="page.page_number.front_matter_start_selector",
+            expected="explicit front-matter boundary", actual=None, severity="warning",
+        ))
+
     for zone, value in formats.items():
         if value not in SUPPORTED_FORMATS:
             findings.append(finding(
@@ -250,11 +271,12 @@ def compile_section_plan(format_spec: Mapping[str, Any], docx: str | Path | Mapp
         source = evidence["sections"][index - 1]
         if body_start is not None and index >= body_start:
             zone = "body"
-        elif front_start_section is not None and index >= front_start_section:
+        elif preserve_front or (front_start_section is not None and index >= front_start_section):
             zone = "front"
         else:
             zone = "cover"
-        if preserve_existing:
+        preserve_section = preserve_existing or (preserve_front and index < body_start)
+        if preserve_section:
             source_page = source.get("page_number", {})
             fmt = source_page.get("format") or "none"
             ooxml_format = source_page.get("ooxml_format")
@@ -280,16 +302,19 @@ def compile_section_plan(format_spec: Mapping[str, Any], docx: str | Path | Mapp
                     "active": active,
                     "required_page_fields": (
                         len(source_story.get("page_fields", []))
-                        if preserve_existing
+                        if preserve_section
                         else (1 if kind == "footer" and active and numbered else 0)
                     ),
                     "expected_page_switch": (
-                        None if preserve_existing
+                        None if preserve_section
                         else (FORMAT_TO_SWITCH.get(fmt) if kind == "footer" and active and numbered else None)
                     ),
                 }
+                if preserve_section and kind == "footer" and isinstance(source_story.get("integrity"), Mapping):
+                    stories[kind][variant]["source_footer_integrity"] = copy.deepcopy(source_story["integrity"])
         sections.append({
             "section_index": index,
+            "page_properties_policy": "preserve_existing" if preserve_section else "apply_plan",
             "zone": zone,
             "format": fmt,
             "ooxml_format": ooxml_format,
@@ -339,10 +364,11 @@ def audit_plan_against_docx(plan: Mapping[str, Any], docx: str | Path | Mapping[
     for expected, actual in zip(expected_sections, actual_sections):
         index = expected["section_index"]
         base = f"sections[{index}]"
+        preserve_section = preserve_existing or expected.get("page_properties_policy") == "preserve_existing"
         actual_page = actual.get("page_number", {})
         expected_fmt = expected.get("ooxml_format")
         actual_fmt = actual_page.get("ooxml_format")
-        if preserve_existing:
+        if preserve_section:
             expected_start = expected.get("start") if expected.get("restart") else None
             actual_start = actual_page.get("start") if actual_page.get("restart") else None
             if actual_fmt != expected_fmt or actual_start != expected_start:
@@ -366,7 +392,7 @@ def audit_plan_against_docx(plan: Mapping[str, Any], docx: str | Path | Mapping[
                     "section_page_restart_mismatch", "Section page-number restart/start does not match the plan.",
                     location=f"{base}.page_number.start", expected=expected_start, actual=actual_start,
                 ))
-        elif not preserve_existing:
+        elif not preserve_section:
             if actual_fmt is not None or actual_page.get("start") is not None:
                 findings.append(finding(
                     "section_page_format_present_on_unnumbered_zone",
@@ -413,7 +439,31 @@ def audit_plan_against_docx(plan: Mapping[str, Any], docx: str | Path | Mapping[
                     continue
                 fields = actual_story.get("page_fields", [])
                 required = int(expected_story.get("required_page_fields", 0))
-                if preserve_existing:
+                if preserve_section:
+                    expected_integrity = expected_story.get("source_footer_integrity")
+                    actual_integrity = actual_story.get("integrity")
+                    integrity_keys = ("present", "field_markup_sha256", "relationship_targets_sha256")
+                    if (not isinstance(expected_integrity, Mapping) or not isinstance(actual_integrity, Mapping)
+                            or any(key not in expected_integrity or key not in actual_integrity for key in integrity_keys)):
+                        findings.append(finding(
+                            "preserved_footer_integrity_unverified",
+                            "Footer preservation lacks bound field/target identity evidence; field counts alone cannot verify it.",
+                            location=f"{base}.footer.{variant}", expected="source and current footer integrity fingerprints",
+                            actual={"source": expected_integrity, "current": actual_integrity},
+                        ))
+                    else:
+                        for key, code in (
+                            ("present", "preserved_footer_presence_mismatch"),
+                            ("field_markup_sha256", "preserved_footer_field_markup_mismatch"),
+                            ("relationship_targets_sha256", "preserved_footer_relationship_targets_mismatch"),
+                        ):
+                            if expected_integrity[key] != actual_integrity[key]:
+                                findings.append(finding(
+                                    code, "Preserved footer field markup or directly referenced target identity changed.",
+                                    location=f"{base}.footer.{variant}.{key}",
+                                    expected=expected_integrity[key], actual=actual_integrity[key],
+                                    evidence={"part": actual_story.get("part")},
+                                ))
                     if len(fields) != required:
                         findings.append(finding(
                             "preserved_page_field_count_mismatch",

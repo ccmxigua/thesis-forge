@@ -100,8 +100,16 @@ def equal(left: Any, right: Any) -> bool:
     return left == right
 
 
-def satisfies(property_path: str, actual: Any, expected: Any) -> bool:
+def satisfies(property_path: str, actual: Any, expected: Any, *, role: str | None = None) -> bool:
     """Evaluate exact properties and monotone constraint properties."""
+    if role == "document_structure" and property_path == "required_roles":
+        # Required roles assert membership, not an exhaustive document inventory
+        # or order. Do not extend this interpretation to other list properties.
+        return bool(
+            isinstance(actual, list) and isinstance(expected, list) and expected
+            and all(isinstance(item, str) and item for item in [*actual, *expected])
+            and all(item in actual for item in expected)
+        )
     if property_path == "fields":
         if not isinstance(actual, list) or not isinstance(expected, list):
             return False
@@ -149,6 +157,38 @@ def satisfies(property_path: str, actual: Any, expected: Any) -> bool:
             return False
         return actual >= expected if leaf in lower_bounds else actual <= expected
     return equal(actual, expected)
+
+
+def required_role_actuals(
+    requirements: list[dict[str, Any]], role_presence: dict[str, bool | None], *,
+    structure_actuals: dict[str, Any] | None = None,
+) -> dict[str, dict[str, Any]]:
+    """Project explicit observations onto each local required-role obligation.
+
+    True requires a content witness; False requires independently established
+    absence, not a failed style lookup. None, missing or nonboolean observations
+    remain unverified. This function never infers presence from requirements.
+    Other observed structure properties may be supplied so a local unknown
+    does not hide an unrelated property in the same requirement.
+    """
+    result: dict[str, dict[str, Any]] = {}
+    for requirement in requirements:
+        if not isinstance(requirement, dict) or requirement.get("role") != "document_structure":
+            continue
+        properties = requirement.get("properties")
+        identifier = requirement.get("id")
+        if (not isinstance(properties, dict) or "required_roles" not in properties
+                or not isinstance(identifier, str) or not identifier):
+            continue
+        actual = copy.deepcopy(structure_actuals or {})
+        actual.pop("required_roles", None)
+        required = properties["required_roles"]
+        if (isinstance(required, list) and required
+                and all(isinstance(item, str) and item for item in required)
+                and all(type(role_presence.get(item)) is bool for item in required)):
+            actual["required_roles"] = [item for item in required if role_presence[item]]
+        result[identifier] = actual
+    return result
 
 
 def expected_receipt_ids(
@@ -348,7 +388,7 @@ def build_property_receipts(
                 actual_value = copy.deepcopy(property_observations)
                 if not property_observations:
                     status = "unverified"
-                elif any(not satisfies(property_path, item["value"], expected_value)
+                elif any(not satisfies(property_path, item["value"], expected_value, role=role)
                          for item in property_observations):
                     status = "failed"
                 elif scoped_observation_errors or len(property_observations) != len(expected_instance_ids):
@@ -358,11 +398,11 @@ def build_property_receipts(
                 if status == "unverified":
                     status_reason = ";".join(dict.fromkeys(scoped_observation_errors)) or \
                         "source-scoped serialized observations are incomplete"
-            elif (role not in actual_by_role
+            elif ((not has_requirement_actual and role not in actual_by_role)
                     or (property_path != "__requirement__"
                         and property_path not in actual)):
                 status = "unverified"
-            elif satisfies(property_path, actual_value, expected_value):
+            elif satisfies(property_path, actual_value, expected_value, role=role):
                 status = "verified"
             else:
                 status = "failed"
@@ -390,7 +430,9 @@ def build_property_receipts(
                 "clause_ids": list(requirement.get("clause_ids") or []),
                 "role": role,
                 "property_path": property_path,
-                "target_locator": target_locator,
+                "target_locator": ("instances:" + ",".join(str(v) for v in observation["target_locators"])
+                    if not source_scoped and isinstance(observation, dict)
+                    and "target_locators" in observation else target_locator),
                 "expected": expected_value,
                 "actual": actual_value,
                 "status": status,

@@ -50,6 +50,7 @@ STYLE_PROPERTIES = {
     "paragraph.alignment", "paragraph.first_line_indent_pt",
     "paragraph.left_indent_pt", "paragraph.right_indent_pt",
     "paragraph.space_before_pt", "paragraph.space_after_pt",
+    "paragraph.space_before_lines", "paragraph.space_after_lines",
     "paragraph.line_spacing.type", "paragraph.line_spacing.value",
     "paragraph.line_spacing.unit", "paragraph.outline_level", "paragraph.page_break_before",
     "paragraph.keep_with_next",
@@ -124,6 +125,11 @@ def style_snapshot(style: Any) -> dict[str, Any]:
             "right_indent_pt": _points(inherited(style, lambda item: item.paragraph_format.right_indent)),
             "space_before_pt": _points(inherited(style, lambda item: item.paragraph_format.space_before)) or 0,
             "space_after_pt": _points(inherited(style, lambda item: item.paragraph_format.space_after)) or 0,
+            **{"space_" + side + "_lines": inherited(style, lambda item, side=side:
+                float(item.element.pPr.spacing.get(qn("w:" + side + "Lines"))) / 100
+                if item.element.pPr is not None and item.element.pPr.spacing is not None
+                and item.element.pPr.spacing.get(qn("w:" + side + "Lines")) is not None else None)
+               for side in ("before", "after")},
             "line_spacing": line_spacing,
             "outline_level": outline_level,
             "page_break_before": inherited(style, lambda item: item.paragraph_format.page_break_before),
@@ -147,13 +153,12 @@ def normalized_requirement(role_spec: dict[str, Any]) -> dict[str, Any]:
     font = dict(role_spec.get("font", {}))
     paragraph = dict(role_spec.get("paragraph", {}))
     size = float(font.get("size_pt") or 12)
-    line_height = float(paragraph.pop("spacing_line_height_pt", size))
+    paragraph.pop("spacing_line_height_pt", None)
     if "first_line_indent_chars" in paragraph:
         paragraph["first_line_indent_pt"] = float(paragraph.pop("first_line_indent_chars")) * size
-    if "space_before_lines" in paragraph:
-        paragraph["space_before_pt"] = float(paragraph.pop("space_before_lines")) * line_height
-    if "space_after_lines" in paragraph:
-        paragraph["space_after_pt"] = float(paragraph.pop("space_after_lines")) * line_height
+    for side in ("before", "after"):
+        if "space_" + side + "_lines" in paragraph:
+            paragraph.pop("space_" + side + "_pt", None)
     return {"font": font, "paragraph": paragraph}
 
 
@@ -234,6 +239,15 @@ def compare_role(role: str, requirement: dict[str, Any], official: dict[str, Any
     official_values = flatten(official or {})
     generated_values = flatten(generated or {})
     properties = sorted((set(required) | set(official_values)) & STYLE_PROPERTIES)
+    # Line-unit and point-unit spacing are alternative representations, not
+    # independent requirements. normalized_requirement deliberately retains
+    # explicit written line units; do not resurrect a template point value as
+    # a second authority. Missing generated line units remain not_observable;
+    # no conversion or inferred visual pass is performed here.
+    for side in ("before", "after"):
+        if required.get(f"paragraph.space_{side}_lines") is not None:
+            properties = [path for path in properties
+                          if path != f"paragraph.space_{side}_pt"]
     rows = []
     for path in properties:
         rule_value = required.get(path)

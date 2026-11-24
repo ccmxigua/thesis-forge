@@ -24,6 +24,7 @@ from header_scope import compile_header_scope_rules
 from header_scope_audit import audit_scoped_headers
 from obligation_submission_gate import audit_obligation_submission_gate
 from render_attestation import load_key, verify as verify_attestation
+from continued_table_acceptance import continuation_geometry_diagnostic
 from artifact_io import atomic_write_text, paths_alias
 from semantic_contract import sha256_json, strict_json_dumps, strict_json_read
 
@@ -701,6 +702,16 @@ def audit_docx(docx_path: Path, spec: dict[str, Any] | None = None,
     issues: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
     submission_blockers: list[dict[str, Any]] = []
+    continued_table = continuation_geometry_diagnostic(spec.get("tables", {}))
+    if continued_table is not None:
+        # Neither the legacy report flag nor an otherwise valid Word render,
+        # ordinary visual pass, or scoped generic WPS receipt proves this
+        # particular table on the target continuation page.
+        submission_blockers.append(_issue(
+            "continued_table_native_scope_pending", "render_required",
+            "Formal submission is on HOLD: this continuation contract has no supported, independently verified native table-scope receipt.",
+            continued_table, stage="rendered_output",
+        ))
     if rendered_format_audit is not None:
         actual_docx_sha = hashlib.sha256(docx_path.read_bytes()).hexdigest() if docx_path.is_file() else None
         audit_errors = []

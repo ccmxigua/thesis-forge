@@ -26,6 +26,8 @@ optional renderers or Word do not prevent DOCX packet preparation. Actual
 internal reviewer and WPS access must be observed in this host, not inferred
 from a successful dependency probe. Never call a directory copy “installed.”
 
+For reference-only blank leaves, use the [bounded diagnostic and optional causal correction](docs/guarded-reference-leaf.md). A diagnostic never authorizes editing; keep native Word/WPS acceptance and prior run records separate.
+
 ## Ordinary conversation: start here
 
 Use this skill directly in the invoking conversation. The current Agent does
@@ -35,11 +37,16 @@ A host needs file read/write access and a Python execution tool with the project
 dependencies. A chat without those tools cannot execute the local pipeline;
 report the missing capability rather than claim universal execution.
 
-1. Initialize **one** authorized validation campaign with
+1. For a restart or recovery, require `scripts/startup_readiness.py` to
+   return `ready` against the selected bundle and **the same** existing campaign
+   before preparing or generating. Use the pinned manifest, current ledger SHA
+   and campaign UUID from the authorized retained record; see the command in
+   [installation and recovery](docs/install-dot.md#recover-an-existing-startup-checkpoint).
+   A missing or incompatible checkpoint is not a new campaign. Only for an
+   explicitly authorized first run, initialize one new campaign with
    `python scripts/validation_budget.py init --campaign /absolute/campaign`.
-   Keep that campaign across candidates and resumes. Do not create a new
-   campaign to evade its caps. It allows at most two candidates, two full
-   renders per candidate, and one WPS save-close-reopen per candidate.
+   Keep its original limits, receipts and charged attempts across candidates
+   and resumes; do not reinitialize or replay an uncertain operation.
 2. Run `python scripts/current_session.py run /absolute/requirements.docx
    /absolute/thesis.docx --work-dir /absolute/new-run --campaign
    /absolute/campaign --author-task-id <actual-current-task-id>`. This invokes
@@ -73,10 +80,47 @@ report the missing capability rather than claim universal execution.
    in `render/render-binding.json`, then issue role `visual`. All page images
    must be observed; absent image-tool evidence remains pending.
 
+## Separate paper and issue delivery (required)
+
+`candidate/review.docx` is an internal diagnostic candidate, not the paper
+handoff. Preserve it and its entire run directory, especially
+`application/review-scorecard.json`, source bindings, review receipts and render
+bindings. A DOCX/PDF alone cannot reconstruct that audit data.
+
+Use the external-ledger sequence in `references/engine-contract.md`: `strip`
+with the original bound scorecard, then authorized TOC refresh/render,
+`reconcile_current_output --external-scorecard-out`, then `export`. Deliver the
+paper DOCX and editable issue-ledger DOCX as **separate files**, with the short
+summary and machine-readable ledger. Keep only compact MR ID pointers in the
+paper. Never strip diagnostics by text heuristics or reconstruct a ledger from
+visible paragraphs. Missing original bindings block separation, not permission
+to fabricate them. Preserve originals; respect the existing render budget.
+
+Before handing off the derived paper, run:
+`python scripts/separated_delivery.py /absolute/paper.docx --ledger-json
+/absolute/ledger.json --ledger-docx /absolute/issues.docx`.
+`current_session complete_scoped` concerns the original candidate review only;
+its separate `delivery` field remains pending. The standalone gate receipt
+checks the derived handoff without rebinding original reviewer evidence.
+A zero exit checks artifact separation and ledger bindings only, not visual,
+formatting, native Word/WPS, or submission acceptance. A diagnostic candidate
+may be shared for explicit inspection only when clearly labelled as such.
+
+Figure groups with unresolved subcaption roles remain pending source review;
+do not force keep-next chains across prose, page/section breaks or ambiguous
+captions. Cover overflow under substituted fonts requires same-font/native
+comparison; never delete template borders or shrink fonts merely to fit.
+
 For native acceptance, read `references/wps-native-acceptance.md` before any
 upload or edit. Import real observations with `native_acceptance.py record`.
 `pass_scoped` never changes Word/provider/submission flags. A missing export
 is null, not the input hash. Native URL/version changes invalidate reuse.
+
+When source requirements cover continued tables, read
+`docs/continued-table-acceptance.md`. Preserve source-bound manual fragments
+and distinguish observed native pagination from automatic XML header flags.
+Draft generation remains available, but the formal release gate stays pending
+for this scope; a generic WPS or Word review does not verify repeated headers.
 
 These commands are orchestration steps for the Agent, not options the user
 must configure. Use absolute script paths when running outside the skill

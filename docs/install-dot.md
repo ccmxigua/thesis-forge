@@ -25,6 +25,35 @@ install OS applications or supply fonts. WPS, image viewing and independent
 internal tasks require actual tools exposed by the current host. A tool path
 is not proof that a document has passed visual acceptance.
 
+## Recover an existing startup checkpoint
+
+Before reopening or re-running an existing project, run the read-only guard
+from the complete selected skill using its pinned Python environment:
+
+```sh
+/absolute/thesis-runtime-venv/bin/python /absolute/skill/scripts/startup_readiness.py \
+  --manifest-sha256 APPROVED_BUNDLE_MANIFEST_SHA256 \
+  --campaign /absolute/existing-campaign --campaign-id EXISTING_CAMPAIGN_UUID \
+  --ledger-sha256 CURRENT_AUTHORITATIVE_LEDGER_SHA256 --phase prepare
+```
+
+Use `--installation-platform chatgpt` only for the observed installation
+normalization documented below. For `--phase resume`, also supply the retained
+`--work-dir` and its `--run-id`; for `--phase generate`, include both and the
+stable `--operation-id`. Obtain the expected identifiers and digests from the
+approved deployment/checkpoint records, not from the files being checked.
+Do not substitute a repaired draft, archived ledger, source checkout, or a
+new campaign. Exit 2 and a named blocker identify what must be restored.
+
+This check does not create or reserve anything and never authorizes execution.
+Use the authoritative session `status` / `next` followed by the usual bound
+candidate reservation only when permitted. Ledger incompatibility must be
+resolved by recovering a reviewed compatible runtime, not by editing ledger
+JSON, resetting limits or replacing already charged operations. This released
+budget authority understands v1 only; a separately reviewed v2 or v3 campaign
+requires its own compatible authority even if the bundle label matches.
+The guard does not weaken independent review, WPS, or Word release gates.
+
 ## Build and verify
 
 ```sh

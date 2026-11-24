@@ -3,7 +3,8 @@
 
 The split removes only the scorecard display block whose complete text is
 bound to the supplied scorecard JSON. Manual-review markers remain in the
-thesis. Full current/historical entries are retained in an editable DOCX and a
+thesis by default; explicit external-only mode moves the exact generated
+manual layer to the complete separately bound ledger. Full current/historical entries are retained in an editable DOCX and a
 machine-readable JSON ledger. Nothing in this module promotes readiness.
 """
 from __future__ import annotations
@@ -31,6 +32,7 @@ from docx_semantics import all_body_paragraphs
 from draft_scorecard import (PREFIX, STATUSES, _scorecard_semantics_valid, scorecard_lines,
                              audit_external_scorecard)
 from manual_review_display import _text as _full_manual_marker_text
+from external_manual_layer import remove_manual_layer, TITLE as MANUAL_FRONT_TITLE
 from semantic_contract import sha256_json, strict_json_read
 
 NS = {"w": "http://schemas.openxmlformats.org/wordprocessingml/2006/main"}
@@ -154,7 +156,7 @@ def _replace_marker_paragraph_text(node: etree._Element, value: str) -> None:
 
 def strip_scorecard_display(source_docx: Path, baseline_docx: Path,
                             scorecard_path: Path, output_docx: Path,
-                            report_path: Path) -> dict[str, Any]:
+                            report_path: Path, *, externalize_manual: bool = False) -> dict[str, Any]:
     """Remove the exact scorecard block and compact exact ledger-bound MR markers."""
     paths = [source_docx.resolve(), baseline_docx.resolve(), scorecard_path.resolve(),
              output_docx.resolve(), report_path.resolve()]
@@ -186,6 +188,10 @@ def strip_scorecard_display(source_docx: Path, baseline_docx: Path,
         raise ValueError("baseline scorecard ID order differs from scorecard JSON")
 
     expected_mr_ids = _human_marker_ids(card)
+    if externalize_manual:
+        source_texts = [p.text for p in all_body_paragraphs(Document(source_docx))]
+        if any(MR_START.match(t) or t == MANUAL_FRONT_TITLE for t in source_texts):
+            raise ValueError("source already contains manual-review-like content; refuse externalization")
     marker_projections = _manual_marker_projections(card)
     actual_sc_ids, actual_mr_ids = _ids_in_docx(baseline_docx)
     if actual_sc_ids != expected_sc_ids:
@@ -233,6 +239,10 @@ def strip_scorecard_display(source_docx: Path, baseline_docx: Path,
             raise ValueError("baseline DOCX has no body")
         for node in body_paragraphs[:len(expected_lines)]:
             body.remove(node)
+        externalized = {"removed_marker_ids": [], "removed_paragraph_texts": []}
+        if externalize_manual:
+            externalized = remove_manual_layer(document_root, {
+                key: value["paper_text"] for key, value in marker_projections.items()})
         rewritten_document_xml = etree.tostring(
             document_root, encoding="UTF-8", xml_declaration=True, standalone=True,
         )
@@ -246,7 +256,7 @@ def strip_scorecard_display(source_docx: Path, baseline_docx: Path,
     output_sc_ids, output_mr_ids = _ids_in_docx(output_docx)
     if output_sc_ids:
         raise ValueError("scorecard item paragraphs remain in the thesis DOCX")
-    if output_mr_ids != actual_mr_ids:
+    if output_mr_ids != ([] if externalize_manual else actual_mr_ids):
         raise ValueError("manual-review markers changed while compacting the scorecard block")
     output_paragraphs = list(Document(output_docx).paragraphs)
     expected_remaining = [paragraph.text for paragraph in paragraphs[len(expected_lines):]]
@@ -254,6 +264,11 @@ def strip_scorecard_display(source_docx: Path, baseline_docx: Path,
         marker_projections[match.group(1)]["paper_text"] if (match := MR_START.match(text)) else text
         for text in expected_remaining
     ]
+    if externalize_manual:
+        # Exact nodes removed by the validated generated-layer parser, not a
+        # global text replace. Account for direct body paragraph text in order.
+        for removed_text in externalized["removed_paragraph_texts"]:
+            expected_remaining.remove(removed_text)
     if [paragraph.text for paragraph in output_paragraphs] != expected_remaining:
         raise ValueError("document text differs from exact scorecard removal and marker compaction")
     after_parts = _package_part_hashes(output_docx)
@@ -277,6 +292,8 @@ def strip_scorecard_display(source_docx: Path, baseline_docx: Path,
                       "parent_run_id": binding["run_id"], "case_id": binding["case_id"]},
         "output_docx": {"path": str(output_docx.resolve()), "bytes": output_docx.stat().st_size,
                         "sha256": digest(output_docx)},
+        "manual_layer_policy": "external_only" if externalize_manual else "compact_in_paper",
+        "externalized_manual_marker_ids": externalized["removed_marker_ids"],
         "removed_scorecard_display_paragraphs": len(expected_lines),
         "removed_scorecard_item_ids": expected_sc_ids,
         "retained_manual_review_marker_count": len(output_mr_ids),
@@ -290,6 +307,7 @@ def strip_scorecard_display(source_docx: Path, baseline_docx: Path,
         }),
         "body_paragraph_text_sha256_before_and_after_removal": sha256_json(expected_remaining),
         "baseline_all_paragraph_text_sha256": before_signature,
+        "output_ooxml_parts_sha256": after_parts,
         "changed_ooxml_parts": changed_parts,
         "submission_ready": False,
     }
@@ -1263,6 +1281,40 @@ def _issue_summary(card: dict[str, Any], reconciliation: dict[str, Any],
     return "\n".join(lines)
 
 
+def expected_paper_marker_ids(card: dict[str, Any], paper: Path,
+                              split: dict[str, Any] | None = None) -> list[str]:
+    """Accept a marker-free paper only with a complete exact-layer receipt."""
+    ids = _human_marker_ids(card)
+    if not isinstance(split, dict) or split.get("manual_layer_policy") != "external_only":
+        return ids
+    unsigned = {k: v for k, v in split.items() if k != "audit_sha256"}
+    binding = card.get("binding", {})
+    projection = _manual_marker_projections(card)
+    projection_sha = sha256_json({
+        key: {"full_text_sha256": hashlib.sha256(value["full_text"].encode("utf-8")).hexdigest(),
+              "paper_text": value["paper_text"]} for key, value in projection.items()})
+    removed = split.get("externalized_manual_marker_ids")
+    current_body_signature = sha256_json([p.text for p in Document(paper).paragraphs])
+    current_parts = _package_part_hashes(paper)
+    if (split.get("audit_sha256") != sha256_json(unsigned)
+            or split.get("protocol") != "review_package_scorecard_split_v1"
+            or split.get("status") != "complete"
+            or split.get("submission_ready") is not False
+            or split.get("output_docx", {}).get("sha256") != digest(paper)
+            or split.get("body_paragraph_text_sha256_before_and_after_removal") != current_body_signature
+            or split.get("output_ooxml_parts_sha256") != current_parts
+            or split.get("changed_ooxml_parts") != ["word/document.xml"]
+            or split.get("source_docx", {}).get("sha256") != binding.get("input_source_sha256")
+            or split.get("scorecard", {}).get("parent_run_id") != binding.get("run_id")
+            or split.get("scorecard", {}).get("case_id") != binding.get("case_id")
+            or not isinstance(removed, list) or len(removed) != len(set(removed))
+            or set(removed) != set(ids)
+            or split.get("retained_manual_review_marker_ids") != []
+            or split.get("manual_review_marker_projection_sha256") != projection_sha):
+        raise ValueError("external-only manual layer lacks an exact complete source/paper-bound receipt")
+    return []
+
+
 def export_review_package(source_docx: Path, paper_docx: Path,
                           scorecard_path: Path, reconciliation_path: Path,
                           ledger_docx_path: Path, ledger_json_path: Path,
@@ -1323,7 +1375,9 @@ def export_review_package(source_docx: Path, paper_docx: Path,
     actual_sc, actual_mr = _ids_in_docx(paper_docx)
     if actual_sc:
         raise ValueError("paper DOCX still contains verbose SC scorecard rows")
-    if set(actual_mr) != set(_human_marker_ids(card)) or len(actual_mr) != len(set(actual_mr)):
+    split_report = strict_json_read(split_report_path) if split_report_path else None
+    expected_ids = expected_paper_marker_ids(card, paper_docx, split_report)
+    if set(actual_mr) != set(expected_ids) or len(actual_mr) != len(set(actual_mr)):
         raise ValueError("paper DOCX manual-review markers do not match the external scorecard")
     projections = _manual_marker_projections(card)
     paper_marker_texts = {
@@ -1332,7 +1386,7 @@ def export_review_package(source_docx: Path, paper_docx: Path,
         if (match := MR_START.match(paragraph.text))
     }
     if any(paper_marker_texts.get(marker_id) != marker["paper_text"]
-           for marker_id, marker in projections.items()):
+           for marker_id, marker in projections.items() if marker_id in expected_ids):
         raise ValueError("paper DOCX manual-review marker is not the exact compact ledger projection")
 
     source_bundle = (_load_source_review_bundle(source_requirements_dir, requirements_docx_path)
@@ -1418,6 +1472,7 @@ def main(argv: list[str] | None = None) -> int:
     strip.add_argument("scorecard", type=Path)
     strip.add_argument("output_docx", type=Path)
     strip.add_argument("--report", type=Path, required=True)
+    strip.add_argument("--externalize-manual", action="store_true", help="move exact generated manual-review layer to the separate ledger")
     export = sub.add_parser("export", help="write editable and machine-readable ledgers")
     export.add_argument("source_docx", type=Path)
     export.add_argument("paper_docx", type=Path)
@@ -1438,7 +1493,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         if args.command == "strip":
             result = strip_scorecard_display(args.source_docx, args.baseline_docx,
-                                             args.scorecard, args.output_docx, args.report)
+                                             args.scorecard, args.output_docx, args.report, externalize_manual=args.externalize_manual)
         else:
             result = export_review_package(
                 args.source_docx, args.paper_docx, args.scorecard, args.reconciliation,

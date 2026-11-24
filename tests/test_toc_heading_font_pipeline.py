@@ -84,6 +84,10 @@ class TocHeadingFontPipelineTests(unittest.TestCase):
   with tempfile.TemporaryDirectory() as tmp:
    root=Path(tmp);d,a=self.execute(root)
    final_sha=hashlib.sha256((root/'synthetic-output.docx').read_bytes()).hexdigest()
+   from source_role_binding import build_source_role_bindings
+   initial=build_source_role_bindings(Document(root/'synthetic-source.docx'), explicit_mappings={'body_text':'Normal'})
+   early=json.loads((a/'toc-source-role-bindings.json').read_text())
+   self.assertEqual(early,{'schema_version':'1.0','records':initial.records,'findings':initial.findings})
    for name,audit in [('toc-heading-fonts.json',audit_toc_heading_fonts),('toc-style-application.json',audit_toc_style_rules)]:
     receipt=json.loads((a/name).read_text())
     self.assertEqual(receipt['serialized_docx_sha256'],final_sha)
@@ -93,3 +97,37 @@ class TocHeadingFontPipelineTests(unittest.TestCase):
   with tempfile.TemporaryDirectory() as tmp:
    with self.assertRaisesRegex(AssertionError,'final review draft TOC formatting differs; refusing commit'):
     self.execute(Path(tmp),tamper_scorecard=True)
+
+
+ def test_early_toc_snapshot_excludes_later_scope_preparation(self):
+  import subprocess
+  import sys
+  from source_role_binding import build_source_role_bindings
+  with tempfile.TemporaryDirectory() as tmp:
+   root=Path(tmp); doc=Document()
+   doc.add_paragraph('第一章 合成','Heading 1')
+   doc.add_paragraph('Synthetic original body.')
+   args,source,_,_,audits=fixture.review_args(root,doc,{'body_text':{'font':{'size_pt':12}}},{'body_text':'Normal'})
+   expected=build_source_role_bindings(Document(source),explicit_mappings={'body_text':'Normal'})
+   # Inject one synthetic paragraph at the existing header preparation boundary
+   # while still exercising the real formatter, serialization, and receipts.
+   harness="""
+import sys
+sys.path.insert(0,sys.argv.pop(1))
+import apply_format_spec as app
+original=app.prepare_header_scope_boundaries
+def prepare(doc,spec):
+    doc.add_paragraph('Synthetic extra preparation heading','Heading 2')
+    return original(doc,spec)
+app.prepare_header_scope_boundaries=prepare
+raise SystemExit(app.main(sys.argv[1:]))
+"""
+   run=subprocess.run([sys.executable,'-B','-c',harness,str(fixture.SCRIPT_ROOT/'scripts'),*args[3:]],
+                      capture_output=True,text=True,timeout=90)
+   self.assertEqual(run.returncode,0,run.stderr+run.stdout[-6000:])
+   early=json.loads((audits/'toc-source-role-bindings.json').read_text())
+   later=json.loads((audits/'source-role-bindings.json').read_text())
+   self.assertEqual(early,{'schema_version':'1.0','records':expected.records,'findings':expected.findings})
+   self.assertEqual(len(later['records']),len(early['records'])+1)
+   self.assertFalse(any('heading_2' in row['roles'] for row in early['records']))
+   self.assertTrue(any('heading_2' in row['roles'] for row in later['records']))

@@ -14,6 +14,7 @@ sys.path.insert(0, str(ROOT / "scripts"))
 
 from draft_scorecard import (append_scorecard, audit_external_scorecard, audit_scorecard,
                              build_scorecard)  # noqa: E402
+from compliance import historical_clause_snapshot
 from reconcile_current_output import reconcile  # noqa: E402
 from semantic_contract import sha256_json  # noqa: E402
 
@@ -30,6 +31,7 @@ def rendered_report(docx: Path, *, with_font_finding: bool = True) -> dict:
     docx_sha = digest(docx)
     report = {
         "protocol": "rendered_format_audit_v1", "docx_sha256": docx_sha,
+        "source_docx_sha256": "b" * 64,
         "final_docx": {"sha256": docx_sha}, "pdf_sha256": "a" * 64,
         "findings": ([{"code": "rendered_pdf_font_mismatch", "expected": {
             "role": "body", "style_name": "Body", "script": "cjk",
@@ -64,7 +66,7 @@ class CurrentOutputReconciliationCliTests(unittest.TestCase):
                     "serialized_docx_sha256": initial_sha}],
             }
             card = build_scorecard(
-                {"run_id": "historical-run", "case_id": "test",
+                {"run_id": "historical-run", "case_id": "test", "input_source_sha256": "b" * 64,
                  "source_sha256": "b" * 64, "format_spec_sha256": "c" * 64},
                 receipt_audit, [], [],
             )
@@ -72,13 +74,13 @@ class CurrentOutputReconciliationCliTests(unittest.TestCase):
             append_scorecard(document, card)
             document.save(docx)
             write_json(scorecard_path, card)
-            write_json(historical_path, {"mode": "full", "records": [{
-                "clause_id": "C1", "scope": "docx", "status": "generated_and_verified",
-                "requirement_ids": ["R1"], "reason": "historical pass",
-            }]})
             write_json(format_spec_path, {"requirements": [{
                 "id": "R1", "role": "body", "properties": {"font": {"cjk": "SimSun"}},
             }]})
+            write_json(historical_path, historical_clause_snapshot([{
+                "clause_id": "C1", "scope": "docx", "status": "generated_and_verified",
+                "requirement_ids": ["R1"], "reason": "historical pass",
+            }], "full", source_sha256="b" * 64, format_spec_sha256=digest(format_spec_path)))
             write_json(style_map_path, {"body": {"style_name": "Body"}})
             write_json(receipts_path, receipt_audit)
             write_json(rendered_path, rendered_report(docx))
@@ -138,19 +140,19 @@ class CurrentOutputReconciliationCliTests(unittest.TestCase):
                     "serialized_docx_sha256": "0" * 64}],
             }
             card = build_scorecard(
-                {"run_id": "parent-run", "case_id": "test",
+                {"run_id": "parent-run", "case_id": "test", "input_source_sha256": "b" * 64,
                  "source_sha256": "b" * 64, "format_spec_sha256": "c" * 64},
                 receipt_audit, [], [],
             )
             write_json(source_scorecard, card)
             source_scorecard_sha = digest(source_scorecard)
-            write_json(historical_path, {"mode": "full", "records": [{
-                "clause_id": "C1", "scope": "docx", "status": "generated_and_verified",
-                "requirement_ids": ["R1"], "reason": "historical pass",
-            }]})
             write_json(format_spec_path, {"requirements": [{
                 "id": "R1", "role": "body", "properties": {"font": {"cjk": "SimSun"}},
             }]})
+            write_json(historical_path, historical_clause_snapshot([{
+                "clause_id": "C1", "scope": "docx", "status": "generated_and_verified",
+                "requirement_ids": ["R1"], "reason": "historical pass",
+            }], "full", source_sha256="b" * 64, format_spec_sha256=digest(format_spec_path)))
             write_json(style_map_path, {"body": {"style_name": "Body"}})
             write_json(receipts_path, receipt_audit)
             write_json(rendered_path, rendered_report(docx))

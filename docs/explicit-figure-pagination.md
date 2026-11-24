@@ -1,0 +1,11 @@
+# Explicit figure-group pagination (diagnostic operation)
+
+`python scripts/bound_figure_pagination.py INPUT.docx PLAN.json NEW.docx --report NEW.json`
+
+This does not discover figure groups or infer them from adjacency. A host must read the source and supply `protocol=explicit_figure_group_pagination_v1`, the input package SHA-256, canonical document XML SHA-256, and `grouping_evidence` with kind `host_reviewed_source_relation`, exact total-caption `source_quote`, and `caption_body_child`. `members` explicitly list contiguous body-child locators, canonical XML hashes and roles: two or more `image, subcaption` pairs followed by `caption`. Each image includes its embedded relationship-to-media SHA-256 mapping. Subcaptions must bear explicit parenthesized labels. An uncertain source relation remains pending; do not manufacture a plan to remove a visual defect.
+
+The operation rejects missing/stale bindings, section boundaries, explicit page/column breaks, direct or inherited page-break-before, cyclic/unresolved style inheritance, intervening prose, mixed caption images, fields and unsupported objects. It changes only keep-next/keep-lines for the reviewed paragraph chain. It does not move text, resize images, change margins, repair cover geometry, or claim the group fits on a page.
+
+New output and report paths and existing parent directories are required. Both files are staged before no-overwrite publication; ordinary publication errors remove only this operation's newly published inode. A process/system crash can leave one file: consumers must require the paired report and verify its input/output hashes. Neither the report nor its pagination flags constitutes rendered/native visual acceptance. Status remains `configured_not_render_verified`, `visual_verified=false`, `submission_ready=false`.
+
+Preserve all candidate/render/WPS campaign limits. A helper copy is not permission to bypass generation or native acceptance budgets. After an authorized new cycle, render and inspect the actual result, then run the full current-output reconciliation/delivery gates. If the document is only mispaginated under substitute fonts, preserve the source and keep native font/layout verification pending rather than silently shrinking content.

@@ -30,7 +30,13 @@ import equation_reflow
 import equation_compat
 
 from artifact_io import atomic_write_text, commit_files, sibling_temp
+from continued_table_acceptance import (
+    continuation_geometry_diagnostic, header_flags as continuation_header_flags,
+)
 from document_text_font import apply_document_font, audit_document_font, document_font_safe_roles
+from drawing_line_box import effective_line_spacing, inline_drawing_geometry, line_box_assessment
+from source_role_binding import build_source_role_bindings
+from visible_instance_format import collect_visible_instance_format
 from docx_semantics import (
     all_body_paragraphs,
     all_story_paragraphs,
@@ -88,11 +94,12 @@ from current_session_semantic_review import (
 )
 from draft_scorecard import build_scorecard, append_scorecard, audit_scorecard
 from semantic_issue_confirmation import validate_bound_ledger_for_spec
-from compliance import annotate_satisfied_inputs, finalize_records, report as compliance_report
+from compliance import annotate_satisfied_inputs, finalize_records, historical_clause_snapshot, report as compliance_report
 from role_registry import find_existing_style, generated_style, role_config, role_names, structural_detector, style_aliases
 from resource_registry import resource_items
 from submission_audit import audit_docx as audit_submission_docx
 from section_executor import (
+    _page_field_runs as _section_page_field_runs,
     add_page_field as _section_add_page_field,
     all_story_paragraphs,
     execute_section_plan,
@@ -105,6 +112,7 @@ from property_receipts import (
     audit_property_receipts,
     build_property_receipts,
     expected_receipt_ids,
+    required_role_actuals,
     flatten,
 )
 from offline_review_receipt import validate_offline_merge_receipt
@@ -1323,6 +1331,99 @@ def _new_role_style(doc: Document, role: str, source_name: str | None = None) ->
     return name
 
 
+def _style_inherits(style, source_name: str) -> bool:
+    seen = set()
+    while style is not None and style.style_id not in seen:
+        seen.add(style.style_id)
+        if style.name == source_name:
+            return True
+        style = style.base_style
+    return False
+
+
+def _mark_role_style(style, role: str) -> None:
+    # Standard OOXML alias records the semantic intent of generated scoped
+    # styles for later applications without relying on a name prefix.
+    alias = "Body Text" if role == "body_text" else next(iter(style_aliases(role)), None)
+    if alias:
+        node = style.element.find(qn("w:aliases"))
+        if node is None:
+            node = OxmlElement("w:aliases")
+            style.element.insert(1 if style.element.find(qn("w:name")) is not None else 0, node)
+        values = [v.strip() for v in (node.get(qn("w:val")) or "").split(",") if v.strip()]
+        if alias not in values:
+            values.append(alias)
+        node.set(qn("w:val"), ",".join(values))
+
+
+def _style_consumer_inventory(doc: Document) -> list[Paragraph]:
+    """Conservatively inspect every existing Word XML part for shared styles.
+
+    This broad safety inventory is NOT a role selector. SDTs, nested text boxes,
+    notes and unknown stories remain protected unless the narrow source binder
+    separately proves their role. Accessing existing package parts creates no
+    story parts and does not rewrite generic XML parts.
+    """
+    from docx.oxml import parse_xml
+    result, seen = [], set()
+    for part in doc.part.package.parts:
+        if not str(part.partname).startswith('/word/'):
+            continue
+        root = getattr(part, '_element', None)
+        if root is None:
+            if not str(part.partname).endswith('.xml'):
+                continue
+            try:
+                root = parse_xml(part.blob)
+            except Exception as exc:
+                raise ValueError(f"shared-style consumer inventory unreadable: {part.partname}") from exc
+        for node in root.iter(qn('w:p')):
+            if node not in seen:
+                seen.add(node)
+                # Only .style is consumed here; resolve it against document
+                # styles even for generic footnote/endnote OPC parts.
+                result.append(Paragraph(node, doc._body))
+    return result
+
+
+def _style_consumer_bound(source_bindings, role: str, paragraph: Paragraph) -> bool:
+    # Story-specific roles are applied by their existing dedicated executors,
+    # not the narrow main-document binder. Never treat body text styled Header
+    # or Footer as belonging to those stories.
+    if role in {'header', 'footer'}:
+        wanted = qn('w:hdr' if role == 'header' else 'w:ftr')
+        return any(node.tag == wanted for node in paragraph._p.iterancestors())
+    return source_bindings.bound(role, paragraph)
+
+
+def _isolated_role_style(doc: Document, role: str, source_name: str,
+                         claimed: dict[str, str], source_bindings) -> str:
+    """Keep protected consumers of a shared style byte-for-byte unchanged."""
+    base = ("Thesis Body Text" if role == "body_text" else
+            generated_style(role) or f"Thesis {role.replace('_', ' ').title()}")
+    if (base == source_name or any(st.style_id == base.replace(" ", "")
+            and st.name != base for st in doc.styles)):
+        base += " Scoped"
+    name, suffix = base, 2
+    while (name in style_names(doc) or any(st.style_id == name.replace(" ", "") for st in doc.styles)):
+        if name not in style_names(doc):
+            name = f"{base} {suffix}"
+            suffix += 1
+            continue
+        # An existing unconsumed role style can be reused without changing
+        # protected paragraphs, including a later idempotent application.
+        consumers = [p for p in _style_consumer_inventory(doc) if _style_inherits(p.style, name)]
+        if name not in claimed and all(_style_consumer_bound(source_bindings, role, p) for p in consumers):
+            _mark_role_style(doc.styles[name], role)
+            return name
+        name = f"{base} {suffix}"
+        suffix += 1
+    style = doc.styles.add_style(name, WD_STYLE_TYPE.PARAGRAPH)
+    style.base_style = doc.styles[source_name]
+    _mark_role_style(style, role)
+    return name
+
+
 def inherited_style_value(style, getter):
     """Resolve a style property through its Word base-style chain."""
     seen = set()
@@ -1458,6 +1559,11 @@ def style_snapshot(style, doc: Document | None = None) -> dict[str, Any]:
                       "right_indent_pt": points(inherited_style_value(style, lambda item: item.paragraph_format.right_indent)),
                       "space_before_pt": points(inherited_style_value(style, lambda item: item.paragraph_format.space_before)) or 0,
                       "space_after_pt": points(inherited_style_value(style, lambda item: item.paragraph_format.space_after)) or 0,
+                      **{"space_" + side + "_lines": inherited_style_value(style, lambda item, side=side:
+                          float(item.element.pPr.spacing.get(qn("w:" + side + "Lines"))) / 100
+                          if item.element.pPr is not None and item.element.pPr.spacing is not None
+                          and item.element.pPr.spacing.get(qn("w:" + side + "Lines")) is not None else None)
+                         for side in ("before", "after")},
                       "line_spacing": line_spacing,
                       "outline_level": outline_level,
                       "page_break_before": inherited_style_value(style, lambda item: item.paragraph_format.page_break_before),
@@ -1509,6 +1615,68 @@ def official_role_defaults(docx: Path, mappings: dict[str, str]) -> dict[str, di
     return {role: style_snapshot(doc.styles[name], doc) for role, name in mappings.items() if name in names}
 
 
+def _property_only_role_spec(role_spec: dict[str, Any]) -> bool:
+    """Formatting leaves do not authorize replacing a paragraph's source style."""
+    return bool(role_spec) and set(role_spec) <= {"font", "paragraph"}
+
+
+def _header_execution_projection(spec: dict[str, Any]) -> tuple[dict[str, Any], list[dict[str, Any]], set[str]]:
+    """Withhold a header source unit whose content duty is still unresolved.
+
+    Shared evidence is not proof that an accepted fragment is independently
+    executable. Preserve the full affected requirement, including its font
+    leaves, as unverified. Only separate, nonconflicting requirement evidence
+    can retain leaves in the execution projection; the input spec stays intact.
+    """
+    unresolved = {"unresolved", "unsupported_backend"}
+    records = [record for record in spec.get("clause_compliance", [])
+               if record.get("scope") == "docx" and (
+                   record.get("status") in unresolved or any(
+                       item.get("status") in unresolved for item in record.get("obligations", [])))]
+    header_requirements = [req for req in spec.get("requirements", []) if req.get("role") == "header"]
+
+    def linked(req, record):
+        return bool(set(req.get("evidence_ids", [])) & set(record.get("evidence_ids", []))
+                    or record.get("clause_id") in req.get("clause_ids", [])
+                    or req.get("id") in record.get("requirement_ids", []))
+
+    affected = [record for record in records if any(
+        linked(req, record) and (req.get("properties", {}).get("text") is not None
+                                or req.get("properties", {}).get("header_content"))
+        for req in header_requirements)]
+    blocked = [req for req in header_requirements if any(linked(req, record) for record in affected)]
+    if not blocked:
+        return spec, [], set()
+    # Projection must not hide an invalid persisted scope rule or otherwise
+    # bypass the existing source/scope compiler's fail-closed checks.
+    _, original_scope_findings = compile_header_scope_rules(spec)
+    if any(item.get("severity") == "error" for item in original_scope_findings):
+        return spec, [], set()
+    blocked_ids = {req["id"] for req in blocked}
+    independent = [req for req in header_requirements if req["id"] not in blocked_ids]
+    header = {}
+    for path, value in flatten(spec.get("roles", {}).get("header", {})).items():
+        if any(path in flatten(req["properties"]) and flatten(req["properties"])[path] == value
+               for req in independent):
+            _receipt_put(header, path, copy.deepcopy(value))
+    projection = copy.deepcopy(spec)
+    projection["roles"]["header"] = header
+    projection["requirements"] = [req for req in projection["requirements"] if req.get("id") not in blocked_ids]
+    if "header_scope_rules" in projection:
+        projection.pop("header_scope_rules")
+        projection["header_scope_rules"], _ = compile_header_scope_rules(projection)
+    deferrals = [{
+        "code": "header_content_source_unresolved_preserved", "role": "header", "stage": "role_format",
+        "severity": "warning", "blocking": False,
+        "message": "Header source content is unresolved; the entire same-source requirement was deferred without partial execution.",
+        "requirement_ids": [req["id"]],
+        "clause_ids": sorted({record["clause_id"] for record in affected if linked(req, record)}),
+        "evidence_ids": list(req.get("evidence_ids", [])),
+        "deferred_properties": copy.deepcopy(req["properties"]),
+    } for req in blocked]
+    return projection, deferrals, blocked_ids
+
+
 def set_font(style, spec: dict[str, Any]) -> None:
     font = style.font
     if spec.get("latin"): font.name = spec["latin"]
@@ -1535,8 +1703,15 @@ def set_paragraph(style, spec: dict[str, Any]) -> None:
     if spec.get("space_before_pt") is not None: p.space_before = Pt(float(spec["space_before_pt"]))
     if spec.get("space_after_pt") is not None: p.space_after = Pt(float(spec["space_after_pt"]))
     line_pt = float(spec.get("spacing_line_height_pt") or (style.font.size.pt if style.font.size else 12))
-    if spec.get("space_before_lines") is not None: p.space_before = Pt(float(spec["space_before_lines"]) * line_pt)
-    if spec.get("space_after_lines") is not None: p.space_after = Pt(float(spec["space_after_lines"]) * line_pt)
+    for side in ("before", "after"):
+        lines = spec.get("space_" + side + "_lines")
+        if lines is not None:
+            # Word's line-unit and automatic spacing override its point value,
+            # including inherited attributes. Write the authorized unit itself.
+            setattr(p, "space_" + side, Pt(float(lines) * line_pt))
+            spacing = style.element.get_or_add_pPr().get_or_add_spacing()
+            spacing.set(qn("w:" + side + "Lines"), str(round(float(lines) * 100)))
+            spacing.set(qn("w:" + side + "Autospacing"), "0")
     ls = spec.get("line_spacing")
     if isinstance(ls, dict):
         typ, value = ls.get("type"), float(ls.get("value", 1))
@@ -1555,17 +1730,17 @@ def set_paragraph(style, spec: dict[str, Any]) -> None:
 
 
 def normalized_expected(style, role_spec: dict[str, Any]) -> dict[str, Any]:
-    """Translate character/line-relative requirements to concrete Word points."""
+    """Normalize character indents while retaining Word's native spacing units."""
     expected = {k: dict(v) if isinstance(v, dict) else v for k, v in role_spec.items() if k in {"font", "paragraph"}}
     para = dict(expected.get("paragraph", {})); expected["paragraph"] = para
     size = float(expected.get("font", {}).get("size_pt") or (style.font.size.pt if style.font.size else 12))
-    spacing_line_height = float(para.pop("spacing_line_height_pt", size))
+    para.pop("spacing_line_height_pt", None)
     if "first_line_indent_chars" in para:
         para["first_line_indent_pt"] = float(para.pop("first_line_indent_chars")) * size
-    if "space_before_lines" in para:
-        para["space_before_pt"] = float(para.pop("space_before_lines")) * spacing_line_height
-    if "space_after_lines" in para:
-        para["space_after_pt"] = float(para.pop("space_after_lines")) * spacing_line_height
+    for side in ("before", "after"):
+        if "space_" + side + "_lines" in para:
+            # Native line spacing is not a point measurement; audit its real unit.
+            para.pop("space_" + side + "_pt", None)
     return expected
 
 
@@ -1586,15 +1761,62 @@ def _paragraph_runs_including_nested(paragraph: Paragraph) -> list[Run]:
     return [Run(node, paragraph) for node in paragraph._p.iter(qn("w:r"))]
 
 
-def apply_direct_format(paragraph, role_spec: dict[str, Any]) -> None:
+def _keyword_font_span(paragraph: Paragraph, role: str) -> list[int] | None:
+    """Bind only a plain, explicitly labelled keyword value; never guess a label."""
+    allowed = {qn("w:" + tag) for tag in ("pPr", "r", "rPr", "t", "hyperlink",
+        "bookmarkStart", "bookmarkEnd", "proofErr")}
+    # Formatting children inside properties are not paragraph content.
+    content = [node for node in paragraph._p.iterdescendants()
+               if not any(parent.tag in {qn("w:pPr"), qn("w:rPr")}
+                          for parent in node.iterancestors())]
+    if any(node.tag not in allowed for node in content):
+        return None
+    text = "".join(run.text for run in _paragraph_runs_including_nested(paragraph))
+    label = r"关\s*键\s*词" if role == "keywords_zh" else r"key\s*words?"
+    match = re.match(r"^\s*" + label + r"\s*[:：]\s*", text, re.I)
+    if not match or not text[match.end():].strip():
+        return None
+    visible = collect_visible_instance_format(paragraph.part.document, {"keyword": [paragraph]})
+    observation = visible["instance_evidence"]["keyword"][0]
+    if observation.get("reason") or observation["text"] != text:
+        return None
+    return [match.end(), len(text)]
+
+
+def _apply_keyword_font(paragraph: Paragraph, role: str, font_spec: dict[str, Any]) -> None:
+    span = _keyword_font_span(paragraph, role)
+    if span is None or not font_spec:
+        return
+    offset = 0
+    for run in _paragraph_runs_including_nested(paragraph):
+        text = run.text
+        end = offset + len(text)
+        if offset < span[0] < end:
+            # The binder permits only plain text runs here. Clone their full
+            # rPr and retain the original label fragment in its original parent.
+            value = copy.deepcopy(run._r)
+            run._r.addnext(value)
+            tail = Run(value, paragraph)
+            run.text = text[:span[0] - offset]
+            tail.text = text[span[0] - offset:]
+            _apply_editable_run_font(tail, font_spec)
+        elif offset >= span[0] and text:
+            _apply_editable_run_font(run, font_spec)
+        offset = end
+
+
+def apply_direct_format(paragraph, role_spec: dict[str, Any], *, role: str | None = None) -> None:
     """Eliminate direct-formatting overrides on paragraphs governed by a role."""
     font_spec = role_spec.get("font", {})
     # ``Paragraph.runs`` omits runs nested under ``w:hyperlink`` and several
     # field containers.  Styling only that property leaves visible text
     # instances with stale direct formatting even though the shared style
     # audit passes.  Walk the underlying XML and wrap each run instead.
-    for run in _paragraph_runs_including_nested(paragraph):
-        _apply_editable_run_font(run, font_spec)
+    if role in {"keywords_zh", "keywords_en"}:
+        _apply_keyword_font(paragraph, role, font_spec)
+    else:
+        for run in _paragraph_runs_including_nested(paragraph):
+            _apply_editable_run_font(run, font_spec)
     # Direct paragraph properties are set to the same values as the style.
     pseudo = type("ParagraphStyleProxy", (), {"paragraph_format": paragraph.paragraph_format,
                                                "font": paragraph.style.font,
@@ -1700,10 +1922,14 @@ def _prepend_text(paragraph, text: str) -> None:
     paragraph._p.insert(1 if ppr is not None else 0, run)
 
 
-def apply_numbering(doc: Document, mappings: dict[str, Any], roles: dict[str, Any]) -> tuple[dict[str, int], list[dict[str, Any]]]:
+def apply_numbering(doc: Document, mappings: dict[str, Any], roles: dict[str, Any],
+                    bound_roles: dict[Any, str] | None = None) -> tuple[dict[str, int], list[dict[str, Any]]]:
     changed = {}; issues = []; counters = {"heading_1": 0, "heading_2": 0, "heading_3": 0}
     for paragraph in doc.paragraphs:
-        role = next((r for r in counters if r in mappings and paragraph.style.name == mappings[r]["style_name"]), None)
+        role = (bound_roles.get(paragraph._p) if bound_roles is not None else
+                next((r for r in counters if r in mappings and paragraph.style.name == mappings[r]["style_name"]), None))
+        if role not in counters:
+            continue
         if not role or not paragraph.text.strip() or not roles.get(role, {}).get("numbering"): continue
         level = int(role[-1]); counters[role] += 1
         if level == 1: counters["heading_2"] = counters["heading_3"] = 0
@@ -1720,6 +1946,7 @@ def apply_numbering(doc: Document, mappings: dict[str, Any], roles: dict[str, An
         for token, value in replacements.items(): prefix = prefix.replace(token, value)
         if not re.match(r"^(?:" + re.escape(prefix) + r"|第[一二三四五六七八九十百\d]+章|\d+(?:\.\d+){0,2})(?:\s|$)", paragraph.text):
             _prepend_text(paragraph, prefix + (roles[role].get("separator") or "  "))
+            _apply_editable_run_font(paragraph.runs[0], roles[role].get("font", {}))
             changed[role] = changed.get(role, 0) + 1
     return changed, issues
 
@@ -1760,21 +1987,29 @@ def _paragraph_section_indices(doc: Document) -> dict[Any, int]:
 
 
 def _find_body_start_paragraph(doc: Document, selector: dict[str, Any], mappings: dict[str, Any]):
+    # Use the same explicit/inherited TOC style evidence as the pure compiler.
+    # A cached TOC label can match the body regex but must never create a section.
+    from page_field_ops import _style_toc_ids
+    from lxml import etree
+    toc_ids = _style_toc_ids(etree.fromstring(etree.tostring(doc.styles.element)))
+    eligible = [p for p in doc.paragraphs if p.style.style_id not in toc_ids]
     strategy = selector.get("strategy")
     if strategy == "first_heading_1":
         style = mappings.get("heading_1", {}).get("style_name")
         candidate_styles = [style] if style else ROLE_STYLES["heading_1"]
-        paragraph = next((p for p in doc.paragraphs if p.style.name in candidate_styles and p.text.strip()), None)
-        if paragraph is None: raise ValueError("body-start selector 'first_heading_1' matched no paragraph")
-        return paragraph
-    if strategy == "heading_text":
+        matches = [p for p in eligible if p.style.name in candidate_styles and p.text.strip()]
+    elif strategy == "heading_text":
         pattern = selector.get("heading_text_pattern")
         if not pattern: raise ValueError("body selector heading_text requires heading_text_pattern")
-        try: paragraph = next((p for p in doc.paragraphs if re.search(pattern, p.text.strip())), None)
+        try: matches = [p for p in eligible if re.search(pattern, p.text.strip())]
         except re.error as exc: raise ValueError(f"invalid body heading_text_pattern: {exc}") from exc
-        if paragraph is None: raise ValueError("body-start selector 'heading_text' matched no paragraph")
-        return paragraph
-    raise ValueError(f"unsupported semantic body-start strategy: {strategy!r}")
+    else:
+        raise ValueError(f"unsupported semantic body-start strategy: {strategy!r}")
+    if not matches:
+        raise ValueError(f"body-start selector {strategy!r} matched no paragraph")
+    if len(matches) != 1:
+        raise ValueError(f"body-start selector {strategy!r} is ambiguous: {len(matches)} paragraphs")
+    return matches[0]
 
 
 def _paragraph_starts_section(doc: Document, paragraph) -> bool:
@@ -2039,13 +2274,66 @@ def apply_scoped_headers(doc: Document, header_scope_plan: dict[str, Any],
     return counts
 
 
+def _existing_active_story_paragraphs(doc: Document, kind: str) -> list[Paragraph]:
+    """Read active story content without materializing or unlinking any part."""
+    result = []
+    seen = set()
+    for section in doc.sections:
+        variants = [("", True),
+                    ("first_page_", section.different_first_page_header_footer),
+                    ("even_page_", doc.settings.odd_and_even_pages_header_footer)]
+        for prefix, active in variants:
+            if not active:
+                continue
+            for paragraph in all_story_paragraphs(getattr(section, prefix + kind)):
+                if paragraph._p not in seen:
+                    seen.add(paragraph._p)
+                    result.append(paragraph)
+    return result
+
+
 def apply_headers_footers(doc: Document, roles: dict[str, Any], page: dict[str, Any],
                           mappings: dict[str, Any], locations: dict[tuple[int, str], bool],
-                          header_scope_plan: dict[str, Any] | None = None) -> dict[str, int]:
+                          header_scope_plan: dict[str, Any] | None = None,
+                          *, preserve_source_styles: bool = False,
+                          preserve_page_paragraph_layout: bool = False,
+                          property_deferrals: list[dict[str, Any]] | None = None) -> dict[str, int]:
     if page.get("page_number"):
         raise ValueError("pagination must be applied through execute_section_plan")
     counts = {"headers": 0, "footers": 0, "page_numbers": 0, "page_fields_removed": 0}
     header_spec, footer_spec = roles.get("header", {}), roles.get("footer", {})
+    # A leaf-only draft rule applies to existing active content, including
+    # nested table paragraphs. It cannot create stories, break links, or
+    # replace their styles. Explicit content/scoped operations retain their
+    # separate existing routing below.
+    for role, role_spec in (("header", header_spec), ("footer", footer_spec)):
+        if (preserve_source_styles and _property_only_role_spec(role_spec)
+                and not (role == "header" and header_scope_plan and header_scope_plan.get("scoped"))):
+            for paragraph in _existing_active_story_paragraphs(doc, role):
+                paragraph_spec = role_spec
+                if (role == "footer" and preserve_page_paragraph_layout
+                        and _section_page_field_runs(paragraph) and role_spec.get("paragraph")):
+                    # Paragraph properties are shared by PAGE and ordinary
+                    # text in the same paragraph. Do not move/split content
+                    # or override the SectionPlan's layout to satisfy a
+                    # competing role-wide rule. Font leaves still apply to
+                    # every authorized run, including links and field results.
+                    paragraph_spec = {key: value for key, value in role_spec.items() if key != "paragraph"}
+                    if property_deferrals is not None:
+                        property_deferrals.append({
+                            "code": "footer_page_paragraph_properties_preserved",
+                            "role": "footer", "stage": "role_format", "severity": "warning", "blocking": False,
+                            "message": "PAGE paragraph layout remains owned by SectionPlan; conflicting footer paragraph properties are not applied to this paragraph.",
+                            "node_locator": str(paragraph.part.partname) + "#" + paragraph._p.getroottree().getpath(paragraph._p),
+                            "requested_properties": copy.deepcopy(role_spec["paragraph"]),
+                        })
+                if paragraph_spec:
+                    apply_direct_format(paragraph, paragraph_spec)
+                    counts[role + "s"] += 1
+            if role == "header":
+                header_spec = {}
+            else:
+                footer_spec = {}
     seen_headers = set(); seen_footers = set(); sections = list(doc.sections)
     if header_scope_plan and header_scope_plan.get("scoped"):
         counts.update(apply_scoped_headers(doc, header_scope_plan, header_spec, mappings))
@@ -2988,6 +3276,19 @@ def apply_content_instance_overrides(
             raise ValueError("content-instance target source bytes differ from locator source")
         return True
 
+    # Unlocated heading literals identify main-story headings, not identical
+    # running heads, table examples, or field-cache text. Intersect with the
+    # original source inventory below so generated paragraphs remain ineligible.
+    from toc_refresh import toc_result_paragraphs
+    body_heading_elements = {p._p for p in doc.paragraphs} - toc_result_paragraphs(doc)
+
+    def literal_candidates(role: str, literal: str) -> list[Paragraph]:
+        heading_role = role.startswith("heading_") or role in {
+            "abstract_title_zh", "abstract_title_en", "bibliography_heading", "toc_title",
+        }
+        return [p for p in paragraphs if p.text == literal
+                and (not heading_role or p._p in body_heading_elements)]
+
     records: list[dict[str, Any]] = []
     for instance in raw_instances:
         if not isinstance(instance, dict):
@@ -3032,7 +3333,7 @@ def apply_content_instance_overrides(
                         and not location_belongs_to_target(binding)
                         and text and text in fragment_text):
                     target_literal = text
-                candidates = [paragraph for paragraph in paragraphs if paragraph.text == target_literal]
+                candidates = literal_candidates(role, target_literal)
                 if len(candidates) > 1:
                     raise ValueError(
                         f"content instance {instance_id!r} has ambiguous unlocated source literal"
@@ -3043,7 +3344,7 @@ def apply_content_instance_overrides(
                 matches.append(paragraph)
                 binding_by_paragraph[paragraph._p] = binding
         if not bindings:
-            candidates = [paragraph for paragraph in paragraphs if paragraph.text == text]
+            candidates = literal_candidates(role, text)
             if len(candidates) > 1:
                 raise ValueError(f"content instance {instance_id!r} has ambiguous unbound literal")
             matches = candidates
@@ -3607,88 +3908,89 @@ def _captioned_table_scope(doc: Document, mappings: dict[str, Any] | None,
     return selected, findings, exclusions
 
 
-def _drawing_extent_points(paragraph: Paragraph) -> list[float]:
-    values = []
-    for node in paragraph._p.xpath(".//wp:extent"):
-        raw = node.get("cy")
-        try:
-            height = int(raw) / 12700.0
-        except (TypeError, ValueError):
-            continue
-        if height > 0:
-            values.append(round(height, 3))
-    return values
+def _review_table_execution_spec(
+    doc: Document, spec: dict[str, Any], mappings: dict[str, Any],
+    source_contract: dict[str, Any],
+) -> tuple[dict[str, Any], list[dict[str, Any]], set[str]]:
+    """Withhold table mutation until the requested population is resolved.
 
-
-def _effective_line_spacing(paragraph: Paragraph) -> tuple[str | None, float | None]:
-    seen: set[str] = set()
-    fmt = paragraph.paragraph_format
-    rule, spacing = fmt.line_spacing_rule, fmt.line_spacing
-    if rule is not None or spacing is not None:
-        return _line_spacing_values(rule, spacing)
-    style = paragraph.style
-    while style is not None and style.style_id not in seen:
-        seen.add(style.style_id)
-        fmt = style.paragraph_format
-        rule, spacing = fmt.line_spacing_rule, fmt.line_spacing
-        if rule is not None or spacing is not None:
-            return _line_spacing_values(rule, spacing)
-        style = style.base_style
-    return None, None
-
-
-def _line_spacing_values(rule: Any, spacing: Any) -> tuple[str | None, float | None]:
-    name = str(rule).split(".")[-1].lower() if rule is not None else None
-    points = (round(float(spacing.pt), 3) if hasattr(spacing, "pt")
-              else round(float(spacing), 3) if isinstance(spacing, (int, float)) else None)
-    if name and "exactly" in name:
-        name = "exact"
-    elif name and "at_least" in name:
-        name = "at_least"
-    elif name and "single" in name:
-        name = "single"
-    return name, points
+    Layout/fill-in tables and unbound data tables are not an implicit all-table
+    population. Keep the original requirements intact for unverified receipts;
+    this projection is used by execution and serialized verification alike.
+    """
+    table_spec = copy.deepcopy(spec.get("tables", {}))
+    if not table_spec:
+        return table_spec, [], set()
+    reason = None
+    scope_findings = []
+    if source_contract.get("status") == "blocked":
+        reason = "The source table contract is blocked; no fallback table population was inferred."
+    elif table_spec.get("scope") not in {"all_tables", "captioned_tables"}:
+        reason = "The table requirement has no explicit resolved scope; source tables were preserved."
+    elif table_spec.get("scope") == "captioned_tables":
+        _selected, scope_findings, _excluded = _captioned_table_scope(
+            doc, mappings, table_spec.get("caption_position"),
+        )
+        if scope_findings:
+            reason = "The captioned table population is unresolved; source tables were preserved."
+    if reason is None:
+        return table_spec, [], set()
+    requirements = [item for item in spec.get("requirements", [])
+                    if isinstance(item, dict) and item.get("role") == "table"]
+    identifiers = {item["id"] for item in requirements if item.get("id")}
+    deferral = {
+        "code": "table_scope_unresolved", "role": "table", "stage": "table_format",
+        "severity": "warning", "blocking": False, "message": reason,
+        "requirement_ids": sorted(identifiers),
+        "clause_ids": sorted({cid for item in requirements for cid in item.get("clause_ids", [])}),
+        "deferred_properties": table_spec,
+        "source_contract_status": source_contract.get("status"),
+        "scope_findings": copy.deepcopy(scope_findings),
+    }
+    return {}, [deferral], identifiers
 
 
 def apply_drawing_line_box_safety(doc: Document) -> list[dict[str, Any]]:
-    """Give every inline drawing a direct, object-safe minimum paragraph line box."""
+    """Repair only observed restrictive exact inline lines, not rendered layout."""
     audit = []
     for index, paragraph in enumerate(all_body_paragraphs(doc), 1):
         if not has_drawing(paragraph):
             continue
-        extents = _drawing_extent_points(paragraph)
-        before_rule, before_points = _effective_line_spacing(paragraph)
-        minimum = max(extents, default=0.0)
-        changed = (before_rule != "at_least" or before_points is None
-                   or before_points + .05 < minimum)
+        geometry = inline_drawing_geometry(paragraph._p)
+        before = effective_line_spacing(paragraph._p, doc.styles._element)
+        assessment = line_box_assessment(geometry, before)
+        changed = assessment == "restrictive_exact"
         if changed:
-            target = max(before_points or 0.0, minimum)
-            paragraph.paragraph_format.line_spacing = Pt(target)
+            paragraph.paragraph_format.line_spacing = Twips(geometry["minimum_twips"])
             paragraph.paragraph_format.line_spacing_rule = WD_LINE_SPACING.AT_LEAST
-        audit.append({"paragraph_index": index, "drawing_extent_pt": extents,
-                      "effective_line_spacing_before": {"rule": before_rule, "value_pt": before_points},
-                      "changed": changed,
-                      "effective_line_spacing_after": dict(zip(("rule", "value_pt"), _effective_line_spacing(paragraph)))})
+        audit.append({"paragraph_index": index, "drawing_extent_pt": geometry["height_pt"],
+                      "geometry": geometry, "assessment_before": assessment,
+                      "effective_line_spacing_before": before, "changed": changed,
+                      "effective_line_spacing_after": effective_line_spacing(paragraph._p, doc.styles._element),
+                      "rendered_verified": False})
     return audit
 
 
 def audit_drawing_line_boxes(doc: Document) -> list[dict[str, Any]]:
+    """Separate restrictive exact lines from unobservable geometry/spacing."""
     findings = []
     for index, paragraph in enumerate(all_body_paragraphs(doc), 1):
         if not has_drawing(paragraph):
             continue
-        extents = _drawing_extent_points(paragraph)
-        rule, points = _effective_line_spacing(paragraph)
-        if not extents:
-            findings.append({"role": "objects", "property": f"drawings[{index}].line_box",
-                             "failure_type": "drawing_extent_unobservable",
-                             "reason": "inline drawing has no readable positive wp:extent height"})
-        elif rule != "at_least" or points is None or points + .05 < max(extents):
-            findings.append({"role": "objects", "property": f"drawings[{index}].line_box",
-                             "failure_type": "drawing_line_box_clips_object",
-                             "template_value": {"rule": rule, "value_pt": points, "drawing_extent_pt": extents},
-                             "required_value": {"rule": "at_least", "minimum_pt": max(extents)},
-                             "reason": "serialized paragraph line box is smaller than or fixed to an inline drawing"})
+        geometry = inline_drawing_geometry(paragraph._p)
+        spacing = effective_line_spacing(paragraph._p, doc.styles._element)
+        assessment = line_box_assessment(geometry, spacing)
+        common = {"role": "objects", "property": f"drawings[{index}].line_box",
+                  "geometry": geometry, "rendered_verified": False}
+        if assessment == "unverified":
+            findings.append({**common, "failure_type": "drawing_line_box_geometry_unverified",
+                             "status": "unverified", "template_value": spacing,
+                             "reason": "inline bounds or effective spacing are unobservable; no repair is authorized"})
+        elif assessment == "restrictive_exact":
+            findings.append({**common, "failure_type": "drawing_line_box_clips_object", "status": "failed",
+                             "template_value": spacing,
+                             "required_value": {"rule": "at_least", "minimum_pt": geometry["minimum_twips"] / 20.0},
+                             "reason": "observed inline bounds exceed the fixed exact line height; rendered placement is unverified"})
     return findings
 
 
@@ -3788,7 +4090,9 @@ def apply_table_rules(doc: Document, table_spec: dict[str, Any],
                       mappings: dict[str, Any] | None = None) -> dict[str, Any]:
     """Apply deterministic three-line-table and pagination controls."""
     counts = {"tables": 0, "rows_no_split": 0, "header_rows_repeated": 0,
-              "explicit_borders_applied": 0, "continuation_contracts": 0}
+              "ambiguous_header_declarations": 0,
+              "explicit_borders_applied": 0, "continuation_contracts": 0,
+              "selected_table_count": 0, "scope_findings": [], "scope_exclusions": []}
     if not table_spec: return counts
     scope_findings: list[dict[str, Any]] = []
     scope_exclusions: list[dict[str, Any]] = []
@@ -3848,16 +4152,24 @@ def apply_table_rules(doc: Document, table_spec: dict[str, Any],
                 counts["rows_no_split"] += 1
             elif cant is not None:
                 trpr.remove(cant)
-            repeat_header = bool(table_spec.get("repeat_header_row") or continuation.get("repeat_header_row"))
-            if index == 0 and repeat_header:
+            # Only the explicit table-level OOXML instruction enables the
+            # automatic writer. Nested continuation rules require repeated
+            # visible content but do not choose a Word/WPS implementation.
+            if index == 0 and table_spec.get("repeat_header_row") is True:
+                _top, _ignored, ambiguous = continuation_header_flags([row._tr])
+                if ambiguous:
+                    counts["ambiguous_header_declarations"] += 1
+                    continue
                 header = trpr.find(qn("w:tblHeader"))
-                if header is None: trpr.append(OxmlElement("w:tblHeader"))
+                if header is None:
+                    trpr.append(OxmlElement("w:tblHeader"))
+                elif header.get(qn("w:val")) in {"0", "false", "off"}:
+                    header.set(qn("w:val"), "1")
                 counts["header_rows_repeated"] += 1
         if continuation:
             # The continuation contract is intentionally declarative.  Word
-            # decides whether a table crosses a page, so the generator sets
-            # the repeat-header invariant but never fabricates a second
-            # caption or a guessed page break.
+            # decides whether a table crosses a page. Nested visible rules
+            # never write flags, fabricate a caption, or guess a page break.
             counts["continuation_contracts"] += 1
     counts["scope_findings"] = scope_findings
     counts["scope_exclusions"] = scope_exclusions
@@ -3962,7 +4274,8 @@ def audit_table_rules(doc: Document, table_spec: dict[str, Any],
     findings = []
     if not table_spec: return findings
     explicit = table_spec.get("border_widths_pt") if isinstance(table_spec.get("border_widths_pt"), dict) else {}
-    continuation = table_spec.get("continuation") if isinstance(table_spec.get("continuation"), dict) else {}
+    # Retain the caller signature; appendix/pagination evidence is never a
+    # serialized structural finding here. The public diagnostic is separate.
     border_map = {
         "top": "top", "bottom": "bottom", "left": "left", "right": "right",
         "inside_h": "insideH", "inside_v": "insideV",
@@ -4051,29 +4364,16 @@ def audit_table_rules(doc: Document, table_spec: dict[str, Any],
             trpr = row._tr.get_or_add_trPr()
             if table_spec.get("allow_row_split") is False and trpr.find(qn("w:cantSplit")) is None:
                 findings.append({"role": "table", "property": f"tables[{ti}].rows[{ri}].allow_split", "template_value": True, "required_value": False})
-        repeat_header = bool(table_spec.get("repeat_header_row") or continuation.get("repeat_header_row"))
-        if table.rows and repeat_header:
-            if table.rows[0]._tr.get_or_add_trPr().find(qn("w:tblHeader")) is None:
+        if table_spec.get("repeat_header_row") is True:
+            top, _ignored, ambiguous = continuation_header_flags([row._tr for row in table.rows])
+            if not top or ambiguous:
                 findings.append({"role": "table", "property": f"tables[{ti}].repeat_header", "template_value": False, "required_value": True})
-    if continuation:
-        evidence = render_report.get("table_continuation") if isinstance(render_report, dict) else None
-        if not isinstance(evidence, dict) or evidence.get("verified") is not True:
-            findings.append({
-                "role": "table", "property": "tables.continuation.render_verification",
-                "template_value": evidence.get("verified") if isinstance(evidence, dict) else False,
-                "required_value": {
-                    "verified": True,
-                    "caption_suffix": continuation.get("caption_suffix"),
-                    "verification": continuation.get("verification"),
-                },
-                "failure_type": "render_evidence_required",
-                "reason": "cross-page continuation caption and page-span behavior cannot be proven from DOCX XML alone; accepted Word/PDF evidence is required",
-            })
     return findings
 
 
 def table_border_observations(doc: Document, table_spec: dict[str, Any],
-                              mappings: dict[str, Any] | None = None) -> dict[str, Any]:
+                              mappings: dict[str, Any] | None = None, *,
+                              expected_table_indices: list[int] | None = None) -> dict[str, Any]:
     """Return actual serialized edge widths per selected table, independently of counters."""
     if not table_spec:
         return {"status": "not_applicable", "tables": [], "scope_findings": [],
@@ -4098,6 +4398,18 @@ def table_border_observations(doc: Document, table_spec: dict[str, Any],
             return None
 
     observations = []
+    document_table_indices = {table._tbl: index for index, table in enumerate(doc.tables, 1)}
+    selected_table_indices = [document_table_indices[table._tbl] for table in tables]
+    # Review markers and scorecards add paragraphs, never tables. Preserve the
+    # pre-marker population: a surviving subset cannot certify the lost tables.
+    if expected_table_indices is not None and selected_table_indices != expected_table_indices:
+        scope_findings.append({
+            "role": "table", "property": "tables.scope",
+            "failure_type": "table_scope_changed_after_review_markers",
+            "expected_table_indices": expected_table_indices,
+            "actual_table_indices": selected_table_indices,
+            "reason": "the final captioned table population differs from the executed population",
+        })
     children = list(doc._body._element)
     caption_style = (mappings or {}).get("table_caption", {}).get("style_name")
     for index, table in enumerate(tables, 1):
@@ -4157,6 +4469,7 @@ def table_border_observations(doc: Document, table_spec: dict[str, Any],
     return {"status": "blocked" if scope_findings else "observed",
             "scope": table_spec.get("scope", "all_tables"),
             "table_count": len(observations), "tables": observations,
+            "selected_table_indices": selected_table_indices,
             "scope_findings": scope_findings,
             "scope_exclusions": scope_exclusions}
 
@@ -4859,7 +5172,8 @@ def audit_nonblocking_guidance(
     return advisories
 
 
-def audit_document_structure(doc: Document, structure: dict[str, Any], mappings: dict[str, Any]) -> list[dict[str, Any]]:
+def audit_document_structure(doc: Document, structure: dict[str, Any], mappings: dict[str, Any],
+                             *, role_presence: dict[str, bool | None] | None = None) -> list[dict[str, Any]]:
     findings: list[dict[str, Any]] = []
     positions = {p._p: i for i, p in enumerate(doc.paragraphs)}
     role_positions: dict[str, list[int]] = {}
@@ -4873,7 +5187,7 @@ def audit_document_structure(doc: Document, structure: dict[str, Any], mappings:
     }:
         role_positions[role] = [positions[p._p] for p in _role_paragraphs(doc, role, mappings)]
     for role in structure.get("required_roles", []):
-        if not role_positions.get(role):
+        if (role_presence.get(role) is False if role_presence is not None else not role_positions.get(role)):
             findings.append({"role": "document_structure", "property": f"required_roles.{role}", "template_value": False, "required_value": True})
     for sequence_index, sequence in enumerate(sequences):
         previous = -1
@@ -5060,6 +5374,96 @@ def _receipt_put(target: dict[str, Any], path: str, value: Any) -> None:
     cursor[parts[-1]] = value
 
 
+def _instance_xml_sha256(paragraph: Paragraph) -> str:
+    """Prefix-independent, complete paragraph identity across serialization."""
+    def tree(node):
+        return [node.tag, sorted(node.attrib.items()), node.text or "",
+                [tree(child) for child in node]]
+    return sha256_json(tree(paragraph._p))
+
+
+def _format_instance_inventory(doc: Document) -> list[tuple[str, Paragraph]]:
+    """Read body and existing story paragraphs without creating story parts."""
+    from section_executor import all_story_paragraphs as existing_story_paragraphs
+    result = [(node.node_id, node.paragraph) for node in iter_document_nodes(doc)]
+    seen = {paragraph._p for _, paragraph in result}
+    for section_index, section in enumerate(doc.sections):
+        for kind in ("header", "footer"):
+            for prefix in ("", "first_page_", "even_page_"):
+                story = getattr(section, prefix + kind)
+                for index, paragraph in enumerate(existing_story_paragraphs(story)):
+                    if paragraph._p in seen:
+                        continue
+                    seen.add(paragraph._p)
+                    result.append((f"section-{section_index}-{prefix}{kind}-paragraph-{index}", paragraph))
+    return result
+
+
+def _capture_role_instance_targets(
+    doc: Document, paragraphs_by_role: dict[str, list[Paragraph]],
+) -> dict[str, list[dict[str, Any]]]:
+    """Bind intended visible targets before writing, never to unused styles.
+
+    Complete XML hashes preserve duplicate paragraph identity in document order.
+    A later prefix report may shift indexes; a changed duplicate count must not
+    silently retarget a requirement to another equal-looking paragraph.
+    """
+    inventory = _format_instance_inventory(doc)
+    grouped: dict[tuple[str, str], list[tuple[str, Paragraph]]] = {}
+    for locator, paragraph in inventory:
+        key = (str(paragraph.part.partname), _instance_xml_sha256(paragraph))
+        grouped.setdefault(key, []).append((locator, paragraph))
+    result = {}
+    for role, paragraphs in paragraphs_by_role.items():
+        records = []
+        seen = set()
+        for paragraph in paragraphs:
+            if paragraph._p in seen:
+                continue
+            seen.add(paragraph._p)
+            key = (str(paragraph.part.partname), _instance_xml_sha256(paragraph))
+            matches = grouped.get(key, [])
+            occurrence = next((i for i, (_, p) in enumerate(matches) if p._p == paragraph._p), None)
+            records.append({"part": key[0], "xml_sha256": key[1], "occurrence": occurrence,
+                            "match_count": len(matches),
+                            "node_locator": matches[occurrence][0] if occurrence is not None else "missing_source_target"})
+            if role in {"keywords_zh", "keywords_en"}:
+                records[-1]["font_text_span"] = _keyword_font_span(paragraph, role)
+                records[-1]["font_scope_text"] = "".join(run.text for run in _paragraph_runs_including_nested(paragraph))
+        result[role] = records
+    return result
+
+
+def _resolve_role_instance_targets(
+    doc: Document, targets: dict[str, list[dict[str, Any]]],
+) -> dict[str, list[dict[str, Any]]]:
+    grouped: dict[tuple[str, str], list[tuple[str, Paragraph]]] = {}
+    for locator, paragraph in _format_instance_inventory(doc):
+        key = (str(paragraph.part.partname), _instance_xml_sha256(paragraph))
+        grouped.setdefault(key, []).append((locator, paragraph))
+    result = {}
+    for role, records in targets.items():
+        bound = []
+        for record in records:
+            matches = grouped.get((record["part"], record["xml_sha256"]), [])
+            index = record.get("occurrence")
+            valid = (isinstance(index, int) and len(matches) == record["match_count"]
+                     and 0 <= index < len(matches))
+            bound.append({"paragraph": matches[index][1] if valid else None,
+                          "node_locator": matches[index][0] if valid else record["node_locator"]})
+            if "font_text_span" in record:
+                bound[-1].update({key: copy.deepcopy(record[key]) for key in ("font_text_span", "font_scope_text")})
+        result[role] = bound
+    return result
+
+
+def _required_role_presence(doc: Document, targets: dict[str, list[dict[str, Any]]]) -> dict[str, bool | None]:
+    """Positive source witnesses survive serialization; a failed lookup is unknown."""
+    return {role: True if any(binding["paragraph"] is not None and
+                has_visible_or_object_content(binding["paragraph"]) for binding in bindings) else None
+            for role, bindings in _resolve_role_instance_targets(doc, targets).items()}
+
+
 def _receipt_requested_paths(requirements: list[dict[str, Any]]) -> dict[tuple[str, str], Any]:
     requested: dict[tuple[str, str], Any] = {}
     for requirement in requirements:
@@ -5164,7 +5568,13 @@ def _receipt_semantic_actuals(
     # audited against the serialized DOCX.  Its values are therefore accepted
     # as section-level OOXML evidence, including the selector provenance.
     if applied_section_plan and not section_findings:
-        planned = {item.get("zone"): item for item in applied_section_plan.get("sections", [])}
+        planned = {}
+        for item in applied_section_plan.get("sections", []):
+            if item.get("page_properties_policy") == "preserve_existing":
+                continue
+            # Restart belongs to the first executed section of each zone,
+            # not the last continuation. Preserved values are not compliance.
+            planned.setdefault(item.get("zone"), item)
         front = planned.get("front")
         body = planned.get("body")
         if isinstance(front, dict):
@@ -5287,8 +5697,16 @@ def _receipt_semantic_actuals(
             if policy == cover_contract.get("missing_value_policy", policy):
                 put("cover", "missing_value_policy", policy)
 
-    # Table contracts are read from table/row properties after serialization.
-    tables = list(doc.tables)
+    # Read exactly the executed table population. A cover's fill-in borders
+    # cannot disprove (or certify) a separately scoped data-table requirement.
+    table_spec = spec.get("tables", {})
+    tables = list(doc.tables) if table_spec else []
+    if table_spec.get("scope") == "captioned_tables":
+        tables, table_scope_findings, _excluded = _captioned_table_scope(
+            doc, mappings, table_spec.get("caption_position"),
+        )
+        if table_scope_findings:
+            tables = []
     if tables:
         def border_width(table, side: str) -> float:
             borders = table._tbl.tblPr.find(qn("w:tblBorders"))
@@ -5306,10 +5724,8 @@ def _receipt_semantic_actuals(
             border_width(table, side) == 0.0
             for table in tables for side in ("left", "right", "insideV")
         )
-        repeated = all(
-            bool(table.rows and table.rows[0]._tr.get_or_add_trPr().find(qn("w:tblHeader")) is not None)
-            for table in tables
-        )
+        header_blocks = [continuation_header_flags([row._tr for row in table.rows]) for table in tables]
+        repeated = all(top > 0 and not ambiguous for top, _ignored, ambiguous in header_blocks)
         put("table", "remove_vertical_borders", no_vertical)
         put("table", "style", "three_line" if three_line else None)
         put("table", "repeat_header_row", repeated)
@@ -6166,7 +6582,7 @@ def main(argv: list[str]) -> int:
                    help="explicit source-bound scope profile instead of a role-wide format spec; non-release, no legacy fallback")
     p.add_argument("--out-dir", type=Path, required=True); p.add_argument("--style-map", type=Path)
     p.add_argument("--official-template", type=Path,
-                   help="official DOCX whose mapped role styles supply defaults when written rules are silent")
+                   help="source-bound official DOCX resources; style defaults do not authorize unspecified properties")
     p.add_argument("--neutral-reference", action="store_true",
                    help="apply a school-neutral reference style map using structural/source-style fallback")
     p.add_argument("--require-coverage", action="store_true",
@@ -6554,10 +6970,15 @@ def main(argv: list[str]) -> int:
     source_mappings = explicit_raw.get("mappings", explicit_raw)
     explicit = {role: value.get("style_name") if isinstance(value, dict) else value
                 for role, value in source_mappings.items()}
-    defaults = official_role_defaults(args.official_template, explicit) if args.official_template else {}
+    # The execution spec is already filtered by source/capability scope.
+    # A template's complete style snapshot must not fill missing properties
+    # (or empty unsupported roles) with new execution authority.
+    header_execution_spec, header_source_deferrals, deferred_header_requirement_ids = (
+        _header_execution_projection(spec) if args.output_policy == "review_draft" else (spec, [], set())
+    )
     effective_roles = {
-        role: merge_role_style_defaults(defaults.get(role, {}), role_spec)
-        for role, role_spec in spec.get("roles", {}).items()
+        role: merge_role_style_defaults({}, role_spec)
+        for role, role_spec in header_execution_spec.get("roles", {}).items() if role_spec
     }
     effective_roles = document_font_safe_roles(spec, effective_roles)
     requested_compliance_mode = args.compliance_mode or spec.get("compliance_mode", "supported_subset")
@@ -6647,19 +7068,19 @@ def main(argv: list[str]) -> int:
     )
     source_drawing_baseline = audit_drawing_line_boxes(Document(args.input))
     doc = Document(args.input)
-    # Capture source ownership before header, cover, or style mutations. This
-    # inventory is exclusively for TOC compatibility; existing body routing
-    # and its execution receipts remain unchanged.
-    from source_role_binding import build_source_role_bindings
+    # TOC compatibility must use early ownership; the separate 1.0.3
+    # execution snapshot below is taken after section/cover preparation.
     from toc_heading_fonts import bound_heading_plan, compact_toc_heading_fonts, audit_toc_heading_fonts
     toc_source_bindings = build_source_role_bindings(doc, explicit_mappings=explicit)
     toc_heading_plan = bound_heading_plan(doc, toc_source_bindings)
+    original_style_ids = {style.style_id for style in doc.styles}
+    preserved_source_style_roles: set[str] = set()
     source_math_signature = _equation_math_signature(doc)
-    prepared_header_layout = prepare_header_scope_boundaries(doc, spec)
+    prepared_header_layout = prepare_header_scope_boundaries(doc, header_execution_spec)
     original_source_paragraphs = _content_instance_paragraphs(doc)
     args.out_dir.mkdir(parents=True, exist_ok=True)
     header_scope_plan = compile_header_scope_plan(
-        args.input, spec, args.format_spec,
+        args.input, header_execution_spec, args.format_spec,
         document=doc, prepared_layout=prepared_header_layout,
     )
     header_scope_schema = Path(__file__).resolve().parents[1] / "schema" / "header-scope-plan.schema.json"
@@ -6691,10 +7112,27 @@ def main(argv: list[str]) -> int:
     except ValueError as exc:
         raise SystemExit(f"page-number application blocked: {exc}") from exc
     section_indices = _paragraph_section_indices(doc)
+    source_role_bindings = build_source_role_bindings(doc, explicit_mappings=explicit)
+    intended_role_paragraphs = {role: [p for p in all_body_paragraphs(doc)
+        if source_role_bindings.bound(role, p)] for role in effective_roles}
+    direct_story_property_roles = {
+        role for role in ("header", "footer")
+        if args.output_policy == "review_draft" and _property_only_role_spec(effective_roles.get(role, {}))
+        and not (role == "header" and header_scope_plan.get("scoped"))
+    }
+    # Keyword fonts cover value spans, not their separately formatted labels.
+    direct_story_property_roles.update({"keywords_zh", "keywords_en"} & effective_roles.keys())
     for role, role_spec in effective_roles.items():
         if role not in ROLE_STYLES and role not in explicit: continue
         structural_fallback = role not in explicit
         name, was_created = resolve_style(doc, role, explicit, claimed)
+        # A mapped target is not source evidence. In particular, chapter text
+        # in a header cannot make a header style the base of body headings.
+        # Use the actual bound heading's style, irrespective of its display name.
+        source_targets = intended_role_paragraphs.get(role, [])
+        if (role in {"heading_1", "heading_2", "heading_3", "heading_4"}
+                and source_targets and not any(_style_inherits(p.style, name) for p in source_targets)):
+            name, was_created = source_targets[0].style.name, False
         source_name = name
         # Normal is shared by body prose, empty layout paragraphs, and often
         # table cells.  A semantic table rule must never shrink or otherwise
@@ -6704,10 +7142,10 @@ def main(argv: list[str]) -> int:
             was_created = name != source_name
         # A template may reuse Normal on covers, declarations, TOC and body. Do not
         # mutate that shared style globally when the requirement is body-scoped.
-        if role == "body_text" and preliminary_body_start > 0:
+        if role == "body_text":
             used_before = any(p.style.name == source_name and section_indices.get(p._p, 0) < preliminary_body_start
                               for p in all_body_paragraphs(doc))
-            if used_before:
+            if source_name == "Normal" or used_before:
                 scoped_name = "Thesis Body Text"
                 if scoped_name in style_names(doc):
                     name = scoped_name; was_created = False
@@ -6715,11 +7153,25 @@ def main(argv: list[str]) -> int:
                     scoped = doc.styles.add_style(scoped_name, WD_STYLE_TYPE.PARAGRAPH)
                     scoped.base_style = doc.styles[source_name]
                     name = scoped_name; was_created = True
+        # A source style can be inherited by protected front/backmatter or
+        # another semantic role. Isolate the target before mutating the shared
+        # definition, not merely before relabelling direct paragraphs.
+        protected_consumers = [p for p in _style_consumer_inventory(doc)
+            if _style_inherits(p.style, name) and not _style_consumer_bound(source_role_bindings, role, p)]
+        if protected_consumers:
+            name = _isolated_role_style(doc, role, source_name, claimed, source_role_bindings)
+            was_created = True
+        if name != source_name:
+            _mark_role_style(doc.styles[name], role)
         claimed[name] = role; style = doc.styles[name]
         before = style_snapshot(doc.styles[source_name], doc); expected = normalized_expected(style, role_spec)
         for item in diff_expected(before, expected): conflicts.append({"type": "template_requirement_conflict", "role": role, "style": source_name, **item})
-        if role_spec.get("font"): set_font(style, role_spec["font"])
-        if role_spec.get("paragraph"): set_paragraph(style, role_spec["paragraph"])
+        # Header/Footer styles can also be inherited by inactive variants.
+        # Direct, active-instance execution below must not mutate that shared
+        # style and thereby grant authority over an inactive source story.
+        if role not in direct_story_property_roles:
+            if role_spec.get("font"): set_font(style, role_spec["font"])
+            if role_spec.get("paragraph"): set_paragraph(style, role_spec["paragraph"])
         mappings[role] = {"style_name": name, "source_style_name": source_name, "created": was_created,
                           "structural_fallback": structural_fallback,
                           "scope_start_section": preliminary_body_start if role == "body_text" else 0,
@@ -6750,6 +7202,9 @@ def main(argv: list[str]) -> int:
     toc_cached_elements = toc_result_paragraphs(doc)
     claimed_elements: set[Any] = set()
     for role, mapping in sorted(mappings.items(), key=lambda item: (role_priority.get(item[0], 50), item[0])):
+        if role in {"header", "footer"}:
+            applied_paragraphs[role] = 0
+            continue
         count = 0
         role_spec = effective_roles[role]
         paragraphs = all_table_paragraphs(doc) if role == "table_text" else all_body_paragraphs(doc)
@@ -6757,6 +7212,24 @@ def main(argv: list[str]) -> int:
             if role != "toc" and paragraph._p in toc_cached_elements:
                 continue
             if paragraph._p in claimed_elements:
+                continue
+            # Source semantics are immutable even after shared styles change.
+            # Broad Normal/table rules must not consume protected structures.
+            # Auxiliary captions and annotation text retain their own source
+            # typography. A broad role or stale automatic caption-style map is
+            # not permission to consume these unresolved specialized targets.
+            protected_auxiliary_reasons = {
+                "table_annotation_role_unresolved", "subfigure_caption_role_unresolved",
+                "continued_table_caption_role_unresolved",
+            }
+            if (role in {"body_text", "table_text", "figure_caption", "table_caption"}
+                    and protected_auxiliary_reasons.intersection(source_role_bindings.reason(paragraph))):
+                continue
+            if role == "body_text" and not source_role_bindings.body_allowed(paragraph):
+                continue
+            if role == "table_text" and not source_role_bindings.table_allowed(paragraph):
+                continue
+            if role in {"heading_1", "heading_2", "heading_3", "heading_4", "bibliography_entry"} and not source_role_bindings.bound(role, paragraph):
                 continue
             section_index = section_indices.get(paragraph._p, 0)
             if role == "body_text" and section_index < mapping.get("scope_start_section", 0):
@@ -6811,7 +7284,9 @@ def main(argv: list[str]) -> int:
             eligible_candidate = paragraph.style.name in eligible_styles
             if role == "toc":
                 eligible_candidate = has_toc_field(paragraph)
-            if structural_candidate or (role not in {"table_text", "equation"} and eligible_candidate):
+            if ((role != "table_text" and source_role_bindings.bound(role, paragraph)) or structural_candidate
+                    or (role not in {"table_text", "equation"} and eligible_candidate)):
+                intended_role_paragraphs.setdefault(role, []).append(paragraph)
                 old_style = paragraph.style.name
                 heading_rule = _heading_pagination_rule(spec, role, role_spec)
                 if heading_rule is not None and paragraph._p in body_paragraph_indices:
@@ -6820,9 +7295,23 @@ def main(argv: list[str]) -> int:
                         "expected_xml_sha256": heading_paragraph_sha256(paragraph),
                         "role": role, "rule_source": heading_rule,
                     }], enabled=True))
-                if mapping["style_name"] != paragraph.style.name:
+                mapped_style = doc.styles[mapping["style_name"]]
+                source_based_style = (
+                    mapped_style.style_id not in original_style_ids
+                    and mapped_style.base_style is not None
+                    and mapped_style.base_style.style_id == paragraph.style.style_id
+                )
+                preserve_source_style = (
+                    args.output_policy == "review_draft"
+                    and (_property_only_role_spec(role_spec)
+                         or (role.startswith("heading_") and not _style_inherits(paragraph.style, mapping["source_style_name"])))
+                    and not source_based_style
+                )
+                if preserve_source_style:
+                    preserved_source_style_roles.add(role)
+                if not preserve_source_style and mapping["style_name"] != paragraph.style.name:
                     paragraph.style = mapping["style_name"]
-                apply_direct_format(paragraph, role_spec); count += 1
+                apply_direct_format(paragraph, role_spec, role=role); count += 1
                 node = nodes_by_element.get(paragraph._p)
                 execution_receipts.append({
                     "operation": "apply_role_format", "role": role,
@@ -6831,14 +7320,16 @@ def main(argv: list[str]) -> int:
                     "container": node.container if node else "body",
                     "xml_order": node.xml_order if node else None,
                     "source_style_name": old_style,
-                    "style_name": mapping["style_name"],
+                    "style_name": paragraph.style.name,
                     "value_kind": "object" if has_drawing(paragraph) else "text",
                     "value": paragraph.text[:240],
                     "_element": paragraph._p,
                 })
                 claimed_elements.add(paragraph._p)
         applied_paragraphs[role] = count
-    numbering_changed, numbering_issues = apply_numbering(doc, mappings, effective_roles)
+    numbering_changed, numbering_issues = apply_numbering(doc, mappings, effective_roles,
+        {receipt["_element"]: receipt["role"] for receipt in execution_receipts
+         if receipt["role"] in {"heading_1", "heading_2", "heading_3"}})
     apply_page(doc, spec.get("page", {}))
     try:
         # Compile only after semantic boundary creation, so the plan describes
@@ -6847,13 +7338,20 @@ def main(argv: list[str]) -> int:
         # separate story-content operation until its plan schema is introduced.
         with tempfile.NamedTemporaryFile(suffix=".docx") as handle:
             doc.save(handle.name)
-            applied_section_plan = compile_section_plan(spec, handle.name)
+            applied_section_plan = compile_section_plan(
+                spec, handle.name,
+                preserve_unresolved_front=args.output_policy == "review_draft",
+            )
         if not applied_section_plan.get("valid"):
             raise ValueError("compiled SectionPlan is invalid: " + json.dumps(
                 applied_section_plan.get("findings", []), ensure_ascii=False))
+        scope_execution_deferrals = copy.deepcopy(header_source_deferrals) + [
+            copy.deepcopy(item) for item in applied_section_plan.get("findings", [])
+            if item.get("code") == "front_selector_unresolved_preserved"]
         section_execution = execute_section_plan(
             doc, applied_section_plan,
             alignment=spec.get("page", {}).get("page_number", {}).get("alignment"),
+            footer_font=effective_roles.get("footer", {}).get("font"),
         )
         expected_body_start = int(applied_section_plan["body_start_section"] or 1) - 1
         # Header/footer text formatting is intentionally invoked without a
@@ -6862,10 +7360,20 @@ def main(argv: list[str]) -> int:
         # SectionPlan.  Do not let the generic footer role overwrite the
         # executor's centered footer paragraph with body-style alignment.
         story_roles = dict(effective_roles)
-        story_roles.pop("footer", None)
+        if not (args.output_policy == "review_draft"
+                and _property_only_role_spec(story_roles.get("footer", {}))):
+            story_roles.pop("footer", None)
         header_footer_changed = apply_headers_footers(
             doc, story_roles, {}, mappings, {}, header_scope_plan=header_scope_plan,
+            preserve_source_styles=args.output_policy == "review_draft",
+            preserve_page_paragraph_layout=bool(page_num),
+            property_deferrals=scope_execution_deferrals,
         )
+        if args.output_policy == "review_draft":
+            for role in ("header", "footer"):
+                if (_property_only_role_spec(story_roles.get(role, {}))
+                        and not (role == "header" and header_scope_plan.get("scoped"))):
+                    preserved_source_style_roles.add(role)
         # Stable report compatibility: these counters now come from the
         # SectionPlan execution evidence rather than a second pagination path.
         pagination_stories = section_execution.get("stories", [])
@@ -6886,7 +7394,12 @@ def main(argv: list[str]) -> int:
             numbering_issues.extend(position_issues)
             caption_graph.extend(role_graph)
     caption_separator_repairs = normalize_caption_separators(doc, spec.get("roles", {}), mappings)
-    table_changes = apply_table_rules(doc, spec.get("tables", {}), mappings)
+    table_execution_spec, table_scope_deferrals, deferred_table_requirement_ids = (
+        _review_table_execution_spec(doc, spec, mappings, source_table_contract)
+        if args.output_policy == "review_draft" else (spec.get("tables", {}), [], set())
+    )
+    scope_execution_deferrals.extend(table_scope_deferrals)
+    table_changes = apply_table_rules(doc, table_execution_spec, mappings)
     pagination_changes = apply_object_pagination(doc, mappings, spec.get("objects", {}), spec.get("tables", {}))
     toc_fields_updated = set_toc_depth(doc, spec.get("document_structure", {}).get("toc_depth"))
     appendix_changes = apply_appendix_rules(doc, spec.get("appendices", {}))
@@ -7030,6 +7543,26 @@ def main(argv: list[str]) -> int:
     staged_output = sibling_temp(args.output)
     try:
         document_font_execution = apply_document_font(doc, spec)
+        for role in ("header", "footer"):
+            if role in effective_roles:
+                inventory = (
+                    _existing_active_story_paragraphs(doc, role)
+                    if role in preserved_source_style_roles else
+                    [p for _, p in _format_instance_inventory(doc)]
+                )
+                intended_role_paragraphs[role] = [p for p in inventory
+                    if str(p.part.partname).startswith("/word/" + role)
+                    and p._p.xpath(".//w:t[normalize-space()]|.//w:fldSimple|.//w:instrText") ]
+        role_instance_targets = _capture_role_instance_targets(doc, intended_role_paragraphs)
+        # Bind all local required-role duties before report insertion. A stale
+        # aggregate projection or diagnostic prose cannot supply/erase a witness.
+        structural_roles = set(spec.get("document_structure", {}).get("required_roles", []))
+        for requirement in spec.get("requirements", []):
+            if requirement.get("role") == "document_structure":
+                structural_roles.update(requirement.get("properties", {}).get("required_roles", []))
+        structure_instance_targets = _capture_role_instance_targets(doc, {
+            role: [p for p in all_body_paragraphs(doc) if source_role_bindings.bound(role, p)]
+            for role in structural_roles})
         # Layout changes invalidate cached TOC pages. Request native refresh;
         # never calculate page numbers from physical PDF offsets.
         from toc_style_contract import (bound_toc_style_rules, apply_toc_style_rules,
@@ -7057,7 +7590,6 @@ def main(argv: list[str]) -> int:
         from toc_refresh import request_toc_refresh
         toc_refresh_request = request_toc_refresh(
             doc, apply=True, request_document_update=False)
-
         doc.save(staged_output)
         canonicalize_docx_zip(staged_output)
         staged_doc = Document(staged_output)
@@ -7089,10 +7621,15 @@ def main(argv: list[str]) -> int:
     write("toc-refresh-request.json", toc_refresh_request)
     write("toc-style-application.json", toc_style_application)
     write("toc-heading-fonts.json", toc_heading_fonts)
+    write("style-map.json", mappings); write("conflicts.json", conflicts)
+    bound_role_receipt = {"schema_version": "1.0",
+        "records": source_role_bindings.records, "findings": source_role_bindings.findings}
+    write("source-role-bindings.json", bound_role_receipt)
     write("toc-source-role-bindings.json", {"schema_version": "1.0",
         "records": toc_source_bindings.records, "findings": toc_source_bindings.findings})
-    write("style-map.json", mappings); write("conflicts.json", conflicts)
+    write("role-instance-targets.json", {"schema_version": "1.0", "targets": role_instance_targets})
     write("section-plan-applied.json", applied_section_plan)
+    write("scope-execution-deferrals.json", {"schema_version": "1.0", "findings": scope_execution_deferrals})
     write("section-execution.json", section_execution)
     write("caption-object-graph.json", {"schema_version": "1.0", "bindings": caption_graph})
     write("content-instance-audit.json", {
@@ -7166,11 +7703,42 @@ def main(argv: list[str]) -> int:
     write("execution-receipt-audit.json", {"schema_version": "1.0",
           "valid": all(item["serialized"] for item in receipt_audit), "receipts": receipt_audit})
     for role, mapping in mappings.items():
+        if role in direct_story_property_roles:
+            # These roles intentionally leave shared styles unchanged; only
+            # serialized active paragraph/run evidence can verify them.
+            continue
         style = check.styles[mapping["style_name"]]
         actual = style_snapshot(style, check); expected = normalized_expected(style, effective_roles[role])
         for item in diff_expected(actual, expected):
             findings.append({"role": role, "style": mapping["style_name"], **item})
     coverage = role_coverage(check, spec.get("roles", {}), mappings)
+    if deferred_header_requirement_ids and "header" not in mappings:
+        for item in coverage:
+            if item["role"] == "header":
+                item.update(expectation="required", status="deferred", present=False, count=0,
+                            reason="header execution is deferred by unresolved source evidence")
+    # Preserved source styles are deliberately not the mapped style name.
+    # Count exact serialized execution targets instead of manufacturing a
+    # style migration merely to satisfy the old style-name coverage check.
+    preserved_targets = _resolve_role_instance_targets(check, role_instance_targets)
+    for item in coverage:
+        if item["role"] in preserved_source_style_roles:
+            if item["role"] in {"header", "footer"}:
+                paragraphs = [binding["paragraph"] for binding in preserved_targets.get(item["role"], [])
+                              if binding["paragraph"] is not None]
+                # Paragraph.text omits field/hyperlink-contained runs. Use
+                # the same real-content predicate as target capture above.
+                count = sum(1 for paragraph in paragraphs
+                            if paragraph._p.xpath(".//w:t[normalize-space()]|.//w:fldSimple|.//w:instrText"))
+            else:
+                executed_ids = {receipt.get("node_id") for receipt in execution_receipts
+                                if receipt["role"] == item["role"] and not receipt.get("superseded")}
+                paragraphs = [serialized_nodes[node_id].paragraph for node_id in executed_ids
+                              if node_id in serialized_nodes]
+                count = sum(1 for paragraph in paragraphs if paragraph_has_role_content(paragraph))
+            item.update(count=count, present=bool(count), status="present" if count else "missing")
+            if count:
+                item.pop("failure_type", None)
     for item in coverage:
         if item["expectation"] == "required" and item["status"] == "missing":
             issue = {"role": item["role"], "style": item.get("style"), "property": "coverage",
@@ -7238,7 +7806,7 @@ def main(argv: list[str]) -> int:
             "required_value": next((e.get("value") for e in item.get("evidence", []) if e.get("kind") == "expected"), None),
             "section_plan_finding": item,
         })
-    header_audit_roles = copy.deepcopy(spec.get("roles", {}))
+    header_audit_roles = copy.deepcopy(header_execution_spec.get("roles", {}))
     if header_scope_plan.get("scoped") and isinstance(header_audit_roles.get("header"), dict):
         header_audit_roles["header"].pop("header_content", None)
         if not header_audit_roles["header"]:
@@ -7246,7 +7814,7 @@ def main(argv: list[str]) -> int:
     findings.extend(audit_headers(args.output, header_audit_roles, mappings))
     if header_scope_plan.get("scoped"):
         header_scope_audit = audit_scoped_headers(
-            args.input, args.output, spec, args.format_spec,
+            args.input, args.output, header_execution_spec, args.format_spec,
         )
         write("header-scope-audit.json", header_scope_audit)
         header_scope_review_ledger = build_header_scope_review_ledger(header_scope_audit)
@@ -7271,7 +7839,8 @@ def main(argv: list[str]) -> int:
                 "source_scope_finding": item,
             })
     findings.extend(audit_object_order_constraints(check, spec.get("objects", {}), mappings))
-    findings.extend(audit_table_rules(check, spec.get("tables", {}), render_report, mappings))
+    findings.extend(audit_table_rules(check, table_execution_spec, render_report, mappings))
+    table_continuation_geometry = continuation_geometry_diagnostic(spec.get("tables", {}))
     findings.extend(audit_drawing_line_boxes(check))
     findings.extend(audit_caption_separators(check, spec.get("roles", {}), mappings))
     effective_content_constraints = resolve_profile_constraints(spec)
@@ -7284,7 +7853,9 @@ def main(argv: list[str]) -> int:
         "policy": "general_guidance_is_non_blocking",
         "items": guidance_advisories,
     })
-    findings.extend(audit_document_structure(check, spec.get("document_structure", {}), mappings))
+    structure_presence = _required_role_presence(check, structure_instance_targets)
+    findings.extend(audit_document_structure(check, spec.get("document_structure", {}), mappings,
+                                             role_presence=structure_presence))
     findings.extend(audit_appendix_rules(check, spec.get("appendices", {}), spec.get("thesis_profile", {})))
     findings.extend(audit_equation_layout(
         check, spec.get("equations", {}), paragraph_spec=equation_paragraph_spec,
@@ -7448,20 +8019,18 @@ def main(argv: list[str]) -> int:
     serialized_docx_sha256 = hashlib.sha256(args.output.read_bytes()).hexdigest()
     receipt_requirements = []
     actual_by_role = {}
-    for role, mapping in mappings.items():
-        try:
-            actual_by_role[role] = style_snapshot(check.styles[mapping["style_name"]], check)
-        except KeyError:
-            actual_by_role[role] = {}
-    if spec.get("tables"):
-        table_observations = table_border_observations(check, spec.get("tables", {}), mappings)
+    pre_marker_table_indices = None
+    if table_execution_spec:
+        table_observations = table_border_observations(check, table_execution_spec, mappings)
         actual_by_role["table"] = table_border_receipt_actuals(table_observations)
+        pre_marker_table_indices = table_observations["selected_table_indices"]
     for requirement in spec.get("requirements", []):
         if not isinstance(requirement, dict):
             continue
         item = copy.deepcopy(requirement)
         role = item.get("role")
-        if role in mappings and isinstance(item.get("properties"), dict):
+        if (role in mappings and item.get("id") not in deferred_header_requirement_ids
+                and isinstance(item.get("properties"), dict)):
             try:
                 item["properties"] = normalized_expected(
                     check.styles[mappings[role]["style_name"]], item["properties"]
@@ -7469,7 +8038,7 @@ def main(argv: list[str]) -> int:
             except KeyError:
                 pass
         receipt_requirements.append(item)
-    source_scope_actuals: dict[str, list[dict[str, Any]]] = {}
+    source_scope_actuals: dict[str, Any] = {}
     instance_audit_by_id = {
         str(item.get("instance_id")): item
         for item in content_instance_audit if isinstance(item, dict) and item.get("instance_id")
@@ -7493,13 +8062,27 @@ def main(argv: list[str]) -> int:
             })
         source_scope_actuals[requirement_id] = observations
     semantic_actuals, verification_methods, role_observability, role_font_actuals = _receipt_semantic_actuals(
-        check, spec, mappings, receipt_requirements, applied_section_plan,
+        check, {**spec, "tables": table_execution_spec}, mappings, receipt_requirements, applied_section_plan,
         section_findings, cover_contract,
     )
     for role, evidence in semantic_actuals.items():
         actual_by_role.setdefault(role, {}).update(evidence)
     for role, observed_font in role_font_actuals.items():
         actual_by_role.setdefault(role, {}).setdefault("font", {})["latin"] = observed_font
+    visible_format_paths = {}
+    for (role, path), _ in _receipt_requested_paths(receipt_requirements).items():
+        if path.startswith(("font.", "paragraph.")):
+            visible_format_paths.setdefault(role, []).append(path)
+    visible_format = collect_visible_instance_format(check,
+        _resolve_role_instance_targets(check, role_instance_targets),
+        property_paths_by_role=visible_format_paths)
+    for role, values in visible_format["actual_by_role"].items():
+        for path, value in flatten(values).items():
+            _receipt_put(actual_by_role.setdefault(role, {}), path, value)
+    for role, observations in visible_format["role_observability"].items():
+        role_observability.setdefault(role, {}).update(observations)
+    write("visible-instance-format.json", {"schema_version": "1.0",
+        "serialized_docx_sha256": serialized_docx_sha256, **visible_format})
     # Role-level structural receipts are derived from the same post-serialization
     # findings used by clause finalization.  Compute the role result before
     # building receipts; otherwise ``__requirement__`` receipts default to
@@ -7528,6 +8111,12 @@ def main(argv: list[str]) -> int:
         role_results["cover"] = "cover" not in finding_roles
     if spec.get("declarations"):
         role_results["declarations"] = "declarations" not in finding_roles
+    # Independently executed equal-valued leaves cannot certify the withheld
+    # atomic requirement. Keep its original property inventory unverified.
+    source_scope_actuals.update(required_role_actuals(receipt_requirements, structure_presence,
+        structure_actuals=actual_by_role.get("document_structure", {})))
+    source_scope_actuals.update({identifier: {} for identifier in deferred_header_requirement_ids})
+    source_scope_actuals.update({identifier: {} for identifier in deferred_table_requirement_ids})
     property_receipts = build_property_receipts(
         receipt_requirements, mappings, actual_by_role,
         serialized_docx_sha256=serialized_docx_sha256,
@@ -7554,7 +8143,7 @@ def main(argv: list[str]) -> int:
         late_review_items = manual_review_validation_items(raw_validation_findings, spec)
         scoring_capability_findings = (
             capability_report.get("findings", []) if capability_report else []
-        )
+        ) + scope_execution_deferrals
         late_review_items.extend(semantic_uncertainty_items)
         manual_review_receipts = manual_review_receipt_items(property_receipts)
         late_review_items.extend(manual_review_receipts)
@@ -7588,6 +8177,44 @@ def main(argv: list[str]) -> int:
         )
         if not isinstance(manual_review_document_ledger, dict):
             raise SystemExit("scored draft requires a current-run-bound manual ledger")
+        # Manual markers and the scorecard can change caption adjacency.
+        # Replace, rather than merge, table evidence from the exact final file;
+        # otherwise pre-marker actuals could certify an unresolved population.
+        marker_table_observations = table_border_observations(
+            check, table_execution_spec, mappings,
+            expected_table_indices=pre_marker_table_indices,
+        )
+        marker_table_actuals, _, _, _ = _receipt_semantic_actuals(
+            check, {**spec, "tables": table_execution_spec}, mappings,
+            [item for item in receipt_requirements if item.get("role") == "table"],
+            applied_section_plan, section_findings, cover_contract,
+        )
+        actual_by_role["table"] = {}
+        if marker_table_observations.get("status") == "observed":
+            actual_by_role["table"].update(table_border_receipt_actuals(marker_table_observations))
+            actual_by_role["table"].update(marker_table_actuals.get("table", {}))
+        property_receipts = build_property_receipts(
+            receipt_requirements, mappings, actual_by_role,
+            serialized_docx_sha256=serialized_docx_sha256,
+            role_results=role_results,
+            verification_methods=verification_methods,
+            actual_by_requirement=source_scope_actuals,
+            role_observability=role_observability,
+            applicable_roles={
+                item["role"] for item in coverage
+                if item.get("status") == "present" or item.get("expectation") == "required"
+            } | set(role_results) | _source_scoped_receipt_roles(receipt_requirements),
+        )
+        property_receipt_audit = audit_property_receipts(
+            property_receipts,
+            expected_receipt_ids=expected_receipt_ids(
+                receipt_requirements,
+                applicable_roles={
+                    item["role"] for item in coverage
+                    if item.get("status") == "present" or item.get("expectation") == "required"
+            } | set(role_results) | _source_scoped_receipt_roles(receipt_requirements),
+            ),
+        )
         draft_scorecard = build_scorecard(
             manual_review_document_ledger["binding"], property_receipt_audit,
             manual_review_document_ledger["items"], raw_validation_findings, scoring_capability_findings,
@@ -7680,6 +8307,37 @@ def main(argv: list[str]) -> int:
                     ),
                 })
             source_scope_actuals[requirement_id] = observations
+        # Manual markers and the scorecard can change caption adjacency.
+        # Replace, rather than merge, table evidence from the exact final file;
+        # otherwise pre-marker actuals could certify an unresolved population.
+        final_table_observations = table_border_observations(
+            final_check, table_execution_spec, mappings,
+            expected_table_indices=pre_marker_table_indices,
+        )
+        final_table_actuals, _, _, _ = _receipt_semantic_actuals(
+            final_check, {**spec, "tables": table_execution_spec}, mappings,
+            [item for item in receipt_requirements if item.get("role") == "table"],
+            applied_section_plan, section_findings, cover_contract,
+        )
+        actual_by_role["table"] = {}
+        if final_table_observations.get("status") == "observed":
+            actual_by_role["table"].update(table_border_receipt_actuals(final_table_observations))
+            actual_by_role["table"].update(final_table_actuals.get("table", {}))
+        final_visible_format = collect_visible_instance_format(final_check,
+            _resolve_role_instance_targets(final_check, role_instance_targets),
+            property_paths_by_role=visible_format_paths)
+        for role, values in final_visible_format["actual_by_role"].items():
+            for path, value in flatten(values).items():
+                _receipt_put(actual_by_role.setdefault(role, {}), path, value)
+        for role, observations in final_visible_format["role_observability"].items():
+            role_observability.setdefault(role, {}).update(observations)
+        write("visible-instance-format.json", {"schema_version": "1.0",
+            "serialized_docx_sha256": serialized_docx_sha256, **final_visible_format})
+        source_scope_actuals.update(required_role_actuals(receipt_requirements,
+            _required_role_presence(final_check, structure_instance_targets),
+            structure_actuals=actual_by_role.get("document_structure", {})))
+        source_scope_actuals.update({identifier: {} for identifier in deferred_header_requirement_ids})
+        source_scope_actuals.update({identifier: {} for identifier in deferred_table_requirement_ids})
         property_receipts = build_property_receipts(
             receipt_requirements, mappings, actual_by_role,
             serialized_docx_sha256=serialized_docx_sha256,
@@ -7718,9 +8376,7 @@ def main(argv: list[str]) -> int:
             "drawing_line_box_changes": drawing_line_box_changes,
             "drawing_line_box_findings": audit_drawing_line_boxes(final_check),
             "table_source_contract": source_table_contract,
-            "table_border_observations": table_border_observations(
-                final_check, spec.get("tables", {}), mappings,
-            ),
+            "table_border_observations": final_table_observations,
             "caption_separator_repairs": caption_separator_repairs,
             "caption_separator_observations": caption_separator_observations(
                 final_check, spec.get("roles", {}), mappings,
@@ -7769,11 +8425,27 @@ def main(argv: list[str]) -> int:
     if capability_report:
         source_clause_records = annotate_satisfied_inputs(
             source_clause_records, capability_report.get("clauses", []))
+    # Independent expected locator evidence comes from freshly read final
+    # instances, never from the receipt being checked or a permissive prefix.
+    current_role_observability = copy.deepcopy(role_observability)
+    for observations in current_role_observability.values():
+        for observation in observations.values():
+            if observation.get("verification_method") == "serialized_docx_visible_instances":
+                observation["serialized_docx_sha256"] = serialized_docx_sha256
+    # Preserve immutable pre-finalization rows for later derived-DOCX audit.
+    # The final clause report contains current_output_instance and cannot serve
+    # as its own historical input after scorecard separation or rendering.
+    write("historical-clause-compliance-report.json", historical_clause_snapshot(
+        source_clause_records, compliance_mode,
+        source_sha256=hashlib.sha256(args.input.read_bytes()).hexdigest(),
+        format_spec_sha256=hashlib.sha256(args.format_spec.read_bytes()).hexdigest(),
+    ))
     verified_clause_records = finalize_records(
         source_clause_records, spec.get("requirements", []), role_results, finding_roles,
         current_docx_sha256=serialized_docx_sha256,
         property_receipt_audit=property_receipt_audit,
         role_mappings=mappings,
+        current_role_observability=current_role_observability,
     )
     compliance = compliance_report(verified_clause_records, compliance_mode, "validation")
     submission_audit = audit_submission_docx(
@@ -7880,6 +8552,7 @@ def main(argv: list[str]) -> int:
               ),
               "findings": findings, "coverage_warnings": coverage_warnings, "styles_created": created,
               "role_coverage": coverage,
+              "scope_execution_deferrals": scope_execution_deferrals,
               "content_placeholder_policy": {
                   "placeholder": NEUTRAL_CONTENT_PLACEHOLDER,
                   "pending": content_pending,
@@ -7900,6 +8573,7 @@ def main(argv: list[str]) -> int:
               "automatic_section_created": section_created,
               "caption_paragraphs_moved": moved,
               "table_changes": table_changes,
+              "table_continuation_geometry": table_continuation_geometry,
               "object_pagination_changes": pagination_changes,
               "toc_fields_updated": toc_fields_updated,
               "appendix_changes": appendix_changes,

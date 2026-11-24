@@ -195,3 +195,25 @@ def test_platform_adapter_never_ignores_other_changes(platform_installed,tmp_pat
 
 def test_platform_adapter_rejects_unknown_platform(platform_installed):
     assert api().verify_bundle(platform_installed,installation_platform='unknown')['status']=='blocked'
+
+
+def test_bundled_pinned_icon_preserves_observed_chatgpt_normalization(tmp_path):
+    m = api()
+    archive = tmp_path / "real.zip"
+    m.build_bundle(ROOT, archive)
+    install = tmp_path / "install"
+    with zipfile.ZipFile(archive) as bundle:
+        bundle.extractall(install)
+    assert m.verify_bundle(install)["status"] == "pass"
+    icon = install / "assets/icon.svg"
+    expected = (ROOT / "tests/fixtures/chatgpt_installation/icon.svg").read_bytes()
+    assert icon.read_bytes() == expected
+    (install / "agents/openai.yaml").write_bytes(
+        (ROOT / "tests/fixtures/chatgpt_installation/openai.yaml").read_bytes())
+    assert m.verify_bundle(install)["status"] == "blocked"
+    report = m.verify_bundle(install, installation_platform="chatgpt")
+    assert report["status"] == "pass"
+    assert {r["path"] for r in report["accepted_platform_changes"]} == {"agents/openai.yaml"}
+    assert report["platform_origin_authenticated"] is False
+    icon.unlink()
+    assert m.verify_bundle(install, installation_platform="chatgpt")["status"] == "blocked"

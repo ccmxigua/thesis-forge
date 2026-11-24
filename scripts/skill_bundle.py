@@ -12,7 +12,7 @@ import zipfile
 
 from semantic_contract import strict_json_loads
 
-DIRECTORIES = {'scripts', 'schema', 'resources', 'filters', 'csl', 'agents', 'prompts', 'template_profiles', 'docs', 'references'}
+DIRECTORIES = {'assets', 'tests', 'scripts', 'schema', 'resources', 'filters', 'csl', 'agents', 'prompts', 'template_profiles', 'docs', 'references'}
 TOP_FILES = {'SKILL.md', 'README.md', 'convert.sh', 'reference.docx', 'requirements-runtime.txt', 'skill-package.json', 'Makefile', 'pytest.ini', 'requirements-test.txt'}
 MANIFEST = 'bundle-manifest.json'
 # Exact UI-only normalization observed after the supported ChatGPT install.
@@ -114,7 +114,14 @@ def _accept_observed_chatgpt_ui(root: Path, manifest: dict, report: dict) -> Non
     if manifest['name'] != 'thesis-latex2docx':
         return
     yaml_name, icon_name = 'agents/openai.yaml', 'assets/icon.svg'
-    if yaml_name not in report['mismatched'] or icon_name not in report['unexpected']:
+    if yaml_name not in report['mismatched']:
+        return
+    icon_entry = next((item for item in manifest['files'] if item['path'] == icon_name), None)
+    if icon_entry is None:
+        if icon_name not in report['unexpected']:
+            return
+    elif (icon_entry.get('sha256') != CHATGPT_UI_METADATA['icon_sha256']
+          or icon_name in report['missing'] or icon_name in report['mismatched']):
         return
     source = next((item for item in manifest['files'] if item['path'] == yaml_name), {})
     if (source.get('sha256') != CHATGPT_UI_METADATA['source_yaml_sha256']
@@ -128,11 +135,13 @@ def _accept_observed_chatgpt_ui(root: Path, manifest: dict, report: dict) -> Non
     report['accepted_platform_changes'] = [
         {'path': yaml_name, 'change': 'observed_ui_normalization',
          'source_sha256': source['sha256'], 'installed_sha256': yaml_sha},
-        {'path': icon_name, 'change': 'observed_default_icon',
-         'source_sha256': None, 'installed_sha256': icon_sha},
     ]
     report['mismatched'].remove(yaml_name)
-    report['unexpected'].remove(icon_name)
+    if icon_entry is None:
+        report['accepted_platform_changes'].append(
+            {'path': icon_name, 'change': 'observed_default_icon',
+             'source_sha256': None, 'installed_sha256': icon_sha})
+        report['unexpected'].remove(icon_name)
 
 
 def verify_bundle(root: Path, *, installation_platform: str | None = None) -> dict:

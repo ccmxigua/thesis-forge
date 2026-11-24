@@ -30,7 +30,17 @@
       "properties": {
         "active": {"type": "boolean"},
         "required_page_fields": {"type": "integer", "minimum": 0},
-        "expected_page_switch": {"type": ["string", "null"]}
+        "expected_page_switch": {"type": ["string", "null"]},
+        "source_footer_integrity": {
+          "type": "object",
+          "required": ["present", "field_markup_sha256", "relationship_targets_sha256"],
+          "properties": {
+            "present": {"type": "boolean"},
+            "field_markup_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+            "relationship_targets_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+          },
+          "additionalProperties": false
+        }
       },
       "additionalProperties": false
     },
@@ -49,6 +59,7 @@
       "required": ["section_index", "zone", "format", "ooxml_format", "numbered", "restart", "start", "titlePg", "evenAndOdd", "stories"],
       "properties": {
         "section_index": {"type": "integer", "minimum": 1},
+        "page_properties_policy": {"enum": ["apply_plan", "preserve_existing"]},
         "zone": {"enum": ["cover", "front", "body"]},
         "format": {"$ref": "#/$defs/format"},
         "ooxml_format": {"type": ["string", "null"]},

@@ -79,15 +79,18 @@ class DrawingLineBoxRepairTests(unittest.TestCase):
         self.assertEqual(normal.paragraph_format.line_spacing_rule, WD_LINE_SPACING.EXACTLY)
         self.assertEqual(audit_drawing_line_boxes(doc), [])
 
-    def test_single_spacing_with_an_inline_object_is_not_assumed_safe(self) -> None:
+    def test_dynamic_line_spacing_is_not_static_clip_and_is_not_modified(self) -> None:
         doc = Document()
         paragraph = doc.add_paragraph()
         paragraph.paragraph_format.line_spacing = 1
         paragraph.paragraph_format.line_spacing_rule = WD_LINE_SPACING.SINGLE
         paragraph.add_run().add_picture(io.BytesIO(png_bytes()), width=Inches(1))
-        self.assertTrue(audit_drawing_line_boxes(doc))
-        apply_drawing_line_box_safety(doc)
+        original_xml = paragraph._p.xml
         self.assertEqual(audit_drawing_line_boxes(doc), [])
+        repairs = apply_drawing_line_box_safety(doc)
+        self.assertEqual(audit_drawing_line_boxes(doc), [])
+        self.assertEqual(paragraph._p.xml, original_xml)
+        self.assertFalse(any(repair.get("changed", False) for repair in repairs))
 
 
 class TableBorderRepairTests(unittest.TestCase):

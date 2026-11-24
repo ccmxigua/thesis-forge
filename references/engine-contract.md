@@ -653,9 +653,9 @@ The ten-school batch runner defaults to this policy. Use
 submission-mode run has been started fresh; that mode retains the full
 fail-closed capability, render, and final audit gates.
 
-When the complete source-bound scorecard is too verbose to keep in the paper
-DOCX, use the generic external-ledger path rather than deleting paragraphs by
-hand. `scripts/review_package_export.py strip` verifies that the visible
+Paper handoff and detailed issue-ledger handoff must be separate. The
+verbose diagnostic candidate is internal review material, not the paper deliverable.
+Use the generic external-ledger path rather than deleting paragraphs by hand. `scripts/review_package_export.py strip` verifies that the visible
 scorecard block and full `MR-*` marker text exactly match the bound JSON, then
 removes the scorecard block and projects each marker to its unique ID plus a
 short pointer to the separate ledger in a new derived DOCX. Full reasons,
@@ -1561,3 +1561,42 @@ audit, reject reported conflicts, and require complete revalidation and fresh
 independent source-first review. Do not guess applicability, invent human acts,
 stamp provenance onto an unaccepted parent or extend the ordinary retry budget.
 See `docs/compound-local-atom-proposals.md`.
+
+### Immutable clause history for separated review delivery
+
+The application stage writes `historical-clause-compliance-report.json` before
+its first `finalize_records` call. Use this exact saved pre-finalization report
+as the historical input to `reconcile_current_output.py`; the ordinary
+`clause-compliance-report.json` already contains current-output instances and
+is deliberately rejected as historical input. The snapshot retains all original
+statuses and source/spec SHA-256 bindings. Never remove reconciliation fields
+to manufacture a missing historical report. An older run without the snapshot
+remains blocked for that export path; retain its candidate and diagnostic files.
+The reconciliation consumer requires this snapshot protocol and validates its
+format-spec digest against the actual supplied file bytes. Its source digest
+must also match both the scorecard input binding and rendered-audit source
+binding before any clause finalization. Missing or conflicting bindings stop
+the export; old unbound reports are not silently upgraded.
+
+### Fully external manual-review layer (explicit opt-in)
+
+When the requested delivery separates the paper from all issue content, call
+`review_package_export.py strip ... --externalize-manual`. This removes only
+the exact generated front wrapper, its exact page-break node and every
+ledger-bound manual marker. All checks complete before removal. Source files
+containing existing marker-like content are rejected rather than guessed.
+The scorecard and full issues remain unchanged; no obligation is satisfied by
+relocating its display. Default behavior retains compact markers as before.
+
+Keep the emitted split report with the paper. Export and separated-delivery
+verification require its complete removed-ID inventory, marker-text projection
+digest, source/run/case binding and exact paper SHA before accepting a marker-free
+paper. A missing receipt cannot authorize an omitted marker. Further mutations
+require a newly valid derivation receipt, never a patched SHA. Render and
+reconcile the resulting paper before exporting a deliverable ledger; a successful
+layer split alone does not imply layout, formatting or submission acceptance.
+The external-only consumer independently recomputes the paper's body-paragraph
+signature and complete OOXML part-hash inventory recorded at the split. Updating
+only the report's output hash or audit hash cannot authorize changed body text,
+formatting, tables, media or section structure. A stale/missing content inventory
+blocks delivery even when the outer file hash matches.

@@ -241,6 +241,7 @@ def finalize_records(
     current_docx_sha256: str | None = None,
     property_receipt_audit: dict[str, Any] | None = None,
     role_mappings: dict[str, dict[str, Any]] | None = None,
+    current_role_observability: dict[str, dict[str, dict[str, Any]]] | None = None,
     promote_pending: bool = True,
 ) -> list[dict[str, Any]]:
     """Promote pending clauses after serialized-DOCX validation.
@@ -251,6 +252,13 @@ def finalize_records(
     audit a new DOCX instance against an earlier semantic report set
     ``promote_pending=False`` so historical pending states are not rewritten
     by an absent backend snapshot.
+
+    Visible-instance receipts additionally require ``current_role_observability``
+    from an independent, fresh read of these DOCX bytes. Each role/property entry
+    must carry observed=True, the visible-instance verification method, the exact
+    target_locators list, and serialized_docx_sha256. Receipts cannot establish
+    their own expected targets. Omitting this argument preserves strict legacy
+    style/role target validation and cannot authorize instance-locator receipts.
     """
     by_id = {r.get("id"): r for r in requirements}
     receipt_rows = (property_receipt_audit.get("receipts", [])
@@ -258,6 +266,8 @@ def finalize_records(
     expected_receipt_ids = (property_receipt_audit.get("expected_receipt_ids")
                             if isinstance(property_receipt_audit, dict) else None)
     role_mappings = role_mappings or {}
+    current_role_observability = (current_role_observability
+                                  if isinstance(current_role_observability, dict) else {})
     if not isinstance(receipt_rows, list):
         receipt_rows = []
     receipt_rows_by_id: dict[str, list[dict[str, Any]]] = {}
@@ -341,7 +351,29 @@ def finalize_records(
                 mapped_target = (f"style:{mapping.get('style_name')}"
                                  if isinstance(mapping, dict) and mapping.get("style_name")
                                  else f"role:{role}")
-                identity_matches = identity_matches and receipt.get("target_locator") == mapped_target
+                current_role = current_role_observability.get(role)
+                current_observation = (current_role.get(path)
+                                       if isinstance(current_role, dict) and isinstance(path, str)
+                                       else None)
+                current_observation = (current_observation
+                                       if isinstance(current_observation, dict) else {})
+                instance_method = "serialized_docx_visible_instances"
+                if (receipt.get("verification_method") == instance_method
+                        or current_observation.get("verification_method") == instance_method):
+                    locators = current_observation.get("target_locators")
+                    valid_targets = (isinstance(locators, list) and bool(locators)
+                                     and all(isinstance(value, str) and bool(value.strip())
+                                             for value in locators))
+                    identity_matches = identity_matches and (
+                        current_observation.get("observed") is True
+                        and current_observation.get("verification_method") == instance_method
+                        and receipt.get("verification_method") == instance_method
+                        and current_observation.get("serialized_docx_sha256") == current_docx_sha256
+                        and valid_targets
+                        and receipt.get("target_locator") == "instances:" + ",".join(locators)
+                    )
+                else:
+                    identity_matches = identity_matches and receipt.get("target_locator") == mapped_target
                 if not identity_matches:
                     unknown.append({"requirement_id": rid, "receipt_id": receipt_id,
                                     "reason": "receipt requirement, role, property, expected value, or target locator does not match"})
@@ -634,4 +666,22 @@ def report(records: list[dict[str, Any]], mode: str, phase: str) -> dict[str, An
          "responsible_party": "university_or_submitter"}
         for r in records if r.get("scope") == "external_submission"
     ]
+    return result
+
+
+def historical_clause_snapshot(records: list[dict[str, Any]], mode: str, *,
+                               source_sha256: str, format_spec_sha256: str) -> dict[str, Any]:
+    """Retain pre-finalization history; never reverse-engineer reconciled rows."""
+    if any(not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value)
+           for value in (source_sha256, format_spec_sha256)):
+        raise ValueError("historical snapshot requires exact source/spec SHA-256 bindings")
+    if not isinstance(records, list) or any(
+            not isinstance(row, dict) or not isinstance(row.get("status"), str)
+            or "current_output_instance" in row for row in records):
+        raise ValueError("historical snapshot requires original unreconciled clause records")
+    result = report(copy.deepcopy(records), mode, "pre_validation")
+    result["protocol"] = "immutable_pre_finalization_clause_history_v1"
+    result["binding"] = {"source_sha256": source_sha256,
+                         "format_spec_sha256": format_spec_sha256}
+    result["submission_ready"] = False
     return result

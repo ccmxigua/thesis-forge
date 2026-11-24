@@ -85,6 +85,26 @@ def reconcile(
     if not isinstance(mappings, dict):
         raise ValueError("style map mappings are invalid")
 
+    # An unreconciled-looking row list is not enough: bind this history to
+    # this exact spec and the same source recorded by both independent inputs.
+    if historical.get("protocol") != "immutable_pre_finalization_clause_history_v1":
+        raise ValueError("historical report lacks the immutable snapshot protocol")
+    binding = historical.get("binding")
+    if not isinstance(binding, dict):
+        raise ValueError("historical snapshot is missing its source/spec binding")
+    if binding.get("format_spec_sha256") != sha256_file(format_spec_path):
+        raise ValueError("historical snapshot format-spec SHA does not match current bytes")
+    scorecard = strict_json_read(scorecard_path)
+    card_binding = scorecard.get("binding") if isinstance(scorecard, dict) else None
+    source_sha = binding.get("source_sha256")
+    if (not isinstance(source_sha, str) or len(source_sha) != 64
+            or any(c not in "0123456789abcdef" for c in source_sha)
+            or not isinstance(card_binding, dict)
+            or card_binding.get("input_source_sha256") != source_sha
+            or not isinstance(rendered_report, dict)
+            or rendered_report.get("source_docx_sha256") != source_sha):
+        raise ValueError("historical snapshot source SHA must match scorecard and rendered audit")
+
     current_docx_sha = sha256_file(final_docx_path)
     source_records = copy.deepcopy(historical["records"])
     for record in source_records:

@@ -73,7 +73,9 @@ class RenderedFormatAuditTests(unittest.TestCase):
     def test_audit_binds_pdf_and_docx_and_reports_observed_font_resources(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             report = self._run(Path(td))
-            self.assertEqual(report["status"], "passed", report["findings"])
+            self.assertEqual(report["status"], "issues_found", report["findings"])
+            self.assertEqual({f["code"] for f in report["findings"]},
+                             {"rendered_drawing_visibility_unverified"})
             self.assertGreater(report["pdf"]["page_count"], 0)
             self.assertTrue(report["actual_pdf_font_resources"])
             self.assertEqual(report["expected_pdf_fonts"][0]["name"], "Helvetica")
@@ -82,12 +84,13 @@ class RenderedFormatAuditTests(unittest.TestCase):
             self.assertFalse(report["field_refresh_claimed"])
             self.assertEqual(len(report["audit_sha256"]), 64)
 
-    def test_font_substitution_and_clipped_image_are_specific_findings(self) -> None:
+    def test_font_substitution_and_unbound_image_visibility_are_distinct_findings(self) -> None:
         with tempfile.TemporaryDirectory() as td:
             report = self._run(Path(td), expected_font="Expected CJK Font", clip_image=True)
             codes = {item["code"] for item in report["findings"]}
             self.assertIn("rendered_pdf_font_mismatch", codes)
-            self.assertIn("rendered_drawing_clipped_by_page", codes)
+            self.assertIn("rendered_drawing_visibility_unverified", codes)
+            self.assertNotIn("rendered_drawing_clipped_by_page", codes)
             self.assertEqual(report["status"], "issues_found")
 
     def test_stale_renderer_report_pdf_hash_is_rejected(self) -> None:
